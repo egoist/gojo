@@ -1,0 +1,133 @@
+// Cancellation flows down the task tree.
+use fmt, time, task
+
+enum JobError {
+    Bad(id int)
+}
+
+fn work(id int, log Mutex[Vec[String]]) ! JobError {
+    if id == 3 {
+        time.sleep(time.millisecond)
+        return err(.Bad(id))
+    }
+    // the others would sleep for a minute; the failure cancels them
+    time.sleep(60 * time.second)
+    with l = log.lock() {
+        l.push(fmt.sprint("task", id, "cancelled", task.cancelled()))
+    }
+}
+
+fn firstErrorCancelsTheRest() {
+    let log = Mutex(Vec[String]{})
+    let start = time.now()
+    let r = task.group((g) => {
+        for id in 0..6 {
+            g.go(() => {
+                try work(id, log)
+            })
+        }
+    })
+    let ms = time.since(start) / time.millisecond
+    match r {
+        err(.Bad(id)) => println("group failed: task", id, "fast", ms < 1000)
+        ok(_) => println("group ok?")
+    }
+    with l = log.lock() {
+        l.sort()
+        println(l)
+    }
+}
+
+fn blockedReceiversWake() {
+    let never = chan[int]()
+    let r = task.group((g) => {
+        for _ in 0..3 {
+            g.go(() => {
+                // none: cancelled while waiting
+                let v = <-never
+                println("receiver got", v)
+            })
+        }
+        g.go(() => {
+            time.sleep(time.millisecond)
+            return err("stop")
+        })
+    })
+    println("receivers done", r)
+}
+
+fn timeouts() {
+    // the body finishes in time
+    let fast = task.timeout(time.second, () => 40 + 2)
+    println("fast", fast)
+
+    // the deadline passes: the sleep wakes early, the result is none
+    let start = time.now()
+    let slow = task.timeout(5 * time.millisecond, () => {
+        time.sleep(60 * time.second)
+        return "finished"
+    })
+    println("slow", slow, "fast", time.since(start) < time.second)
+
+    // a deadline also cancels the tasks started inside
+    let started = time.now()
+    let inner = task.timeout(5 * time.millisecond, () => {
+        return task.group((g) => {
+            for _ in 0..4 {
+                g.go(() => { time.sleep(60 * time.second) })
+            }
+        })
+    })
+    println("inner", inner, "fast", time.since(started) < time.second)
+
+    // nested deadlines: the inner one is shorter
+    let nested = task.timeout(time.second, () => {
+        let a = task.timeout(time.millisecond, () => {
+            time.sleep(time.second)
+            return 1
+        })
+        return a ?? 2
+    })
+    println("nested", nested)
+}
+
+fn explicitCancel() {
+    let r = task.group((g) => {
+        g.go(() => {
+            var rounds = 0
+            for !task.cancelled() {
+                rounds += 1
+                time.sleep(100 * time.microsecond)
+            }
+            println("loop saw the cancel", rounds > 0)
+        })
+        time.sleep(2 * time.millisecond)
+        g.cancel()
+    })
+    println("cancelled group", r.isOk())
+}
+
+fn checkpoint() int ! task.Cancelled {
+    var n = 0
+    for {
+        try task.check()
+        n += 1
+        if n % 1000 == 0 { task.yieldNow() }
+    }
+    return n
+}
+
+fn checkpoints() {
+    let r = task.timeout(5 * time.millisecond, () => checkpoint())
+    println("checkpoint", r)
+}
+
+fn main() {
+    firstErrorCancelsTheRest()
+    blockedReceiversWake()
+    timeouts()
+    explicitCancel()
+    checkpoints()
+    // nothing here is cancelled
+    println("main cancelled", task.cancelled())
+}

@@ -118,12 +118,44 @@ fn address_sanitizer() {
     }
 }
 
-/// Multi-package projects: each directory in tests/projects is built as a whole.
+/// Runs the concurrent programs under ThreadSanitizer: `cargo test -- --ignored`.
+#[test]
+#[ignore]
+fn thread_sanitizer() {
+    let mut failures = vec![];
+    let dir = std::env::temp_dir().join("kite_tsan");
+    let _ = std::fs::create_dir_all(&dir);
+    for f in files("tests/run") {
+        let src = std::fs::read_to_string(&f).unwrap();
+        if !(src.contains("go ") || src.contains("task.") || src.contains("chan[")) {
+            continue;
+        }
+        let bin = dir.join(f.file_stem().unwrap());
+        let out = Command::new(kite()).arg("build").arg("--cc").arg("cc -fsanitize=thread -g -O1").arg(&f).arg("-o").arg(&bin).output().unwrap();
+        if !out.status.success() {
+            failures.push(format!("{}: build failed\n{}", f.display(), String::from_utf8_lossy(&out.stderr)));
+            continue;
+        }
+        let run = Command::new(&bin).output().unwrap();
+        let stderr = String::from_utf8_lossy(&run.stderr);
+        if stderr.contains("ThreadSanitizer") {
+            failures.push(format!("{}:\n{}", f.display(), stderr.lines().take(30).collect::<Vec<_>>().join("\n")));
+        }
+    }
+    if !failures.is_empty() {
+        panic!("{} program(s) failed under ThreadSanitizer:\n{}", failures.len(), failures.join("\n"));
+    }
+}
+
+/// Multi-package projects: each directory in tests/projects and examples is built as a whole.
 #[test]
 fn projects() {
     let mut failures = vec![];
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/projects");
-    let mut dirs: Vec<PathBuf> = std::fs::read_dir(&root).unwrap().filter_map(|e| e.ok().map(|e| e.path())).filter(|p| p.is_dir()).collect();
+    let base = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut dirs: Vec<PathBuf> = vec![];
+    for root in [base.join("tests/projects"), base.join("examples")] {
+        dirs.extend(std::fs::read_dir(&root).unwrap().filter_map(|e| e.ok().map(|e| e.path())).filter(|p| p.is_dir()));
+    }
     dirs.sort();
     for d in dirs {
         let out = Command::new(kite()).arg("run").arg(&d).output().unwrap();

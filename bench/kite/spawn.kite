@@ -1,0 +1,15 @@
+// 1M short-lived goroutines, 1000 at a time: tests spawning and stack reuse.
+fn main() {
+    let done = chan[int](1000)
+    var total = 0
+    for round in 0..1000 {
+        for i in 0..1000 {
+            let d = done.clone()
+            go () => { d <- round + i }
+        }
+        for _ in 0..1000 {
+            total += (<-done).unwrap()
+        }
+    }
+    println(total)
+}

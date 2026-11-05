@@ -1,0 +1,126 @@
+// TCP networking. Calls block only the calling goroutine: while one waits for
+// the network, others keep running on its thread.
+//
+//   let ln = try net.listen(":8080")
+//   for {
+//       let c = try ln.accept()
+//       go serve(c)
+//   }
+
+pub struct Error {
+    pub msg String
+    pub code int
+
+    pub fn message(self) String {
+        return self.msg.clone()
+    }
+
+    // The call stopped because its task was cancelled.
+    pub fn isCancelled(self) bool {
+        return __isCancelled(self.code)
+    }
+}
+
+fn __listen(addr str) int
+fn __connect(addr str) int
+fn __accept(fd int) int
+fn __read(fd int, buf inout Vec[byte], max int) int
+fn __write(fd int, data []byte) int
+fn __close(fd int)
+fn __shutdownWrite(fd int)
+fn __port(fd int) int
+fn __errMsg(code int) String
+fn __isCancelled(code int) bool
+
+fn fail(what str, code int) Error {
+    return Error{msg: what + ": " + __errMsg(code), code: code}
+}
+
+pub struct Listener {
+    fd int
+
+    // Waits for the next connection.
+    pub fn accept(self) Conn ! Error {
+        let fd = __accept(self.fd)
+        if fd < 0 {
+            return err(fail("accept", -fd))
+        }
+        return Conn{fd: fd}
+    }
+
+    // The port it listens on; useful after `listen(":0")`.
+    pub fn port(self) int {
+        return __port(self.fd)
+    }
+
+    fn drop(self inout) {
+        __close(self.fd)
+    }
+}
+
+pub struct Conn {
+    fd int
+
+    // Appends up to `max` bytes to `buf`, waiting until at least one arrives.
+    // Returns how many were read; 0 means the peer closed the connection.
+    pub fn read(self, buf inout Vec[byte], max int) int ! Error {
+        let n = __read(self.fd, &buf, max)
+        if n < 0 {
+            return err(fail("read", -n))
+        }
+        return n
+    }
+
+    // Writes all of `data`.
+    pub fn write(self, data []byte) ! Error {
+        var off = 0
+        for off < data.len {
+            let n = __write(self.fd, data[off..])
+            if n < 0 {
+                return err(fail("write", -n))
+            }
+            off += n
+        }
+    }
+
+    pub fn writeText(self, s str) ! Error {
+        return self.write(s.bytes())
+    }
+
+    // Reads until the peer closes the connection.
+    pub fn readAll(self) Vec[byte] ! Error {
+        var buf = Vec[byte]{}
+        for {
+            let n = try self.read(&buf, 65536)
+            if n == 0 {
+                return buf
+            }
+        }
+    }
+
+    // Tells the peer no more data is coming; reading still works.
+    pub fn closeWrite(self) {
+        __shutdownWrite(self.fd)
+    }
+
+    fn drop(self inout) {
+        __close(self.fd)
+    }
+}
+
+// Listens on "host:port"; ":port" listens on all interfaces, ":0" picks a free port.
+pub fn listen(addr str) Listener ! Error {
+    let fd = __listen(addr)
+    if fd < 0 {
+        return err(fail("listen " + addr, -fd))
+    }
+    return Listener{fd: fd}
+}
+
+pub fn dial(addr str) Conn ! Error {
+    let fd = __connect(addr)
+    if fd < 0 {
+        return err(fail("dial " + addr, -fd))
+    }
+    return Conn{fd: fd}
+}

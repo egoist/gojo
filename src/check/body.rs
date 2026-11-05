@@ -3851,7 +3851,12 @@ impl Checker {
                         }
                     }
                     if !ok {
-                        self.diags.push(Diag::new(c.span, format!("a task borrows `{}`, which does not outlive the task group", local.name)).note(Some(local.span), "declare it outside `task.group`, or send it to the task over a channel"));
+                        if matches!(local.kind, LocalKind::Ref { .. } | LocalKind::Param(Mode::Borrow | Mode::Inout)) {
+                            self.diags.push(Diag::new(c.span, format!("a task borrows `{}`, which does not outlive the task group", local.name)).note(Some(local.span), "declare it outside `task.group`, or `.clone()` it into a local so the task can take it"));
+                        } else {
+                            // declared inside the group body: the task takes it, like `go` does
+                            c.by_value.push(l);
+                        }
                     }
                 }
                 if local.closure_depth >= gdepth && self.is_copy(&t) && !matches!(local.kind, LocalKind::Ref { .. }) {

@@ -844,14 +844,16 @@ impl<'a> Bc<'a> {
         for (l, u) in &c.captures {
             let le = TExpr::new(TK::Local(*l), self.tf.locals[*l as usize].ty.clone(), c.span);
             let t = self.tf.locals[*l as usize].ty.clone();
-            if c.owned && !self.is_copy(&t) {
+            let taken = c.owned || (c.scoped && c.by_value.contains(l));
+            if taken && !self.is_copy(&t) {
                 self.do_move(st, &le);
+                continue;
             } else if *u == CapUse::Mutate {
                 self.write(st, &le);
             } else {
                 self.read(st, &le);
             }
-            if c.scoped {
+            if c.scoped && !c.by_value.contains(l) {
                 // tasks keep their borrows until the group finishes
                 if let Some(p) = place_path(&le) {
                     if !self.is_holder(p.0) {
@@ -891,7 +893,8 @@ impl<'a> Bc<'a> {
                     if let TK::Closure(c) = &a.e.kind {
                         self.closure(st, c);
                         if !c.owned {
-                            for (l, u) in &c.captures {
+                            // values copied into a task's environment aren't borrowed
+                            for (l, u) in c.captures.iter().filter(|(l, _)| !c.by_value.contains(l)) {
                                 let le = TExpr::new(TK::Local(*l), self.tf.locals[*l as usize].ty.clone(), c.span);
                                 for (p, _) in self.arg_targets(&le) {
                                     accesses.push((p, if *u == CapUse::Mutate { Acc::Mut } else { Acc::Read }, c.span, c.loop_body.is_some()));

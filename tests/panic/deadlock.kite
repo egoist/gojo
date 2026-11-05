@@ -1,0 +1,10 @@
+fn main() {
+    let c = chan[int]()
+    let d = c.clone()
+    go () => {
+        // waits for a value nobody sends
+        _ = <-d
+    }
+    _ = <-c
+    // panic: all goroutines are asleep: deadlock
+}

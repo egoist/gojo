@@ -1,5 +1,5 @@
 // Kite runtime implementation.
-#include "kite_rt.h"
+#include <kite_rt.h>
 #include <stdio.h>
 #include <errno.h>
 #include <pthread.h>
@@ -12,12 +12,14 @@
 #include <ctype.h>
 
 static int g_argc;
+static void box_tls_setup(void);
 static char **g_argv;
 
 void kite_rt_init(int argc, char **argv) {
     g_argc = argc;
     g_argv = argv;
     setvbuf(stdout, NULL, _IOFBF, 1 << 16);
+    box_tls_setup();
 }
 
 // ------------------------------------------------------------------ panics
@@ -77,7 +79,40 @@ void *kite_realloc(void *p, size_t n) {
 
 // ------------------------------------------------------------------ small-object allocator
 
-__thread kite_box_node *kite_box_lists[KITE_BOX_MAX / 16 + 1];
+static __thread kite_box_node *t_box_lists[KITE_BOX_MAX / 16 + 1];
+intptr_t kite_box_tls;
+#if defined(__APPLE__)
+#include <pthread.h>
+static pthread_key_t g_box_key;
+#endif
+
+__attribute__((noinline)) kite_box_node **kite_box_lists(void) {
+    __asm__ volatile("" : : : "memory");
+    return t_box_lists;
+}
+
+// Every thread that may allocate calls this first.
+void kite_thread_init(void) {
+#if defined(__APPLE__)
+    pthread_setspecific(g_box_key, kite_box_lists());
+#endif
+}
+
+static void box_tls_setup(void) {
+#if defined(__linux__) && (defined(__aarch64__) || defined(__x86_64__))
+    uintptr_t tp;
+#if defined(__aarch64__)
+    __asm__ volatile("mrs %0, tpidr_el0" : "=r"(tp));
+#else
+    __asm__ volatile("movq %%fs:0, %0" : "=r"(tp));
+#endif
+    kite_box_tls = (intptr_t)((uintptr_t)kite_box_lists() - tp);
+#elif defined(__APPLE__)
+    if (pthread_key_create(&g_box_key, NULL) != 0) kite_panic("cannot create a thread key", "<runtime>");
+    kite_box_tls = (intptr_t)g_box_key;
+#endif
+    kite_thread_init();
+}
 
 // Slabs are carved into blocks of one size class. They are kept on a global
 // list (never returned to the OS), like most size-class allocators.
@@ -97,13 +132,14 @@ void *kite_box_refill(size_t cls) {
     uint8_t *start = (uint8_t *)s + 16, *end = (uint8_t *)s + KITE_SLAB;
     size_t count = (size_t)(end - start) / sz;
     // keep the first block, thread the rest onto the free list
-    kite_box_node *head = kite_box_lists[cls];
+    kite_box_node **lists = kite_box_lists();
+    kite_box_node *head = lists[cls];
     for (size_t i = count; i-- > 1;) {
         kite_box_node *f = (kite_box_node *)(start + i * sz);
         f->next = head;
         head = f;
     }
-    kite_box_lists[cls] = head;
+    lists[cls] = head;
     return start;
 }
 
@@ -669,278 +705,6 @@ void kite_map_free(kite_map *m) {
     free(m->index);
 }
 
-// ------------------------------------------------------------------ goroutines
-
-typedef struct { void (*fn)(void *); void *arg; } go_start;
-
-static void *go_main(void *p) {
-    go_start s = *(go_start *)p;
-    free(p);
-    s.fn(s.arg);
-    return NULL;
-}
-
-void kite_go(void (*fn)(void *), void *arg) {
-    go_start *s = kite_alloc(sizeof *s);
-    s->fn = fn;
-    s->arg = arg;
-    pthread_t t;
-    pthread_attr_t attr;
-    pthread_attr_init(&attr);
-    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
-    pthread_attr_setstacksize(&attr, 8 << 20);
-    if (pthread_create(&t, &attr, go_main, s) != 0) kite_panic("cannot start goroutine", "<runtime>");
-    pthread_attr_destroy(&attr);
-}
-
-// ------------------------------------------------------------------ select support
-
-static pthread_mutex_t g_sel_lock = PTHREAD_MUTEX_INITIALIZER;
-static pthread_cond_t g_sel_cond = PTHREAD_COND_INITIALIZER;
-static uint64_t g_sel_gen;
-
-static void select_notify(void) {
-    pthread_mutex_lock(&g_sel_lock);
-    g_sel_gen++;
-    pthread_cond_broadcast(&g_sel_cond);
-    pthread_mutex_unlock(&g_sel_lock);
-}
-
-void kite_select_wait(void) {
-    pthread_mutex_lock(&g_sel_lock);
-    uint64_t gen = g_sel_gen;
-    struct timespec ts;
-    clock_gettime(CLOCK_REALTIME, &ts);
-    ts.tv_nsec += 2000000;
-    if (ts.tv_nsec >= 1000000000) { ts.tv_sec++; ts.tv_nsec -= 1000000000; }
-    while (gen == g_sel_gen) {
-        if (pthread_cond_timedwait(&g_sel_cond, &g_sel_lock, &ts) != 0) break;
-    }
-    pthread_mutex_unlock(&g_sel_lock);
-}
-
-// ------------------------------------------------------------------ channels
-
-struct kite_chan {
-    pthread_mutex_t mu;
-    pthread_cond_t can_send, can_recv, taken;
-    uint8_t *buf;
-    size_t esize;
-    int64_t cap;     // user capacity (0 = unbuffered)
-    int64_t slots;   // max(cap, 1)
-    int64_t head, len;
-    uint64_t sent, received;
-    bool closed;
-    int64_t refs;
-};
-
-kite_chan *kite_chan_new(size_t esize, int64_t cap) {
-    if (cap < 0) kite_panic("negative channel capacity", "<runtime>");
-    kite_chan *c = kite_alloc(sizeof *c);
-    memset(c, 0, sizeof *c);
-    pthread_mutex_init(&c->mu, NULL);
-    pthread_cond_init(&c->can_send, NULL);
-    pthread_cond_init(&c->can_recv, NULL);
-    pthread_cond_init(&c->taken, NULL);
-    c->esize = esize ? esize : 1;
-    c->cap = cap;
-    c->slots = cap ? cap : 1;
-    c->buf = kite_alloc((size_t)c->slots * c->esize);
-    c->refs = 1;
-    return c;
-}
-
-void kite_chan_retain(kite_chan *c) { __atomic_add_fetch(&c->refs, 1, __ATOMIC_RELAXED); }
-
-void kite_chan_release(kite_chan *c, void (*drop_elem)(void *)) {
-    if (!c) return;
-    if (__atomic_sub_fetch(&c->refs, 1, __ATOMIC_ACQ_REL) != 0) return;
-    if (drop_elem)
-        for (int64_t i = 0; i < c->len; i++) drop_elem(c->buf + ((c->head + i) % c->slots) * c->esize);
-    free(c->buf);
-    pthread_mutex_destroy(&c->mu);
-    pthread_cond_destroy(&c->can_send);
-    pthread_cond_destroy(&c->can_recv);
-    pthread_cond_destroy(&c->taken);
-    free(c);
-}
-
-static void chan_push(kite_chan *c, const void *elem) {
-    memcpy(c->buf + ((c->head + c->len) % c->slots) * c->esize, elem, c->esize);
-    c->len++;
-    c->sent++;
-}
-
-void kite_chan_send(kite_chan *c, const void *elem, const char *loc) {
-    pthread_mutex_lock(&c->mu);
-    while (!c->closed && c->len == c->slots) pthread_cond_wait(&c->can_send, &c->mu);
-    if (c->closed) {
-        pthread_mutex_unlock(&c->mu);
-        kite_panic("send on closed channel", loc);
-    }
-    chan_push(c, elem);
-    uint64_t my = c->sent;
-    pthread_cond_signal(&c->can_recv);
-    if (c->cap == 0) {
-        // unbuffered: wait until a receiver takes the value
-        while (c->received < my && !c->closed) pthread_cond_wait(&c->taken, &c->mu);
-    }
-    pthread_mutex_unlock(&c->mu);
-    select_notify();
-}
-
-bool kite_chan_try_send(kite_chan *c, const void *elem, const char *loc) {
-    pthread_mutex_lock(&c->mu);
-    if (c->closed) {
-        pthread_mutex_unlock(&c->mu);
-        kite_panic("send on closed channel", loc);
-    }
-    if (c->len == c->slots) {
-        pthread_mutex_unlock(&c->mu);
-        return false;
-    }
-    chan_push(c, elem);
-    pthread_cond_signal(&c->can_recv);
-    pthread_mutex_unlock(&c->mu);
-    select_notify();
-    return true;
-}
-
-static void chan_pop(kite_chan *c, void *out) {
-    memcpy(out, c->buf + c->head * c->esize, c->esize);
-    c->head = (c->head + 1) % c->slots;
-    c->len--;
-    c->received++;
-    pthread_cond_signal(&c->can_send);
-    pthread_cond_broadcast(&c->taken);
-}
-
-bool kite_chan_recv(kite_chan *c, void *out) {
-    pthread_mutex_lock(&c->mu);
-    while (c->len == 0 && !c->closed) pthread_cond_wait(&c->can_recv, &c->mu);
-    if (c->len == 0) {
-        pthread_mutex_unlock(&c->mu);
-        return false;
-    }
-    chan_pop(c, out);
-    pthread_mutex_unlock(&c->mu);
-    select_notify();
-    return true;
-}
-
-// 1 = received, 2 = closed, 0 = would block
-int kite_chan_try_recv(kite_chan *c, void *out) {
-    pthread_mutex_lock(&c->mu);
-    if (c->len == 0) {
-        int r = c->closed ? 2 : 0;
-        pthread_mutex_unlock(&c->mu);
-        return r;
-    }
-    chan_pop(c, out);
-    pthread_mutex_unlock(&c->mu);
-    select_notify();
-    return 1;
-}
-
-void kite_chan_close(kite_chan *c, const char *loc) {
-    pthread_mutex_lock(&c->mu);
-    if (c->closed) {
-        pthread_mutex_unlock(&c->mu);
-        kite_panic("close of closed channel", loc);
-    }
-    c->closed = true;
-    pthread_cond_broadcast(&c->can_recv);
-    pthread_cond_broadcast(&c->can_send);
-    pthread_cond_broadcast(&c->taken);
-    pthread_mutex_unlock(&c->mu);
-    select_notify();
-}
-
-int64_t kite_chan_len(kite_chan *c) {
-    pthread_mutex_lock(&c->mu);
-    int64_t n = c->len;
-    pthread_mutex_unlock(&c->mu);
-    return c->cap == 0 ? 0 : n;
-}
-
-// ------------------------------------------------------------------ mutex
-
-struct kite_mutex { pthread_mutex_t m; };
-
-kite_mutex *kite_mutex_new(void) {
-    kite_mutex *m = kite_alloc(sizeof *m);
-    pthread_mutex_init(&m->m, NULL);
-    return m;
-}
-void kite_mutex_free(kite_mutex *m) {
-    if (!m) return;
-    pthread_mutex_destroy(&m->m);
-    free(m);
-}
-void kite_mutex_lock(kite_mutex *m) { pthread_mutex_lock(&m->m); }
-void kite_mutex_unlock(kite_mutex *m) { pthread_mutex_unlock(&m->m); }
-
-// ------------------------------------------------------------------ task groups
-
-typedef struct group_task { pthread_t t; struct group_task *next; } group_task;
-
-struct kite_group {
-    pthread_mutex_t mu;
-    group_task *tasks;
-    bool failed;
-};
-
-kite_group *kite_group_new(void) {
-    kite_group *g = kite_alloc(sizeof *g);
-    pthread_mutex_init(&g->mu, NULL);
-    g->tasks = NULL;
-    g->failed = false;
-    return g;
-}
-
-void kite_group_go(kite_group *g, void (*fn)(void *), void *arg) {
-    go_start *s = kite_alloc(sizeof *s);
-    s->fn = fn;
-    s->arg = arg;
-    group_task *t = kite_alloc(sizeof *t);
-    pthread_attr_t attr;
-    pthread_attr_init(&attr);
-    pthread_attr_setstacksize(&attr, 8 << 20);
-    if (pthread_create(&t->t, &attr, go_main, s) != 0) kite_panic("cannot start task", "<runtime>");
-    pthread_attr_destroy(&attr);
-    pthread_mutex_lock(&g->mu);
-    t->next = g->tasks;
-    g->tasks = t;
-    pthread_mutex_unlock(&g->mu);
-}
-
-// Returns true for the first failing task (which records its error).
-bool kite_group_fail(kite_group *g) {
-    pthread_mutex_lock(&g->mu);
-    bool first = !g->failed;
-    g->failed = true;
-    pthread_mutex_unlock(&g->mu);
-    return first;
-}
-
-void kite_group_wait(kite_group *g) {
-    for (;;) {
-        pthread_mutex_lock(&g->mu);
-        group_task *t = g->tasks;
-        g->tasks = NULL;
-        pthread_mutex_unlock(&g->mu);
-        if (!t) break;
-        while (t) {
-            pthread_join(t->t, NULL);
-            group_task *n = t->next;
-            free(t);
-            t = n;
-        }
-    }
-    pthread_mutex_destroy(&g->mu);
-    free(g);
-}
-
 // ------------------------------------------------------------------ os
 
 kite_vec kite_os_args(void) {
@@ -1013,12 +777,6 @@ bool kite_os___getenv(kite_str name, kite_string *out) {
 
 // ------------------------------------------------------------------ time
 
-void kite_time_sleep(int64_t ns) {
-    if (ns <= 0) return;
-    struct timespec ts = { (time_t)(ns / 1000000000), (long)(ns % 1000000000) };
-    while (nanosleep(&ts, &ts) != 0 && errno == EINTR) {}
-}
-
 int64_t kite_time_now(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -1054,22 +812,3 @@ void *kite_dlsym(const char *lib, const char *name) {
     return f;
 }
 
-// ------------------------------------------------------------------ tests
-
-int kite_run_test(void (*fn)(void), const char *name) {
-    fflush(stdout);
-    fflush(stderr);
-    int64_t t0 = kite_time_now();
-    pid_t pid = fork();
-    if (pid == 0) {
-        fn();
-        fflush(stdout);
-        _exit(0);
-    }
-    int status = 0;
-    waitpid(pid, &status, 0);
-    double ms = (double)(kite_time_now() - t0) / 1e6;
-    bool ok = WIFEXITED(status) && WEXITSTATUS(status) == 0;
-    fprintf(stderr, "%s %s (%.1f ms)\n", ok ? "  ok  " : "  FAIL", name, ms);
-    return ok ? 0 : 1;
-}

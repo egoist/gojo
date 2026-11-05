@@ -1,0 +1,125 @@
+// Goroutines are scheduled onto a few threads; blocking parks only the goroutine.
+use fmt, time, task
+
+fn pingPong(n int) int {
+    let ping = chan[int]()
+    let pong = chan[int]()
+    let p = ping.clone()
+    let q = pong.clone()
+    go () => {
+        for v in p {
+            q <- v + 1
+        }
+        q.close()
+    }
+    var last = 0
+    for i in 0..n {
+        ping <- i
+        last = (<-pong).unwrap()
+    }
+    ping.close()
+    return last
+}
+
+fn main() {
+    // many goroutines at once, each parked on a channel
+    let n = 10000
+    let start = chan[bool]()
+    let done = chan[int](n)
+    for i in 0..n {
+        let s = start.clone()
+        let d = done.clone()
+        go () => {
+            _ = <-s
+            d <- i
+        }
+    }
+    start.close()
+    var sum = 0
+    for _ in 0..n {
+        sum += (<-done).unwrap()
+    }
+    println("goroutines", n, "sum", sum)
+
+    // unbuffered hand-offs
+    println("ping-pong", pingPong(10000))
+
+    // a lock that parks goroutines instead of threads
+    let counter = arc(Mutex(0))
+    let fin = chan[bool](8)
+    for _ in 0..8 {
+        let c = counter.clone()
+        let f = fin.clone()
+        go () => {
+            for _ in 0..10000 {
+                with v = c.lock() {
+                    v += 1
+                }
+            }
+            f <- true
+        }
+    }
+    for _ in 0..8 {
+        _ = <-fin
+    }
+    with v = counter.lock() {
+        println("counter", v)
+    }
+
+    // timers: sleepers wake in order of their deadlines, not of when they started
+    // (10 ms apart: some virtual machines only have 3 ms timer precision)
+    let order = chan[int](20)
+    let base = time.now() + 20 * time.millisecond
+    for i in 0..20 {
+        let o = order.clone()
+        let at = base + (19 - i) * 10 * time.millisecond
+        go () => {
+            time.sleep(at - time.now())
+            o <- at
+        }
+    }
+    var prev = 0
+    var sorted = true
+    for _ in 0..20 {
+        let at = (<-order).unwrap()
+        if at < prev { sorted = false }
+        prev = at
+    }
+    println("timers in order", sorted)
+
+    // select waits on several channels without spinning
+    let a = chan[int]()
+    let b = chan[String]()
+    let ac = a.clone()
+    let bc = b.clone()
+    go () => {
+        time.sleep(time.millisecond)
+        bc <- "late"
+        time.sleep(time.millisecond)
+        ac <- 7
+    }
+    for _ in 0..2 {
+        select {
+            let x = <-a => println("a", x)
+            let s = <-b => println("b", s)
+        }
+    }
+
+    // a goroutine stuck in a long computation doesn't hold up the others
+    let spin = chan[int](1)
+    let sc = spin.clone()
+    go () => {
+        var x = 0
+        for i in 0..200000000 { x = x +% i }
+        sc <- x
+    }
+    let quick = chan[bool](1)
+    let qc = quick.clone()
+    go () => { qc <- true }
+    println("quick", (<-quick).unwrap())
+    _ = <-spin
+
+    // yieldNow lets others run
+    task.yieldNow()
+    println(fmt.sprint("done"))
+}

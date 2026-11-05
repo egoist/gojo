@@ -1,0 +1,25 @@
+use task
+
+fn work(items []String) {
+    _ = task.group((g) => {
+        // fine: `r` points into `items`, which outlives the group
+        for s in items {
+            let r = s
+            g.go(() => { println(r) })
+        }
+        // not fine: `first` points into `inner`, which dies with the group body
+        let inner = ["b".toString()]
+        let first = inner[0]
+        g.go(() => { println(first) })
+        // error: a task borrows `first`, which does not outlive the task group
+    })
+}
+
+fn main() {
+    var total = 0
+    _ = task.group((g) => {
+        g.go(() => { total += 1 })
+        // error: a task cannot modify the captured variable `total`
+    })
+    work(["a"])
+}

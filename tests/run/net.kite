@@ -1,0 +1,80 @@
+// TCP: an echo server and its clients, all goroutines in one process.
+use fmt, net, task, time
+
+fn serve(c net.Conn) {
+    var buf = Vec[byte]{}
+    for {
+        buf.clear()
+        let n = c.read(&buf, 4096) catch _e {
+            return
+        }
+        if n == 0 { return }
+        c.write(buf) catch _e {
+            return
+        }
+    }
+}
+
+fn client(port int, id int) String ! net.Error {
+    let c = try net.dial(fmt.sprint("127.0.0.1:", port))
+    let msg = fmt.sprint("client", id)
+    try c.writeText(msg)
+    c.closeWrite()
+    let reply = try c.readAll()
+    return String(reply)
+}
+
+fn main() {
+    let ln = net.listen("127.0.0.1:0").unwrap()
+    let port = ln.port()
+    println("listening", port > 0)
+
+    // the server accepts in a group of its own; cancelling the group stops it
+    let replies = Mutex(Vec[String]{})
+    let r = task.group((g) => {
+        g.go(() => {
+            let srv = task.group((s) => {
+                for {
+                    let c = ln.accept() catch e {
+                        println("accept stopped, cancelled:", e.isCancelled())
+                        return
+                    }
+                    go serve(c)
+                }
+            })
+            _ = srv
+        })
+        let clients = task.group((cg) => {
+            for id in 0..50 {
+                cg.go(() => {
+                    let reply = try client(port, id)
+                    with l = replies.lock() { l.push(reply) }
+                })
+            }
+        })
+        println("clients ok", clients.isOk())
+        g.cancel()
+    })
+    println("group ok", r.isOk())
+    with l = replies.lock() {
+        l.sort()
+        println(l.len, l[0], l[49])
+    }
+
+    // a read with a deadline: the peer never answers
+    let quiet = net.listen("127.0.0.1:0").unwrap()
+    let c = net.dial(fmt.sprint("127.0.0.1:", quiet.port())).unwrap()
+    let start = time.now()
+    let got = task.timeout(10 * time.millisecond, () => {
+        var buf = Vec[byte]{}
+        return c.read(&buf, 10)
+    })
+    // the deadline cancels the read; timeout reports none
+    println("read timed out", got.isNone(), "fast", time.since(start) < time.second)
+
+    // errors are values
+    match net.dial("127.0.0.1:1") {
+        err(e) => println("dial failed:", e.message().contains("refused"))
+        ok(_) => println("connected?")
+    }
+}

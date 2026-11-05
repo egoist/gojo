@@ -4,7 +4,14 @@ pub const microsecond = 1000
 pub const millisecond = 1000000
 pub const second = 1000000000
 
-pub fn sleep(d int)
+fn __sleep(d int) bool
+
+// Parks the goroutine; other goroutines keep running on its thread. Returns
+// early when the task is cancelled (see task.cancelled).
+pub fn sleep(d int) {
+    _ = __sleep(d)
+}
+
 // Monotonic clock in nanoseconds.
 pub fn now() int
 

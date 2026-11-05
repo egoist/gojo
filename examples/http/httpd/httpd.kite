@@ -1,0 +1,137 @@
+// A small HTTP/1.1 server built on goroutines, task groups and cancellation.
+//
+//  - every connection is a task in the server's group: stopping the server
+//    cancels the requests in flight;
+//  - every request runs under a deadline (`task.timeout`): a slow handler is
+//    cancelled and the client gets 504;
+//  - a client that hangs up cancels its request: the handler's blocking calls
+//    return early instead of finishing work nobody will read.
+use fmt, net, task
+
+pub struct Request {
+    pub method String
+    pub path String
+}
+
+pub struct Response {
+    pub status int
+    pub body String
+}
+
+pub interface Handler {
+    fn serve(self, req Request) Response
+}
+
+pub struct Stats {
+    pub served int = 0
+    pub timedOut int = 0
+    pub hungUp int = 0
+    pub stopped int = 0
+}
+
+enum Outcome { Served, TimedOut, HungUp, Stopped }
+
+fn reason(status int) str {
+    return match status {
+        200 => "OK"
+        400 => "Bad Request"
+        404 => "Not Found"
+        504 => "Gateway Timeout"
+        _ => "Unknown"
+    }
+}
+
+// Reads the request head: "GET /path HTTP/1.1\r\n...\r\n\r\n".
+fn readRequest(c net.Conn) ?Request {
+    var buf = Vec[byte]{}
+    for buf.len <= 65536 {
+        let text = String(buf)
+        if text.contains("\r\n\r\n") {
+            let parts = text.split("\r\n")[0].split(" ")
+            if parts.len < 3 {
+                return none
+            }
+            return Request{method: parts[0].clone(), path: parts[1].clone()}
+        }
+        let n = c.read(&buf, 4096) catch _e { 0 }
+        if n == 0 {
+            return none
+        }
+    }
+    return none
+}
+
+fn writeResponse(c net.Conn, r Response) {
+    let head = "HTTP/1.1 " + fmt.sprint(r.status) + " " + reason(r.status) + "\r\nContent-Length: " + fmt.sprint(r.body.len()) + "\r\nConnection: close\r\n\r\n"
+    c.writeText(head + r.body) catch _e {}
+}
+
+fn handleConn[H Handler + send](c net.Conn, h H, deadline int) Outcome {
+    let req = readRequest(c) ?? Request{method: "", path: ""}
+    if task.cancelled() {
+        return .Stopped
+    }
+    if req.method.len() == 0 {
+        writeResponse(c, Response{status: 400, body: "bad request\n"})
+        return .Served
+    }
+    var none_ ?Response = none
+    let result = Mutex(none_)
+    let hungUp = Mutex(false)
+    _ = task.group((g) => {
+        // the watcher: a read that returns 0 means the client hung up
+        g.go(() => {
+            var probe = Vec[byte]{}
+            let n = c.read(&probe, 1) catch _e { -1 }
+            if n == 0 && !task.cancelled() {
+                with x = hungUp.lock() { x = true }
+                g.cancel()
+            }
+        })
+        // the handler, under a deadline; when done it stops the watcher
+        g.go(() => {
+            let r = task.timeout(deadline, () => h.serve(req))
+            with x = result.lock() { x = r }
+            g.cancel()
+        })
+    })
+    with gone = hungUp.lock() {
+        if gone { return .HungUp }
+    }
+    // the server is stopping: drop the request
+    if task.cancelled() {
+        return .Stopped
+    }
+    with r = result.lock() {
+        if let resp = r {
+            writeResponse(c, Response{status: resp.status, body: resp.body.clone()})
+            return .Served
+        }
+    }
+    writeResponse(c, Response{status: 504, body: "timed out\n"})
+    return .TimedOut
+}
+
+// Serves until the calling task is cancelled; then cancels the requests in
+// flight and waits for them.
+pub fn serve[H Handler + send](ln net.Listener, h H, deadline int, stats Mutex[Stats]) {
+    _ = task.group((g) => {
+        for {
+            let c = ln.accept() catch _e {
+                return
+            }
+            // `c` moves into the task; `h` and `stats` are borrowed
+            g.go(() => {
+                let o = handleConn(c, h, deadline)
+                with s = stats.lock() {
+                    match o {
+                        .Served => s.served += 1
+                        .TimedOut => s.timedOut += 1
+                        .HungUp => s.hungUp += 1
+                        .Stopped => s.stopped += 1
+                    }
+                }
+            })
+        }
+    })
+}

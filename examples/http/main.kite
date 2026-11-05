@@ -1,0 +1,95 @@
+// `kite run examples/http`: starts the server and checks it with a few clients.
+// `kite run examples/http serve`: serves on :8080 until interrupted.
+use fmt, net, os, task, time
+use ./httpd
+
+struct App {}
+
+extend App {
+    fn serve(self, req httpd.Request) httpd.Response {
+        return match req.path.asStr() {
+            "/" => httpd.Response{status: 200, body: "hello\n"}
+            "/slow" => {
+                // cancelled at the deadline, or when the client hangs up
+                time.sleep(10 * time.second)
+                httpd.Response{status: 200, body: "finally\n"}
+            }
+            _ => httpd.Response{status: 404, body: "not found\n"}
+        }
+    }
+}
+
+fn get(port int, path str) String ! net.Error {
+    let c = try net.dial("127.0.0.1:" + fmt.sprint(port))
+    try c.writeText("GET " + path + " HTTP/1.1\r\nHost: localhost\r\n\r\n")
+    let reply = String(try c.readAll())
+    if reply.len() == 0 {
+        return err(net.Error{msg: "connection closed", code: 0})
+    }
+    return reply.split("\r\n")[0].clone()
+}
+
+fn hangUp(port int, path str) ! net.Error {
+    let c = try net.dial("127.0.0.1:" + fmt.sprint(port))
+    try c.writeText("GET " + path + " HTTP/1.1\r\nHost: localhost\r\n\r\n")
+    // dropping `c` closes the connection without reading the answer
+}
+
+fn main() ! net.Error {
+    let stats = Mutex(httpd.Stats{})
+    let app = App{}
+    let args = os.args()
+    if args.len > 1 && args[1] == "serve" {
+        let ln = try net.listen(":8080")
+        println("listening on :8080")
+        httpd.serve(ln, app, time.second, stats)
+        return
+    }
+
+    let ln = try net.listen("127.0.0.1:0")
+    let port = ln.port()
+    let start = time.now()
+    let stop = chan[bool]()
+    _ = task.group((g) => {
+        // the server, in a group of its own so that it can be stopped alone
+        g.go(() => {
+            _ = task.group((sg) => {
+                sg.go(() => { httpd.serve(ln, app, 50 * time.millisecond, stats) })
+                _ = <-stop
+                sg.cancel()
+            })
+        })
+        let fast = task.group((cg) => {
+            for _ in 0..20 {
+                cg.go(() => {
+                    let line = try get(port, "/")
+                    if line != "HTTP/1.1 200 OK" { println("unexpected", line) }
+                })
+            }
+        })
+        println("20 requests to /:", fast.isOk())
+        println("/missing:", get(port, "/missing") catch _e { "?" })
+        println("/slow:", get(port, "/slow") catch _e { "?" })
+        _ = hangUp(port, "/slow")
+        // wait until the server has noticed the hang-up
+        for _ in 0..200 {
+            var seen = false
+            with s = stats.lock() { seen = s.hungUp > 0 }
+            if seen { break }
+            time.sleep(time.millisecond)
+        }
+        // a request still in flight when the server stops
+        _ = task.group((cg) => {
+            cg.go(() => {
+                let line = get(port, "/slow") catch _e { "connection closed" }
+                println("in flight at shutdown:", line)
+            })
+            time.sleep(10 * time.millisecond)
+            stop <- true
+        })
+    })
+    with s = stats.lock() {
+        println("served", s.served, "timed out", s.timedOut, "hung up", s.hungUp, "stopped", s.stopped)
+    }
+    println("took less than 1s:", time.since(start) < time.second)
+}

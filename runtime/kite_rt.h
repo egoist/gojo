@@ -98,7 +98,33 @@ static inline void kite_free(void *p) { free(p); }
 // free list for their size class instead of through malloc.
 #define KITE_BOX_MAX 256
 typedef struct kite_box_node { struct kite_box_node *next; } kite_box_node;
-extern __thread kite_box_node *kite_box_lists[KITE_BOX_MAX / 16 + 1];
+kite_box_node **kite_box_lists(void);
+// The free lists live in thread-local storage. A goroutine can resume on another
+// thread, and a compiler may keep a thread-local's address across calls, so the
+// thread register is re-read on every use (volatile asm is never merged or moved
+// across a call). Linux: offset from the thread pointer; macOS: a pthread key.
+extern intptr_t kite_box_tls;
+static inline kite_box_node **kite_box_head(void) {
+#if defined(__linux__) && defined(__aarch64__)
+    uintptr_t tp;
+    __asm__ volatile("mrs %0, tpidr_el0" : "=r"(tp));
+    return (kite_box_node **)(tp + kite_box_tls);
+#elif defined(__linux__) && defined(__x86_64__)
+    uintptr_t tp;
+    __asm__ volatile("movq %%fs:0, %0" : "=r"(tp));
+    return (kite_box_node **)(tp + kite_box_tls);
+#elif defined(__APPLE__) && defined(__aarch64__)
+    uintptr_t tp;
+    __asm__ volatile("mrs %0, tpidrro_el0" : "=r"(tp));
+    return ((kite_box_node ***)(tp & ~(uintptr_t)7))[kite_box_tls];
+#elif defined(__APPLE__) && defined(__x86_64__)
+    kite_box_node **p;
+    __asm__ volatile("movq %%gs:(,%1,8), %0" : "=r"(p) : "r"(kite_box_tls));
+    return p;
+#else
+    return kite_box_lists();
+#endif
+}
 void *kite_box_refill(size_t cls);
 #if defined(__has_feature)
 #if __has_feature(address_sanitizer)
@@ -114,9 +140,10 @@ static inline void *kite_box_alloc(size_t n) {
 #endif
     if (n > KITE_BOX_MAX) return kite_alloc(n);
     size_t cls = n ? (n + 15) >> 4 : 1;
-    kite_box_node *f = kite_box_lists[cls];
+    kite_box_node **lists = kite_box_head();
+    kite_box_node *f = lists[cls];
     if (__builtin_expect(f != NULL, 1)) {
-        kite_box_lists[cls] = f->next;
+        lists[cls] = f->next;
         return f;
     }
     return kite_box_refill(cls);
@@ -130,8 +157,9 @@ static inline void kite_box_free(void *p, size_t n) {
     if (n > KITE_BOX_MAX) { free(p); return; }
     size_t cls = n ? (n + 15) >> 4 : 1;
     kite_box_node *f = p;
-    f->next = kite_box_lists[cls];
-    kite_box_lists[cls] = f;
+    kite_box_node **lists = kite_box_head();
+    f->next = lists[cls];
+    lists[cls] = f;
 }
 
 // ---- strings
@@ -201,18 +229,33 @@ static inline uint64_t kite_hash_u64(uint64_t x) {
 }
 static inline uint64_t kite_hash_mix(uint64_t h, uint64_t x) { return kite_hash_u64(h ^ (x + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2))); }
 
-// ---- concurrency
+// ---- concurrency (runtime/kite_sched.c)
+// A goroutine waiting in a channel queue. Lives on the waiting goroutine's stack.
+typedef struct kite_sudog {
+    struct kite_g *g;
+    kite_chan *c;
+    void *elem;
+    uint64_t token;
+    bool ok, linked;
+    struct kite_sudog *next, *prev;
+} kite_sudog;
+typedef struct {
+    kite_chan *c;
+    void *elem;     // value to send, or where to receive into
+    bool send;
+    bool ok;
+    kite_sudog s;
+} kite_sel_case;
+_Noreturn void kite_sched_main(void (*entry)(void));
 void kite_go(void (*fn)(void *), void *arg);
 kite_chan *kite_chan_new(size_t esize, int64_t cap);
 void kite_chan_retain(kite_chan *c);
 void kite_chan_release(kite_chan *c, void (*drop_elem)(void *));
-void kite_chan_send(kite_chan *c, const void *elem, const char *loc);
+bool kite_chan_send(kite_chan *c, const void *elem, const char *loc);
 bool kite_chan_recv(kite_chan *c, void *out);
-int kite_chan_try_recv(kite_chan *c, void *out);
-bool kite_chan_try_send(kite_chan *c, const void *elem, const char *loc);
 void kite_chan_close(kite_chan *c, const char *loc);
 int64_t kite_chan_len(kite_chan *c);
-void kite_select_wait(void);
+int kite_select(kite_sel_case *cases, int n, bool has_default, const char *loc);
 kite_mutex *kite_mutex_new(void);
 void kite_mutex_free(kite_mutex *m);
 void kite_mutex_lock(kite_mutex *m);
@@ -221,16 +264,32 @@ kite_group *kite_group_new(void);
 void kite_group_go(kite_group *g, void (*fn)(void *), void *arg);
 void kite_group_wait(kite_group *g);
 bool kite_group_fail(kite_group *g);
+bool kite_time___sleep(int64_t ns);
+bool kite_task___cancelled(void);
+uint8_t *kite_task___scopeEnter(int64_t ns);
+bool kite_task___scopeExit(uint8_t *s);
+void kite_task___groupCancel(uint8_t *state);
+void kite_task_yieldNow(void);
+int64_t kite_net___listen(kite_str addr);
+int64_t kite_net___connect(kite_str addr);
+int64_t kite_net___accept(int64_t fd);
+int64_t kite_net___read(int64_t fd, kite_vec *buf, int64_t max);
+int64_t kite_net___write(int64_t fd, kite_slice data);
+void kite_net___close(int64_t fd);
+void kite_net___shutdownWrite(int64_t fd);
+int64_t kite_net___port(int64_t fd);
+kite_string kite_net___errMsg(int64_t code);
+bool kite_net___isCancelled(int64_t code);
 
 // ---- os / time / ffi
 void kite_rt_init(int argc, char **argv);
+void kite_thread_init(void);
 kite_vec kite_os_args(void);
 _Noreturn void kite_os_exit(int64_t code);
 int64_t kite_os___readFile(kite_str path, kite_vec *out);
 int64_t kite_os___writeFile(kite_str path, kite_slice data);
 kite_string kite_os___errMsg(kite_str path, int64_t code);
 bool kite_os___getenv(kite_str name, kite_string *out);
-void kite_time_sleep(int64_t ns);
 int64_t kite_time_now(void);
 void *kite_dlsym(const char *lib, const char *name);
 int kite_run_test(void (*fn)(void), const char *name);

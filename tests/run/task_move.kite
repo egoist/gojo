@@ -1,0 +1,39 @@
+// A task borrows what lives outside its group, and takes what was declared
+// inside the group body, like `go` does.
+use fmt, task
+
+struct Res {
+    name String
+    dropped arc[Mutex[int]]
+
+    fn drop(self inout) {
+        with n = self.dropped.lock() { n += 1 }
+    }
+}
+
+fn main() {
+    let dropped = arc(Mutex(0))
+    let shared = "outside"
+    let out = Mutex(Vec[String]{})
+    let r = task.group((g) => {
+        for i in 0..5 {
+            let res = Res{name: fmt.sprint("res", i), dropped: dropped.clone()}
+            g.go(() => {
+                with o = out.lock() { o.push(res.name.clone() + " " + shared) }
+            })
+        }
+        // copies are copied; the group handle too
+        let n = 7
+        g.go(() => {
+            with o = out.lock() { o.push(fmt.sprint("copy", n)) }
+            g.cancel()
+        })
+    })
+    with o = out.lock() {
+        o.sort()
+        println(o, r.isOk())
+    }
+    with n = dropped.lock() {
+        println("dropped", n)
+    }
+}

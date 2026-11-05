@@ -1,0 +1,14 @@
+group failed: task 3 fast true
+["task 0 cancelled true", "task 1 cancelled true", "task 2 cancelled true", "task 4 cancelled true", "task 5 cancelled true"]
+receiver got none
+receiver got none
+receiver got none
+receivers done err("stop")
+fast some(42)
+slow none fast true
+inner none fast true
+nested some(2)
+loop saw the cancel true
+cancelled group true
+checkpoint none
+main cancelled false

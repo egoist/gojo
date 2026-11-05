@@ -1,0 +1,8 @@
+goroutines 10000 sum 49995000
+ping-pong 10000
+counter 80000
+timers in order true
+b some("late")
+a some(7)
+quick true
+done

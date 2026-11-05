@@ -1,0 +1,6 @@
+20 requests to /: true
+/missing: HTTP/1.1 404 Not Found
+/slow: HTTP/1.1 504 Gateway Timeout
+in flight at shutdown: connection closed
+served 21 timed out 1 hung up 1 stopped 1
+took less than 1s: true

@@ -1,0 +1,10 @@
+use task
+
+fn main() {
+    _ = task.group((g) => {
+        let local = "x".toString()
+        g.go(() => { println(local) })
+        println(local)
+        // error: use of `local` after it was moved
+    })
+}

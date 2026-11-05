@@ -5,9 +5,9 @@
 - `run/`：可运行的程序，输出必须与同名 `.out` 一致；
 - `errors/`：必须编译失败，并给出文件里 `// error:` 后面写的信息；
 - `panic/`：运行时必须以退出码 2 终止，并给出 `// panic:` 后面写的信息；
-- `projects/`：多包项目；`testblocks/`：`kite test`。
+- `projects/`：多包项目；`testblocks/`：`kite test`；`examples/`（仓库根目录下）：示例程序，同样比对输出。
 
-测试都在 `tests/` 目录下，由 `cargo test` 运行；`cargo test -- --include-ignored` 还会在 AddressSanitizer / UBSan 下重跑所有 `run/` 程序。
+测试都在 `tests/` 目录下，由 `cargo test` 运行；`cargo test -- --include-ignored` 还会在 AddressSanitizer / UBSan 下重跑所有 `run/` 程序，并在 ThreadSanitizer 下重跑其中的并发程序。
 
 ## 1. 词法
 
@@ -177,8 +177,9 @@
 - `defer stmt` 在**当前块**结束时执行，多个 defer 逆序执行；`errdefer stmt` 只在函数以错误返回时执行，只能用在返回结果或可选值的函数里。
 - `break`、`continue`、`return`、`try` 离开作用域时同样执行释放和 defer。
 - 被推迟的代码不能离开它自己：其中不能写 `return`、`try`、`yield`，也不能 `break`/`continue` 外层循环。里面自己的循环、闭包不受影响。
+- 一条语句里的临时值（例如 `String(try readBytes())` 里的 `Vec`）活到这条语句用完它们为止。
 
-测试：`run/ownership`、`run/errdefer`、`run/labels`、`run/push_flow`、`errors/defer_exit`、`errors/rules`。
+测试：`run/ownership`、`run/errdefer`、`run/labels`、`run/push_flow`、`run/temporaries`、`errors/defer_exit`、`errors/rules`。
 
 ### 5.4 视图与投影
 
@@ -269,15 +270,46 @@
 
 ## 10. 并发
 
-- `go f(x)`、`go () => { }`：参数和捕获被 move 进新线程，必须满足 `send`。
-- `chan[T](n)` 创建带 `n` 个缓冲的 channel，`chan[T]()` 和 `chan[T](0)` 无缓冲。`ch <- v` 发送并 move `v`；`<-ch` 返回 `?T`，channel 关闭后为 `none`；`for x in ch` 一直接收到关闭；`ch.close()`；`.clone()` 得到同一个 channel 的另一个句柄。
-- `select` 的分支：`let x = <-ch => ...`、`<-ch => ...`、`ch <- v => ...`、`_ => ...`。没有 `_` 时等待某个分支就绪。分支体里的 `break`/`continue` 作用于外层循环。
+### 10.1 goroutine 与 channel
+
+- `go f(x)`、`go () => { }` 启动 goroutine：参数和捕获被 move 进去，必须满足 `send`。goroutine 与调用方脱离，不属于任何任务组，不受取消影响。
+- `chan[T](n)` 创建带 `n` 个缓冲的 channel，`chan[T]()` 和 `chan[T](0)` 无缓冲（发送方等到接收方取走为止）。`ch <- v` 发送并 move `v`；`<-ch` 返回 `?T`，channel 关闭且取空后为 `none`；`for x in ch` 一直接收到关闭；`ch.close()`；`.clone()` 得到同一个 channel 的另一个句柄。向已关闭的 channel 发送、重复关闭会 panic。
+- `select` 的分支：`let x = <-ch => ...`、`<-ch => ...`、`ch <- v => ...`、`_ => ...`。有多个分支就绪时随机选一个；没有 `_` 时等待某个分支就绪；没被选中的发送分支，值不会被发送，照常释放。分支体里的 `break`/`continue` 作用于外层循环。
 - `Mutex(x)` 拥有数据；`arc(Mutex(x))` 用于长期共享。`with v = mu.lock() { }` 加锁，块结束解锁，引用带不出块。
 - `Mutex(&x)` 创建借用 `x` 的锁，类型是 `MutexRef[T]`，是视图（不能存储）。存在期间 `x` 被可变借用，不能直接访问；`x` 必须是 `var`。
-- `task.group((g) => { g.go(() => ...) })`：块结束时等待所有子任务；子任务可以借用组外的数据；第一个错误作为整个 group 的错误返回。
-- 任何线程里的 panic 都终止进程。
+- `task.yieldNow()` 让出当前线程给其他 goroutine。
+- 所有 goroutine 都阻塞、而且没有计时器或网络等待能唤醒它们时，程序以 panic 结束（“all goroutines are asleep: deadlock”）。
 
-测试：`run/concurrency`、`run/mutexref`、`errors/send_rc`、`errors/task_race`、`errors/go_closure_mutation`、`errors/select_arms`、`errors/mutexref`、`errors/mutexref_borrow`、`errors/mutexref_immutable`。
+### 10.2 任务组
+
+- `task.group((g) => { g.go(() => ...) })`：块结束时等待所有子任务，返回 `! E`，`E` 是子任务的错误类型；第一个错误作为整个 group 的错误。
+- 子任务借用组外的数据；组体里声明的值被子任务**拿走**（与 `go` 相同），之后组体不能再用。子任务不能修改捕获的变量，要共享可变状态就用 `Mutex`。
+- `g` 是可以复制的句柄：子任务可以调用 `g.cancel()` 取消整个组，但不能 `g.go`。
+
+### 10.3 取消
+
+- 取消沿任务树向下传播：一个子任务失败、调用 `g.cancel()`、或 `task.timeout` 的期限到了，这个组（或期限）之下的所有任务，包括嵌套的组，都被取消。组本身照样等待所有子任务结束，因为它们可能借用着组外的数据。
+- 被取消的任务里，阻塞操作立即返回：接收得到 `none`；发送不会发生，值被释放；`select` 当作接收分支的 channel 已关闭（只有发送分支时什么也不执行）；`time.sleep` 提前醒来；`net` 的读写、`accept`、`dial` 返回 `isCancelled()` 为真的 `net.Error`。加锁不会被取消。
+- `task.cancelled()` 查询当前任务是否已被取消；`try task.check()` 在被取消时返回 `task.Cancelled` 错误，用作长时间计算里的检查点。取消不会打断不阻塞的代码。
+- `task.timeout(d, () => body)` 返回 `?T`：期限内完成为 `some`，期限到了或调用方被取消为 `none`。期限可以嵌套，内层更短的先到。
+- 不属于任何组的代码（`main`、裸 `go`）永远不会被取消。
+
+### 10.4 运行时
+
+- goroutine 是有栈协程，由 M:N 调度器分配到工作线程上（默认与 CPU 核数相同，`KITE_MAXPROCS` 可改）。channel、锁、`time.sleep`、网络操作只挂起当前 goroutine。
+- 一个 goroutine 长时间占着线程（调用阻塞的 C 函数、长计算）时，调度器另起线程运行其他 goroutine。
+- 每个 goroutine 的栈固定在一个地址，不会移动（任务可以借用其他 goroutine 栈上的数据）。默认 2 MB（`KITE_GOROUTINE_STACK` 可改），`main` 为 1 GB；只有用到的页占内存。栈溢出由保护页捕获，以 panic 结束。
+- 任何 goroutine 里的 panic 都终止进程。
+
+测试：`run/concurrency`、`run/sched`、`run/cancel`、`run/task_move`、`run/net`、`run/mutexref`、`panic/deadlock`、`errors/send_rc`、`errors/task_race`、`errors/task_capture`、`errors/task_moved`、`errors/go_closure_mutation`、`errors/select_arms`、`errors/mutexref`、`errors/mutexref_borrow`、`errors/mutexref_immutable`、`examples/http`。
+
+### 10.5 网络
+
+- `net.listen("host:port")`（`":0"` 选一个空闲端口）返回 `Listener`；`accept()` 返回 `Conn`；`net.dial(addr)` 连接。
+- `Conn`：`read(&buf, max)` 追加最多 `max` 字节到 `buf`，返回读到的字节数，0 表示对方已关闭；`write(data)`、`writeText(s)` 写完全部数据；`readAll()` 读到对方关闭；`closeWrite()` 关闭写方向。`Listener` 和 `Conn` 离开作用域时关闭。
+- 错误是 `net.Error` 值（`message()`、`isCancelled()`）。
+
+测试：`run/net`、`examples/http`。
 
 ## 11. unsafe 与 FFI
 
@@ -301,5 +333,5 @@
 - 编译器生成 C，用 `cc` 或 `zig cc` 编译。debug 与 release（`-O2`）的唯一区别是优化级别：溢出检查、下标检查都保留。
 - 泛型单态化；IR 节点数不超过 60 的函数带 `inline` 提示。
 - `Box`、`rc`/`arc`、接口盒子用按大小分级的线程本地空闲链表分配；`Vec`/`String` 缓冲区用 `malloc`。
-- goroutine 目前是操作系统线程。
+- goroutine 是 M:N 调度的有栈协程，见 10.4。
 - `Map` 保持插入顺序。浮点按最短往返表示打印，指数在 [-4, 21) 内时不用科学计数法。

@@ -23,11 +23,12 @@ const STD: &[(&str, &str)] = &[
     ("math", include_str!("../std/math.kite")),
     ("time", include_str!("../std/time.kite")),
     ("task", include_str!("../std/task.kite")),
+    ("net", include_str!("../std/net.kite")),
     ("strings", include_str!("../std/strings.kite")),
 ];
 
 pub const RUNTIME_H: &str = include_str!("../runtime/kite_rt.h");
-pub const RUNTIME_C: &str = include_str!("../runtime/kite_rt.c");
+pub const RUNTIME_C: &str = concat!(include_str!("../runtime/kite_rt.c"), include_str!("../runtime/kite_sched.c"));
 
 struct Options {
     release: bool,
@@ -302,7 +303,7 @@ fn load(input: &str) -> Result<Loaded, (SourceMap, Vec<Diag>)> {
         }
     };
     add_std("prelude", &mut units, &mut std_files);
-    for s in ["fmt", "os", "math", "time", "task", "strings"] {
+    for s in ["fmt", "os", "math", "time", "task", "strings", "net"] {
         if s == "fmt" || s == "os" || std_needed.iter().any(|n| n == s) {
             add_std(s, &mut units, &mut std_files);
         }
@@ -346,6 +347,20 @@ fn compiler(opts: &Options) -> (String, Vec<String>) {
     }
 }
 
+/// The runtime header, in a directory of its own per runtime version, so that
+/// compilers of different versions can share the cache.
+fn runtime_include_dir() -> Result<PathBuf, String> {
+    let dir = cache_dir().join(format!("include_{:016x}", hash_str(RUNTIME_H)));
+    let h = dir.join("kite_rt.h");
+    if !h.exists() {
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        let tmp = dir.join(format!("kite_rt.h.{}", std::process::id()));
+        std::fs::write(&tmp, RUNTIME_H).map_err(|e| e.to_string())?;
+        std::fs::rename(&tmp, &h).map_err(|e| e.to_string())?;
+    }
+    Ok(dir)
+}
+
 /// Compile the runtime once per (compiler, flags) and cache the object file.
 fn runtime_object(opts: &Options) -> Result<PathBuf, String> {
     let (cc, pre) = compiler(opts);
@@ -357,10 +372,10 @@ fn runtime_object(opts: &Options) -> Result<PathBuf, String> {
         return Ok(obj);
     }
     let c = dir.join(format!("kite_rt_{:016x}.c", key));
-    std::fs::write(dir.join("kite_rt.h"), RUNTIME_H).map_err(|e| e.to_string())?;
+    let inc = runtime_include_dir()?;
     std::fs::write(&c, RUNTIME_C).map_err(|e| e.to_string())?;
     let tmp = dir.join(format!("kite_rt_{:016x}.{}.o", key, std::process::id()));
-    let out = Command::new(&cc).args(&pre).arg("-c").arg(flags).arg("-w").arg("-I").arg(&dir).arg(&c).arg("-o").arg(&tmp).output().map_err(|e| format!("cannot run C compiler `{}`: {}", cc, e))?;
+    let out = Command::new(&cc).args(&pre).arg("-c").arg(flags).arg("-w").arg("-I").arg(&inc).arg(&c).arg("-o").arg(&tmp).output().map_err(|e| format!("cannot run C compiler `{}`: {}", cc, e))?;
     if !out.status.success() {
         return Err(format!("runtime compilation failed:\n{}", String::from_utf8_lossy(&out.stderr)));
     }
@@ -443,7 +458,8 @@ fn drive(cmd: &str, input: &str, opts: &Options, prog_args: &[String]) -> Result
     let mut c = Command::new(&cc);
     c.args(&pre);
     c.arg(if opts.release { "-O2" } else { "-O0" });
-    c.arg("-w").arg("-fwrapv").arg("-I").arg(&dir).arg(&c_path).arg(&rt).arg("-o").arg(&out_path).arg("-lm").arg("-lpthread");
+    let inc = runtime_include_dir().map_err(|e| eprintln!("error: {}", e))?;
+    c.arg("-w").arg("-fwrapv").arg("-I").arg(&inc).arg(&c_path).arg(&rt).arg("-o").arg(&out_path).arg("-lm").arg("-lpthread");
     if cfg!(target_os = "linux") {
         c.arg("-ldl");
     }
