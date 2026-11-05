@@ -1,0 +1,9 @@
+fn main() {
+    var n = 0
+    let mu = Mutex(&n)
+    n += 1
+    with c = mu.lock() {
+        c += 1
+    }
+    // error: cannot modify `n` while it is mutably borrowed by `mu`
+}

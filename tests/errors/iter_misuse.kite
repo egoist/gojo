@@ -1,0 +1,35 @@
+struct Bag {
+    items Vec[int]
+
+    fn each(self, body fn(int) Flow) {
+        for x in self.items {
+            if body(x) == .Break {
+                return
+            }
+        }
+    }
+
+    fn add(self inout, x int) {
+        self.items.push(x)
+    }
+}
+
+struct Plain { x int }
+
+fn take(s sink String) {}
+
+fn main() {
+    let p = Plain{x: 1}
+    for y in p {
+        println(y)
+    }
+    var b = Bag{items: [1]}
+    let s = "x".toString()
+    for x in b {
+        take(s)
+        println(x)
+    }
+    // error: cannot iterate over `Plain`
+    // error: make it iterable with `fn cursor(self) C`
+    // error: cannot move `s` inside this loop
+}

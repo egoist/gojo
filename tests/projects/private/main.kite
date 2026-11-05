@@ -1,0 +1,9 @@
+use ./lib
+
+fn main() {
+    let s = lib.S.new()
+    println(s.a, s.b)
+    println(s.hidden())
+    println(lib.helper())
+    println(lib.S.secret())
+}

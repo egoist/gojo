@@ -1,0 +1,41 @@
+// aliases, new types, embedding, constants
+type UserId = int
+type Celsius f64
+
+const Size = 3
+const Greeting = "hi"
+const Big = Size * 1000
+
+struct Named {
+    name String
+
+    fn hello(self) String {
+        return Greeting + " " + self.name
+    }
+}
+
+struct Admin {
+    Named
+    level int = 1
+}
+
+fn grid() [Size]int {
+    var g [Size]int
+    for i in 0..Size {
+        g[i] = i * i
+    }
+    return g
+}
+
+fn warm(c Celsius) bool {
+    return f64(c) > 20.0
+}
+
+fn main() {
+    let id UserId = 7
+    let n int = id + 1
+    println(n, warm(Celsius(25.0)), Celsius(3.5))
+    let a = Admin{Named: Named{name: "root"}}
+    println(a.name, a.level, a.hello())
+    println(grid(), Big)
+}

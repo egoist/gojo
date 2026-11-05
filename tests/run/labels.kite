@@ -1,0 +1,56 @@
+struct Res {
+    name String
+
+    fn drop(self inout) {
+        println("drop", self.name)
+    }
+}
+
+fn find(grid Vec[Vec[int]], target int) ?int {
+    var steps = 0
+    rows: for row in grid {
+        for x in row {
+            steps += 1
+            if x == target {
+                break rows
+            }
+            if x < 0 {
+                continue rows
+            }
+        }
+    }
+    return steps
+}
+
+fn main() {
+    let grid = [[1, 2, 3], [-1, 9, 9], [4, 5, 6]]
+    println(find(grid, 5), find(grid, 100))
+
+    outer: for i in 0..3 {
+        let _a = Res{name: "a" + String(rune('0' + i))}
+        var j = 0
+        for {
+            let _b = Res{name: "b" + String(rune('0' + j))}
+            j += 1
+            if j == 2 {
+                continue outer
+            }
+            if i == 2 {
+                break outer
+            }
+        }
+    }
+
+    let ch = chan[Res](4)
+    for n in ["x", "skip", "y"] {
+        ch <- Res{name: n.clone()}
+    }
+    ch.close()
+    for r in ch {
+        if r.name == "skip" {
+            continue
+        }
+        println("got", r.name)
+    }
+    println("done")
+}

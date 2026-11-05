@@ -810,13 +810,27 @@ impl Parser {
                     StmtKind::Yield(Some(self.expr()?))
                 }
             }
-            Tok::Kw(Kw::Break) => {
+            Tok::Kw(Kw::Break) | Tok::Kw(Kw::Continue) => {
+                let is_break = self.is_kw(Kw::Break);
                 self.bump();
-                StmtKind::Break
+                let label = match self.peek().clone() {
+                    Tok::Ident(l) if !self.toks[self.pos].nl_before => {
+                        let sp = self.bump().span;
+                        Some((l, sp))
+                    }
+                    _ => None,
+                };
+                if is_break {
+                    StmtKind::Break(label)
+                } else {
+                    StmtKind::Continue(label)
+                }
             }
-            Tok::Kw(Kw::Continue) => {
+            Tok::Ident(l) if matches!(self.peek_at(1), Tok::P(":")) && matches!(self.peek_at(2), Tok::Kw(Kw::For)) => {
+                let sp = self.bump().span;
                 self.bump();
-                StmtKind::Continue
+                self.bump();
+                StmtKind::For(self.for_loop()?, Some((l, sp)))
             }
             Tok::Kw(Kw::Defer) => {
                 self.bump();
@@ -843,7 +857,7 @@ impl Parser {
             }
             Tok::Kw(Kw::For) => {
                 self.bump();
-                StmtKind::For(self.for_loop()?)
+                StmtKind::For(self.for_loop()?, None)
             }
             Tok::Kw(Kw::Select) => {
                 self.bump();

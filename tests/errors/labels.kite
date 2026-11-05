@@ -1,0 +1,9 @@
+fn main() {
+    a: for i in 0..3 {
+        a: for j in 0..3 {
+            break b
+        }
+    }
+    // error: label `a` is already used by an enclosing loop
+    // error: no enclosing loop is labeled `b`
+}

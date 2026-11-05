@@ -1,0 +1,22 @@
+pub struct S {
+    pub a int
+    b int
+
+    pub fn new() S {
+        return S{a: 1, b: 2}
+    }
+
+    fn hidden(self) int {
+        return self.b
+    }
+}
+
+fn helper() int {
+    return 1
+}
+
+extend S {
+    fn secret() int {
+        return 1
+    }
+}

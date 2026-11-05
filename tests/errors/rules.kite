@@ -1,0 +1,69 @@
+// Smaller rules from docs/spec.md that have no test file of their own.
+enum Color { Red, Green }
+
+fn guarded(c Color) int {
+    return match c {
+        .Red => 1
+        .Green if true => 2
+    }
+    // error: `match` is not exhaustive: `Green` is not covered
+}
+
+struct NoHash {
+    x int
+    fn equal(self, other NoHash) bool { return self.x == other.x }
+}
+
+fn keys() {
+    var a = Map[NoHash, int]{}
+    // error: `NoHash` cannot be a Map key
+    var b = Map[f64, int]{}
+    // error: `f64` cannot be a Map key
+    println(a, b)
+}
+
+struct Inner { name String }
+struct Outer { inner ?Box[Inner] }
+
+fn optionalChain(o Outer) {
+    let n = o.inner?.name
+    // error: `?.` can only read copyable members here
+    println(n)
+}
+
+interface Bumper {
+    fn bump(self inout) int
+}
+
+struct WrongMode {
+    n int
+    fn bump(self) int { return self.n }
+}
+
+struct GenericMethod {
+    fn bump[T any](self inout) int { return 1 }
+}
+
+fn useBumper(b inout Bumper) int { return b.bump() }
+
+fn notInout() {
+    var w = WrongMode{n: 1}
+    println(useBumper(&w))
+    // error: method `bump` of `WrongMode` has a borrowed receiver, but `Bumper` requires inout
+    var g = GenericMethod{}
+    println(useBumper(&g))
+    // error: method `bump` has type parameters and cannot satisfy an interface
+}
+
+fn noResult() int {
+    errdefer println("x")
+    // error: `errdefer` is only allowed in functions that return a result
+    return 1
+}
+
+fn main() {
+    println(guarded(.Red), noResult())
+    keys()
+    optionalChain(Outer{})
+    notInout()
+}

@@ -1,0 +1,88 @@
+// User-written constraints, default values, new types over numbers, wrapping
+// arithmetic and `eachMut`.
+interface Num {
+    ~int | ~f64
+}
+
+type Meters f64
+type Id int
+type Name String
+
+fn total[T Num](xs []T) T {
+    var s T
+    for x in xs { s += x }
+    return s
+}
+
+struct Pair[T any] {
+    a T
+    b T
+
+    pub fn bigger(self) T where T: copy + ordered {
+        if self.a > self.b { return self.a }
+        return self.b
+    }
+}
+
+struct Settings {
+    name String = "app"
+    port int = 80
+}
+
+struct Grid {
+    cells Vec[int]
+
+    pub fn each(self, body fn(&int) Flow) {
+        for c in self.cells {
+            if body(c) == .Break { return }
+        }
+    }
+    pub fn eachMut(self inout, body fn(inout int) Flow) {
+        for c in &self.cells {
+            if body(&c) == .Break { return }
+        }
+    }
+}
+
+fn main() {
+    // type sets: `~f64` admits new types over f64
+    println(total([1, 2, 3]), total([1.5, 2.5]), total([Meters(1.5), Meters(2.0)]))
+    println(Pair{a: 3, b: 9}.bigger(), Pair{a: 2.5, b: 1.0}.bigger())
+
+    // `var x T` needs T: default
+    var s Settings
+    var n int
+    var o ?String
+    var d Meters
+    s.port = 8080
+    println(s.name, s.port, n, o ?? "none", d)
+
+    // new types keep the operators of the underlying number
+    var m = Meters(1.5)
+    m += Meters(2.0)
+    m = -m
+    println(m, m < Meters(0.0), m == Meters(-3.5), f64(m) * 2.0)
+    var ids = [Id(3), Id(1), Id(2)]
+    ids.sort()
+    println(ids, ids.max(), Id(5) & Id(4), Id(5) +% Id(1))
+    var byId = Map[Id, String]{}
+    byId.insert(Id(7), "seven".toString())
+    println(byId.get(Id(7)).unwrap())
+    var names = [Name("b".toString()), Name("a".toString())]
+    names.sort()
+    println(names)
+
+    // explicit wrapping
+    let big = 9223372036854775807
+    println(big +% 1, (0 - big) -% 2, big *% 2)
+
+    // push iteration: `for x in &g` calls eachMut
+    var g = Grid{cells: [1, 2, 3, 4]}
+    for c in &g { c *= 10 }
+    var seen = Vec[int]{}
+    for c in g {
+        if c > 30 { break }
+        seen.push(c)
+    }
+    println(seen)
+}

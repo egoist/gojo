@@ -1,0 +1,16 @@
+break 1
+continue 1
+continue 3
+2
+valid 1
+err("bad two")
+1 1
+1 2
+2 1
+after inner 1
+after inner 2
+after inner 3
+deferred 1 1
+body defer 1
+body defer 2
+function defer 1

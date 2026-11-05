@@ -1,0 +1,98 @@
+// Patterns and the smaller expression forms.
+enum Level { Debug, Info, Warn }
+
+enum Tree {
+    Leaf
+    Node(left Box[Tree], value int, right Box[Tree])
+}
+
+enum Msg {
+    Move(x int, y int)
+    Say(text String)
+    Quit
+}
+
+struct User {
+    age int
+    boss ?Box[User]
+}
+
+fn classify(n int) String {
+    return match n {
+        x if x > 100 => "huge"
+        0 | -1 => "small"
+        1..=9 => "digit"
+        _ => "other"
+    }
+}
+
+fn depth(t Tree) int {
+    return match t {
+        .Leaf => 0
+        .Node(l, _, r) => {
+            let a = depth(l)
+            let b = depth(r)
+            if a > b { a + 1 } else { b + 1 }
+        }
+    }
+}
+
+fn describe(m Msg) String {
+    return match m {
+        .Move(0, 0) => "stay"
+        .Move(x, _) if x < 0 => "left"
+        .Move(_, _) => "move"
+        .Say(t) => t.clone()
+        .Quit => "quit"
+    }
+}
+
+fn plusOne(o ?int) ?int {
+    let v = try o
+    return some(v + 1)
+}
+
+fn main() {
+    println(classify(500), classify(-1), classify(0), classify(7), classify(50))
+
+    let t = Tree.Node(Box(Tree.Leaf), 1, Box(Tree.Node(Box(Tree.Leaf), 2, Box(Tree.Leaf))))
+    println(depth(t))
+
+    println(describe(.Move(0, 0)), describe(.Move(-1, 3)), describe(.Move(1, 3)), describe(.Say("hi")), describe(.Quit))
+
+    // options: match, ??, ?., try
+    let o ?int = some(3)
+    match o {
+        some(v) if v > 5 => println("big", v)
+        some(v) => println("small", v)
+        none => println("nothing")
+    }
+    println(plusOne(some(1)), plusOne(none))
+    let u = User{age: 30, boss: some(Box(User{age: 50}))}
+    let loner = User{age: 20}
+    println(u.boss?.age ?? 0, loner.boss?.age ?? 0)
+
+    // simple enums are ordered and convert to integers
+    println(int(Level.Warn), Level.Debug < Level.Info)
+
+    // a function literal with explicit types
+    let inc = fn(x int) int { return x + 1 }
+    println(inc(1))
+
+    // indexes while iterating, and slicing
+    let v = [10, 20, 30]
+    for i, x in v {
+        println(i, x)
+    }
+    println(v[1..], "hello"[1..3])
+
+    // a newline inside parentheses or brackets doesn't end the statement
+    let w = [
+        1,
+        2,
+    ]
+    println(
+        w,
+        w.len,
+    )
+}

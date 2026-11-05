@@ -41,6 +41,12 @@ pub struct Checker {
     send_memo: HashMap<DefId, bool>,
     pub iface_error: Option<DefId>,
     pub pending_infer: Vec<(Span, String, Vec<String>, TExpr)>,
+    /// Types that are `copy` because the compiler inferred it.
+    pub inferred_copy: Vec<DefId>,
+    /// set while resolving a constraint: interfaces with type sets are allowed there
+    allow_typeset: bool,
+    /// Was `copy` set on this type by inference (not declared)?
+    copy_candidates: Vec<DefId>,
     /// Types whose capabilities are being checked (for recursive types).
     cap_stack: std::cell::RefCell<Vec<(DefId, Vec<Ty>, &'static str)>>,
 }
@@ -64,6 +70,9 @@ pub fn check_program(units: Vec<Unit>) -> Result<(Program, Vec<TFunc>, Vec<(Stri
         iface_error: None,
         pending_infer: vec![],
         cap_stack: std::cell::RefCell::new(vec![]),
+        inferred_copy: vec![],
+        allow_typeset: false,
+        copy_candidates: vec![],
     };
     c.collect(units);
     if !c.diags.is_empty() {
@@ -253,6 +262,7 @@ impl Checker {
             if let ast::ItemKind::Interface(i) = &self.files[fi].items[ii].kind.clone() {
                 let env = self.file_env(fi);
                 for e in &i.embeds {
+                    self.allow_typeset = true;
                     let t = self.resolve_type(e, &env);
                     match t {
                         Ty::Iface(d, _) => {
@@ -366,9 +376,44 @@ impl Checker {
                 self.prog.types[id].has_drop = true;
             }
         }
+        // Package-private, non-generic types are `copy` when all their fields
+        // are (exported types must say `copy`, so adding a field to a public
+        // type never silently changes how downstream code compiles).
+        let mut auto: Vec<DefId> = (0..self.prog.types.len() as DefId)
+            .filter(|&d| {
+                let def = self.prog.def(d);
+                !def.is_pub && !def.is_copy && def.tparams.is_empty() && !def.has_drop && !matches!(def.kind, TypeDefKind::Iface { .. }) && !self.prog.packages[def.pkg as usize].is_std
+            })
+            .collect();
+        for &d in &auto {
+            self.prog.types[d as usize].is_copy = true;
+        }
+        self.copy_candidates = auto.clone();
+        loop {
+            let before = auto.len();
+            auto.retain(|&d| {
+                let def = self.prog.def(d);
+                let tys: Vec<Ty> = match &def.kind {
+                    TypeDefKind::Struct { fields } => fields.iter().map(|f| f.ty.clone()).collect(),
+                    TypeDefKind::Enum { variants } => variants.iter().flat_map(|v| v.fields.iter().map(|f| f.1.clone())).collect(),
+                    _ => vec![],
+                };
+                tys.iter().all(|t| self.is_copy(t))
+            });
+            for d in 0..self.prog.types.len() as DefId {
+                let def = self.prog.def(d);
+                if !def.is_pub && def.tparams.is_empty() && !auto.contains(&d) && self.copy_inferred(d) {
+                    self.prog.types[d as usize].is_copy = false;
+                }
+            }
+            if auto.len() == before {
+                break;
+            }
+        }
+        self.inferred_copy = auto;
         for id in 0..self.prog.types.len() as DefId {
             let def = self.prog.def(id).clone();
-            if def.is_copy {
+            if def.is_copy && !self.inferred_copy.contains(&id) {
                 let tys: Vec<Ty> = match &def.kind {
                     TypeDefKind::Struct { fields } => fields.iter().map(|f| f.ty.clone()).collect(),
                     TypeDefKind::Enum { variants } => variants.iter().flat_map(|v| v.fields.iter().map(|f| f.1.clone())).collect(),
@@ -415,7 +460,7 @@ impl Checker {
     fn inline_contains(&self, t: &Ty, stack: &mut Vec<DefId>) -> bool {
         match t {
             Ty::Adt(d, _) => self.is_infinite(*d, stack),
-            Ty::Option(a) | Ty::Array(a, _) => self.inline_contains(a, stack),
+            Ty::Option(a) | Ty::Array(a, _) | Ty::ArrayT(a, _) => self.inline_contains(a, stack),
             Ty::Result(a, b) => self.inline_contains(a, stack) || self.inline_contains(b, stack),
             _ => false,
         }
@@ -533,6 +578,19 @@ impl Checker {
         if f.yields.is_some() && f.yield_opt {
             // stored as the element type; Proj with opt
         }
+        if f.is_extern_c {
+            for (p, ast_p) in params.iter().zip(&f.params) {
+                if !self.ffi_safe(&p.ty, 0) {
+                    let s = self.prog.show(&p.ty);
+                    self.err(ast_p.ty.span, format!("`{}` has no C representation; `extern \"C\"` functions take numbers, `bool`, raw pointers and structs of those", s));
+                }
+            }
+            if !self.ffi_safe(&ret, 0) {
+                let s = self.prog.show(&ret);
+                let sp = f.ret.as_ref().map(|t| t.span).unwrap_or(f.name_span);
+                self.err(sp, format!("`{}` has no C representation; `extern \"C\"` functions return numbers, `bool`, raw pointers and structs of those", s));
+            }
+        }
         let id = self.prog.funcs.len() as FuncId;
         self.prog.funcs.push(FuncDef {
             name: f.name.clone(),
@@ -616,6 +674,33 @@ impl Checker {
         None
     }
 
+    /// Integer type parameters take integer arguments, other parameters take types.
+    /// A parameter introduced by a receiver / `extend` type in an integer
+    /// position becomes an integer parameter.
+    pub fn check_targ_kinds(&mut self, d: DefId, targs: &[Ty], span: Span) {
+        let tps = self.prog.def(d).tparams.clone();
+        for (tp, a) in tps.iter().zip(targs.iter()) {
+            let want_int = self.prog.tparam(*tp).is_int;
+            match a {
+                Ty::ConstInt(_) if !want_int => {
+                    let n = self.prog.tparam(*tp).name.clone();
+                    self.err(span, format!("`{}` is a type parameter; it takes a type, not a number", n));
+                }
+                Ty::Param(p) if want_int => self.prog.tparams[*p as usize].is_int = true,
+                Ty::Param(_) | Ty::ConstInt(_) | Ty::Var(_) | Ty::Error => {}
+                _ if want_int => {
+                    let n = self.prog.tparam(*tp).name.clone();
+                    self.err(span, format!("`{}` is an integer parameter; it takes a number like `3`", n));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn copy_inferred(&self, d: DefId) -> bool {
+        self.copy_candidates.contains(&d)
+    }
+
     pub fn sym_is_pub(&self, sym: &Sym) -> bool {
         match sym {
             Sym::Type(d) => self.prog.def(*d).is_pub,
@@ -651,6 +736,7 @@ impl Checker {
                 }
             }
         }
+        self.allow_typeset = true;
         match self.resolve_type(te, env) {
             Ty::Iface(d, args) => Some(Bound::Iface(d, args.to_vec())),
             Ty::Error => None,
@@ -663,6 +749,21 @@ impl Checker {
     }
 
     pub fn resolve_type(&mut self, te: &TypeExpr, env: &TyEnv) -> Ty {
+        let allow_typeset = std::mem::replace(&mut self.allow_typeset, false);
+        let t = self.resolve_type_inner(te, env);
+        if let Ty::Iface(d, _) = &t {
+            if !allow_typeset {
+                if let TypeDefKind::Iface { type_set: Some(_), .. } = &self.prog.def(*d).kind {
+                    let n = self.prog.def(*d).name.clone();
+                    self.err(te.span, format!("interface `{}` has a type set and can only be used as a constraint; use an enum for a value that is one of several types", n));
+                    return Ty::Error;
+                }
+            }
+        }
+        t
+    }
+
+    fn resolve_type_inner(&mut self, te: &TypeExpr, env: &TyEnv) -> Ty {
         match &te.kind {
             TypeExprKind::Unit => Ty::Unit,
             TypeExprKind::IntLit(n) => Ty::ConstInt(*n as u64),
@@ -688,9 +789,12 @@ impl Checker {
                 match &n.kind {
                     ast::ExprKind::Int(v) => Ty::Array(Rc::new(elem), *v as u64),
                     ast::ExprKind::Ident(name) => match env.tparams.get(name) {
-                        Some(Ty::Param(_)) => {
-                            self.err(n.span, "arrays sized by an integer type parameter are not supported yet");
-                            Ty::Error
+                        Some(Ty::Param(p)) => {
+                            let p = *p;
+                            if !self.prog.tparam(p).is_int {
+                                self.err(n.span, format!("`{}` is a type parameter; an array length must be an integer parameter like `{} int`", name, name));
+                            }
+                            Ty::ArrayT(Rc::new(elem), Rc::new(Ty::Param(p)))
                         }
                         _ => match self.lookup_const_int(name, env) {
                             Some(v) => Ty::Array(Rc::new(elem), v),
@@ -718,16 +822,56 @@ impl Checker {
     fn lookup_const_int(&self, name: &str, env: &TyEnv) -> Option<u64> {
         let sel = self.file_cx[env.file].names.get(name).map(|x| x.0);
         for p in [Some(env.pkg), sel, Some(self.prog.prelude)].into_iter().flatten() {
-            if let Some(Sym::Const(c)) = self.prog.packages[p as usize].items.get(name) {
-                if let Some(v) = &self.prog.consts[*c as usize].value {
-                    if let TK::Int(n) = v.kind {
-                        return Some(n as u64);
+            if let Some(v) = self.const_int_ast(p, name, 0) {
+                return u64::try_from(v).ok();
+            }
+        }
+        None
+    }
+
+    /// Evaluate an integer constant from its source (array lengths are needed
+    /// before constants are type-checked).
+    fn const_int_ast(&self, pkg: PkgId, name: &str, depth: u32) -> Option<i128> {
+        if depth > 32 {
+            return None;
+        }
+        for (fi, f) in self.files.iter().enumerate() {
+            if self.file_cx[fi].pkg != pkg {
+                continue;
+            }
+            for item in &f.items {
+                if let ast::ItemKind::Const { name: n, value, .. } = &item.kind {
+                    if n == name {
+                        return self.eval_int(pkg, value, depth + 1);
                     }
                 }
             }
         }
         None
     }
+
+    fn eval_int(&self, pkg: PkgId, e: &ast::Expr, depth: u32) -> Option<i128> {
+        use ast::ExprKind as E;
+        Some(match &e.kind {
+            E::Int(v) => *v as i128,
+            E::Ident(n) => self.const_int_ast(pkg, n, depth)?,
+            E::Unary("-", x) => -self.eval_int(pkg, x, depth)?,
+            E::Binary(op, a, b) => {
+                let (x, y) = (self.eval_int(pkg, a, depth)?, self.eval_int(pkg, b, depth)?);
+                match *op {
+                    "+" => x + y,
+                    "-" => x - y,
+                    "*" => x * y,
+                    "/" if y != 0 => x / y,
+                    "%" if y != 0 => x % y,
+                    "<<" => x << y,
+                    _ => return None,
+                }
+            }
+            _ => return None,
+        })
+    }
+
 
     fn resolve_named(&mut self, path: &[String], args: &[TypeExpr], span: Span, env: &TyEnv) -> Ty {
         let targs: Vec<Ty> = args.iter().map(|a| self.resolve_type(a, env)).collect();
@@ -770,6 +914,7 @@ impl Checker {
                     "weak" => Ty::Weak(a),
                     "Cell" => Ty::Cell(a),
                     "Mutex" => Ty::Mutex(a),
+                    "MutexRef" => Ty::MutexRef(a),
                     _ => unreachable!(),
                 };
             }
@@ -807,6 +952,7 @@ impl Checker {
     fn type_from_sym(&mut self, sym: Sym, name: &str, targs: Vec<Ty>, span: Span) -> Ty {
         match sym {
             Sym::Type(d) => {
+                self.check_targ_kinds(d, &targs, span);
                 if targs.iter().any(|t| t.contains_view()) && !matches!(self.prog.def(d).kind, TypeDefKind::Iface { .. }) {
                     self.err(span, format!("`{}` cannot be instantiated with a borrowed view type; use an owned type (String / Vec[T])", name));
                 }
@@ -867,7 +1013,7 @@ impl Checker {
     pub fn is_copy(&self, t: &Ty) -> bool {
         match t {
             Ty::Unit | Ty::Never | Ty::Bool | Ty::Int(_) | Ty::F32 | Ty::F64 | Ty::Str | Ty::Slice(_) | Ty::Ptr(_) | Ty::Error | Ty::ConstInt(_) => true,
-            Ty::Option(a) | Ty::Array(a, _) => self.is_copy(a),
+            Ty::Option(a) | Ty::Array(a, _) | Ty::ArrayT(a, _) => self.is_copy(a),
             Ty::Result(a, b) => self.is_copy(a) && self.is_copy(b),
             Ty::Adt(d, _) => self.prog.def(*d).is_copy,
             Ty::Param(p) => self.has_bound(*p, Cap::Copy),
@@ -875,10 +1021,36 @@ impl Checker {
         }
     }
 
+    /// Can this type cross a C call as it is?
+    fn ffi_safe(&self, t: &Ty, depth: u32) -> bool {
+        match t {
+            Ty::Unit | Ty::Never | Ty::Bool | Ty::Int(_) | Ty::F32 | Ty::F64 | Ty::Ptr(_) | Ty::Error => true,
+            // fields may not be resolved yet for recursive types; those are rejected elsewhere
+            Ty::Adt(d, args) if self.prog.def(*d).is_struct() && depth < 32 => self.prog.field_tys(*d, args).iter().all(|f| self.ffi_safe(&f.1, depth + 1)),
+            _ => false,
+        }
+    }
+
+    /// The underlying type of a new type (`type Celsius f64`), with type arguments applied.
+    pub fn newtype_inner(&self, d: DefId, args: &[Ty]) -> Option<Ty> {
+        if !self.prog.def(d).newtype {
+            return None;
+        }
+        self.prog.field_tys(d, args).into_iter().next().map(|f| f.1)
+    }
+
+    /// A new type over a number: supports the same operators as the number.
+    pub fn numeric_newtype(&self, t: &Ty) -> Option<Ty> {
+        match t {
+            Ty::Adt(d, args) => self.newtype_inner(*d, args).filter(|i| i.is_numeric()),
+            _ => None,
+        }
+    }
+
     pub fn is_comparable(&self, t: &Ty) -> bool {
         match t {
             Ty::Unit | Ty::Bool | Ty::Int(_) | Ty::F32 | Ty::F64 | Ty::Str | Ty::String | Ty::Error | Ty::Ptr(_) => true,
-            Ty::Option(a) | Ty::Vec(a) | Ty::Slice(a) | Ty::Array(a, _) | Ty::Box(a) => self.is_comparable(a),
+            Ty::Option(a) | Ty::Vec(a) | Ty::Slice(a) | Ty::Array(a, _) | Ty::ArrayT(a, _) | Ty::Box(a) => self.is_comparable(a),
             Ty::Result(a, b) => self.is_comparable(a) && self.is_comparable(b),
             Ty::Adt(d, args) => {
                 if self.prog.methods.contains_key(&(TyKey::Adt(*d), "equal".into())) {
@@ -894,7 +1066,12 @@ impl Checker {
     pub fn is_ordered(&self, t: &Ty) -> bool {
         match t {
             Ty::Int(_) | Ty::F32 | Ty::F64 | Ty::Str | Ty::String | Ty::Error | Ty::Bool => true,
-            Ty::Adt(d, _) => self.prog.methods.contains_key(&(TyKey::Adt(*d), "compare".into())) || self.prog.def(*d).is_simple_enum(),
+            Ty::Adt(d, args) => {
+                if let Some(inner) = self.newtype_inner(*d, args) {
+                    return self.prog.methods.contains_key(&(TyKey::Adt(*d), "compare".into())) || self.is_ordered(&inner);
+                }
+                self.prog.methods.contains_key(&(TyKey::Adt(*d), "compare".into())) || self.prog.def(*d).is_simple_enum()
+            }
             Ty::Param(p) => self.has_bound(*p, Cap::Ordered),
             _ => false,
         }
@@ -903,7 +1080,7 @@ impl Checker {
     pub fn is_hash(&self, t: &Ty) -> bool {
         match t {
             Ty::Unit | Ty::Bool | Ty::Int(_) | Ty::Str | Ty::String | Ty::Error => true,
-            Ty::Option(a) | Ty::Vec(a) | Ty::Slice(a) | Ty::Array(a, _) | Ty::Box(a) => self.is_hash(a),
+            Ty::Option(a) | Ty::Vec(a) | Ty::Slice(a) | Ty::Array(a, _) | Ty::ArrayT(a, _) | Ty::Box(a) => self.is_hash(a),
             Ty::Adt(d, args) => {
                 if self.prog.methods.contains_key(&(TyKey::Adt(*d), "hash".into())) {
                     return true;
@@ -945,11 +1122,14 @@ impl Checker {
     pub fn is_default(&self, t: &Ty) -> bool {
         match t {
             Ty::Unit | Ty::Bool | Ty::Int(_) | Ty::F32 | Ty::F64 | Ty::String | Ty::Vec(_) | Ty::Map(..) | Ty::Option(_) | Ty::Error | Ty::Str => true,
-            Ty::Array(a, _) | Ty::Mutex(a) | Ty::Cell(a) => self.is_default(a),
-            Ty::Adt(d, _) => {
+            Ty::Array(a, _) | Ty::ArrayT(a, _) | Ty::Mutex(a) | Ty::Cell(a) => self.is_default(a),
+            Ty::Adt(d, args) => {
+                if let Some(inner) = self.newtype_inner(*d, args) {
+                    return self.is_default(&inner);
+                }
                 let def = self.prog.def(*d);
                 match &def.kind {
-                    TypeDefKind::Struct { fields } => !def.newtype && fields.iter().all(|f| f.default.is_some() || matches!(f.ty, Ty::Option(_))),
+                    TypeDefKind::Struct { fields } => fields.iter().all(|f| f.default.is_some() || matches!(f.ty, Ty::Option(_))),
                     _ => false,
                 }
             }
@@ -961,7 +1141,7 @@ impl Checker {
     pub fn is_send(&mut self, t: &Ty) -> bool {
         match t {
             Ty::Rc(_) | Ty::Weak(_) | Ty::Cell(_) | Ty::Ptr(_) | Ty::Func(_) => false,
-            Ty::Vec(a) | Ty::Slice(a) | Ty::Array(a, _) | Ty::Option(a) | Ty::Box(a) | Ty::Arc(a) | Ty::Mutex(a) | Ty::Chan(a) => self.is_send(a),
+            Ty::Vec(a) | Ty::Slice(a) | Ty::Array(a, _) | Ty::ArrayT(a, _) | Ty::Option(a) | Ty::Box(a) | Ty::Arc(a) | Ty::Mutex(a) | Ty::MutexRef(a) | Ty::Chan(a) => self.is_send(a),
             Ty::Map(a, b) | Ty::Result(a, b) => self.is_send(a) && self.is_send(b),
             Ty::Adt(d, args) => {
                 let d = *d;
@@ -1157,8 +1337,10 @@ pub fn bind_params(pat: &Ty, t: &Ty, s: &mut HashMap<TParamId, Ty>) -> bool {
             s.insert(*p, t.clone());
             true
         }
-        (Ty::Vec(a), Ty::Vec(b)) | (Ty::Slice(a), Ty::Slice(b)) | (Ty::Option(a), Ty::Option(b)) | (Ty::Box(a), Ty::Box(b)) | (Ty::Rc(a), Ty::Rc(b)) | (Ty::Arc(a), Ty::Arc(b)) | (Ty::Weak(a), Ty::Weak(b)) | (Ty::Cell(a), Ty::Cell(b)) | (Ty::Mutex(a), Ty::Mutex(b)) | (Ty::Chan(a), Ty::Chan(b)) | (Ty::Ptr(a), Ty::Ptr(b)) => bind_params(a, b, s),
+        (Ty::Vec(a), Ty::Vec(b)) | (Ty::Slice(a), Ty::Slice(b)) | (Ty::Option(a), Ty::Option(b)) | (Ty::Box(a), Ty::Box(b)) | (Ty::Rc(a), Ty::Rc(b)) | (Ty::Arc(a), Ty::Arc(b)) | (Ty::Weak(a), Ty::Weak(b)) | (Ty::Cell(a), Ty::Cell(b)) | (Ty::Mutex(a), Ty::Mutex(b)) | (Ty::MutexRef(a), Ty::MutexRef(b)) | (Ty::Chan(a), Ty::Chan(b)) | (Ty::Ptr(a), Ty::Ptr(b)) => bind_params(a, b, s),
         (Ty::Array(a, n), Ty::Array(b, m)) => n == m && bind_params(a, b, s),
+        (Ty::ArrayT(a, n), Ty::Array(b, m)) => bind_params(n, &Ty::ConstInt(*m), s) && bind_params(a, b, s),
+        (Ty::ArrayT(a, n), Ty::ArrayT(b, m)) => bind_params(n, m, s) && bind_params(a, b, s),
         (Ty::Map(a, b), Ty::Map(c, d)) | (Ty::Result(a, b), Ty::Result(c, d)) => bind_params(a, c, s) && bind_params(b, d, s),
         (Ty::Adt(d1, a1), Ty::Adt(d2, a2)) | (Ty::Iface(d1, a1), Ty::Iface(d2, a2)) => d1 == d2 && a1.iter().zip(a2.iter()).all(|(x, y)| bind_params(x, y, s)),
         (Ty::Func(f1), Ty::Func(f2)) => f1.params.len() == f2.params.len() && f1.params.iter().zip(f2.params.iter()).all(|((m1, x), (m2, y))| m1 == m2 && bind_params(x, y, s)) && bind_params(&f1.ret, &f2.ret, s),
@@ -1188,5 +1370,5 @@ pub fn builtin_type(name: &str) -> Option<Ty> {
 }
 
 pub fn is_generic_builtin(name: &str) -> bool {
-    matches!(name, "Vec" | "Map" | "Box" | "rc" | "arc" | "weak" | "Cell" | "Mutex")
+    matches!(name, "Vec" | "Map" | "Box" | "rc" | "arc" | "weak" | "Cell" | "Mutex" | "MutexRef")
 }

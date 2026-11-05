@@ -101,7 +101,8 @@ enum Cl {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SK {
     Block,
-    Loop,
+    /// A loop body with its loop id.
+    Loop(u32),
     Stmt,
     Func,
 }
@@ -124,6 +125,32 @@ struct Fs<'a> {
     yields: bool,
     /// While emitting return-path cleanups: C condition for "returning an error".
     err_mode: Option<String>,
+    /// Enclosing loops: (loop id, break label, continue label).
+    loop_labels: Vec<(u32, String, String)>,
+    /// Inside the body closure of a push-style `for` loop.
+    lb: Option<LoopBody>,
+}
+
+/// The body of `for x in t` over a type with `each`, compiled as a closure.
+/// `ctl` and `ret` are lvalues (in the closure) of the control word and the
+/// enclosing function's return slot.
+#[derive(Clone)]
+struct LoopBody {
+    id: u32,
+    ctl: String,
+    ret: String,
+}
+
+/// Control word values. 0: keep going.
+const CTL_RETURN: u32 = 1;
+/// The loop's own `break`: `each` may ignore the returned Flow, so the body
+/// has to remember that it must not run again.
+const CTL_STOP: i32 = -1;
+fn ctl_break(id: u32) -> u32 {
+    2 + 2 * id
+}
+fn ctl_continue(id: u32) -> u32 {
+    3 + 2 * id
 }
 
 struct Gen<'a> {
@@ -145,6 +172,8 @@ struct Gen<'a> {
     type_ids: HashMap<Ty, u64>,
     drop_memo: HashMap<Ty, bool>,
     loc_cache: HashMap<Span, String>,
+    /// For the loop-body closure about to be generated: (control word pointer, return slot pointer).
+    pending_lb: Option<(String, String)>,
 }
 
 impl<'a> Gen<'a> {
@@ -168,6 +197,7 @@ impl<'a> Gen<'a> {
             type_ids: HashMap::new(),
             drop_memo: HashMap::new(),
             loc_cache: HashMap::new(),
+            pending_lb: None,
         }
     }
 
@@ -221,7 +251,7 @@ impl<'a> Gen<'a> {
         }
         self.drop_memo.insert(t.clone(), false);
         let r = match t {
-            Ty::String | Ty::Vec(_) | Ty::Map(..) | Ty::Box(_) | Ty::Rc(_) | Ty::Arc(_) | Ty::Weak(_) | Ty::Chan(_) | Ty::Func(_) | Ty::Iface(..) | Ty::Mutex(_) => true,
+            Ty::String | Ty::Vec(_) | Ty::Map(..) | Ty::Box(_) | Ty::Rc(_) | Ty::Arc(_) | Ty::Weak(_) | Ty::Chan(_) | Ty::Func(_) | Ty::Iface(..) | Ty::Mutex(_) | Ty::MutexRef(_) => true,
             Ty::Option(a) | Ty::Array(a, _) | Ty::Cell(a) => self.needs_drop(a),
             Ty::Result(a, b) => self.needs_drop(a) || self.needs_drop(b),
             Ty::Adt(d, args) => {
@@ -256,6 +286,7 @@ impl<'a> Gen<'a> {
             Ty::Vec(a) => format!("Vec_{}", self.mangle(a)),
             Ty::Slice(a) => format!("Sl_{}", self.mangle(a)),
             Ty::Array(a, n) => format!("A{}_{}", n, self.mangle(a)),
+            Ty::ArrayT(a, n) => format!("AT{}_{}", self.mangle(n), self.mangle(a)),
             Ty::Map(a, b) => format!("Map_{}_{}", self.mangle(a), self.mangle(b)),
             Ty::Option(a) => format!("Opt_{}", self.mangle(a)),
             Ty::Result(a, b) => format!("Res_{}_{}", self.mangle(a), self.mangle(b)),
@@ -265,6 +296,7 @@ impl<'a> Gen<'a> {
             Ty::Weak(a) => format!("Weak_{}", self.mangle(a)),
             Ty::Cell(a) => format!("Cell_{}", self.mangle(a)),
             Ty::Mutex(a) => format!("Mtx_{}", self.mangle(a)),
+            Ty::MutexRef(a) => format!("MtxRef_{}", self.mangle(a)),
             Ty::Chan(a) => format!("Chan_{}", self.mangle(a)),
             Ty::Ptr(a) => format!("Ptr_{}", self.mangle(a)),
             Ty::Func(f) => {
@@ -371,7 +403,7 @@ impl<'a> Gen<'a> {
             return;
         }
         match t {
-            Ty::Array(..) | Ty::Option(_) | Ty::Result(..) | Ty::Mutex(_) | Ty::Adt(..) => {}
+            Ty::Array(..) | Ty::Option(_) | Ty::Result(..) | Ty::Mutex(_) | Ty::MutexRef(_) | Ty::Adt(..) => {}
             Ty::Cell(a) => return self.ensure(a),
             _ => return,
         }
@@ -398,6 +430,10 @@ impl<'a> Gen<'a> {
             Ty::Mutex(a) => {
                 let e = self.cty(a);
                 let _ = write!(body, "struct {} {{ kite_mutex *mu; {} val; }};\n", n, e);
+            }
+            Ty::MutexRef(a) => {
+                let e = self.cname(a);
+                let _ = write!(body, "struct {} {{ kite_mutex *mu; {} *ptr; }};\n", n, e);
             }
             Ty::Adt(d, args) => {
                 let def = self.prog.def(*d).clone();
@@ -573,6 +609,14 @@ static bool mr_{m}(kite_map *mp, const {k} *key, {e} *out) {{\n\
         }
     }
 
+    /// A new type over a number, as `Some(number type)`.
+    fn numeric_newtype(&self, t: &Ty) -> Option<Ty> {
+        match t {
+            Ty::Adt(d, args) if self.prog.def(*d).newtype => self.prog.field_tys(*d, args).into_iter().next().map(|f| f.1).filter(|i| i.is_numeric()),
+            _ => None,
+        }
+    }
+
     fn zero(&mut self, t: &Ty) -> String {
         let c = self.cty(t);
         if self.is_scalar(t) {
@@ -712,7 +756,7 @@ static bool mr_{m}(kite_map *mp, const {k} *key, {e} *out) {{\n\
         let (sig, ps) = self.fn_signature(f, &subst, &name);
         let _ = writeln!(self.protos, "{};", sig);
         let ret = if fd.yields.is_some() { fd.ret.subst(&subst) } else { fd.ret.subst(&subst) };
-        let mut fs = Fs { tf, subst, out: String::new(), ind: 1, scopes: vec![], repr: HashMap::new(), flagged: HashSet::new(), flags: HashMap::new(), ret, yields: fd.yields.is_some(), err_mode: None };
+        let mut fs = Fs { tf, subst, out: String::new(), ind: 1, scopes: vec![], repr: HashMap::new(), flagged: HashSet::new(), flags: HashMap::new(), ret, yields: fd.yields.is_some(), err_mode: None, loop_labels: vec![], lb: None };
         collect_moves_block(&tf.body, &mut fs.flagged, tf);
         fs.scopes.push(Scope { kind: SK::Func, items: vec![] });
         let mut lids = vec![];
@@ -835,13 +879,15 @@ static bool mr_{m}(kite_map *mp, const {k} *key, {e} *out) {{\n\
             Cl::Defer(b) => {
                 self.emit(fs, "{");
                 fs.ind += 1;
-                let saved = fs.scopes.len();
+                // the deferred code can't leave its own block, so it must not see the
+                // enclosing scopes: their cleanups include this very `defer`
+                let outer = std::mem::replace(&mut fs.scopes, vec![Scope { kind: SK::Func, items: vec![] }]);
                 self.push_scope(fs, SK::Block);
                 for s in &b.stmts {
                     self.stmt(fs, s);
                 }
                 self.pop_scope(fs);
-                fs.scopes.truncate(saved);
+                fs.scopes = outer;
                 fs.ind -= 1;
                 self.emit(fs, "}");
             }
@@ -849,14 +895,14 @@ static bool mr_{m}(kite_map *mp, const {k} *key, {e} *out) {{\n\
                 if let Some(cond) = fs.err_mode.clone() {
                     self.emit(fs, &format!("if ({}) {{", cond));
                     fs.ind += 1;
-                    let saved = fs.scopes.len();
+                    let outer = std::mem::replace(&mut fs.scopes, vec![Scope { kind: SK::Func, items: vec![] }]);
                     let saved_mode = fs.err_mode.take();
                     self.push_scope(fs, SK::Block);
                     for s in &b.stmts {
                         self.stmt(fs, s);
                     }
                     self.pop_scope(fs);
-                    fs.scopes.truncate(saved);
+                    fs.scopes = outer;
                     fs.err_mode = saved_mode;
                     fs.ind -= 1;
                     self.emit(fs, "}");
@@ -1041,6 +1087,24 @@ static bool mr_{m}(kite_map *mp, const {k} *key, {e} *out) {{\n\
                 self.discard(fs, &old, &ot, false);
                 self.pop_scope(fs);
             }
+            TStmt::Return(e, _) if fs.lb.is_some() => {
+                self.push_scope(fs, SK::Stmt);
+                let ret = fs.ret.clone();
+                match e {
+                    Some(e) if ret != Ty::Unit && ret != Ty::Never && e.ty != Ty::Never => {
+                        let v = self.expr(fs, e);
+                        self.emit_return(fs, &v);
+                    }
+                    Some(e) => {
+                        let v = self.expr(fs, e);
+                        let t = self.sub(fs, &e.ty);
+                        self.discard(fs, &v, &t, e.is_place());
+                        self.emit_return(fs, "");
+                    }
+                    None => self.emit_return(fs, ""),
+                }
+                fs.scopes.pop();
+            }
             TStmt::Return(e, _) => {
                 self.push_scope(fs, SK::Stmt);
                 let ret = fs.ret.clone();
@@ -1092,17 +1156,48 @@ static bool mr_{m}(kite_map *mp, const {k} *key, {e} *out) {{\n\
                 }
                 fs.scopes.pop();
             }
-            TStmt::Break(_) | TStmt::Continue(_) => {
-                let idx = fs.scopes.iter().rposition(|s| s.kind == SK::Loop).unwrap_or(0);
-                self.cleanup_to(fs, idx + 1);
-                self.emit(fs, if matches!(s, TStmt::Break(_)) { "break;" } else { "continue;" });
+            TStmt::Break(id, _) | TStmt::Continue(id, _) if !fs.loop_labels.iter().any(|l| l.0 == *id) && fs.lb.is_some() => {
+                // leaving a push-style loop body: tell `each` to stop, and the
+                // caller where to go next
+                let is_break = matches!(s, TStmt::Break(..));
+                let lb = fs.lb.clone().unwrap();
+                // the control word is set after cleanups: a `defer` may run its own push loop
+                if *id == lb.id {
+                    self.cleanup_to(fs, 0);
+                    if is_break {
+                        self.emit(fs, &format!("{} = {};", lb.ctl, CTL_STOP));
+                    }
+                    let f = self.flow(is_break);
+                    self.emit(fs, &format!("return {};", f));
+                } else {
+                    let code = if is_break { ctl_break(*id) } else { ctl_continue(*id) };
+                    self.cleanup_to(fs, 0);
+                    self.emit(fs, &format!("{} = {};", lb.ctl, code));
+                    let f = self.flow(true);
+                    self.emit(fs, &format!("return {};", f));
+                }
+            }
+            TStmt::Break(id, _) | TStmt::Continue(id, _) => {
+                let is_break = matches!(s, TStmt::Break(..));
+                let idx = fs.scopes.iter().rposition(|s| s.kind == SK::Loop(*id)).unwrap_or(0);
+                let (lb, lc) = fs.loop_labels.iter().rev().find(|l| l.0 == *id).map(|l| (l.1.clone(), l.2.clone())).unwrap_or_default();
+                if is_break {
+                    // leave the loop: run the loop scope's own cleanups too
+                    self.cleanup_to(fs, idx);
+                    self.emit(fs, &format!("goto {};", lb));
+                } else {
+                    self.cleanup_to(fs, idx + 1);
+                    self.emit(fs, &format!("goto {};", lc));
+                }
             }
             TStmt::Defer(b) => self.register(fs, Cl::Defer(b.clone())),
             TStmt::ErrDefer(b) => self.register(fs, Cl::ErrDefer(b.clone())),
-            TStmt::While { cond, body } => {
+            TStmt::While { id, cond, body } => {
+                let (lb, lc) = (self.label(), self.label());
+                fs.loop_labels.push((*id, lb.clone(), lc.clone()));
                 self.emit(fs, "for (;;) {");
                 fs.ind += 1;
-                self.push_scope(fs, SK::Loop);
+                self.push_scope(fs, SK::Loop(*id));
                 if let Some(c) = cond {
                     self.push_scope(fs, SK::Stmt);
                     let cv = self.expr(fs, c);
@@ -1112,11 +1207,14 @@ static bool mr_{m}(kite_map *mp, const {k} *key, {e} *out) {{\n\
                     self.emit(fs, &format!("if (!{}) break;", t));
                 }
                 self.block_stmts(fs, body);
+                self.emit(fs, &format!("{}:;", lc));
                 fs.scopes.pop();
                 fs.ind -= 1;
                 self.emit(fs, "}");
+                self.emit(fs, &format!("{}:;", lb));
+                fs.loop_labels.pop();
             }
-            TStmt::For { kind, iter, hi, elem, index, mutable: _, body, span } => self.for_loop(fs, *kind, iter, hi.as_ref(), *elem, *index, body, *span),
+            TStmt::For { id, kind, iter, hi, elem, index, mutable: _, body, span } => self.for_loop(fs, *id, *kind, iter, hi.as_ref(), *elem, *index, body, *span),
             TStmt::Go { call, span } => self.go_stmt(fs, call, *span),
             TStmt::Send { chan, value } => {
                 self.push_scope(fs, SK::Stmt);
@@ -1142,10 +1240,10 @@ static bool mr_{m}(kite_map *mp, const {k} *key, {e} *out) {{\n\
                 let c = self.cty(&t);
                 let n = self.local_cname(fs, *local);
                 if *lock {
-                    let m = self.lock_target(fs, place);
+                    let (m, v) = self.lock_target(fs, place);
                     self.emit(fs, &format!("kite_mutex_lock({}->mu);", m));
                     self.register(fs, Cl::Unlock(format!("{}->mu", m)));
-                    self.emit(fs, &format!("{} *{} = &{}->val;", c, n, m));
+                    self.emit(fs, &format!("{} *{} = {};", c, n, v));
                 } else {
                     let p = self.lval_scoped(fs, place);
                     self.emit(fs, &format!("{} *{} = &{};", c, n, p));
@@ -1157,7 +1255,142 @@ static bool mr_{m}(kite_map *mp, const {k} *key, {e} *out) {{\n\
                 self.emit(fs, "}");
             }
             TStmt::Select { arms, span } => self.select(fs, arms, *span),
+            TStmt::ForEach { call, .. } => self.for_each(fs, call),
         }
+    }
+
+    fn flow(&mut self, brk: bool) -> String {
+        let d = self.prog.prelude_type("Flow").unwrap();
+        let c = self.cty(&Ty::Adt(d, std::rc::Rc::new(vec![])));
+        format!("(({}){{ .tag = {} }})", c, if brk { 1 } else { 0 })
+    }
+
+    /// Return `v` (empty: no value) from the enclosing function. Inside a
+    /// push-style loop body the value goes to the return slot instead.
+    fn emit_return(&mut self, fs: &mut Fs, v: &str) {
+        let ret = fs.ret.clone();
+        let has_val = !v.is_empty() && !matches!(ret, Ty::Unit | Ty::Never);
+        let r = if has_val {
+            let rc = self.cty(&ret);
+            let r = self.tmp();
+            self.emit(fs, &format!("{} {} = {};", rc, r, v));
+            fs.err_mode = match &ret {
+                Ty::Result(..) => Some(format!("!{}.ok", r)),
+                Ty::Option(_) => Some(format!("!{}", self.osome(&ret, &r))),
+                _ => None,
+            };
+            Some(r)
+        } else {
+            None
+        };
+        match fs.lb.clone() {
+            Some(lb) => {
+                if let Some(r) = &r {
+                    self.emit(fs, &format!("{} = {};", lb.ret, r));
+                }
+                self.cleanup_to(fs, 0);
+                fs.err_mode = None;
+                self.emit(fs, &format!("{} = {};", lb.ctl, CTL_RETURN));
+                let f = self.flow(true);
+                self.emit(fs, &format!("return {};", f));
+            }
+            None => {
+                self.cleanup_to(fs, 0);
+                fs.err_mode = None;
+                match r {
+                    Some(r) => self.emit(fs, &format!("return {};", r)),
+                    None => self.emit(fs, "return;"),
+                }
+            }
+        }
+    }
+
+    /// `for x in t` with `t.each(body)`: call `each`, then act on what the body asked for.
+    fn for_each(&mut self, fs: &mut Fs, call: &TExpr) {
+        let ret = fs.ret.clone();
+        let has_ret = !matches!(ret, Ty::Unit | Ty::Never);
+        let (ctl, retslot) = match fs.lb.clone() {
+            Some(lb) => (lb.ctl.clone(), lb.ret.clone()),
+            None => {
+                let c = self.tmp();
+                self.emit(fs, &format!("int {} = 0;", c));
+                let r = if has_ret {
+                    let rc = self.cty(&ret);
+                    let r = self.tmp();
+                    self.emit(fs, &format!("{} {};", rc, r));
+                    r
+                } else {
+                    String::new()
+                };
+                (c, r)
+            }
+        };
+        self.push_scope(fs, SK::Stmt);
+        self.pending_lb = Some((format!("&{}", ctl), if has_ret { format!("&{}", retslot) } else { "NULL".into() }));
+        let v = self.call_expr(fs, call);
+        self.pending_lb = None;
+        let _ = v;
+        self.pop_scope(fs);
+        // dispatch on the control word
+        self.emit(fs, &format!("if ({} == {}) {} = 0;", ctl, CTL_STOP, ctl));
+        self.emit(fs, &format!("if ({}) {{", ctl));
+        fs.ind += 1;
+        self.emit(fs, &format!("if ({} == {}) {{", ctl, CTL_RETURN));
+        fs.ind += 1;
+        match fs.lb.clone() {
+            Some(_) => {
+                // still inside an outer loop body: keep passing it outward
+                self.leave_body(fs, &ctl);
+            }
+            None => {
+                let v = if has_ret { retslot.clone() } else { String::new() };
+                self.emit_return(fs, &v);
+            }
+        }
+        fs.ind -= 1;
+        self.emit(fs, "}");
+        for (id, lb_, lc_) in fs.loop_labels.clone() {
+            for (code, label, is_break) in [(ctl_break(id), lb_, true), (ctl_continue(id), lc_, false)] {
+                self.emit(fs, &format!("if ({} == {}) {{", ctl, code));
+                fs.ind += 1;
+                self.emit(fs, &format!("{} = 0;", ctl));
+                let idx = fs.scopes.iter().rposition(|s| s.kind == SK::Loop(id)).unwrap_or(0);
+                self.cleanup_to(fs, if is_break { idx } else { idx + 1 });
+                self.emit(fs, &format!("goto {};", label));
+                fs.ind -= 1;
+                self.emit(fs, "}");
+            }
+        }
+        if let Some(lb) = fs.lb.clone() {
+            for (code, brk) in [(ctl_break(lb.id), true), (ctl_continue(lb.id), false)] {
+                self.emit(fs, &format!("if ({} == {}) {{", ctl, code));
+                fs.ind += 1;
+                self.emit(fs, &format!("{} = 0;", ctl));
+                self.cleanup_to(fs, 0);
+                if brk {
+                    self.emit(fs, &format!("{} = {};", ctl, CTL_STOP));
+                }
+                let f = self.flow(brk);
+                self.emit(fs, &format!("return {};", f));
+                fs.ind -= 1;
+                self.emit(fs, "}");
+            }
+            self.leave_body(fs, &ctl);
+        }
+        fs.ind -= 1;
+        self.emit(fs, "}");
+    }
+
+    /// Leave a loop body with a jump still pending. The control word is cleared
+    /// during cleanups, so a `defer` that runs its own push loop is not skipped.
+    fn leave_body(&mut self, fs: &mut Fs, ctl: &str) {
+        let saved = self.tmp();
+        self.emit(fs, &format!("int {} = {};", saved, ctl));
+        self.emit(fs, &format!("{} = 0;", ctl));
+        self.cleanup_to(fs, 0);
+        self.emit(fs, &format!("{} = {};", ctl, saved));
+        let f = self.flow(true);
+        self.emit(fs, &format!("return {};", f));
     }
 
     /// Statements of a block in a new C block + scope.
@@ -1249,7 +1482,7 @@ static bool mr_{m}(kite_map *mp, const {k} *key, {e} *out) {{\n\
         }
     }
 
-    fn for_loop(&mut self, fs: &mut Fs, kind: IterKind, iter: &TExpr, hi: Option<&TExpr>, elem: LocalId, index: Option<LocalId>, body: &TBlock, _span: Span) {
+    fn for_loop(&mut self, fs: &mut Fs, id: u32, kind: IterKind, iter: &TExpr, hi: Option<&TExpr>, elem: LocalId, index: Option<LocalId>, body: &TBlock, _span: Span) {
         self.emit(fs, "{");
         fs.ind += 1;
         self.push_scope(fs, SK::Block);
@@ -1357,17 +1590,22 @@ static bool mr_{m}(kite_map *mp, const {k} *key, {e} *out) {{\n\
                 fs.repr.insert(elem, Repr::Val(en));
             }
         }
-        self.push_scope(fs, SK::Loop);
+        let (lb, lc) = (self.label(), self.label());
+        fs.loop_labels.push((id, lb.clone(), lc.clone()));
+        self.push_scope(fs, SK::Loop(id));
         if kind == IterKind::Chan && self.needs_drop(&et) {
             self.declare_flags(fs, elem);
             self.register(fs, Cl::DropLocal(elem));
         }
         self.block_stmts(fs, body);
+        self.emit(fs, &format!("{}:;", lc));
         let top = fs.scopes.len() - 1;
         self.emit_scope_cleanups(fs, top);
         fs.scopes.pop();
         fs.ind -= 1;
         self.emit(fs, "}");
+        self.emit(fs, &format!("{}:;", lb));
+        fs.loop_labels.pop();
         self.pop_scope(fs);
         fs.ind -= 1;
         self.emit(fs, "}");
@@ -1582,6 +1820,10 @@ static bool mr_{m}(kite_map *mp, const {k} *key, {e} *out) {{\n\
                 let v = self.prog.consts[*c as usize].value.clone().unwrap();
                 self.expr(fs, &v)
             }
+            TK::ConstParam(p) => match self.sub(fs, &Ty::Param(*p)) {
+                Ty::ConstInt(n) => format!("INT64_C({})", n),
+                t => panic!("integer parameter bound to {:?}", t),
+            },
             TK::FuncRef(f, targs) => {
                 let targs: Vec<Ty> = targs.iter().map(|x| self.sub(fs, x)).collect();
                 self.func_item(*f, targs)
@@ -1672,6 +1914,17 @@ static bool mr_{m}(kite_map *mp, const {k} *key, {e} *out) {{\n\
             TK::Unary { op, e: x } => {
                 let v = self.expr(fs, x);
                 let xt = self.sub(fs, &x.ty);
+                if let Some(inner) = self.numeric_newtype(&xt) {
+                    let c = self.cty(&xt);
+                    let iv = format!("({}).f_value", v);
+                    let r = match (&inner, *op) {
+                        (Ty::Int(k), "-") => format!("kite_neg_{}({}, {})", int_suffix(*k), iv, self.loc(e.span)),
+                        (_, "-") => format!("(-{})", iv),
+                        (_, "~") => format!("(({})~{})", self.cty(&inner), iv),
+                        _ => iv,
+                    };
+                    return format!("(({}){{ {} }})", c, r);
+                }
                 match *op {
                     "-" => match &xt {
                         Ty::Int(k) => {
@@ -1990,6 +2243,11 @@ static bool mr_{m}(kite_map *mp, const {k} *key, {e} *out) {{\n\
                 format!("kite_chan_new(sizeof({}), {})", ec, v)
             }
             TK::DefaultOf => self.default_value(fs, &t),
+            TK::MutexRef(x) => {
+                let p = self.lval(fs, x);
+                let c = self.cty(&t);
+                format!("(({}){{ kite_mutex_new(), &{} }})", c, p)
+            }
             TK::Unbox(x) => {
                 let b = self.expr(fs, x);
                 let c = self.cty(&t);
@@ -2052,6 +2310,12 @@ static bool mr_{m}(kite_map *mp, const {k} *key, {e} *out) {{\n\
 
     fn default_value(&mut self, fs: &mut Fs, t: &Ty) -> String {
         match t {
+            Ty::Adt(d, args) if self.prog.def(*d).newtype => {
+                let inner = self.prog.field_tys(*d, args)[0].1.clone();
+                let v = self.default_value(fs, &inner);
+                let c = self.cty(t);
+                format!("(({}){{ {} }})", c, v)
+            }
             Ty::Adt(d, args) if self.prog.def(*d).is_struct() => {
                 let c = self.cty(t);
                 let n = self.prog.def(*d).fields().len();
@@ -2202,9 +2466,24 @@ static bool mr_{m}(kite_map *mp, const {k} *key, {e} *out) {{\n\
     }
 
     fn cast(&mut self, fs: &mut Fs, x: &TExpr, t: &Ty, sp: Span) -> String {
-        let xt = self.sub(fs, &x.ty);
-        let v = self.expr(fs, x);
+        let mut xt = self.sub(fs, &x.ty);
+        let mut v = self.expr(fs, x);
         let l = self.loc(sp);
+        // new types (reached through generic code): unwrap the source, wrap the target
+        if let Some(inner) = self.numeric_newtype(&xt) {
+            v = format!("({}).f_value", v);
+            xt = inner;
+        }
+        if let Some(inner) = self.numeric_newtype(t) {
+            let iv = match &inner {
+                Ty::Int(k) => self.int_cast_check(&v, &xt, *k, &l),
+                Ty::F32 => format!("((float){})", v),
+                Ty::F64 => format!("((double){})", v),
+                _ => v,
+            };
+            let c = self.cty(t);
+            return format!("(({}){{ {} }})", c, iv);
+        }
         match t {
             Ty::Int(k) => self.int_cast_check(&v, &xt, *k, &l),
             Ty::F32 => format!("((float){})", v),
@@ -2214,6 +2493,11 @@ static bool mr_{m}(kite_map *mp, const {k} *key, {e} *out) {{\n\
     }
 
     fn arith(&mut self, op: BinOp, a: &str, b: &str, t: &Ty, sp: Span) -> String {
+        if let Some(inner) = self.numeric_newtype(t) {
+            let v = self.arith(op, &format!("({}).f_value", a), &format!("({}).f_value", b), &inner, sp);
+            let c = self.cty(t);
+            return format!("(({}){{ {} }})", c, v);
+        }
         let l = self.loc(sp);
         match t {
             Ty::Int(k) => {
@@ -2272,6 +2556,15 @@ static bool mr_{m}(kite_map *mp, const {k} *key, {e} *out) {{\n\
             return t;
         }
         let lt = self.sub(fs, &l.ty);
+        if self.numeric_newtype(&lt).is_some() {
+            let a = self.expr(fs, l);
+            let a = if has_effects(r) { self.materialize(fs, &a, &lt, false) } else { a };
+            let b = self.expr(fs, r);
+            if op.is_cmp() {
+                return format!("(({}).f_value {} ({}).f_value)", a, cmp_op(op), b);
+            }
+            return self.arith(op, &a, &b, &lt, sp);
+        }
         if op.is_cmp() {
             if self.is_scalar(&lt) {
                 let a = self.expr(fs, l);
@@ -2613,7 +2906,9 @@ static bool mr_{m}(kite_map *mp, const {k} *key, {e} *out) {{\n\
         }
         let by_value = c.owned;
         let byv = |l: &LocalId| by_value || c.by_value.contains(l);
-        if !fields.is_empty() {
+        let lbp = if c.loop_body.is_some() { self.pending_lb.take() } else { None };
+        let outer_rc = if lbp.is_some() && !matches!(fs.ret, Ty::Unit | Ty::Never) { Some(self.cty(&fs.ret.clone())) } else { None };
+        if !fields.is_empty() || lbp.is_some() {
             let mut body = format!("typedef struct {{");
             for (l, _, lc) in &fields {
                 if byv(l) {
@@ -2622,6 +2917,9 @@ static bool mr_{m}(kite_map *mp, const {k} *key, {e} *out) {{\n\
                     let _ = write!(body, " {} *c{};", lc, l);
                 }
             }
+            if lbp.is_some() {
+                let _ = write!(body, " int *kctl; {} *kret;", outer_rc.clone().unwrap_or_else(|| "void".into()));
+            }
             let _ = writeln!(body, " }} {};", envn);
             self.tdefs.push_str(&body);
         }
@@ -2629,7 +2927,12 @@ static bool mr_{m}(kite_map *mp, const {k} *key, {e} *out) {{\n\
         let ret = fty.ret.clone();
         let rc = self.ret_cty(&ret);
         let mut ps = vec!["void *envp".to_string()];
-        let mut nfs = Fs { tf: fs.tf, subst: fs.subst.clone(), out: String::new(), ind: 1, scopes: vec![], repr: HashMap::new(), flagged: fs.flagged.clone(), flags: HashMap::new(), ret: ret.clone(), yields: false, err_mode: None };
+        let mut nfs = Fs { tf: fs.tf, subst: fs.subst.clone(), out: String::new(), ind: 1, scopes: vec![], repr: HashMap::new(), flagged: fs.flagged.clone(), flags: HashMap::new(), ret: ret.clone(), yields: false, err_mode: None, loop_labels: vec![], lb: None };
+        if let (Some(lid), Some(_)) = (c.loop_body, &lbp) {
+            // `return` / `try` in the body act on the enclosing function
+            nfs.ret = fs.ret.clone();
+            nfs.lb = Some(LoopBody { id: lid, ctl: "(*env->kctl)".into(), ret: "(*env->kret)".into() });
+        }
         nfs.scopes.push(Scope { kind: SK::Func, items: vec![] });
         for (i, p) in c.params.iter().enumerate() {
             let (m, pt) = fty.params[i].clone();
@@ -2649,7 +2952,7 @@ static bool mr_{m}(kite_map *mp, const {k} *key, {e} *out) {{\n\
                 }
             }
         }
-        if !fields.is_empty() {
+        if !fields.is_empty() || lbp.is_some() {
             self.emit(&mut nfs, &format!("{} *env = envp;", envn));
         } else {
             self.emit(&mut nfs, "(void)envp;");
@@ -2664,9 +2967,35 @@ static bool mr_{m}(kite_map *mp, const {k} *key, {e} *out) {{\n\
         let sig = format!("static {} {}({})", rc, fname, ps.join(", "));
         let _ = writeln!(self.protos, "{};", sig);
         let body = c.body.clone();
-        self.fn_body(&mut nfs, &body);
+        if nfs.lb.is_some() {
+            // a body that already asked to leave must not run again
+            let stop = self.flow(true);
+            self.emit(&mut nfs, &format!("if (*env->kctl) return {};", stop));
+            self.push_scope(&mut nfs, SK::Block);
+            for st in &body.stmts {
+                self.stmt(&mut nfs, st);
+            }
+            self.pop_scope(&mut nfs);
+            self.cleanup_to(&mut nfs, 0);
+            let go = self.flow(false);
+            self.emit(&mut nfs, &format!("return {};", go));
+        } else {
+            self.fn_body(&mut nfs, &body);
+        }
         let _ = writeln!(self.bodies, "{} {{\n{}}}\n", sig, nfs.out);
         // environment value
+        if let Some((ctlp, retp)) = &lbp {
+            let mut inits = vec![];
+            for (l, _, _) in &fields {
+                let p = self.local_place(fs, *l);
+                inits.push(format!("&{}", p));
+            }
+            inits.push(ctlp.clone());
+            inits.push(retp.clone());
+            let e = self.tmp();
+            self.emit(fs, &format!("{} {} = {{ {} }};", envn, e, inits.join(", ")));
+            return format!("((kite_func){{ (void *){}, &{}, NULL }})", fname, e);
+        }
         if fields.is_empty() {
             return format!("((kite_func){{ (void *){}, NULL, NULL }})", fname);
         }
@@ -2986,10 +3315,8 @@ static bool mr_{m}(kite_map *mp, const {k} *key, {e} *out) {{\n\
                 let cond = self.osome(&xt, &tv);
                 self.emit(fs, &format!("if (!{}) {{", cond));
                 fs.ind += 1;
-                fs.err_mode = Some("1".into());
-                self.cleanup_to(fs, 0);
-                fs.err_mode = None;
-                self.emit(fs, &format!("return ({}){{0}};", rc));
+                let none = format!("(({}){{0}})", rc);
+                self.emit_return(fs, &none);
                 fs.ind -= 1;
                 self.emit(fs, "}");
                 if *t == Ty::Unit {
@@ -3030,10 +3357,7 @@ static bool mr_{m}(kite_map *mp, const {k} *key, {e} *out) {{\n\
                 };
                 let r = self.tmp();
                 self.emit(fs, &format!("{} {} = {{ .ok = 0, .u.err = {} }};", rc, r, errv));
-                fs.err_mode = Some("1".into());
-                self.cleanup_to(fs, 0);
-                fs.err_mode = None;
-                self.emit(fs, &format!("return {};", r));
+                self.emit_return(fs, &r);
                 fs.ind -= 1;
                 self.emit(fs, "}");
                 if *t == Ty::Unit {
@@ -3523,11 +3847,11 @@ static bool mr_{m}(kite_map *mp, const {k} *key, {e} *out) {{\n\
                 self.emit(fs, &format!("{} = {};", a, v));
                 "0".into()
             }
-            "Mutex.lock" => {
-                let m = self.lock_target(fs, &args[0].e);
+            "Mutex.lock" | "MutexRef.lock" => {
+                let (m, v) = self.lock_target(fs, &args[0].e);
                 self.emit(fs, &format!("kite_mutex_lock({}->mu);", m));
                 self.register_stmt(fs, Cl::Unlock(format!("{}->mu", m)));
-                format!("(&{}->val)", m)
+                format!("({})", v)
             }
             "Chan.send" => {
                 let e = elem(&recv_ty);
@@ -3600,8 +3924,9 @@ static bool mr_{m}(kite_map *mp, const {k} *key, {e} *out) {{\n\
     }
 
     /// Pointer to the Mutex struct behind a (possibly arc-wrapped) receiver expression.
-    fn lock_target(&mut self, fs: &mut Fs, e: &TExpr) -> String {
-        // e is a Proj of Mutex.lock, or the mutex receiver itself
+    /// The Mutex struct behind a lock projection's receiver, and a pointer to
+    /// the guarded value.
+    fn lock_target(&mut self, fs: &mut Fs, e: &TExpr) -> (String, String) {
         let recv = match &e.kind {
             TK::Proj { call, .. } => match &call.kind {
                 TK::Call { args, .. } => args[0].e.clone(),
@@ -3614,8 +3939,10 @@ static bool mr_{m}(kite_map *mp, const {k} *key, {e} *out) {{\n\
         let p = self.lval(fs, &recv);
         let m = self.tmp();
         self.emit(fs, &format!("{} *{} = &{};", c, m, p));
-        m
+        let v = if matches!(mt, Ty::MutexRef(_)) { format!("{}->ptr", m) } else { format!("&{}->val", m) };
+        (m, v)
     }
+
 
     fn vec_intrinsic(&mut self, fs: &mut Fs, name: &str, el: &Ty, args: &[TArg], ret: &Ty, l: &str) -> String {
         let ec = self.cty(el);
@@ -3961,6 +4288,7 @@ static bool mr_{m}(kite_map *mp, const {k} *key, {e} *out) {{\n\
                 }
                 b.push_str("    kite_mutex_free(p->mu);\n");
             }
+            Ty::MutexRef(_) => b.push_str("    kite_mutex_free(p->mu);\n"),
             Ty::Option(inner) => {
                 let inner = (**inner).clone();
                 if self.needs_drop(&inner) {
@@ -4321,6 +4649,15 @@ static void intro_{m}({c} *a, int64_t n, int depth) {{\n    while (n > 24) {{\n 
             self.bodies.push_str(&b);
             return name;
         }
+        if let Ty::Adt(d, args) = t {
+            if self.prog.def(*d).newtype {
+                let inner = self.prog.field_tys(*d, args)[0].1.clone();
+                let f = self.cmp_fn(&inner);
+                let _ = writeln!(b, "    return {}(&a->f_value, &b->f_value);\n}}", f);
+                self.bodies.push_str(&b);
+                return name;
+            }
+        }
         match t {
             Ty::Str => b.push_str("    return kite_str_cmp(*a, *b);\n"),
             Ty::String => b.push_str("    return kite_str_cmp(kite_string_view(a), kite_string_view(b));\n"),
@@ -4488,7 +4825,7 @@ static void intro_{m}({c} *a, int64_t n, int depth) {{\n    while (n > 24) {{\n 
                 let ff = self.fmt_fn(&inner);
                 let _ = writeln!(b, "    {}(b, p, nested);", ff);
             }
-            Ty::Mutex(_) => b.push_str("    kite_fmt_cstr(b, \"Mutex{..}\");\n"),
+            Ty::Mutex(_) | Ty::MutexRef(_) => b.push_str("    kite_fmt_cstr(b, \"Mutex{..}\");\n"),
             Ty::Chan(_) => b.push_str("    kite_fmt_cstr(b, \"chan\");\n"),
             Ty::Func(_) => b.push_str("    kite_fmt_cstr(b, \"<fn>\");\n"),
             Ty::Ptr(_) => b.push_str("    kite_fmt_ptr(b, *p);\n"),
@@ -4662,7 +4999,7 @@ fn collect_moves_stmt(s: &TStmt, out: &mut HashSet<(LocalId, Vec<usize>)>, tf: &
         }
         TStmt::Return(Some(e), _) | TStmt::Yield(Some(e), _) => collect_moves_expr(e, out, tf),
         TStmt::Defer(b) | TStmt::ErrDefer(b) => collect_moves_block(b, out, tf),
-        TStmt::While { cond, body } => {
+        TStmt::While { cond, body, .. } => {
             if let Some(c) = cond {
                 collect_moves_expr(c, out, tf)
             }
@@ -4675,7 +5012,7 @@ fn collect_moves_stmt(s: &TStmt, out: &mut HashSet<(LocalId, Vec<usize>)>, tf: &
             }
             collect_moves_block(body, out, tf)
         }
-        TStmt::Go { call, .. } => collect_moves_expr(call, out, tf),
+        TStmt::Go { call, .. } | TStmt::ForEach { call, .. } => collect_moves_expr(call, out, tf),
         TStmt::Send { chan, value } => {
             collect_moves_expr(chan, out, tf);
             collect_moves_expr(value, out, tf)
@@ -4762,7 +5099,7 @@ fn collect_moves_expr(e: &TExpr, out: &mut HashSet<(LocalId, Vec<usize>)>, tf: &
                 f(m)
             }
         }
-        TK::Unary { e: x, .. } | TK::Cast(x) | TK::SomeLit(x) | TK::OkLit(x) | TK::ErrLit(x) | TK::Coerce(_, x) | TK::Recv(x) | TK::Wrap(x) | TK::MakeChan(x) | TK::Unbox(x) => f(x),
+        TK::Unary { e: x, .. } | TK::Cast(x) | TK::SomeLit(x) | TK::OkLit(x) | TK::ErrLit(x) | TK::Coerce(_, x) | TK::Recv(x) | TK::Wrap(x) | TK::MakeChan(x) | TK::Unbox(x) | TK::MutexRef(x) => f(x),
         TK::Binary { l, r, .. } | TK::Coalesce { l, r } => {
             f(l);
             f(r)

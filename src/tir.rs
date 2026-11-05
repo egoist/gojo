@@ -67,17 +67,21 @@ pub enum TStmt {
     /// `m[k] = v`
     MapInsert { map: TExpr, key: TExpr, value: TExpr },
     Return(Option<TExpr>, Span),
-    Break(Span),
-    Continue(Span),
+    /// Exit / restart the loop with this id.
+    Break(u32, Span),
+    Continue(u32, Span),
     Defer(TBlock),
     ErrDefer(TBlock),
-    While { cond: Option<TExpr>, body: TBlock },
-    For { kind: IterKind, iter: TExpr, hi: Option<TExpr>, elem: LocalId, index: Option<LocalId>, mutable: bool, body: TBlock, span: Span },
+    While { id: u32, cond: Option<TExpr>, body: TBlock },
+    For { id: u32, kind: IterKind, iter: TExpr, hi: Option<TExpr>, elem: LocalId, index: Option<LocalId>, mutable: bool, body: TBlock, span: Span },
     Go { call: TExpr, span: Span },
     Send { chan: TExpr, value: TExpr },
     With { local: LocalId, place: TExpr, lock: bool, body: TBlock },
     Yield(Option<TExpr>, Span),
     Select { arms: Vec<TSelectArm>, span: Span },
+    /// `for` over a type with an `each` method: the call, whose last argument
+    /// is the loop body closure.
+    ForEach { id: u32, call: TExpr },
 }
 
 #[derive(Clone, Debug)]
@@ -210,6 +214,9 @@ pub struct TClosure {
     pub scoped: bool,
     /// Captures stored by value even though the closure borrows (scoped tasks).
     pub by_value: Vec<LocalId>,
+    /// The body of a `for` loop over a type with `each`: break / continue /
+    /// return / try inside it act on the enclosing function (loop id).
+    pub loop_body: Option<u32>,
     pub span: Span,
 }
 
@@ -260,6 +267,8 @@ pub enum TK {
     NoneLit,
     Local(LocalId),
     Const(u32),
+    /// The value of an integer type parameter (`R` in `struct Mat[R int, C int]`).
+    ConstParam(TParamId),
     FuncRef(FuncId, Vec<Ty>),
     Field { base: Box<TExpr>, index: usize },
     /// Deref through Box / rc / arc / raw pointer (a place).
@@ -306,6 +315,8 @@ pub enum TK {
     MakeChan(Box<TExpr>),
     /// Move the contents out of an owned Box, freeing the allocation.
     Unbox(Box<TExpr>),
+    /// `Mutex(&place)`
+    MutexRef(Box<TExpr>),
     /// Default value of a type (`var x T`, struct defaults, `T.default()`).
     DefaultOf,
     Error,
@@ -335,4 +346,161 @@ impl TExpr {
             _ => false,
         }
     }
+}
+
+// ---------- generic traversal ----------
+
+/// Calls `f` on every expression in the block (pre-order), including closure bodies.
+pub fn visit_block(b: &TBlock, f: &mut dyn FnMut(&TExpr)) {
+    for s in &b.stmts {
+        visit_stmt(s, f);
+    }
+    if let Some(v) = &b.value {
+        visit_expr(v, f);
+    }
+}
+
+pub fn visit_stmt(s: &TStmt, f: &mut dyn FnMut(&TExpr)) {
+    match s {
+        TStmt::Let { init, .. } => visit_expr(init, f),
+        TStmt::LetRef { place, .. } => visit_expr(place, f),
+        TStmt::Expr(e) => visit_expr(e, f),
+        TStmt::Assign { place, value, .. } => {
+            visit_expr(place, f);
+            visit_expr(value, f)
+        }
+        TStmt::MapInsert { map, key, value } => {
+            visit_expr(map, f);
+            visit_expr(key, f);
+            visit_expr(value, f)
+        }
+        TStmt::Return(Some(e), _) | TStmt::Yield(Some(e), _) => visit_expr(e, f),
+        TStmt::Defer(b) | TStmt::ErrDefer(b) => visit_block(b, f),
+        TStmt::While { cond, body, .. } => {
+            if let Some(c) = cond {
+                visit_expr(c, f)
+            }
+            visit_block(body, f)
+        }
+        TStmt::For { iter, hi, body, .. } => {
+            visit_expr(iter, f);
+            if let Some(h) = hi {
+                visit_expr(h, f)
+            }
+            visit_block(body, f)
+        }
+        TStmt::Go { call, .. } | TStmt::ForEach { call, .. } => visit_expr(call, f),
+        TStmt::Send { chan, value } => {
+            visit_expr(chan, f);
+            visit_expr(value, f)
+        }
+        TStmt::With { place, body, .. } => {
+            visit_expr(place, f);
+            visit_block(body, f)
+        }
+        TStmt::Select { arms, .. } => {
+            for a in arms {
+                match &a.kind {
+                    TSelectKind::Recv { chan, .. } => visit_expr(chan, f),
+                    TSelectKind::Send { chan, value } => {
+                        visit_expr(chan, f);
+                        visit_expr(value, f)
+                    }
+                    TSelectKind::Default => {}
+                }
+                visit_block(&a.body, f)
+            }
+        }
+        _ => {}
+    }
+}
+
+pub fn visit_expr(e: &TExpr, f: &mut dyn FnMut(&TExpr)) {
+    f(e);
+    let mut g = |x: &TExpr| visit_expr(x, f);
+    match &e.kind {
+        TK::Field { base, .. } | TK::Deref(base) | TK::OptField { base, .. } => g(base),
+        TK::Index { base, index } | TK::StrIndex { base, index } => {
+            g(base);
+            g(index)
+        }
+        TK::MapIndex { base, key } => {
+            g(base);
+            g(key)
+        }
+        TK::SliceOf { base, lo, hi } => {
+            g(base);
+            if let Some(l) = lo {
+                g(l)
+            }
+            if let Some(h) = hi {
+                g(h)
+            }
+        }
+        TK::Call { args, .. } | TK::Intrinsic { args, .. } => {
+            for a in args {
+                g(&a.e)
+            }
+        }
+        TK::Proj { call, .. } => g(call),
+        TK::ProjUnwrap { proj, msg } => {
+            g(proj);
+            if let Some(m) = msg {
+                g(m)
+            }
+        }
+        TK::Unary { e: x, .. } | TK::Cast(x) | TK::SomeLit(x) | TK::OkLit(x) | TK::ErrLit(x) | TK::Move(x) | TK::Copy(x) | TK::Coerce(_, x) | TK::Recv(x) | TK::Wrap(x) | TK::MakeChan(x) | TK::Unbox(x) | TK::MutexRef(x) => g(x),
+        TK::Binary { l, r, .. } | TK::Coalesce { l, r } => {
+            g(l);
+            g(r)
+        }
+        TK::StructLit { fields, .. } => fields.iter().for_each(|x| g(x)),
+        TK::EnumLit { args, .. } => args.iter().for_each(|x| g(x)),
+        TK::VecLit(xs) | TK::ArrayLit(xs) => xs.iter().for_each(|x| g(x)),
+        TK::MapLit(ps) => ps.iter().for_each(|(k, v)| {
+            g(k);
+            g(v)
+        }),
+        TK::Closure(c) => visit_block(&c.body, f),
+        TK::If { cond, then, else_ } => {
+            g(cond);
+            visit_block(then, f);
+            if let Some(b) = else_ {
+                visit_block(b, f)
+            }
+        }
+        TK::Match { scrut, arms, .. } => {
+            g(scrut);
+            for a in arms {
+                if let Some(gd) = &a.guard {
+                    visit_expr(gd, f)
+                }
+                visit_expr(&a.body, f)
+            }
+        }
+        TK::Block(b) | TK::Unsafe(b) => visit_block(b, f),
+        TK::Try { e: x, wrap } => {
+            visit_expr(x, f);
+            if let Some(TryWrap::Call(_, w)) = wrap {
+                visit_expr(w, f)
+            }
+        }
+        TK::Catch { e: x, handler, .. } => {
+            visit_expr(x, f);
+            visit_block(handler, f)
+        }
+        _ => {}
+    }
+}
+
+/// Locals mentioned anywhere in the statement.
+pub fn locals_in_stmt(s: &TStmt, out: &mut Vec<LocalId>) {
+    visit_stmt(s, &mut |e| {
+        if let TK::Local(l) = e.kind {
+            out.push(l)
+        }
+        if let TK::Closure(c) = &e.kind {
+            out.extend(c.captures.iter().map(|c| c.0))
+        }
+    });
 }

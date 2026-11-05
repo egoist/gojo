@@ -1,0 +1,6 @@
+struct Holder {
+    m MutexRef[int]
+}
+
+fn main() {}
+// error: field `m` has borrowed view type `MutexRef[int]`

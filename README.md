@@ -116,20 +116,21 @@ cargo build --release
 
 ## 已实现的语言特性
 
-- **基础**：`let`/`var`、`for x in xs`、`for i in 0..n`、`for cond {}`、`for {}`、`if`/`match`/块作为表达式、`defer`（块级）、`errdefer`、`const`、类型别名和新类型（`type Celsius f64`）、`(x) => x * 2` 短闭包。
+- **基础**：`let`/`var`、`for x in xs`、`for i in 0..n`、`for cond {}`、`for {}`、循环标签（`outer: for ...`，`break outer`）、`if`/`match`/块作为表达式、`defer`（块级）、`errdefer`、`const`、类型别名和新类型（`type Celsius f64`，底层是数字时保留运算符）、`(x) => x * 2` 短闭包。
 - **类型**：全部标量、`String`/`str`、`Vec[T]`/`[]T`、`[N]T`、`Map[K, V]`、`?T`、`T ! E`、`Box`、`rc`/`weak`、`arc`、`Cell`、`Mutex`、`chan T`、函数类型、`*T`。
 - **方法**：写在 `struct`/`enum` 的大括号里，第一个参数 `self` 带接收者模式；关联函数 `Stack[String].new()`（泛型参数可由期望类型推断）；`extend T { ... }` 补充方法，标准库还用它给内置类型及其特定实例（如 `extend []String`）加方法。
-- **结构体与枚举**：字段默认值（缺少必填字段是编译错误）、`copy struct`、和类型枚举、`.Variant` 简写、struct 嵌入（字段和方法提升）。
+- **结构体与枚举**：字段默认值（缺少必填字段是编译错误）、`copy struct`、包内私有类型自动推导 copy、和类型枚举、`.Variant` 简写、struct 嵌入（字段和方法提升）。
 - **所有权**：三种参数模式（借用 / `inout` / `sink`）、确定性释放（作用域逆序、`drop` 方法、`drop(x)`）、部分移动、条件移动（只在需要时插入标志位）、`.clone()`。
-- **投影**：`yield &T` / `yield inout T` / `yield ?&T` 函数；`v[i]`、`m.get(k)`、`m.entry(k)`、`mu.lock()` 都是投影，借出的引用带不出块。
+- **投影**：`yield &T` / `yield inout T` / `yield ?&T` 函数；`v[i]`、`m.get(k)`、`m.entry(k)`、`mu.lock()` 都是投影，借出的引用带不出块。绑定到 `let` 的引用和视图在最后一次使用之后就不再占用被借的值。解析器这类结构用 `Span` 存区间，不需要自引用。
+- **自定义迭代**：游标协议（`cursor` + `next`/`nextMut`，`zip` 和归并只是同时推进几个游标）和推送协议（`each`/`eachMut`，适合树这样的递归结构）；两种协议里 `break`、`continue`、`return`、`try`、带标签的跳转都照常工作。
 - **错误处理**：`try`、`try x else Wrap`、`catch e { ... }`、`match` 解构 `ok`/`err`、`?T` 上的 `try`、`??`、`?.`。
 - **接口**：结构化隐式满足、接口值（堆上盒子 + 虚表）、借用接口参数（胖指针，不分配）、`fn bump(self inout) int` 这种可变接收者方法、`match` 按具体类型分支、嵌入接口、带类型集的约束接口（`~int | ~f64`）。
-- **泛型**：泛型函数/结构体/枚举、方法自带类型参数、`where` 条件方法、内置能力约束（`copy`、`clone`、`default`、`send`、`comparable`、`ordered`、`hash`）、局部双向推断（含闭包返回类型）。自定义 `equal`/`hash`/`compare` 方法后可以作 Map 键或排序。
-- **并发**：`go`、带缓冲/无缓冲 channel（发送即转移所有权）、`close`、`for x in ch`、`select`（分支写法同 `match`：`let x = <-ch => ...`、`ch <- v => ...`、`_ => ...`）、`arc(Mutex(x))`、`task.group` 结构化并发（任务可以借用组外数据，首个错误作为组的结果）。
-- **unsafe 与 FFI**：`extern "C" lib "libz" { ... }` 运行时 `dlopen`，构建时不需要 C 头文件；不写 `lib` 时查找 libc。
+- **泛型**：泛型函数/结构体/枚举、方法自带类型参数、`where` 条件方法、内置能力约束（`copy`、`clone`、`default`、`send`、`comparable`、`ordered`、`hash`）、局部双向推断（含闭包返回类型）、整数常量泛型（`Mat[R, C]`，维度不匹配是编译错误）。自定义 `equal`/`hash`/`compare` 方法后可以作 Map 键或排序。
+- **并发**：`go`、带缓冲/无缓冲 channel（发送即转移所有权）、`close`、`for x in ch`、`select`（分支写法同 `match`：`let x = <-ch => ...`、`ch <- v => ...`、`_ => ...`）、`arc(Mutex(x))`、`Mutex(&x)`（锁借用外部数据，用在 `task.group` 里）、`task.group` 结构化并发（任务可以借用组外数据，首个错误作为组的结果）。
+- **unsafe 与 FFI**：`extern "C" lib "libz" { ... }` 运行时 `dlopen`，构建时不需要 C 头文件；不写 `lib` 时查找 libc；`extern "C" static` 静态链接；`extern "C" fn` 导出 Kite 函数；`unsafe send struct` 由作者担保跨线程安全。没有 C 表示的类型（`String`、函数值等）不能出现在 `extern` 签名里。
 - **标准库**：prelude（Option/Result/字符串/切片/Vec/Map 方法、`Arena[T]` + 带代数的 `Id[T]`、`Hasher`）、`fmt`、`os`、`math`、`time`、`task`、`strings`。内置类型的方法签名用 Kite 写在 `std/prelude.kite`，其中 `map`/`filter`/`fold`/`join`/`Arena` 等本身就是 Kite 代码。
 
-`tests/run/` 下的程序覆盖了以上全部特性，可以当作语言示例阅读。
+`tests/run/` 下的程序覆盖了以上全部特性，可以当作语言示例阅读。精确的语言规则见 [`docs/spec.md`](docs/spec.md)，每一节都列出了覆盖它的测试。
 
 ## 实现结构
 
@@ -159,15 +160,15 @@ std/              用 Kite 写的标准库（编译进二进制）
 
 ## 与设计文档的差异和改进
 
-这些是有意的取舍，也回答了文档第 12 节的部分开放问题：
+这些是有意的取舍（设计文档第 12 节记录了已定的决议）：
 
 1. **后端**：原型生成 C，由 `cc` 或 `zig cc` 编译，因此天然支持交叉编译（已在 Alpine 容器中验证 `x86_64`/`aarch64` musl 静态二进制）。前端已经达到 Go 的速度量级，瓶颈在 C 编译器；自带的快速 debug 后端是下一步。
 2. **泛型用单态化**，而不是字典传递。只实例化可达代码，编译时间目前不是问题；字典传递留到自研后端时再做。
-3. **panic 默认 abort**（开放问题“unwind 还是 abort”）：不生成展开表，二进制更小；代价是 `task.group` 里的 panic 会结束整个进程，而不是变成 `task.Panic` 错误。
+3. **panic 只有 abort 一种模式**：不生成展开表，二进制更小；任何线程里的 panic 都结束整个进程，没有 `recover` 和 `task.Panic`。`kite test` 把每个测试放在单独的进程里，一个测试 panic 不影响其他测试。
 4. **match 的绑定模式**：匹配一个“位置”时绑定默认是引用；如果某个分支把绑定 move 走（例如 `some(v) => v`），这个分支自动变为消耗型，被匹配的拥有值随之被移动。这样既不用写 `ref`，也能在 `sink` 接收者里写出 `unwrap`。
 5. **`fn` 关键字**：函数、方法、函数类型（`fn(int) int`）和函数字面量都用 `fn`，取代 Go 的 `func`。
 6. **包与导入**：去掉了 Go 式的 `package main` 和带引号的 `import "fmt"`，改为“目录即包”和 `use`（见上文“包与导入”）。这也去掉了 Go 里包名和目录名必须一致的冗余；`main` 不需要 `pub`。
-7. **结构体/枚举自动获得 `clone`、`==`、`hash`**（字段都支持时）；需要自定义时写 `clone`/`equal`/`hash`/`compare` 方法。`copy` 仍需显式声明（开放问题“copy 是否自动推导”：维持显式，避免给导出类型加字段时悄悄破坏下游）。
+7. **结构体/枚举自动获得 `clone`、`==`、`hash`**（字段都支持时）；需要自定义时写 `clone`/`equal`/`hash`/`compare` 方法。`copy` 对导出类型必须显式声明（避免给公开类型加字段时悄悄破坏下游），包内私有的非泛型类型自动推导。
 8. **新增 `errdefer`**（来自 Zig）：只在函数以错误返回时执行，适合回滚。
 9. **字符串字面量列表推断为 `Vec[String]`**，避免把借用视图存进集合。
 10. **打印**：类型有 `toString()` 或 `message()` 方法时用它，否则按结构打印（`Config{name: "app", port: 8080}`）。
@@ -175,16 +176,18 @@ std/              用 Kite 写的标准库（编译进二进制）
 12. **方法写在类型里**：取代 Go 的 `func (p *Point) scale(k int)`。接收者是显式的 `self`（`self` / `self inout` / `self sink`），没有 `self` 的是关联函数（`Point.new()`），`extend T { ... }` 用来补充方法；接口方法用同一种写法声明。
 13. **`select` 的分支和 `match` 一样用 `=>`**：`let x = <-ch => ...`、`<-done => ...`、`ch <- v => ...`、`_ => ...`，取代 Go 的 `case ...:` / `default:`；分支体里的 `break` 作用于外层循环。
 14. **`v[i]` 绑定**：`let x = v[i]` 对非 copy 元素得到引用（文档语义），想要拥有值就写 `.clone()`。
-15. release 构建默认保留溢出检查（开放问题“release 中的溢出行为”）。
+15. release 构建默认保留溢出检查。
+16. **没有 `switch`**：`match` 支持字面量、区间、`|` 和守卫，而且是穷尽检查的。
+17. **不引入 `View[Owner, T]`**：结构体永远不存引用，解析器存拥有的数据和 `Span` 区间，用方法借出视图。
+18. **`defer` 不能改变函数的去向**：里面不能写 `return`、`try`，也不能跳出外层循环（来自 Zig）。
 
 ## 尚未实现
 
 - goroutine 目前是操作系统线程，没有 M:N 调度器；`task.group` 还没有取消传播、超时，任务 panic 会结束进程（见上文第 3 条）。
-- 自定义类型的 `for x in t`（基于 `each` 的 push 迭代器）、pull 迭代器 / `zip`。
-- 整数常量泛型（`Mat[R, C]`）、`#specialize`、PGO。
+- `#specialize`、PGO。
+- 设计文档里的 `Set[T]`、`RwLock[T]`、`Atomic[T]`、`saturatingAdd`、`unsafe.cast`、`unsafe.forget`，以及把 Kite 函数作为回调传给 C（`extern "C" fn` 目前只能导出和直接调用）。
 - 按包分开编译、导出数据缓存（目前每次整体编译，靠前端速度和二进制缓存弥补）。
-- `kite fmt` 格式化工具、`switch` 语句、带标签的 `break`。
-- `Mutex(&x)` 这种借用外部数据的锁（目前锁必须拥有数据）。
+- `kite fmt` 格式化工具。
 - 接口值和函数值不满足 `send`（偏保守）；传给 `go` 的闭包按捕获内容单独检查。
 
 ## 测试

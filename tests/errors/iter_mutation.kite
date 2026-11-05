@@ -1,0 +1,27 @@
+struct Bag {
+    items Vec[int]
+
+    fn each(self, body fn(int) Flow) {
+        for x in self.items {
+            if body(x) == .Break {
+                return
+            }
+        }
+    }
+
+    fn add(self inout, x int) {
+        self.items.push(x)
+    }
+}
+
+struct Plain { x int }
+
+fn take(s sink String) {}
+
+fn main() {
+    var b = Bag{items: [1]}
+    for x in b {
+        b.add(x)
+    }
+}
+    // error: cannot modify `b` while iterating over it

@@ -1,0 +1,43 @@
+// Integer type parameters: sizes checked at compile time.
+copy struct Mat[R int, C int] {
+    data [R][C]f64
+
+    fn rows(self) int {
+        return R
+    }
+
+    fn cols(self) int {
+        return C
+    }
+}
+
+extend Mat[R, K] {
+    fn mul[C int](self, b Mat[K, C]) Mat[R, C] {
+        var data [R][C]f64
+        for i in 0..R {
+            for j in 0..C {
+                var s = 0.0
+                for k in 0..K {
+                    s += self.data[i][k] * b.data[k][j]
+                }
+                data[i][j] = s
+            }
+        }
+        return Mat[R, C]{data: data}
+    }
+}
+
+struct Box2[T any] { v T }
+
+fn main() {
+    let a = Mat[2, 3]{data: [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]}
+    let bad = a.mul(a)
+    let x Mat[int, 2] = a
+    let y Box2[3] = Box2{v: 1}
+    _ = bad
+    _ = x
+    _ = y
+    // error: mismatched types: expected `Mat[3, _]`, found `Mat[2, 3]`
+    // error: `R` is an integer parameter; it takes a number like `3`
+    // error: `T` is a type parameter; it takes a type, not a number
+}

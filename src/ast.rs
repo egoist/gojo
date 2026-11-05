@@ -183,12 +183,14 @@ pub enum StmtKind {
     Expr(Expr),
     Assign { place: Expr, op: &'static str, value: Expr },
     Return(Option<Expr>),
-    Break,
-    Continue,
+    /// `break` / `break label`
+    Break(Option<(String, Span)>),
+    Continue(Option<(String, Span)>),
     Defer(Box<Stmt>),
     /// Runs only when the function returns an error.
     ErrDefer(Box<Stmt>),
-    For(ForLoop),
+    /// `label: for ...`
+    For(ForLoop, Option<(String, Span)>),
     Go(Expr),
     Send { chan: Expr, value: Expr },
     With { name: String, name_span: Span, expr: Expr, body: Block },

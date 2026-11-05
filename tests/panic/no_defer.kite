@@ -1,0 +1,7 @@
+fn main() {
+    defer println("deferred")
+    let v = Vec[int]{}
+    _ = v[1]
+    // panic: index out of range
+    // panic-not: deferred
+}

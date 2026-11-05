@@ -599,3 +599,25 @@ pub struct Arena[T any] {
     }
 }
 
+
+extend MutexRef[T] {
+    // `Mutex(&x)`: locking yields the borrowed place
+    pub fn lock(self) yield inout T
+}
+
+// ---------------------------------------------------------------- spans
+// A zero-copy parser keeps the owned input and `Span`s into it, and borrows
+// views on demand: no reference is ever stored in a struct.
+
+pub copy struct Span {
+    pub lo int
+    pub hi int
+
+    pub fn of(self, s str) str {
+        return s[self.lo..self.hi]
+    }
+
+    pub fn len(self) int {
+        return self.hi - self.lo
+    }
+}

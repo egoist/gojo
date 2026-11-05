@@ -1,0 +1,18 @@
+fn add(a int, b int) int {
+    return a + b
+}
+
+fn main() {}
+
+test "adds" {
+    assertEq(add(2, 3), 5)
+}
+
+test "panics are isolated" {
+    let v = Vec[int]{}
+    _ = v[1]
+}
+
+test "still runs after a failure" {
+    assert(add(1, 1) == 2)
+}

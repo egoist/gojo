@@ -77,6 +77,13 @@ fn runtime_panics() {
                 failures.push(format!("{}: missing panic message `{}` in:\n{}", f.display(), w, stderr));
             }
         }
+        // a panic ends the process at once: deferred code must not have run
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        for w in src.lines().filter_map(|l| l.trim().strip_prefix("// panic-not: ")) {
+            if stdout.contains(w) {
+                failures.push(format!("{}: `{}` should not have been printed:\n{}", f.display(), w, stdout));
+            }
+        }
         if stderr.contains("<std>") {
             failures.push(format!("{}: panic location points into the standard library:\n{}", f.display(), stderr));
         }
@@ -138,4 +145,20 @@ fn projects() {
     if !failures.is_empty() {
         panic!("{} project(s) failed:\n{}", failures.len(), failures.join("\n"));
     }
+}
+
+/// `kite test`: each test runs in its own process, so a panic fails only that test.
+#[test]
+fn test_blocks() {
+    let f = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/testblocks/blocks.kite");
+    let out = Command::new(kite()).arg("test").arg(&f).output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr);
+    assert!(stderr.contains("ok   adds"), "{}", stderr);
+    assert!(stderr.contains("FAIL panics are isolated"), "{}", stderr);
+    assert!(stderr.contains("ok   still runs after a failure"), "{}", stderr);
+    assert!(stderr.contains("2 passed, 1 failed"), "{}", stderr);
+    // `kite run` ignores test blocks, including the one that panics
+    let run = Command::new(kite()).arg("run").arg(&f).output().unwrap();
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
 }

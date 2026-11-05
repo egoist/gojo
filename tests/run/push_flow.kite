@@ -1,0 +1,93 @@
+// A push iterator that ignores the Flow its body returns: every way of leaving
+// the loop must still stop the body from running again.
+struct Careless {
+    v Vec[int]
+
+    fn each(self, body fn(&int) Flow) {
+        for x in self.v {
+            _ = body(x)
+        }
+    }
+}
+
+fn firstAbove(c Careless, n int) int {
+    for x in c {
+        if x > n { return x }
+    }
+    return -1
+}
+
+fn check(c Careless) int ! String {
+    for x in c {
+        _ = try validate(x)
+    }
+    return 0
+}
+
+fn validate(x int) int ! String {
+    if x == 2 { return err("bad two") }
+    println("valid", x)
+    return x
+}
+
+fn main() {
+    let c = Careless{v: [1, 2, 3]}
+
+    for x in c {
+        println("break", x)
+        if x == 1 { break }
+    }
+
+    // `continue` keeps going
+    for x in c {
+        if x == 2 { continue }
+        println("continue", x)
+    }
+
+    // `return` and `try`: the first result wins
+    println(firstAbove(c, 1))
+    println(check(c))
+
+    // labels out of nested push loops
+    outer: for a in c {
+        for b in c {
+            println(a, b)
+            if b == 2 { continue outer }
+            if a == 2 { break outer }
+        }
+    }
+
+    // an inner `break` leaves only the inner loop
+    for a in c {
+        for b in c {
+            if b == 1 { break }
+            println("never", b)
+        }
+        println("after inner", a)
+    }
+
+    // `defer` inside a body runs on the way out, and may run its own push loop
+    for a in c {
+        defer {
+            for b in c {
+                println("deferred", a, b)
+                break
+            }
+        }
+        if a == 1 { break }
+    }
+    deferredAtReturn(c)
+}
+
+fn deferredAtReturn(c Careless) {
+    defer {
+        for b in c {
+            if b == 2 { break }
+            println("function defer", b)
+        }
+    }
+    for a in c {
+        defer println("body defer", a)
+        if a == 2 { return }
+    }
+}

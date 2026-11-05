@@ -1,0 +1,44 @@
+// Deferred code runs while the function is already leaving: it can't redirect that.
+fn g() int ! String { return 1 }
+
+fn ret() int {
+    defer { return 1 }
+    // error: cannot `return` from a defer
+    return 2
+}
+
+fn tried() int ! String {
+    defer { _ = try g() }
+    // error: cannot use `try` in a defer
+    return 2
+}
+
+fn rolled() int ! String {
+    errdefer { return 1 }
+    return 2
+}
+
+fn looped() {
+    for i in 0..3 {
+        defer { break }
+        // error: `break` outside of a loop
+        println(i)
+    }
+}
+
+// A closure is its own function, and a loop inside the defer can use its own `break`.
+fn fine() {
+    defer {
+        for i in 0..3 {
+            if i == 1 { break }
+        }
+        let f = () => { return }
+        f()
+    }
+}
+
+fn main() {
+    println(ret(), tried(), rolled())
+    looped()
+    fine()
+}

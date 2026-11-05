@@ -12,7 +12,7 @@ pub struct Frame {
     pub depth: u32,
     pub captures: Vec<(LocalId, CapUse)>,
     saved_ret: Ty,
-    saved_loops: u32,
+    saved_loops: Vec<(Option<String>, u32)>,
     saved_yields: Option<(YieldKind, bool)>,
 }
 
@@ -22,7 +22,11 @@ pub struct FnCx {
     pub used: Vec<bool>,
     pub ret: Ty,
     pub yields: Option<(YieldKind, bool)>,
-    pub loops: u32,
+    /// Enclosing loops (label, id), innermost last.
+    pub loops: Vec<(Option<String>, u32)>,
+    pub next_loop: u32,
+    /// Label for the next loop being checked.
+    pub pending_label: Option<String>,
     pub frames: Vec<Frame>,
     pub unsafe_depth: u32,
     pub env: TyEnv,
@@ -34,6 +38,11 @@ pub struct FnCx {
     pub group_err: Vec<(Ty, u32)>,
     /// Owner type for the next associated-function call (`Stack[String].new()`).
     pub call_owner: Option<Ty>,
+    /// The next closure checked is the body of a push-style `for` loop.
+    pub loop_body_next: Option<(u32, Option<String>)>,
+    /// Inside `defer` / `errdefer`: the deferred code can't leave the function.
+    /// An ordinary closure starts over at 0; a loop body doesn't.
+    pub defer_depth: u32,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -85,7 +94,9 @@ impl FnCx {
             used: vec![],
             ret,
             yields: None,
-            loops: 0,
+            loops: vec![],
+            next_loop: 0,
+            pending_label: None,
             frames: vec![],
             unsafe_depth: 0,
             env,
@@ -96,6 +107,8 @@ impl FnCx {
             hidden: 0,
             group_err: vec![],
             call_owner: None,
+            loop_body_next: None,
+            defer_depth: 0,
         }
     }
     pub fn depth(&self) -> u32 {
@@ -433,9 +446,17 @@ impl Checker {
                 cx.vars[*x as usize] = Some(r);
                 true
             }
-            (Ty::Vec(x), Ty::Vec(y)) | (Ty::Slice(x), Ty::Slice(y)) | (Ty::Option(x), Ty::Option(y)) | (Ty::Box(x), Ty::Box(y)) | (Ty::Rc(x), Ty::Rc(y)) | (Ty::Arc(x), Ty::Arc(y)) | (Ty::Weak(x), Ty::Weak(y)) | (Ty::Cell(x), Ty::Cell(y)) | (Ty::Mutex(x), Ty::Mutex(y)) | (Ty::Chan(x), Ty::Chan(y)) | (Ty::Ptr(x), Ty::Ptr(y)) => {
+            (Ty::Vec(x), Ty::Vec(y)) | (Ty::Slice(x), Ty::Slice(y)) | (Ty::Option(x), Ty::Option(y)) | (Ty::Box(x), Ty::Box(y)) | (Ty::Rc(x), Ty::Rc(y)) | (Ty::Arc(x), Ty::Arc(y)) | (Ty::Weak(x), Ty::Weak(y)) | (Ty::Cell(x), Ty::Cell(y)) | (Ty::Mutex(x), Ty::Mutex(y)) | (Ty::MutexRef(x), Ty::MutexRef(y)) | (Ty::Chan(x), Ty::Chan(y)) | (Ty::Ptr(x), Ty::Ptr(y)) => {
                 let (x, y) = ((**x).clone(), (**y).clone());
                 self.unify(cx, &x, &y)
+            }
+            (Ty::ArrayT(x, n), Ty::Array(y, m)) | (Ty::Array(y, m), Ty::ArrayT(x, n)) => {
+                let (x, y, n) = ((**x).clone(), (**y).clone(), (**n).clone());
+                self.unify(cx, &n, &Ty::ConstInt(*m)) && self.unify(cx, &x, &y)
+            }
+            (Ty::ArrayT(x, n), Ty::ArrayT(y, m)) => {
+                let (x, y, n, m) = ((**x).clone(), (**y).clone(), (**n).clone(), (**m).clone());
+                self.unify(cx, &n, &m) && self.unify(cx, &x, &y)
             }
             (Ty::Array(x, n), Ty::Array(y, m)) => {
                 let (x, y) = ((**x).clone(), (**y).clone());
@@ -767,10 +788,11 @@ impl Checker {
                 let e = self.borrow(cx, e);
                 return TExpr::new(TK::Coerce(Coercion::StringToStr, Box::new(e)), Ty::Str, sp);
             }
-            (Ty::Vec(a), Ty::Slice(b)) | (Ty::Array(a, _), Ty::Slice(b)) => {
+            (Ty::Vec(a), Ty::Slice(b)) | (Ty::Array(a, _), Ty::Slice(b)) | (Ty::ArrayT(a, _), Ty::Slice(b)) => {
                 let (a, b) = ((**a).clone(), (**b).clone());
                 if self.unify(cx, &a, &b) {
                     let k = if matches!(actual, Ty::Vec(_)) { Coercion::VecToSlice } else { Coercion::ArrayToSlice };
+                    let _ = &k;
                     let e = self.borrow(cx, e);
                     return TExpr::new(TK::Coerce(k, Box::new(e)), target.clone(), sp);
                 }
@@ -988,6 +1010,9 @@ impl Checker {
             }
             StmtKind::Assign { place, op, value } => return self.assign(cx, place, op, value, sp),
             StmtKind::Return(v) => {
+                if cx.defer_depth > 0 {
+                    self.err(sp, "cannot `return` from a defer");
+                }
                 if cx.yields.is_some() && cx.frames.is_empty() {
                     if v.is_some() {
                         self.err(sp, "projection functions `yield` a place instead of returning a value");
@@ -1023,6 +1048,9 @@ impl Checker {
                 }
             }
             StmtKind::Yield(v) => {
+                if cx.defer_depth > 0 {
+                    self.err(sp, "cannot `yield` from a defer");
+                }
                 let (yk, opt) = match cx.yields {
                     Some(y) if cx.frames.is_empty() => y,
                     _ => {
@@ -1066,14 +1094,29 @@ impl Checker {
                     }
                 }
             }
-            StmtKind::Break | StmtKind::Continue => {
-                if cx.loops == 0 {
-                    self.err(sp, format!("`{}` outside of a loop", if matches!(s.kind, StmtKind::Break) { "break" } else { "continue" }));
-                }
-                if matches!(s.kind, StmtKind::Break) {
-                    TStmt::Break(sp)
+            StmtKind::Break(label) | StmtKind::Continue(label) => {
+                let is_break = matches!(s.kind, StmtKind::Break(_));
+                let word = if is_break { "break" } else { "continue" };
+                let id = match label {
+                    None => match cx.loops.last() {
+                        Some((_, id)) => *id,
+                        None => {
+                            self.err(sp, format!("`{}` outside of a loop", word));
+                            return None;
+                        }
+                    },
+                    Some((l, lsp)) => match cx.loops.iter().rev().find(|(n, _)| n.as_deref() == Some(l.as_str())) {
+                        Some((_, id)) => *id,
+                        None => {
+                            self.err(*lsp, format!("no enclosing loop is labeled `{}`", l));
+                            return None;
+                        }
+                    },
+                };
+                if is_break {
+                    TStmt::Break(id, sp)
                 } else {
-                    TStmt::Continue(sp)
+                    TStmt::Continue(id, sp)
                 }
             }
             StmtKind::ErrDefer(inner) => {
@@ -1085,26 +1128,33 @@ impl Checker {
                     self.err(sp, "`errdefer` is only allowed in functions that return a result (`T ! E`) or an optional value");
                 }
                 self.push_scope(cx);
-                let saved = cx.loops;
-                cx.loops = 0;
+                let saved = std::mem::take(&mut cx.loops);
+                cx.defer_depth += 1;
                 let t = self.stmt(cx, inner);
+                cx.defer_depth -= 1;
                 cx.loops = saved;
                 self.pop_scope(cx);
                 TStmt::ErrDefer(TBlock { stmts: t.into_iter().collect(), value: None, span: inner.span })
             }
             StmtKind::Defer(inner) => {
                 self.push_scope(cx);
-                let saved = cx.loops;
-                cx.loops = 0;
+                let saved = std::mem::take(&mut cx.loops);
+                cx.defer_depth += 1;
                 let t = self.stmt(cx, inner);
+                cx.defer_depth -= 1;
                 cx.loops = saved;
                 self.pop_scope(cx);
-                if matches!(inner.kind, StmtKind::Return(_)) {
-                    self.err(inner.span, "cannot `return` from a defer");
-                }
                 TStmt::Defer(TBlock { stmts: t.into_iter().collect(), value: None, span: inner.span })
             }
-            StmtKind::For(f) => return self.for_loop(cx, f, sp),
+            StmtKind::For(f, label) => {
+                if let Some((l, lsp)) = label {
+                    if cx.loops.iter().any(|(n, _)| n.as_deref() == Some(l.as_str())) {
+                        self.err(*lsp, format!("label `{}` is already used by an enclosing loop", l));
+                    }
+                }
+                cx.pending_label = label.as_ref().map(|l| l.0.clone());
+                return self.for_loop(cx, f, sp);
+            }
             StmtKind::Go(e) => return self.go_stmt(cx, e, sp),
             StmtKind::Send { chan, value } => {
                 let ch = self.expr(cx, chan, None);
@@ -1215,8 +1265,8 @@ impl Checker {
             return;
         }
         let ok = match op {
-            BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem => l.is_numeric() || self.param_numeric(&l),
-            BinOp::WAdd | BinOp::WSub | BinOp::WMul | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr => l.is_int(),
+            BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem => l.is_numeric() || self.param_numeric(&l) || self.numeric_newtype(&l).is_some(),
+            BinOp::WAdd | BinOp::WSub | BinOp::WMul | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr => l.is_int() || self.numeric_newtype(&l).map_or(false, |i| i.is_int()),
             _ => true,
         };
         if !ok {
@@ -1239,20 +1289,30 @@ impl Checker {
         false
     }
 
+    fn enter_loop(&mut self, cx: &mut FnCx) -> u32 {
+        let id = cx.next_loop;
+        cx.next_loop += 1;
+        let label = cx.pending_label.take();
+        cx.loops.push((label, id));
+        id
+    }
+
     fn for_loop(&mut self, cx: &mut FnCx, f: &ast::ForLoop, sp: Span) -> Option<TStmt> {
         match f {
             ast::ForLoop::Infinite(b) => {
-                cx.loops += 1;
+                let id = self.enter_loop(cx);
                 let body = self.block(cx, b, Expect::NoValue);
-                cx.loops -= 1;
-                Some(TStmt::While { cond: None, body })
+                cx.loops.pop();
+                Some(TStmt::While { id, cond: None, body })
             }
             ast::ForLoop::Cond(c, b) => {
+                let label = cx.pending_label.take();
                 let cond = self.expr_value(cx, c, Some(&Ty::Bool));
-                cx.loops += 1;
+                cx.pending_label = label;
+                let id = self.enter_loop(cx);
                 let body = self.block(cx, b, Expect::NoValue);
-                cx.loops -= 1;
-                Some(TStmt::While { cond: Some(cond), body })
+                cx.loops.pop();
+                Some(TStmt::While { id, cond: Some(cond), body })
             }
             ast::ForLoop::In { first, second, iter, by_ref, body } => {
                 self.push_scope(cx);
@@ -1275,10 +1335,10 @@ impl Checker {
                 self.err(iter.span, "a range yields one value per iteration");
             }
             let elem = self.declare(cx, &first.0, it, LocalKind::Let, first.1, false);
-            cx.loops += 1;
+            let id = self.enter_loop(cx);
             let b = self.block(cx, body, Expect::NoValue);
-            cx.loops -= 1;
-            return Some(TStmt::For { kind: IterKind::Range { inclusive: *inclusive }, iter: l, hi: Some(h), elem, index: None, mutable: false, body: b, span: sp });
+            cx.loops.pop();
+            return Some(TStmt::For { id, kind: IterKind::Range { inclusive: *inclusive }, iter: l, hi: Some(h), elem, index: None, mutable: false, body: b, span: sp });
         }
         let it = self.expr(cx, iter, None);
         let ity = self.resolve(cx, &it.ty);
@@ -1290,7 +1350,7 @@ impl Checker {
         let (kind, elem_ty, idx_ty, elem_kind) = match &ity {
             Ty::Vec(t) => (IterKind::Vec, (**t).clone(), Some(Ty::int()), LocalKind::Ref { mutable: by_ref }),
             Ty::Slice(t) => (IterKind::Slice, (**t).clone(), Some(Ty::int()), LocalKind::Ref { mutable: by_ref }),
-            Ty::Array(t, _) => (IterKind::Array, (**t).clone(), Some(Ty::int()), LocalKind::Ref { mutable: by_ref }),
+            Ty::Array(t, _) | Ty::ArrayT(t, _) => (IterKind::Array, (**t).clone(), Some(Ty::int()), LocalKind::Ref { mutable: by_ref }),
             Ty::Map(k, v) => (IterKind::Map, (**v).clone(), Some((**k).clone()), LocalKind::Ref { mutable: by_ref }),
             Ty::Str | Ty::String => {
                 if by_ref {
@@ -1300,11 +1360,7 @@ impl Checker {
             }
             Ty::Chan(t) => (IterKind::Chan, (**t).clone(), None, LocalKind::Let),
             Ty::Error => return None,
-            _ => {
-                let s = self.prog.show(&ity);
-                self.err(iter.span, format!("cannot iterate over `{}`", s));
-                return None;
-            }
+            _ => return self.for_custom(cx, first, second, iter, it, &ity, by_ref, body, sp),
         };
         let (index, elem) = if kind == IterKind::Map {
             let k = self.declare(cx, &first.0, idx_ty.clone().unwrap(), LocalKind::Ref { mutable: false }, first.1, false);
@@ -1335,10 +1391,115 @@ impl Checker {
                 cx.locals[l as usize].ref_root = iter_root;
             }
         }
-        cx.loops += 1;
+        let id = self.enter_loop(cx);
         let b = self.block(cx, body, Expect::NoValue);
-        cx.loops -= 1;
-        Some(TStmt::For { kind, iter: it, hi: None, elem, index, mutable: by_ref, body: b, span: sp })
+        cx.loops.pop();
+        Some(TStmt::For { id, kind, iter: it, hi: None, elem, index, mutable: by_ref, body: b, span: sp })
+    }
+
+    /// `for x in t` over a user type:
+    /// - pull: `cursor(self) C` + `next(self, c inout C) yield ?&T` (or returning `?T`);
+    ///   `nextMut` for `for x in &t`. Rewritten into a plain loop, so every kind of
+    ///   control flow works as usual.
+    /// - push: `each(self, body fn(T) Flow)` (`eachMut` for `&t`). The body becomes a
+    ///   closure; break / continue / return / try inside it are routed out by codegen.
+    #[allow(clippy::too_many_arguments)]
+    fn for_custom(&mut self, cx: &mut FnCx, first: &(String, Span), second: Option<&(String, Span)>, iter: &Expr, it: TExpr, ity: &Ty, by_ref: bool, body: &ast::Block, sp: Span) -> Option<TStmt> {
+        let has = |c: &Checker, name: &str| TyKey::of(ity).map(|k| c.prog.methods.contains_key(&(k, name.to_string()))).unwrap_or(false);
+        let next = if by_ref { "nextMut" } else { "next" };
+        let each = if by_ref { "eachMut" } else { "each" };
+        let label = cx.pending_label.take();
+        if has(self, "cursor") && has(self, next) {
+            cx.hidden += 1;
+            let n = cx.hidden;
+            let e = |k: ExprKind| Expr { kind: k, span: iter.span };
+            let ident = |name: &str| Expr { kind: ExprKind::Ident(name.to_string()), span: iter.span };
+            let is_path = {
+                fn path(x: &Expr) -> bool {
+                    match &x.kind {
+                        ExprKind::Ident(_) => true,
+                        ExprKind::Field(b, _, _) => path(b),
+                        _ => false,
+                    }
+                }
+                path(iter)
+            };
+            let mut stmts = vec![];
+            let target = if is_path {
+                iter.clone()
+            } else {
+                let name = format!("__it{}", n);
+                stmts.push(Stmt { kind: StmtKind::Let { name: name.clone(), name_span: iter.span, ty: None, init: Some(iter.clone()), mutable: by_ref }, span: iter.span });
+                ident(&name)
+            };
+            let cname = format!("__c{}", n);
+            let method = |m: &str, args: Vec<Expr>| e(ExprKind::Call(Box::new(e(ExprKind::Field(Box::new(target.clone()), m.to_string(), iter.span))), args));
+            stmts.push(Stmt { kind: StmtKind::Let { name: cname.clone(), name_span: iter.span, ty: None, init: Some(method("cursor", vec![])), mutable: true }, span: iter.span });
+            let iname = format!("__i{}", n);
+            let (elem, index) = match second {
+                Some(s2) => (s2.clone(), Some(first.clone())),
+                None => (first.clone(), None),
+            };
+            let mut inner = vec![];
+            if let Some((iv, isp)) = &index {
+                stmts.push(Stmt { kind: StmtKind::Let { name: iname.clone(), name_span: *isp, ty: None, init: Some(e(ExprKind::Int(0))), mutable: true }, span: *isp });
+                inner.push(Stmt { kind: StmtKind::Let { name: iv.clone(), name_span: *isp, ty: None, init: Some(ident(&iname)), mutable: false }, span: *isp });
+                inner.push(Stmt { kind: StmtKind::Assign { place: ident(&iname), op: "+=", value: e(ExprKind::Int(1)) }, span: *isp });
+            }
+            inner.extend(body.stmts.iter().cloned());
+            let step = method(next, vec![e(ExprKind::Ref(Box::new(ident(&cname))))]);
+            let if_let = e(ExprKind::IfLet {
+                pat: ast::Pattern { kind: ast::PatternKind::Ident(elem.0.clone()), span: elem.1 },
+                expr: Box::new(step),
+                then: ast::Block { stmts: inner, span: body.span },
+                else_: Some(Box::new(e(ExprKind::Block(ast::Block { stmts: vec![Stmt { kind: StmtKind::Break(None), span: sp }], span: sp })))),
+            });
+            let lp = ast::ForLoop::Infinite(ast::Block { stmts: vec![Stmt { kind: StmtKind::Expr(if_let), span: sp }], span: body.span });
+            stmts.push(Stmt { kind: StmtKind::For(lp, label.map(|l| (l, sp))), span: sp });
+            let tb = self.block(cx, &ast::Block { stmts, span: sp }, Expect::NoValue);
+            return Some(TStmt::Expr(TExpr::new(TK::Block(tb), Ty::Unit, sp)));
+        }
+        if has(self, each) {
+            let id = cx.next_loop;
+            cx.next_loop += 1;
+            let mut params = vec![ast::ClosureParam { name: first.0.clone(), mode: Mode::Borrow, ty: None, span: first.1 }];
+            if let Some(s2) = second {
+                params.push(ast::ClosureParam { name: s2.0.clone(), mode: Mode::Borrow, ty: None, span: s2.1 });
+            }
+            let closure = Expr { kind: ExprKind::Closure { params, ret: None, body: Box::new(Expr { kind: ExprKind::Block(body.clone()), span: body.span }) }, span: body.span };
+            cx.loop_body_next = Some((id, label));
+            let call = self.method_call_on(cx, it, each, iter.span, None, &[closure], sp, None);
+            let took = cx.loop_body_next.take().is_none();
+            if let TK::Call { args, .. } = &call.kind {
+                let ok = took && matches!(args.last(), Some(TArg { e: TExpr { kind: TK::Closure(c), .. }, mode: ArgMode::Borrow }) if c.loop_body == Some(id));
+                if !ok {
+                    let s = self.prog.show(ity);
+                    self.err(iter.span, format!("`{}.{}` must take the loop body as its last parameter: `fn {}(self, body fn(T) Flow)`", s, each, each));
+                    return None;
+                }
+                let rt = self.resolve(cx, match args.last() {
+                    Some(a) => match &a.e.ty {
+                        Ty::Func(f) => &f.ret,
+                        _ => &a.e.ty,
+                    },
+                    None => &Ty::Error,
+                });
+                let flow = self.prog.prelude_type("Flow").map(|d| Ty::Adt(d, Rc::new(vec![])));
+                if Some(&rt) != flow.as_ref() {
+                    let s = self.prog.show(&rt);
+                    self.err(iter.span, format!("the loop body passed to `{}` must return `Flow`, not `{}`", each, s));
+                }
+            } else {
+                return None;
+            }
+            return Some(TStmt::ForEach { id, call });
+        }
+        let s = self.prog.show(ity);
+        self.diags.push(
+            Diag::new(iter.span, format!("cannot iterate over `{}`", s))
+                .note(None, format!("make it iterable with `fn cursor(self) C` and `fn {}(self{}, c inout C) yield ?&T`, or with `fn {}(self{}, body fn(T) Flow)`", next, if by_ref { " inout" } else { "" }, each, if by_ref { " inout" } else { "" })),
+        );
+        None
     }
 
     fn go_stmt(&mut self, cx: &mut FnCx, e: &Expr, sp: Span) -> Option<TStmt> {
@@ -1554,7 +1715,7 @@ impl Checker {
                 let lo = lo.as_ref().map(|l| Box::new(self.expr_value(cx, l, Some(&Ty::int()))));
                 let hi = hi.as_ref().map(|h| Box::new(self.expr_value(cx, h, Some(&Ty::int()))));
                 let rty = match &bty {
-                    Ty::Vec(t) | Ty::Slice(t) | Ty::Array(t, _) => Ty::Slice(t.clone()),
+                    Ty::Vec(t) | Ty::Slice(t) | Ty::Array(t, _) | Ty::ArrayT(t, _) => Ty::Slice(t.clone()),
                     Ty::Str | Ty::String => Ty::Str,
                     Ty::Error => return TExpr::error(sp),
                     _ => {
@@ -1754,6 +1915,10 @@ impl Checker {
             Some(PathRes::Pkg(..)) => {
                 self.err(sp, format!("package `{}` used as a value", name));
                 TExpr::error(sp)
+            }
+            Some(PathRes::TypeCon(Ty::Param(p), _)) if self.prog.tparam(p).is_int => {
+                // an integer type parameter used as a value
+                TExpr::new(TK::ConstParam(p), Ty::int(), sp)
             }
             Some(PathRes::TypeCon(..)) => {
                 self.err(sp, format!("type `{}` used as a value", name));
@@ -2065,7 +2230,7 @@ impl Checker {
             }
         }
         let bty = self.resolve(cx, &b.ty);
-        if name == "len" && matches!(bty, Ty::Vec(_) | Ty::Slice(_) | Ty::Array(..) | Ty::Str | Ty::String | Ty::Map(..)) {
+        if name == "len" && matches!(bty, Ty::Vec(_) | Ty::Slice(_) | Ty::Array(..) | Ty::ArrayT(..) | Ty::Str | Ty::String | Ty::Map(..)) {
             let b = self.borrow(cx, b);
             return TExpr::new(TK::Intrinsic { name: "len".into(), targs: vec![], args: vec![TArg { mode: ArgMode::Borrow, e: b }] }, Ty::int(), sp);
         }
@@ -2092,7 +2257,7 @@ impl Checker {
         loop {
             let bty = self.resolve(cx, &b.ty);
             match &bty {
-                Ty::Vec(t) | Ty::Slice(t) | Ty::Array(t, _) => {
+                Ty::Vec(t) | Ty::Slice(t) | Ty::Array(t, _) | Ty::ArrayT(t, _) => {
                     let t = (**t).clone();
                     let i = self.expr(cx, &idx[0], Some(&Ty::int()));
                     let ity = self.resolve(cx, &i.ty);
@@ -2131,7 +2296,8 @@ impl Checker {
                 }
                 let e = self.expr_value(cx, inner, expect.filter(|t| t.is_numeric()));
                 let t = self.resolve(cx, &e.ty);
-                if !(matches!(t, Ty::Int(k) if k.signed()) || t.is_float() || t.is_error() || self.param_numeric(&t)) {
+                let signed = |t: &Ty| matches!(t, Ty::Int(k) if k.signed()) || t.is_float();
+                if !(signed(&t) || t.is_error() || self.param_numeric(&t) || self.numeric_newtype(&t).map_or(false, |i| signed(&i))) {
                     let s = self.prog.show(&t);
                     self.err(sp, format!("cannot negate a value of type `{}`", s));
                 }
@@ -2293,6 +2459,9 @@ impl Checker {
     }
 
     fn try_expr(&mut self, cx: &mut FnCx, inner: &Expr, wrap: Option<&Expr>, sp: Span) -> TExpr {
+        if cx.defer_depth > 0 {
+            self.err(sp, "cannot use `try` in a defer: it would return from the function; handle the error with `catch` or `match`");
+        }
         let e = self.expr(cx, inner, None);
         let e = self.value(cx, e);
         let ety = self.resolve(cx, &e.ty);
@@ -2660,6 +2829,11 @@ impl Checker {
                 return TExpr::error(sp);
             }
         }
+        let loop_body = cx.loop_body_next.take();
+        let saved_defer = cx.defer_depth;
+        if loop_body.is_none() {
+            cx.defer_depth = 0;
+        }
         let depth = cx.depth() + 1;
         let saved_ret = cx.ret.clone();
         let ret_ty = match (ret, &ef) {
@@ -2670,9 +2844,15 @@ impl Checker {
             (None, Some(f)) => f.ret.clone(),
             (None, None) => self.fresh(cx),
         };
-        cx.frames.push(Frame { depth, captures: vec![], saved_ret, saved_loops: cx.loops, saved_yields: cx.yields });
-        cx.ret = ret_ty.clone();
-        cx.loops = 0;
+        if let Some((lid, label)) = &loop_body {
+            // a loop body: outer loops stay reachable and `return` / `try`
+            // keep referring to the enclosing function
+            cx.frames.push(Frame { depth, captures: vec![], saved_ret, saved_loops: cx.loops.clone(), saved_yields: cx.yields });
+            cx.loops.push((label.clone(), *lid));
+        } else {
+            cx.frames.push(Frame { depth, captures: vec![], saved_ret, saved_loops: std::mem::take(&mut cx.loops), saved_yields: cx.yields });
+            cx.ret = ret_ty.clone();
+        }
         cx.yields = None;
         self.push_scope(cx);
         let mut ps = vec![];
@@ -2710,6 +2890,7 @@ impl Checker {
         }
         let rr = self.resolve(cx, &ret_ty);
         let tb = match &body.kind {
+            ExprKind::Block(b) if loop_body.is_some() => self.block_in_scope(cx, b, Expect::NoValue, false),
             ExprKind::Block(b) => {
                 let ex = if rr == Ty::Unit { Expect::NoValue } else if matches!(rr, Ty::Var(_)) { Expect::Infer } else { Expect::Ty(rr.clone()) };
                 let mut tb = self.block_in_scope(cx, b, ex, false);
@@ -2751,6 +2932,7 @@ impl Checker {
             }
         };
         self.pop_scope(cx);
+        cx.defer_depth = saved_defer;
         let fr = cx.frames.pop().unwrap();
         cx.ret = fr.saved_ret;
         cx.loops = fr.saved_loops;
@@ -2763,7 +2945,7 @@ impl Checker {
             let e = e.clone();
             self.unify(cx, &e, &fty);
         }
-        let c = TClosure { id, params: ps, ret: ret_final, body: tb, captures: fr.captures, owned: false, scoped: false, by_value: vec![], span: sp };
+        let c = TClosure { id, params: ps, ret: ret_final, body: tb, captures: fr.captures, owned: false, scoped: false, by_value: vec![], loop_body: loop_body.map(|l| l.0), span: sp };
         TExpr::new(TK::Closure(Box::new(c)), fty, sp)
     }
 
@@ -2773,7 +2955,11 @@ impl Checker {
             // captures declared inside an enclosing closure that is the same frame are fine
             let local = cx.locals[l as usize].clone();
             if u == CapUse::Move {
-                self.err(c.span, format!("closure moves captured variable `{}` out; closures may only read or (if not escaping) modify captured variables", local.name));
+                if c.loop_body.is_some() {
+                    self.diags.push(Diag::new(c.span, format!("cannot move `{}` inside this loop: the body of a `for` over a type with `each` may run many times", local.name)).note(None, "`.clone()` it, or iterate with `cursor` / `next`, whose loops allow moves"));
+                } else {
+                    self.err(c.span, format!("closure moves captured variable `{}` out; closures may only read or (if not escaping) modify captured variables", local.name));
+                }
             }
             if owned {
                 let lt = self.resolve(cx, &local.ty);
@@ -3006,6 +3192,17 @@ impl Checker {
             if args.len() != 1 {
                 self.err(sp, format!("`{}(x)` takes one value", name));
                 return TExpr::error(sp);
+            }
+            if let (true, ExprKind::Ref(inner)) = (name == "Mutex", &args[0].kind) {
+                // `Mutex(&x)`: lock a borrowed place
+                let p = self.expr(cx, inner, None);
+                if !p.is_place() {
+                    self.err(inner.span, "`Mutex(&x)` needs a variable or another place to lock");
+                    return TExpr::error(sp);
+                }
+                self.require_mut(cx, &p, "lock");
+                let t = Rc::new(self.resolve(cx, &p.ty));
+                return TExpr::new(TK::MutexRef(Box::new(p)), Ty::MutexRef(t), sp);
             }
             let inner_expect = match (name.as_str(), expect) {
                 ("Box", Some(Ty::Box(t))) | ("rc", Some(Ty::Rc(t))) | ("arc", Some(Ty::Arc(t))) | ("Mutex", Some(Ty::Mutex(t))) | ("Cell", Some(Ty::Cell(t))) => Some((**t).clone()),
@@ -3474,9 +3671,15 @@ impl Checker {
                         let rp = fd.recv.as_ref().unwrap().ty.clone();
                         let mut sm = HashMap::new();
                         if bind_params(&rp, &cty, &mut sm) {
+                            if !fd.is_pub && fd.pkg != cx.env.pkg {
+                                let (n, s) = (fd.name.clone(), self.prog.show(&cty));
+                                self.err(nsp, format!("method `{}` of `{}` is private", n, s));
+                            }
+                            let fd = self.prog.func(fid);
                             // conditional methods: check where-bounds on receiver params
                             let tps = fd.tparams.clone();
                             let fname = fd.name.clone();
+                            let mut unmet = false;
                             for tp in tps {
                                 if let Some(t) = sm.get(&tp).cloned() {
                                     for bd in self.prog.tparam(tp).bounds.clone() {
@@ -3484,9 +3687,25 @@ impl Checker {
                                             let tn = self.prog.tparam(tp).name.clone();
                                             let s = self.prog.show(&cty);
                                             self.err(nsp, format!("method `{}` of `{}` requires `{}: {}`: {}", fname, s, tn, bound_name(&self.prog, &bd), m));
+                                            unmet = true;
                                         }
                                     }
                                 }
+                            }
+                            if unmet {
+                                // the generic bound check in call_fn would report the same thing again
+                                let n = self.diags.len();
+                                let r = self.call_fn(cx, fid, targs, Some(cur), args, sp, expect);
+                                let dup = format!("`{}` requires `", fname);
+                                let mut i = n;
+                                while i < self.diags.len() {
+                                    if self.diags[i].msg.starts_with(&dup) {
+                                        self.diags.remove(i);
+                                    } else {
+                                        i += 1;
+                                    }
+                                }
+                                return r;
                             }
                             return self.call_fn(cx, fid, targs, Some(cur), args, sp, expect);
                         }
@@ -3538,7 +3757,7 @@ impl Checker {
                     let t = Ty::Slice(t.clone());
                     TExpr::new(TK::Coerce(Coercion::VecToSlice, Box::new(cur)), t, sp2)
                 }
-                Ty::Array(t, _) => {
+                Ty::Array(t, _) | Ty::ArrayT(t, _) => {
                     let t = Ty::Slice(t.clone());
                     TExpr::new(TK::Coerce(Coercion::ArrayToSlice, Box::new(cur)), t, sp2)
                 }
@@ -3685,7 +3904,7 @@ pub fn is_lock_proj(prog: &Program, e: &TExpr) -> bool {
     if let TK::Proj { call, .. } = &e.kind {
         if let TK::Call { callee: Callee::Func(f, _), .. } = &call.kind {
             let fd = prog.func(*f);
-            return fd.kind == FuncKind::Intrinsic && fd.recv_key == Some(TyKey::Mutex) && fd.name == "lock";
+            return fd.kind == FuncKind::Intrinsic && matches!(fd.recv_key, Some(TyKey::Mutex) | Some(TyKey::MutexRef)) && fd.name == "lock";
         }
     }
     false
@@ -3696,9 +3915,9 @@ pub fn block_diverges(b: &TBlock) -> bool {
         return v.ty == Ty::Never;
     }
     match b.stmts.last() {
-        Some(TStmt::Return(..)) | Some(TStmt::Break(_)) | Some(TStmt::Continue(_)) => true,
+        Some(TStmt::Return(..)) | Some(TStmt::Break(..)) | Some(TStmt::Continue(..)) => true,
         Some(TStmt::Expr(e)) => e.ty == Ty::Never,
-        Some(TStmt::While { cond: None, body }) => !contains_break(body),
+        Some(TStmt::While { cond: None, body, .. }) => !contains_break(body),
         _ => false,
     }
 }
@@ -3706,7 +3925,7 @@ pub fn block_diverges(b: &TBlock) -> bool {
 fn contains_break(b: &TBlock) -> bool {
     fn stmt(s: &TStmt) -> bool {
         match s {
-            TStmt::Break(_) => true,
+            TStmt::Break(..) => true,
             TStmt::Expr(e) => expr(e),
             TStmt::Let { init, .. } => expr(init),
             TStmt::With { body, .. } | TStmt::Defer(body) | TStmt::ErrDefer(body) => contains_break(body),
@@ -3792,7 +4011,7 @@ fn zonk_walk_stmt(s: &mut TStmt, f: &mut dyn FnMut(&mut Ty)) {
         }
         TStmt::Return(Some(e), _) => zonk_walk_expr(e, f),
         TStmt::Defer(b) | TStmt::ErrDefer(b) => zonk_walk_block(b, f),
-        TStmt::While { cond, body } => {
+        TStmt::While { cond, body, .. } => {
             if let Some(c) = cond {
                 zonk_walk_expr(c, f)
             }
@@ -3805,7 +4024,7 @@ fn zonk_walk_stmt(s: &mut TStmt, f: &mut dyn FnMut(&mut Ty)) {
             }
             zonk_walk_block(body, f)
         }
-        TStmt::Go { call, .. } => zonk_walk_expr(call, f),
+        TStmt::Go { call, .. } | TStmt::ForEach { call, .. } => zonk_walk_expr(call, f),
         TStmt::Send { chan, value } => {
             zonk_walk_expr(chan, f);
             zonk_walk_expr(value, f)
@@ -3876,7 +4095,7 @@ pub fn zonk_walk_expr(e: &mut TExpr, f: &mut dyn FnMut(&mut Ty)) {
             targs.iter_mut().for_each(|t| f(t));
             args.iter_mut().for_each(|a| zonk_walk_expr(&mut a.e, f))
         }
-        TK::Unary { e: x, .. } | TK::Cast(x) | TK::SomeLit(x) | TK::OkLit(x) | TK::ErrLit(x) | TK::Move(x) | TK::Copy(x) | TK::Coerce(_, x) | TK::Recv(x) | TK::Wrap(x) | TK::MakeChan(x) | TK::Unbox(x) => zonk_walk_expr(x, f),
+        TK::Unary { e: x, .. } | TK::Cast(x) | TK::SomeLit(x) | TK::OkLit(x) | TK::ErrLit(x) | TK::Move(x) | TK::Copy(x) | TK::Coerce(_, x) | TK::Recv(x) | TK::Wrap(x) | TK::MakeChan(x) | TK::Unbox(x) | TK::MutexRef(x) => zonk_walk_expr(x, f),
         TK::Binary { l, r, .. } | TK::Coalesce { l, r } => {
             zonk_walk_expr(l, f);
             zonk_walk_expr(r, f)

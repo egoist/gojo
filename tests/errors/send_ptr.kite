@@ -1,0 +1,15 @@
+struct Plain {
+    p *int
+}
+
+extern "C" {
+    fn calloc(n u64, size u64) *int
+}
+
+fn main() {
+    let x = Plain{p: unsafe { calloc(1, 8) }}
+    go () => {
+        _ = x.p
+    }
+    // error: `go` closure captures `x` of type `Plain`, which cannot be sent to another goroutine
+}

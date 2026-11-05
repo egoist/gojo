@@ -1,0 +1,37 @@
+// A zero-copy tokenizer: the input and the token spans live in one struct.
+struct Tokens {
+    src String
+    spans Vec[Span]
+
+    fn new(src sink String) Tokens {
+        var spans = Vec[Span]{}
+        var i = 0
+        let b = src.bytes()
+        for i < b.len {
+            if b[i] == ' ' {
+                i += 1
+                continue
+            }
+            let lo = i
+            for i < b.len && b[i] != ' ' {
+                i += 1
+            }
+            spans.push(Span{lo: lo, hi: i})
+        }
+        return Tokens{src: src, spans: spans}
+    }
+
+    // a view into the stored input
+    fn get(self, i int) str {
+        return self.spans[i].of(self.src)
+    }
+}
+
+fn main() {
+    let t = Tokens.new("let x = 42".toString())
+    for i in 0..t.spans.len {
+        print(t.get(i), "")
+    }
+    println()
+    println(t.spans.len, t.spans[3].len())
+}

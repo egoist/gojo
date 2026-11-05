@@ -1,0 +1,170 @@
+use fmt
+
+// Pull iteration: `cursor` + `next`. The cursor is plain data.
+struct Countdown {
+    from int
+
+    fn cursor(self) int {
+        return self.from
+    }
+
+    // returns owned values: a generator
+    fn next(self, c inout int) ?int {
+        if c == 0 {
+            return none
+        }
+        c -= 1
+        return c + 1
+    }
+}
+
+struct Ring {
+    items Vec[String]
+    start int
+
+    fn cursor(self) int {
+        return 0
+    }
+
+    // yields references into the ring
+    fn next(self, c inout int) yield ?&String {
+        if c >= self.items.len {
+            yield none
+        }
+        let i = (self.start + c) % self.items.len
+        c += 1
+        yield self.items[i]
+    }
+
+    fn nextMut(self inout, c inout int) yield ?inout String {
+        if c >= self.items.len {
+            yield none
+        }
+        let i = (self.start + c) % self.items.len
+        c += 1
+        yield self.items[i]
+    }
+}
+
+// Push iteration: `each` with a body that returns Flow.
+enum Tree {
+    Leaf
+    Node(left Box[Tree], value int, right Box[Tree])
+
+    fn insert(self sink, v int) Tree {
+        return match self {
+            Leaf => Tree.Node(Box(Tree.Leaf), v, Box(Tree.Leaf))
+            Node(l, x, r) => if v < x {
+                Tree.Node(Box((*l).insert(v)), x, r)
+            } else {
+                Tree.Node(l, x, Box((*r).insert(v)))
+            }
+        }
+    }
+
+    // in-order traversal; stops as soon as the body says Break
+    fn each(self, body fn(int) Flow) Flow {
+        return match self {
+            Leaf => .Continue
+            Node(l, x, r) => {
+                if l.each(body) == .Break {
+                    return .Break
+                }
+                if body(x) == .Break {
+                    return .Break
+                }
+                r.each(body)
+            }
+        }
+    }
+}
+
+fn firstOver(t Tree, limit int) ?int {
+    for x in t {
+        if x > limit {
+            return x
+        }
+    }
+    return none
+}
+
+fn parseAll(t Tree) int ! String {
+    var sum = 0
+    for x in t {
+        let checked = try check(x)
+        sum += checked
+    }
+    return sum
+}
+
+fn check(x int) int ! String {
+    if x == 13 {
+        return err("unlucky".toString())
+    }
+    return x
+}
+
+fn main() {
+    var r = Ring{items: ["a", "b", "c", "d"], start: 2}
+    for i, s in r {
+        print(i, s, "")
+    }
+    println()
+    for s in &r {
+        s.push("!")
+    }
+    println(r.items)
+    var total = 0
+    for n in (Countdown{from: 5}) {
+        if n == 3 {
+            continue
+        }
+        total += n
+    }
+    println("countdown", total)
+
+    var t = Tree.Leaf
+    for v in [50, 30, 70, 20, 40, 60, 80] {
+        t = t.insert(v)
+    }
+    var seen = Vec[int]{}
+    for x in t {
+        if x == 40 {
+            continue
+        }
+        if x > 70 {
+            break
+        }
+        seen.push(x)
+    }
+    println(seen)
+    println(firstOver(t, 55), firstOver(t, 100))
+    println(parseAll(t))
+    let t2 = t.clone().insert(13)
+    println(parseAll(t2))
+
+    // labeled jumps out of a push-style loop, through nested loops
+    var hits = Vec[String]{}
+    outer: for round in 0..3 {
+        for x in t {
+            if x == 30 && round == 0 {
+                continue outer
+            }
+            if x == 60 {
+                break outer
+            }
+            hits.push(fmt.sprint(round, x))
+        }
+    }
+    println(hits)
+    var pairs = 0
+    for a in t {
+        inner: for b in t {
+            if b > a {
+                break inner
+            }
+            pairs += 1
+        }
+    }
+    println("pairs", pairs)
+}

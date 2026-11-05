@@ -68,6 +68,7 @@ struct Loan {
 }
 
 struct LoopCx {
+    id: u32,
     breaks: Vec<St>,
     conts: Vec<St>,
 }
@@ -291,10 +292,24 @@ impl<'a> Bc<'a> {
     // Loans
     // ------------------------------------------------------------------
 
-    fn add_loans(&mut self, holder: LocalId, targets: Vec<(Path, bool)>, mutable: bool, sp: Span, st: &St) {
+    /// Record that `holder` borrows `targets`. `from` is the expression the
+    /// borrow comes from: borrowing again through an existing reference (a
+    /// re-borrow) does not conflict with that reference's own loan.
+    fn add_loans(&mut self, holder: LocalId, targets: Vec<(Path, bool)>, mutable: bool, sp: Span, st: &St, from: &TExpr) {
+        let mut vias: Vec<LocalId> = vec![];
+        visit_expr(from, &mut |e| {
+            if let TK::Local(l) = e.kind {
+                vias.push(l)
+            }
+        });
+        vias.retain(|l| self.holders.contains_key(l));
         for (t, _) in &targets {
             self.check_moved(st, t, sp, "borrow of");
-            self.check_loans(t, if mutable { Acc::Mut } else { Acc::Read }, sp, None);
+            let acc = if mutable { Acc::Mut } else { Acc::Read };
+            let saved: Vec<Loan> = self.loans.clone();
+            self.loans.retain(|l| !l.holder.map(|h| vias.contains(&h)).unwrap_or(false));
+            self.check_loans(t, acc, sp, None);
+            self.loans = saved;
         }
         for (t, _) in &targets {
             self.loans.push(Loan { target: t.clone(), mutable, holder: Some(holder), span: sp, depth: self.depth });
@@ -342,6 +357,7 @@ impl<'a> Bc<'a> {
             }
             TK::Proj { call, .. } => self.view_sources(call),
             TK::ProjUnwrap { proj, .. } => self.view_sources(proj),
+            TK::MutexRef(p) => Ok(self.targets(p).into_iter().map(|(t, _)| (t, true)).collect()),
             TK::Block(b) | TK::Unsafe(b) => match &b.value {
                 Some(v) => self.view_sources(v),
                 None => Ok(vec![]),
@@ -378,8 +394,44 @@ impl<'a> Bc<'a> {
     fn block(&mut self, st: &mut St, b: &TBlock) {
         self.depth += 1;
         self.defers.push(vec![]);
-        for s in &b.stmts {
+        // A reference or view declared in this block stops borrowing after the
+        // last statement that mentions it (defers count as the end of the block).
+        let mut last_use: HashMap<LocalId, usize> = HashMap::new();
+        let mut declared: Vec<LocalId> = vec![];
+        for (i, s) in b.stmts.iter().enumerate() {
+            match s {
+                TStmt::Let { local, .. } | TStmt::LetRef { local, .. } => declared.push(*local),
+                _ => {}
+            }
+            let mut ls = vec![];
+            locals_in_stmt(s, &mut ls);
+            let at = if matches!(s, TStmt::Defer(_) | TStmt::ErrDefer(_)) { usize::MAX } else { i };
+            for l in ls {
+                let e = last_use.entry(l).or_insert(at);
+                *e = (*e).max(at);
+            }
+        }
+        if let Some(v) = &b.value {
+            let mut ls = vec![];
+            visit_expr(v, &mut |e| {
+                if let TK::Local(l) = e.kind {
+                    ls.push(l)
+                }
+                if let TK::Closure(c) = &e.kind {
+                    ls.extend(c.captures.iter().map(|c| c.0))
+                }
+            });
+            for l in ls {
+                last_use.insert(l, usize::MAX);
+            }
+        }
+        for (i, s) in b.stmts.iter().enumerate() {
             self.stmt(st, s);
+            for &l in &declared {
+                if last_use.get(&l).copied().unwrap_or(0) == i && self.holders.contains_key(&l) {
+                    self.loans.retain(|ln| ln.holder != Some(l));
+                }
+            }
         }
         if let Some(v) = &b.value {
             self.expr(st, v);
@@ -410,7 +462,8 @@ impl<'a> Bc<'a> {
                     match self.view_sources(init) {
                         Ok(srcs) => {
                             if !srcs.is_empty() {
-                                self.add_loans(*local, srcs, false, init.span, st);
+                                let mutable = matches!(init.kind, TK::MutexRef(_));
+                                self.add_loans(*local, srcs, mutable, init.span, st, init);
                             }
                         }
                         Err(sp) => self.err(Diag::new(sp, "this temporary value is dropped at the end of the statement, but a view of it is kept").note(None, "bind the value to a variable first: `let s = ...` and borrow from that")),
@@ -428,7 +481,7 @@ impl<'a> Bc<'a> {
                     }
                     None => targets,
                 };
-                self.add_loans(*local, targets, mutable, place.span, st);
+                self.add_loans(*local, targets, mutable, place.span, st, place);
             }
             TStmt::Expr(e) => self.expr(st, e),
             TStmt::Assign { place, op, value, .. } => {
@@ -471,14 +524,14 @@ impl<'a> Bc<'a> {
                 }
                 *st = St::unreachable();
             }
-            TStmt::Break(_) => {
-                if let Some(l) = self.loops.last_mut() {
+            TStmt::Break(id, _) => {
+                if let Some(l) = self.loops.iter_mut().rev().find(|l| l.id == *id) {
                     l.breaks.push(st.clone());
                 }
                 *st = St::unreachable();
             }
-            TStmt::Continue(_) => {
-                if let Some(l) = self.loops.last_mut() {
+            TStmt::Continue(id, _) => {
+                if let Some(l) = self.loops.iter_mut().rev().find(|l| l.id == *id) {
                     l.conts.push(st.clone());
                 }
                 *st = St::unreachable();
@@ -492,15 +545,15 @@ impl<'a> Bc<'a> {
                     d.push(b.clone());
                 }
             }
-            TStmt::While { cond, body } => {
-                self.loop_body(st, |me, s| {
+            TStmt::While { id, cond, body } => {
+                self.loop_body(st, *id, |me, s| {
                     if let Some(c) = cond {
                         me.expr(s, c);
                     }
                     me.block(s, body);
                 }, cond.is_none());
             }
-            TStmt::For { kind, iter, hi, elem, index, mutable, body, .. } => {
+            TStmt::For { id, kind, iter, hi, elem, index, mutable, body, .. } => {
                 self.expr(st, iter);
                 if let Some(h) = hi {
                     self.expr(st, h);
@@ -523,7 +576,7 @@ impl<'a> Bc<'a> {
                     }
                 }
                 let (el, ix) = (*elem, *index);
-                self.loop_body(st, |me, s| {
+                self.loop_body(st, *id, |me, s| {
                     me.reinit(s, &(el, vec![]));
                     if let Some(i) = ix {
                         me.reinit(s, &(i, vec![]));
@@ -533,7 +586,7 @@ impl<'a> Bc<'a> {
                 self.end_depth();
                 self.depth -= 1;
             }
-            TStmt::Go { call, .. } => self.expr(st, call),
+            TStmt::Go { call, .. } | TStmt::ForEach { call, .. } => self.expr(st, call),
             TStmt::Send { chan, value } => {
                 self.expr(st, chan);
                 self.expr(st, value);
@@ -543,7 +596,7 @@ impl<'a> Bc<'a> {
                 self.depth += 1;
                 let mutable = !*lock && matches!(self.tf.locals[*local as usize].kind, LocalKind::Ref { mutable: true });
                 let targets = self.targets(place);
-                self.add_loans(*local, targets, mutable, place.span, st);
+                self.add_loans(*local, targets, mutable, place.span, st, place);
                 self.block(st, body);
                 self.end_depth();
                 self.depth -= 1;
@@ -617,11 +670,11 @@ impl<'a> Bc<'a> {
         }
     }
 
-    fn loop_body(&mut self, st: &mut St, mut body: impl FnMut(&mut Self, &mut St), infinite: bool) {
+    fn loop_body(&mut self, st: &mut St, id: u32, mut body: impl FnMut(&mut Self, &mut St), infinite: bool) {
         let entry = st.clone();
         // first pass discovers moves that happen inside the loop
         self.suppress += 1;
-        self.loops.push(LoopCx { breaks: vec![], conts: vec![] });
+        self.loops.push(LoopCx { id, breaks: vec![], conts: vec![] });
         let mut s1 = entry.clone();
         let saved_loans = self.loans.clone();
         let saved_holders = self.holders.clone();
@@ -636,7 +689,7 @@ impl<'a> Bc<'a> {
             head.join(c);
         }
         // second pass reports errors with moves from previous iterations
-        self.loops.push(LoopCx { breaks: vec![], conts: vec![] });
+        self.loops.push(LoopCx { id, breaks: vec![], conts: vec![] });
         let mut s2 = head.clone();
         body(self, &mut s2);
         let lc = self.loops.pop().unwrap();
@@ -679,6 +732,7 @@ impl<'a> Bc<'a> {
                 }
             }
             TK::Unary { e: x, .. } | TK::Cast(x) | TK::SomeLit(x) | TK::OkLit(x) | TK::ErrLit(x) | TK::Coerce(_, x) | TK::Recv(x) | TK::Wrap(x) | TK::MakeChan(x) | TK::Unbox(x) => self.expr(st, x),
+            TK::MutexRef(p) => self.write(st, p),
             TK::OptField { base, .. } => self.expr(st, base),
             TK::Binary { op, l, r } => {
                 self.expr(st, l);
@@ -823,13 +877,14 @@ impl<'a> Bc<'a> {
             TK::Proj { call, .. } => return self.call_args(st, call),
             _ => return self.expr(st, e),
         };
-        let mut accesses: Vec<(Path, Acc, Span)> = vec![];
+        // (path, access, span, comes from a push-style loop body)
+        let mut accesses: Vec<(Path, Acc, Span, bool)> = vec![];
         for a in args {
             match a.mode {
                 ArgMode::Inout => {
                     self.write(st, &a.e);
                     for (p, _) in self.arg_targets(&a.e) {
-                        accesses.push((p, Acc::Mut, a.e.span));
+                        accesses.push((p, Acc::Mut, a.e.span, false));
                     }
                 }
                 ArgMode::Borrow => {
@@ -839,7 +894,7 @@ impl<'a> Bc<'a> {
                             for (l, u) in &c.captures {
                                 let le = TExpr::new(TK::Local(*l), self.tf.locals[*l as usize].ty.clone(), c.span);
                                 for (p, _) in self.arg_targets(&le) {
-                                    accesses.push((p, if *u == CapUse::Mutate { Acc::Mut } else { Acc::Read }, c.span));
+                                    accesses.push((p, if *u == CapUse::Mutate { Acc::Mut } else { Acc::Read }, c.span, c.loop_body.is_some()));
                                 }
                             }
                         }
@@ -852,7 +907,7 @@ impl<'a> Bc<'a> {
                     }
                     if !self.is_copy(&a.e.ty) || a.e.ty.is_view() {
                         for (p, _) in self.arg_targets(&a.e) {
-                            accesses.push((p, Acc::Read, a.e.span));
+                            accesses.push((p, Acc::Read, a.e.span, false));
                         }
                     }
                 }
@@ -861,13 +916,13 @@ impl<'a> Bc<'a> {
                     if let TK::Move(x) = &a.e.kind {
                         if let Some(p) = place_path(x) {
                             if !self.is_holder(p.0) {
-                                accesses.push((p, Acc::Mut, a.e.span));
+                                accesses.push((p, Acc::Mut, a.e.span, false));
                             }
                         }
                     } else if a.e.ty.is_view() {
                         if let Ok(srcs) = self.view_sources(&a.e) {
                             for (p, _) in srcs {
-                                accesses.push((p, Acc::Read, a.e.span));
+                                accesses.push((p, Acc::Read, a.e.span, false));
                             }
                         }
                     }
@@ -880,7 +935,13 @@ impl<'a> Bc<'a> {
                 if overlap(&a.0, &b.0) && (a.1 == Acc::Mut || b.1 == Acc::Mut) {
                     let n = self.name(&a.0);
                     let (sp, other) = (a.2, b.2);
-                    self.err(Diag::new(sp, format!("`{}` is used by two arguments of the same call, and one of them may modify it", n)).note(Some(other), "the other use is here"));
+                    if a.3 || b.3 {
+                        let (body, it) = if a.3 { (a, b) } else { (b, a) };
+                        let msg = if body.1 == Acc::Mut { format!("cannot modify `{}` while iterating over it", n) } else { format!("cannot use `{}` while iterating over it mutably", n) };
+                        self.err(Diag::new(it.2, msg).note(Some(body.2), "the loop body uses it here"));
+                    } else {
+                        self.err(Diag::new(sp, format!("`{}` is used by two arguments of the same call, and one of them may modify it", n)).note(Some(other), "the other use is here"));
+                    }
                 }
             }
         }

@@ -1,0 +1,6 @@
+fn main() {
+    let x = 1
+    let bad = Mutex(&x)
+    _ = bad
+    // error: cannot lock variable `x`: it is not mutable
+}

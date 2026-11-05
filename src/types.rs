@@ -95,6 +95,9 @@ pub enum Ty {
     Vec(Rc<Ty>),
     Slice(Rc<Ty>),
     Array(Rc<Ty>, u64),
+    /// An array whose length is an integer type parameter or inference
+    /// variable; becomes `Array` once the length is known.
+    ArrayT(Rc<Ty>, Rc<Ty>),
     Map(Rc<Ty>, Rc<Ty>),
     Option(Rc<Ty>),
     Result(Rc<Ty>, Rc<Ty>),
@@ -104,6 +107,9 @@ pub enum Ty {
     Weak(Rc<Ty>),
     Cell(Rc<Ty>),
     Mutex(Rc<Ty>),
+    /// `Mutex(&x)`: a lock guarding a borrowed place. A view: it cannot be
+    /// stored, and while it exists `x` is reachable only through it.
+    MutexRef(Rc<Ty>),
     Chan(Rc<Ty>),
     Func(Rc<FuncTy>),
     Adt(DefId, Rc<Vec<Ty>>),
@@ -146,8 +152,8 @@ impl Ty {
     /// Borrowed views: may not be stored in fields or collections.
     pub fn is_view(&self) -> bool {
         match self {
-            Ty::Str | Ty::Slice(_) => true,
-            Ty::Option(t) | Ty::Array(t, _) => t.is_view(),
+            Ty::Str | Ty::Slice(_) | Ty::MutexRef(_) => true,
+            Ty::Option(t) | Ty::Array(t, _) | Ty::ArrayT(t, _) => t.is_view(),
             Ty::Result(a, b) => a.is_view() || b.is_view(),
             _ => false,
         }
@@ -155,10 +161,10 @@ impl Ty {
     /// A borrowed view anywhere inside the type.
     pub fn contains_view(&self) -> bool {
         match self {
-            Ty::Str | Ty::Slice(_) => true,
+            Ty::Str | Ty::Slice(_) | Ty::MutexRef(_) => true,
             // function values borrow their parameters; captures are checked separately
             Ty::Func(_) => false,
-            Ty::Vec(a) | Ty::Array(a, _) | Ty::Option(a) | Ty::Box(a) | Ty::Rc(a) | Ty::Arc(a) | Ty::Weak(a) | Ty::Cell(a) | Ty::Mutex(a) | Ty::Chan(a) | Ty::Ptr(a) => a.contains_view(),
+            Ty::Vec(a) | Ty::Array(a, _) | Ty::ArrayT(a, _) | Ty::Option(a) | Ty::Box(a) | Ty::Rc(a) | Ty::Arc(a) | Ty::Weak(a) | Ty::Cell(a) | Ty::Mutex(a) | Ty::Chan(a) | Ty::Ptr(a) => a.contains_view(),
             Ty::Map(a, b) | Ty::Result(a, b) => a.contains_view() || b.contains_view(),
             Ty::Adt(_, args) | Ty::Iface(_, args) => args.iter().any(|a| a.contains_view()),
             _ => false,
@@ -194,8 +200,8 @@ impl Ty {
     pub fn walk(&self, f: &mut dyn FnMut(&Ty)) {
         f(self);
         match self {
-            Ty::Vec(a) | Ty::Slice(a) | Ty::Array(a, _) | Ty::Option(a) | Ty::Box(a) | Ty::Rc(a) | Ty::Arc(a) | Ty::Weak(a) | Ty::Cell(a) | Ty::Mutex(a) | Ty::Chan(a) | Ty::Ptr(a) => a.walk(f),
-            Ty::Map(a, b) | Ty::Result(a, b) => {
+            Ty::Vec(a) | Ty::Slice(a) | Ty::Array(a, _) | Ty::Option(a) | Ty::Box(a) | Ty::Rc(a) | Ty::Arc(a) | Ty::Weak(a) | Ty::Cell(a) | Ty::Mutex(a) | Ty::MutexRef(a) | Ty::Chan(a) | Ty::Ptr(a) => a.walk(f),
+            Ty::Map(a, b) | Ty::Result(a, b) | Ty::ArrayT(a, b) => {
                 a.walk(f);
                 b.walk(f)
             }
@@ -222,6 +228,14 @@ impl Ty {
             Ty::Vec(a) => Ty::Vec(m(a, f)),
             Ty::Slice(a) => Ty::Slice(m(a, f)),
             Ty::Array(a, n) => Ty::Array(m(a, f), *n),
+            Ty::ArrayT(a, n) => {
+                let len = n.map(f);
+                let elem = m(a, f);
+                match len {
+                    Ty::ConstInt(k) => Ty::Array(elem, k),
+                    l => Ty::ArrayT(elem, Rc::new(l)),
+                }
+            }
             Ty::Option(a) => Ty::Option(m(a, f)),
             Ty::Box(a) => Ty::Box(m(a, f)),
             Ty::Rc(a) => Ty::Rc(m(a, f)),
@@ -229,6 +243,7 @@ impl Ty {
             Ty::Weak(a) => Ty::Weak(m(a, f)),
             Ty::Cell(a) => Ty::Cell(m(a, f)),
             Ty::Mutex(a) => Ty::Mutex(m(a, f)),
+            Ty::MutexRef(a) => Ty::MutexRef(m(a, f)),
             Ty::Chan(a) => Ty::Chan(m(a, f)),
             Ty::Ptr(a) => Ty::Ptr(m(a, f)),
             Ty::Map(a, b) => Ty::Map(m(a, f), m(b, f)),
@@ -432,6 +447,7 @@ pub enum TyKey {
     Weak,
     Cell,
     Mutex,
+    MutexRef,
     Chan,
     Str,
     String,
@@ -449,7 +465,7 @@ impl TyKey {
             Ty::Iface(d, _) => TyKey::Iface(*d),
             Ty::Vec(_) => TyKey::Vec,
             Ty::Slice(_) => TyKey::Slice,
-            Ty::Array(..) => TyKey::Array,
+            Ty::Array(..) | Ty::ArrayT(..) => TyKey::Array,
             Ty::Map(..) => TyKey::Map,
             Ty::Option(_) => TyKey::Option,
             Ty::Result(..) => TyKey::Result,
@@ -459,6 +475,7 @@ impl TyKey {
             Ty::Weak(_) => TyKey::Weak,
             Ty::Cell(_) => TyKey::Cell,
             Ty::Mutex(_) => TyKey::Mutex,
+            Ty::MutexRef(_) => TyKey::MutexRef,
             Ty::Chan(_) => TyKey::Chan,
             Ty::Str => TyKey::Str,
             Ty::String => TyKey::String,
@@ -557,6 +574,7 @@ impl Program {
             Ty::Vec(a) => format!("Vec[{}]", self.show(a)),
             Ty::Slice(a) => format!("[]{}", self.show(a)),
             Ty::Array(a, n) => format!("[{}]{}", n, self.show(a)),
+            Ty::ArrayT(a, n) => format!("[{}]{}", self.show(n), self.show(a)),
             Ty::Map(a, b) => format!("Map[{}, {}]", self.show(a), self.show(b)),
             Ty::Option(a) => format!("?{}", self.show(a)),
             Ty::Result(a, b) => {
@@ -572,6 +590,7 @@ impl Program {
             Ty::Weak(a) => format!("weak[{}]", self.show(a)),
             Ty::Cell(a) => format!("Cell[{}]", self.show(a)),
             Ty::Mutex(a) => format!("Mutex[{}]", self.show(a)),
+            Ty::MutexRef(a) => format!("MutexRef[{}]", self.show(a)),
             Ty::Chan(a) => format!("chan {}", self.show(a)),
             Ty::Ptr(a) => format!("*{}", self.show(a)),
             Ty::Func(ft) => {

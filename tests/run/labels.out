@@ -1,0 +1,15 @@
+some(6) some(7)
+drop b0
+drop b1
+drop a0
+drop b0
+drop b1
+drop a1
+drop b0
+drop a2
+got x
+drop x
+drop skip
+got y
+drop y
+done

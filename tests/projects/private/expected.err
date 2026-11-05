@@ -1,0 +1,4 @@
+field `b` of `S` is private
+method `hidden` of `lib.S` is private
+`helper` is not public in package `lib`
+`secret` is not public

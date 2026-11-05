@@ -1,0 +1,54 @@
+use task, time
+
+struct Page {
+    url String
+    size int
+}
+
+enum FetchError {
+    NotFound(url String)
+}
+
+fn fetch(url str) Page ! FetchError {
+    time.sleep(time.millisecond)
+    if url.contains("missing") {
+        return err(FetchError.NotFound(url.toString()))
+    }
+    return Page{url: url.toString(), size: url.len * 100}
+}
+
+// The design document's example: tasks borrow `urls`, and push into `pages`
+// through a lock that borrows it.
+fn fetchAll(urls []String) Vec[Page] ! FetchError {
+    var pages = Vec[Page]{}
+    let mu = Mutex(&pages)
+    try task.group((g) => {
+        for u in urls {
+            g.go(() => {
+                let p = try fetch(u)
+                with list = mu.lock() {
+                    list.push(p)
+                }
+            })
+        }
+    })
+    return pages
+}
+
+fn main() {
+    let urls = ["a.com", "bb.org", "ccc.net"]
+    var pages = fetchAll(urls).unwrap()
+    pages.sortBy((x, y) => x.size < y.size)
+    for p in pages {
+        println(p.url, p.size)
+    }
+    let bad = ["a.com", "missing.io"]
+    println(fetchAll(bad).isErr())
+
+    var count = 0
+    let mu = Mutex(&count)
+    with c = mu.lock() {
+        c += 5
+    }
+    println(count)
+}

@@ -1,0 +1,47 @@
+interface Num {
+    ~int | ~f64
+}
+
+type Meters f64
+type Label String
+
+struct Pair[T any] {
+    a T
+    b T
+
+    pub fn bigger(self) T where T: copy + ordered {
+        if self.a > self.b { return self.a }
+        return self.b
+    }
+}
+
+struct Need { name String }
+
+fn total[T Num](xs []T) T {
+    var s T
+    for x in xs { s += x }
+    return s
+}
+
+fn fresh[T any]() T {
+    var x T
+    // error: `var x T` needs an initial value: `T` has no default value
+    return x
+}
+
+fn main() {
+    let p = Pair{a: "x".toString(), b: "y".toString()}
+    println(p.bigger())
+    // error: method `bigger` of `Pair[String]` requires `T: copy`
+    println(total(["a".toString()]))
+    // error: `String` is not in the type set of `Num`
+    var n Need
+    // error: `Need` has no default value
+    let m = Meters(1.0) + 2.5
+    // error: mismatched operand types: `Meters` + `f64`
+    let l = Label("a".toString()) + Label("b".toString())
+    // error: operator not supported for type `Label`
+    let v Num = 1
+    // error: interface `Num` has a type set
+    println(n, m, l, v, fresh[int]())
+}

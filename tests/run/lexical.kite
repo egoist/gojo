@@ -1,0 +1,20 @@
+/* block comments
+   may span lines */
+fn main() {
+    // integer literals: decimal, hex, binary, octal, with separators
+    println(1_000_000, 0xff, 0b1010, 0o17, 0x_dead_beef)
+    // floats
+    println(1.5, 2.5e3, 1e-3, 0.1 + 0.2)
+    // strings: escapes, unicode, raw strings
+    println("tab\tquote\"backslash\\", "\u{1F600}".len, "\x41")
+    println(`raw \n stays`)
+    // runes are i32 code points; they convert to bytes when the type says so
+    let r = 'é'
+    let b u8 = 'A'
+    println(r, b, String(r))
+    // a newline ends a statement unless the line ends with an operator
+    let total = 1 +
+        2 +
+        3
+    println(total); println("two statements on one line")
+}

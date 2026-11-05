@@ -1,0 +1,46 @@
+// `unsafe send`, static linking, and functions exported to C.
+extern "C" static "m" {
+    fn cbrt(x f64) f64
+}
+
+extern "C" {
+    fn abs(x i32) i32
+    fn calloc(n u64, size u64) *int
+    fn free(p *int)
+}
+
+extern "C" fn kiteTwice(x i32) i32 {
+    return x * 2
+}
+
+// A raw pointer isn't `send`; the author of this struct vouches for it.
+unsafe send struct Handle {
+    p *int
+    id int
+}
+
+// Structs of numbers and pointers cross the C boundary as they are.
+copy struct Pair {
+    a i32
+    b f64
+}
+
+extern "C" fn sumPair(p Pair) f64 {
+    return f64(p.a) + p.b
+}
+
+fn main() {
+    println(unsafe { cbrt(27.0) })
+    println(kiteTwice(unsafe { abs(-21) }))
+    println(sumPair(Pair{a: 1, b: 2.5}))
+
+    let h = Handle{p: unsafe { calloc(1, 8) }, id: 7}
+    let done = chan[int](1)
+    let tx = done.clone()
+    let p = h.p
+    go () => {
+        tx <- h.id
+    }
+    println(<-done)
+    unsafe { free(p) }
+}

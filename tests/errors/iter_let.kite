@@ -1,0 +1,7 @@
+fn main() {
+    let v = [1, 2]
+    for x in &v {
+        // error: cannot mutably iterate over variable `v`: it is not mutable
+        x += 1
+    }
+}

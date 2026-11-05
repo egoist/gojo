@@ -425,10 +425,20 @@ void kite_fmt_f64(kite_string *b, double v) {
     char buf[64];
     if (isnan(v)) { kite_fmt_cstr(b, "NaN"); return; }
     if (isinf(v)) { kite_fmt_cstr(b, v > 0 ? "+Inf" : "-Inf"); return; }
-    // shortest representation that round-trips
-    for (int p = 1; p <= 17; p++) {
-        snprintf(buf, sizeof buf, "%.*g", p, v);
+    // shortest digit count that round-trips
+    int p = 1;
+    for (; p < 17; p++) {
+        snprintf(buf, sizeof buf, "%.*e", p - 1, v);
         if (strtod(buf, NULL) == v) break;
+    }
+    snprintf(buf, sizeof buf, "%.*e", p - 1, v);
+    int exp = atoi(strchr(buf, 'e') + 1);
+    if (exp >= -4 && exp < 21) {
+        // plain notation, like Go's %v
+        int decimals = p - 1 - exp;
+        snprintf(buf, sizeof buf, "%.*f", decimals > 0 ? decimals : 0, v);
+    } else {
+        snprintf(buf, sizeof buf, "%.*g", p, v);
     }
     kite_fmt_cstr(b, buf);
 }
