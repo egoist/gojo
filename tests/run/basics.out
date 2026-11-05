@@ -1,0 +1,20 @@
+app 8080 none
+Config{name: "web", port: 80, proxy: some("localhost:3128")}
+localhost:3128
+3.141592653589793
+7
+[warn] disk almost full
+Point{x: 3, y: 6} Point{x: 11, y: 22}
+45 5 3
+0 zero
+7 small
+42 big
+-3 negative
+sum 31 31 8 some(9)
+[6, 2, 8, 2, 10, 18, 4, 12] [4, 5, 9, 6] true some(2)
+[1, 1, 2, 3, 4, 5, 6, 9]
+empty
+has 5
+many
+260 44
+13 11 HéLLO WöRLD h true

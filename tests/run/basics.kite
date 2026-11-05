@@ -1,0 +1,125 @@
+use math
+
+struct Config {
+    name  String
+    port  int = 8080
+    proxy ?String
+}
+
+enum Shape {
+    Circle(r f64)
+    Rect(w f64, h f64)
+}
+
+enum Level { Debug, Info, Warn, Error }
+
+copy struct Point {
+    x, y int
+
+    fn add(self, o Point) Point {
+        return Point{x: self.x + o.x, y: self.y + o.y}
+    }
+
+    fn scale(self inout, k int) {
+        self.x *= k
+        self.y *= k
+    }
+}
+
+fn area(s Shape) f64 {
+    return match s {
+        Circle(r) => math.Pi * r * r
+        Rect(w, h) => w * h
+    }
+}
+
+fn levelName(l Level) str {
+    return match l {
+        .Debug => "debug"
+        .Info => "info"
+        .Warn => "warn"
+        .Error => "error"
+    }
+}
+
+fn log(l Level, msg str) {
+    println("[" + levelName(l) + "]", msg)
+}
+
+fn classify(n int) str {
+    return match n {
+        0 => "zero"
+        1..=9 => "small"
+        _ => if n < 0 { "negative" } else { "big" }
+    }
+}
+
+fn main() {
+    let cfg = Config{name: "app"}
+    println(cfg.name, cfg.port, cfg.proxy)
+    let cfg2 = Config{name: "web", port: 80, proxy: "localhost:3128"}
+    println(cfg2)
+    println(cfg2.proxy ?? "direct")
+
+    println(area(Shape.Circle(1.0)))
+    println(area(.Rect(2.0, 3.5)))
+    log(.Warn, "disk almost full")
+
+    var p = Point{x: 1, y: 2}
+    let q = p.add(Point{x: 10, y: 20})
+    p.scale(3)
+    println(p, q)
+
+    var hits = 0
+    for i in 0..10 {
+        hits += i
+    }
+    var j = 0
+    for j < 5 {
+        j += 1
+    }
+    var k = 0
+    for {
+        k += 1
+        if k == 3 {
+            break
+        }
+    }
+    println(hits, j, k)
+    for n in [0, 7, 42, -3] {
+        println(n, classify(n))
+    }
+
+    let xs = [3, 1, 4, 1, 5, 9, 2, 6]
+    var total = 0
+    xs.each((x) => total += x)
+    println("sum", total, xs.sum(), xs.len, xs.max())
+    let doubled = xs.map((x) => x * 2)
+    let big = xs.filter((x) => x > 3)
+    println(doubled, big, xs.contains(9), xs.indexOf(4))
+    var sorted = xs.clone()
+    sorted.sort()
+    println(sorted)
+
+    let opt ?int = none
+    if let v = opt {
+        println("has", v)
+    } else {
+        println("empty")
+    }
+    let o2 ?int = 5
+    if let v = o2 {
+        println("has", v)
+    }
+    let label = if hits > 40 { "many" } else { "few" }
+    println(label)
+    let wrapped = 250 +% 10
+    println(wrapped, u8(200) +% u8(100))
+    let s = "héllo wörld"
+    var runes = 0
+    for c in s {
+        runes += 1
+        _ = c
+    }
+    println(s.len, runes, s.toUpper(), s[0..1], s.contains("wör"))
+}

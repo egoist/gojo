@@ -1,0 +1,313 @@
+// Untyped syntax tree produced by the parser.
+#![allow(dead_code)]
+
+use crate::diag::Span;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Mode {
+    Borrow,
+    Inout,
+    Sink,
+}
+
+#[derive(Clone, Debug)]
+pub struct File {
+    pub package: String,
+    pub imports: Vec<Import>,
+    pub items: Vec<Item>,
+    pub file_id: u32,
+}
+
+#[derive(Clone, Debug)]
+pub struct Import {
+    /// As written (`fmt`, `./geom`); the loader rewrites it to a package key.
+    pub path: String,
+    /// Name the package is bound to (defaults to the last path segment).
+    pub alias: Option<String>,
+    /// `use ./geom.{Vec2, Shape}`: names brought into scope instead of the package.
+    pub names: Option<Vec<(String, Span)>>,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug)]
+pub struct Item {
+    pub kind: ItemKind,
+    pub is_pub: bool,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug)]
+pub enum ItemKind {
+    Func(FuncDecl),
+    Struct(StructDecl),
+    Enum(EnumDecl),
+    Interface(IfaceDecl),
+    TypeAlias { name: String, tparams: Vec<TParam>, ty: TypeExpr, newtype: bool },
+    Const { name: String, ty: Option<TypeExpr>, value: Expr },
+    Extern(ExternBlock),
+    Test { name: String, body: Block },
+}
+
+#[derive(Clone, Debug)]
+pub struct ExternBlock {
+    pub abi: String,
+    pub lib: Option<String>,
+    pub funcs: Vec<FuncDecl>,
+}
+
+#[derive(Clone, Debug)]
+pub struct TParam {
+    pub name: String,
+    pub bounds: Vec<TypeExpr>,
+    pub is_int: bool,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug)]
+pub struct Param {
+    pub name: String,
+    pub mode: Mode,
+    pub ty: TypeExpr,
+    pub span: Span,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum YieldKind {
+    Ref,
+    Mut,
+}
+
+#[derive(Clone, Debug)]
+pub struct FuncDecl {
+    pub name: String,
+    pub name_span: Span,
+    pub recv: Option<Param>,
+    pub tparams: Vec<TParam>,
+    pub params: Vec<Param>,
+    pub ret: Option<TypeExpr>,
+    pub yields: Option<YieldKind>,
+    /// `yield ?&T`: the projection may produce nothing.
+    pub yield_opt: bool,
+    pub wheres: Vec<(String, Vec<TypeExpr>, Span)>,
+    pub body: Option<Block>,
+    pub is_extern_c: bool,
+    /// Associated function (declared in a type body without `self`): the owning type.
+    pub owner: Option<TypeExpr>,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug)]
+pub struct FieldDecl {
+    pub name: String,
+    pub ty: TypeExpr,
+    pub default: Option<Expr>,
+    pub is_pub: bool,
+    pub embedded: bool,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug)]
+pub struct StructDecl {
+    pub name: String,
+    pub tparams: Vec<TParam>,
+    pub fields: Vec<FieldDecl>,
+    pub is_copy: bool,
+    pub unsafe_send: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct VariantDecl {
+    pub name: String,
+    /// (name, type); unnamed payloads get names `_0`, `_1`...
+    pub fields: Vec<(String, TypeExpr)>,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug)]
+pub struct EnumDecl {
+    pub name: String,
+    pub tparams: Vec<TParam>,
+    pub variants: Vec<VariantDecl>,
+    pub is_copy: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct IfaceMethod {
+    pub name: String,
+    pub recv_mode: Mode,
+    pub params: Vec<Param>,
+    pub ret: Option<TypeExpr>,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug)]
+pub struct IfaceDecl {
+    pub name: String,
+    pub tparams: Vec<TParam>,
+    pub methods: Vec<IfaceMethod>,
+    pub embeds: Vec<TypeExpr>,
+    /// Type-set elements: (approx `~`, type)
+    pub type_set: Vec<(bool, TypeExpr)>,
+}
+
+#[derive(Clone, Debug)]
+pub enum TypeExprKind {
+    /// `a.b.C[args]`
+    Named { path: Vec<String>, args: Vec<TypeExpr> },
+    Option(Box<TypeExpr>),
+    Result(Box<TypeExpr>, Box<TypeExpr>),
+    Slice(Box<TypeExpr>),
+    Array(Box<Expr>, Box<TypeExpr>),
+    Func { params: Vec<(Mode, TypeExpr)>, ret: Option<Box<TypeExpr>> },
+    Ptr(Box<TypeExpr>),
+    Chan(Box<TypeExpr>),
+    Unit,
+    IntLit(u128),
+}
+
+#[derive(Clone, Debug)]
+pub struct TypeExpr {
+    pub kind: TypeExprKind,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug)]
+pub struct Block {
+    pub stmts: Vec<Stmt>,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug)]
+pub enum StmtKind {
+    Let { name: String, name_span: Span, ty: Option<TypeExpr>, init: Option<Expr>, mutable: bool },
+    Expr(Expr),
+    Assign { place: Expr, op: &'static str, value: Expr },
+    Return(Option<Expr>),
+    Break,
+    Continue,
+    Defer(Box<Stmt>),
+    /// Runs only when the function returns an error.
+    ErrDefer(Box<Stmt>),
+    For(ForLoop),
+    Go(Expr),
+    Send { chan: Expr, value: Expr },
+    With { name: String, name_span: Span, expr: Expr, body: Block },
+    Discard(Expr),
+    Yield(Option<Expr>),
+    Select(Vec<SelectArm>),
+}
+
+#[derive(Clone, Debug)]
+pub struct SelectArm {
+    /// `case let x = <-ch`, `case <-ch`, `case ch <- v`, `default`
+    pub kind: SelectKind,
+    pub body: Block,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug)]
+pub enum SelectKind {
+    Recv { bind: Option<(String, Span)>, chan: Expr },
+    Send { chan: Expr, value: Expr },
+    Default,
+}
+
+#[derive(Clone, Debug)]
+pub struct Stmt {
+    pub kind: StmtKind,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug)]
+pub enum ForLoop {
+    Infinite(Block),
+    Cond(Expr, Block),
+    In { first: (String, Span), second: Option<(String, Span)>, iter: Expr, by_ref: bool, body: Block },
+}
+
+#[derive(Clone, Debug)]
+pub struct Arm {
+    pub pat: Pattern,
+    pub guard: Option<Expr>,
+    pub body: Expr,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug)]
+pub enum PatternKind {
+    Wild,
+    /// A bare identifier: either a binding or a unit variant / constant (resolved by checker).
+    Ident(String),
+    /// `.Name` or `.Name(pats)`
+    DotVariant(String, Option<Vec<Pattern>>),
+    /// `A.B` / `A.B(pats)` / `Name(pats)` / `ok(p)` etc.
+    Path(Vec<String>, Option<Vec<Pattern>>),
+    Int(i128),
+    Str(String),
+    Char(u32),
+    Bool(bool),
+    None,
+    Range(i128, i128, bool),
+    /// `name Type` (interface type match)
+    Typed(String, TypeExpr),
+    Or(Vec<Pattern>),
+}
+
+#[derive(Clone, Debug)]
+pub struct Pattern {
+    pub kind: PatternKind,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug)]
+pub struct ClosureParam {
+    pub name: String,
+    pub mode: Mode,
+    pub ty: Option<TypeExpr>,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug)]
+pub enum ExprKind {
+    Int(u128),
+    Float(f64),
+    Str(String),
+    Char(u32),
+    Bool(bool),
+    None,
+    Ident(String),
+    Field(Box<Expr>, String, Span),
+    OptField(Box<Expr>, String),
+    /// `a[b, c]` — index or explicit type arguments (resolved by checker).
+    Index(Box<Expr>, Vec<Expr>),
+    /// `a[T, U]` where the arguments only parse as types.
+    TypeArgs(Box<Expr>, Vec<TypeExpr>),
+    Slice(Box<Expr>, Option<Box<Expr>>, Option<Box<Expr>>),
+    Call(Box<Expr>, Vec<Expr>),
+    Unary(&'static str, Box<Expr>),
+    Binary(&'static str, Box<Expr>, Box<Expr>),
+    /// `&x` (inout argument / mutable iteration)
+    Ref(Box<Expr>),
+    Closure { params: Vec<ClosureParam>, ret: Option<TypeExpr>, body: Box<Expr> },
+    If { cond: Box<Expr>, then: Block, else_: Option<Box<Expr>> },
+    IfLet { pat: Pattern, expr: Box<Expr>, then: Block, else_: Option<Box<Expr>> },
+    Match { scrut: Box<Expr>, arms: Vec<Arm> },
+    Block(Block),
+    Unsafe(Block),
+    Try { expr: Box<Expr>, wrap: Option<Box<Expr>> },
+    Catch { expr: Box<Expr>, bind: Option<(String, Span)>, body: Block },
+    Coalesce(Box<Expr>, Box<Expr>),
+    Range { lo: Box<Expr>, hi: Box<Expr>, inclusive: bool },
+    Recv(Box<Expr>),
+    DotVariant(String),
+    StructLit { ty: Box<Expr>, fields: Vec<(String, Span, Expr)>, positional: Vec<Expr>, kv: Vec<(Expr, Expr)> },
+    VecLit(Vec<Expr>),
+    /// A type in expression position, e.g. `chan[int]`, `[]int`, `?int`.
+    TypeExpr(TypeExpr),
+}
+
+#[derive(Clone, Debug)]
+pub struct Expr {
+    pub kind: ExprKind,
+    pub span: Span,
+}

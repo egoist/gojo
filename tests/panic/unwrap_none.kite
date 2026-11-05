@@ -1,0 +1,7 @@
+fn main() {
+    let m = Map[String, int]{}
+    let x = m.get("k") ?? 1
+    let o ?int = none
+    _ = o.unwrap() + x
+    // panic: unwrap() called on none
+}

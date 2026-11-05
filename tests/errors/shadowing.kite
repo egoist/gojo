@@ -1,0 +1,8 @@
+fn main() {
+    let err = 1
+    if err > 0 {
+        let err = 2
+        println(err)
+    }
+    // error: `err` shadows an existing variable
+}

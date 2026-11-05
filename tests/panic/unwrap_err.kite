@@ -1,0 +1,6 @@
+enum E { NotFound(path String) }
+fn f() int ! E { return err(E.NotFound("a.txt".toString())) }
+fn main() {
+    _ = f().unwrap()
+    // panic: unwrap() called on an error: NotFound("a.txt")
+}

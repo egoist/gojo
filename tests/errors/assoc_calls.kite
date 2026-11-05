@@ -1,0 +1,16 @@
+struct Point {
+    x int
+
+    fn origin() Point { return Point{x: 0} }
+    fn get(self) int { return self.x }
+}
+
+fn main() {
+    let p = Point.origin()
+    let q = Point.nowhere()
+    let r = p.origin()
+    println(p.get(), q, r)
+    // error: unknown associated item `nowhere`
+    // error: type `Point` has no method `origin`
+    // error: call it on the type: `Point.origin(...)`
+}

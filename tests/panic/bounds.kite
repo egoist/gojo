@@ -1,0 +1,6 @@
+fn main() {
+    let v = [1, 2, 3]
+    let i = v.len
+    println(v[i])
+    // panic: index out of range: index 3, length 3
+}

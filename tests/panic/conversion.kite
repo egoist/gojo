@@ -1,0 +1,5 @@
+fn main() {
+    let big = 300
+    println(u8(big))
+    // panic: integer conversion out of range
+}

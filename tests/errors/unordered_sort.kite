@@ -1,0 +1,6 @@
+struct P { x int }
+fn main() {
+    var v = Vec[P]{}
+    v.sort()
+    // error: method `sort` of `Vec[P]` requires `T: ordered`
+}

@@ -1,0 +1,10 @@
+struct Config {
+    name String
+    port int = 8080
+    proxy ?String
+}
+fn main() {
+    let c = Config{port: 1}
+    _ = c
+    // error: missing field `name` in `Config` literal
+}

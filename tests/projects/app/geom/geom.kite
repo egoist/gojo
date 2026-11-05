@@ -1,0 +1,31 @@
+use math
+use ../util/text
+
+pub copy struct Vec2 {
+    pub x f64
+    pub y f64
+
+    pub fn length(self) f64 {
+        return math.sqrt(self.x * self.x + self.y * self.y)
+    }
+}
+
+pub fn origin() Vec2 {
+    return Vec2{x: 0.0, y: 0.0}
+}
+
+pub interface Shape {
+    fn area(self) f64
+}
+
+pub struct Square {
+    pub side f64
+
+    pub fn area(self) f64 {
+        return self.side * self.side
+    }
+}
+
+pub fn describe(v Vec2) String {
+    return text.shout("vec") + " of length " + text.num(v.length())
+}

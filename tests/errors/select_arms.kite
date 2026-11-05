@@ -1,0 +1,9 @@
+fn main() {
+    let a = chan[int](1)
+    select {
+        let x = <-a => println(x)
+        _ => println("one")
+        _ => println("two")
+    }
+    // error: `select` has more than one `_` arm
+}

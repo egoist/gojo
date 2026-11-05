@@ -1,0 +1,11 @@
+ok demo 9000
+io: /nonexistent/x.cfg: No such file or directory
+syntax error on line 2 expected key = value
+syntax error on line 1 unknown key
+using defaults because of io: /nonexistent: No such file or directory
+app 8080
+roundtrip app 8080
+ok(2) err("3 is odd") err("5 is odd")
+3
+some(5) none
+7 true true

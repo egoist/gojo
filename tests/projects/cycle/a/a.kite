@@ -1,0 +1,5 @@
+use ../b
+
+pub fn hello() {
+    b.hello()
+}

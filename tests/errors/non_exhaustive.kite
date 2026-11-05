@@ -1,0 +1,16 @@
+enum Shape { Circle(r f64), Rect(w f64, h f64), Dot }
+fn area(s Shape) f64 {
+    return match s {
+        Circle(r) => r * r
+        Dot => 0.0
+    }
+    // error: `match` is not exhaustive: `Rect(_, _)` is not covered
+}
+fn opt(o ?int) int {
+    return match o {
+        some(0) => 0
+        none => 1
+    }
+    // error: `some(_)` is not covered
+}
+fn main() { _ = area(.Dot) }

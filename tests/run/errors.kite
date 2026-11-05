@@ -1,0 +1,106 @@
+use fmt, os
+
+struct Config {
+    name String
+    port int = 8080
+}
+
+enum LoadError {
+    Io(os.Error)
+    Syntax(line int, msg String)
+}
+
+fn parse(text str) Config ! LoadError {
+    let lines = text.lines()
+    var cfg = Config{name: "unnamed"}
+    for i, line in lines {
+        let l = line.trim()
+        if l.isEmpty() {
+            continue
+        }
+        let parts = l.split("=")
+        if parts.len != 2 {
+            return err(LoadError.Syntax(i + 1, "expected key = value"))
+        }
+        let key = parts[0].trim()
+        let value = parts[1].trim()
+        match key {
+            "name" => cfg.name = value.toString()
+            "port" => cfg.port = value.parseInt() ?? 0
+            _ => return err(.Syntax(i + 1, "unknown key"))
+        }
+    }
+    return cfg
+}
+
+fn load(path str) Config ! LoadError {
+    let data = try os.readText(path) else LoadError.Io
+    return try parse(data)
+}
+
+fn save(c Config, path str) ! os.Error {
+    let text = "name = " + c.name + "\nport = " + fmt.sprint(c.port) + "\n"
+    try os.writeText(path, text)
+}
+
+fn describe(r Config ! LoadError) String {
+    return match r {
+        ok(c) => fmt.sprint("ok", c.name, c.port)
+        err(.Syntax(line, msg)) => fmt.sprint("syntax error on line", line, msg)
+        err(.Io(e)) => fmt.sprint("io:", e)
+    }
+}
+
+fn half(n int) int ! String {
+    if n % 2 != 0 {
+        return err(fmt.sprint(n, "is odd"))
+    }
+    return n / 2
+}
+
+fn quarter(n int) int ! String {
+    let h = try half(n)
+    return try half(h)
+}
+
+fn firstEven(xs []int) ?int {
+    for x in xs {
+        if x % 2 == 0 {
+            return x
+        }
+    }
+    return none
+}
+
+fn plusOne(xs []int) ?int {
+    let e = try firstEven(xs)
+    return e + 1
+}
+
+fn main() {
+    let path = "/tmp/kite_test_cfg.txt"
+    _ = os.writeText(path, "name = demo\nport = 9000\n")
+    println(describe(load(path)))
+    println(describe(load("/nonexistent/x.cfg")))
+    println(describe(parse("name = a\nbogus\n")))
+    println(describe(parse("color = red")))
+
+    let cfg = load("/nonexistent") catch e {
+        println("using defaults because of", describe(err(e)))
+        Config{name: "app"}
+    }
+    println(cfg.name, cfg.port)
+
+    save(cfg, path) catch e {
+        println("save failed:", e)
+    }
+    let back = load(path).unwrap()
+    println("roundtrip", back.name, back.port)
+
+    println(quarter(8), quarter(6), quarter(5))
+    let q = quarter(12) catch { 0 }
+    println(q)
+    println(plusOne([1, 3, 4]), plusOne([1, 3]))
+    let r ?int = none
+    println(r.unwrapOr(7), half(10).isOk(), half(3).isErr())
+}

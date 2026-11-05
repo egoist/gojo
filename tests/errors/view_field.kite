@@ -1,0 +1,3 @@
+struct Parser { input str }
+fn main() {}
+// error: field `input` has borrowed view type `str`

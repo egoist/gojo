@@ -1,0 +1,9 @@
+fn main() {
+    var v = [1, 2, 3]
+    for x in v {
+        if x == 2 {
+            v.push(4)
+        }
+    }
+    // error: cannot modify `v` while it is borrowed by `x`
+}

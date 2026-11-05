@@ -1,0 +1,8 @@
+fn main() {
+    var x i8 = 120
+    for _ in 0..10 {
+        x += 1
+    }
+    println(x)
+    // panic: integer overflow in addition
+}

@@ -1,0 +1,151 @@
+interface Counter {
+    fn bump(self inout) int
+    fn value(self) int
+}
+
+struct Clicks {
+    n int
+
+    fn bump(self inout) int {
+        self.n += 1
+        return self.n
+    }
+
+    fn value(self) int { return self.n }
+}
+struct Doubler {
+    n int
+
+    fn bump(self inout) int {
+        self.n = if self.n == 0 { 1 } else { self.n * 2 }
+        return self.n
+    }
+
+    fn value(self) int { return self.n }
+}
+fn firstWord(s str) str {
+    for i, c in s {
+        if c == ' ' {
+            return s[0..i]
+        }
+    }
+    return s
+}
+
+fn bumpAll[C Counter](cs inout Vec[C]) {
+    for c in &cs {
+        _ = c.bump()
+    }
+}
+
+enum State {
+    Idle
+    Running(task String, steps int)
+    Done(result String)
+
+    fn start() State {
+        return .Idle
+    }
+
+    fn advance(self sink) State {
+        return match self {
+            Idle => State.Running("job".toString(), 0)
+            Running(t, n) => if n >= 2 { State.Done(t + " ok") } else { State.Running(t, n + 1) }
+            Done(r) => State.Done(r)
+        }
+    }
+
+    fn isDone(self) bool {
+        return match self {
+            Done(_) => true
+            _ => false
+        }
+    }
+}
+
+const Limit = 3
+
+struct Settings {
+    retries int = Limit * 2
+    label String = "default".toString()
+    ratio f64 = 0.5
+}
+
+fn makeAdder(base int) fn(int) int {
+    return (x int) => x + base
+}
+
+fn applyTwice(f fn(int) int, x int) int {
+    return f(f(x))
+}
+
+fn main() {
+    // interface values mutated through inout
+    var cs = Vec[Counter]{}
+    cs.push(Clicks{n: 0})
+    cs.push(Doubler{n: 0})
+    for _ in 0..3 {
+        for c in &cs {
+            _ = c.bump()
+        }
+    }
+    println(cs[0].value(), cs[1].value())
+
+    var plain = [Clicks{n: 5}, Clicks{n: 10}]
+    bumpAll(&plain)
+    println(plain[0].n, plain[1].n)
+
+    // views returned from functions borrow their arguments
+    let line = "hello brave new world".toString()
+    let w = firstWord(line)
+    println(w, w.len, firstWord("single"))
+
+    // mutable iteration with index
+    var v = [10, 20, 30]
+    for i, x in &v {
+        x += i
+    }
+    println(v)
+
+    // consuming match + reassignment of the moved variable
+    var st = State.start()
+    for _ in 0..5 {
+        st = st.advance()
+    }
+    println(st, st.isDone())
+
+    // nested closures and captured parameters
+    let add5 = makeAdder(5)
+    println(add5(1), applyTwice(add5, 0), applyTwice((x) => x * 3, 2))
+    var log = Vec[String]{}
+    let items = ["a", "b"]
+    items.each((it) => {
+        items.each((jt) => {
+            log.push(it.clone() + jt)
+        })
+    })
+    println(log)
+
+    // defaults referencing constants
+    let s = Settings{}
+    let s2 = Settings{label: "custom"}
+    println(s.retries, s.label, s2.label, s2.ratio)
+
+    // Map values updated in place
+    var scores = Map[String, Vec[int]]{}
+    scores["ann"] = [1]
+    if let list = scores.getMut("ann") {
+        list.push(2)
+    }
+    scores["bob"] = Vec[int]{}
+    println(scores, scores.get("ann")?.len, scores.get("zed")?.len)
+
+    // nested results and options
+    let nested ?int ! String = some(3)
+    match nested {
+        ok(some(n)) => println("got", n)
+        ok(none) => println("nothing")
+        err(e) => println("error", e)
+    }
+    println("b" < "ab", "abc" == "abc".toString(), 'z' > 'a')
+}

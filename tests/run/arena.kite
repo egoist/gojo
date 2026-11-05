@@ -1,0 +1,32 @@
+struct Node {
+    name String
+    edges Vec[Id[Node]]
+}
+
+fn main() {
+    var g = Arena[Node]{}
+    let a = g.alloc(Node{name: "a", edges: []})
+    let b = g.alloc(Node{name: "b", edges: []})
+    let c = g.alloc(Node{name: "c", edges: []})
+    // a cycle: a -> b -> c -> a
+    for pair in [[a, b], [b, c], [c, a]] {
+        if let n = g.getMut(pair[0]) {
+            n.edges.push(pair[1])
+        }
+    }
+    var cur = a
+    var path = Vec[String]{}
+    for _ in 0..5 {
+        let n = g.get(cur).unwrap()
+        path.push(n.name.clone())
+        cur = n.edges[0]
+    }
+    println(path.join(" -> "), g.len())
+
+    let removed = g.remove(b)
+    println(removed.map((n) => n.name.clone()), g.len())
+    println(g.get(b).isNone(), g.get(a).isSome())
+    // the slot is reused, but the stale id stays dead
+    let d = g.alloc(Node{name: "d", edges: []})
+    println(d.index == b.index, g.get(b).isNone(), g.get(d).map((n) => n.name.clone()))
+}

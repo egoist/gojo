@@ -1,0 +1,179 @@
+use strings, os
+
+struct Address { city String, zip ?String }
+struct Person { name String, age int, addr ?Address }
+
+struct Grid {
+    cells [3][3]int
+}
+
+enum Token {
+    Num(v int)
+    Op(c rune)
+    LParen
+    RParen
+}
+
+fn tokenize(s str) Vec[Token] {
+    var out = Vec[Token]{}
+    var i = 0
+    let b = s.bytes()
+    for i < b.len {
+        let c = b[i]
+        if c >= '0' && c <= '9' {
+            var n = 0
+            for i < b.len && b[i] >= '0' && b[i] <= '9' {
+                n = n * 10 + int(b[i] - '0')
+                i += 1
+            }
+            out.push(.Num(n))
+            continue
+        }
+        match c {
+            '+' | '-' | '*' | '/' => out.push(.Op(rune(c)))
+            '(' => out.push(.LParen)
+            ')' => out.push(.RParen)
+            _ => {}
+        }
+        i += 1
+    }
+    return out
+}
+
+// recursive-descent evaluator over a token slice
+fn expr(ts []Token, pos inout int) int {
+    var v = term(ts, &pos)
+    for pos < ts.len {
+        match ts[pos] {
+            Op(c) if c == '+' || c == '-' => {
+                pos += 1
+                let r = term(ts, &pos)
+                v = if c == '+' { v + r } else { v - r }
+            }
+            _ => break
+        }
+    }
+    return v
+}
+
+fn term(ts []Token, pos inout int) int {
+    var v = atom(ts, &pos)
+    for pos < ts.len {
+        match ts[pos] {
+            Op(c) if c == '*' || c == '/' => {
+                pos += 1
+                let r = atom(ts, &pos)
+                v = if c == '*' { v * r } else { v / r }
+            }
+            _ => break
+        }
+    }
+    return v
+}
+
+fn atom(ts []Token, pos inout int) int {
+    let t = ts[pos]
+    pos += 1
+    return match t {
+        Num(n) => n
+        LParen => {
+            let v = expr(ts, &pos)
+            pos += 1
+            v
+        }
+        Op(c) if c == '-' => -atom(ts, &pos)
+        _ => 0
+    }
+}
+
+fn fib(n int) int {
+    if n < 2 {
+        return n
+    }
+    return fib(n - 1) + fib(n - 2)
+}
+
+fn counter() fn() int {
+    let c = Cell(0)
+    let shared = rc(c)
+    return () => {
+        shared.set(shared.get() + 1)
+        return shared.get()
+    }
+}
+
+fn main() {
+    let p = Person{name: "ann", age: 30, addr: Address{city: "Oslo", zip: none}}
+    let q = Person{name: "bob", age: 5, addr: none}
+    println(p.addr?.city, q.addr?.city, p.addr?.zip)
+
+    var g = Grid{cells: [[1, 2, 3], [4, 5, 6], [7, 8, 9]]}
+    g.cells[1][1] = 50
+    var diag = 0
+    for i in 0..3 {
+        diag += g.cells[i][i]
+    }
+    println(diag, g.cells[1])
+
+    let ts = tokenize("2 * (3 + 4) - 10 / 5")
+    var pos = 0
+    println(ts.len, expr(ts, &pos))
+    println(fib(20))
+
+    var people = [
+        Person{name: "cy", age: 41, addr: none},
+        Person{name: "al", age: 23, addr: none},
+        Person{name: "bo", age: 35, addr: none},
+    ]
+    people.sortBy((a, b) => a.age < b.age)
+    println(people.map((x) => x.name.clone()))
+
+    var b = strings.Builder{}
+    for _ in 0..3 {
+        b.write("ab")
+        b.writeRune('→')
+    }
+    let built = b.finish()
+    println(built, built.len)
+
+    var a = 1
+    var c = 2
+    swap(&a, &c)
+    let old = replace(&a, 10)
+    var v = [1, 2]
+    let taken = take(&v)
+    println(a, c, old, taken, v)
+
+    let next = counter()
+    _ = next()
+    _ = next()
+    println("counter", next())
+
+    var x u32 = 1
+    x = x << 31
+    println(x, x >> 30, 0xff & 0x0f, 5 ^ 3, ~0)
+    println(i64(x) * 2, f64(7) / 2.0, int(3.99), u8('A'))
+
+    let args = os.args()
+    println(args.len >= 1, os.getenv("KITE_DEFINITELY_UNSET").isNone())
+
+    var m = Map[String, Vec[int]]{}
+    for i in 0..6 {
+        let key = if i % 2 == 0 { "even" } else { "odd" }
+        with list = m.entry(key.toString()) {
+            list.push(i)
+        }
+    }
+    if let evens = m.getMut("even") {
+        evens.push(100)
+    }
+    println(m)
+
+    let words = "  the  quick brown   fox ".fields()
+    println(words, words.join("-"), "a,b,,c".split(","))
+    let s = "Hello, World"
+    println(s.find("World"), s.find("x"), s.replace("l", "L"), s.startsWith("Hell"), s[7..])
+    println("42".parseInt(), "x".parseInt(), "2.5".parseFloat(), "ab".repeat(3))
+    let cmp = "apple".compare("banana")
+    println(cmp, "b" > "a", String('x') + "y")
+}

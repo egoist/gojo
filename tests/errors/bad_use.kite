@@ -1,0 +1,7 @@
+use fmtt
+use ./nowhere
+
+fn main() {
+    // error: unknown standard module `fmtt` (packages in this project are written `use ./fmtt`)
+    // error: cannot find package `./nowhere`
+}

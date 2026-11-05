@@ -1,0 +1,124 @@
+use fmt
+
+interface Animal {
+    fn name(self) String
+    fn speak(self) String
+}
+
+interface Counter {
+    fn bump(self inout) int
+}
+
+struct Dog {
+    n String
+
+    fn name(self) String { return self.n.clone() }
+
+    fn speak(self) String { return "woof".toString() }
+}
+struct Cat {
+    lives int = 9
+
+    fn name(self) String { return "cat".toString() }
+
+    fn speak(self) String { return "meow".toString() }
+}
+
+struct Clicks {
+    n int
+
+    fn bump(self inout) int {
+        self.n += 1
+        return self.n
+    }
+}
+fn introduce(a Animal) {
+    println(a.name(), "says", a.speak())
+}
+
+fn bumpTwice(c inout Counter) int {
+    _ = c.bump()
+    return c.bump()
+}
+
+struct Point {
+    x int, y int
+
+    fn toString(self) String {
+        return fmt.sprint("(", self.x, ",", self.y, ")")
+    }
+}
+
+struct Key {
+    id int
+    tag String
+
+    fn equal(self, o Key) bool { return self.id == o.id }
+
+    fn hash(self, h inout Hasher) { h.writeU64(u64(self.id)) }
+}
+
+struct Node {
+    value int
+    parent ?weak[Node]
+}
+
+fn main() {
+    introduce(Dog{n: "rex"})
+    introduce(Cat{})
+    var zoo = Vec[Animal]{}
+    zoo.push(Dog{n: "fido"})
+    zoo.push(Cat{})
+    for a in zoo {
+        match a {
+            d Dog => println("dog named", d.n)
+            c Cat => println("cat with", c.lives, "lives")
+            _ => {}
+        }
+    }
+    println(zoo.len, zoo[0].speak())
+    var c = Clicks{n: 0}
+    println(bumpTwice(&c), c.n)
+
+    var counts = Map[String, int]{}
+    for w in "the quick the lazy the end".split(" ") {
+        with e = counts.entry(w.clone()) {
+            e += 1
+        }
+    }
+    println(counts, counts.len)
+    println(counts["the"], counts.get("quick"), counts.get("nope"), counts.contains("lazy"))
+    if let n = counts.get("the") {
+        println("the appears", n, "times")
+    }
+    counts["lazy"] = 100
+    let old = counts.insert("end".toString(), 7)
+    let gone = counts.remove("quick")
+    println(old, gone, counts)
+    var keys = counts.keys()
+    keys.sort()
+    println(keys)
+    for k, v in counts {
+        if v > 5 {
+            println("big:", k, v)
+        }
+    }
+    let m2 = Map[int, String]{1: "one", 2: "two"}
+    println(m2[2], Point{x: 1, y: 2}, [Point{x: 3, y: 4}])
+
+    var byKey = Map[Key, int]{}
+    byKey[Key{id: 1, tag: "a"}] = 10
+    byKey[Key{id: 1, tag: "b"}] = 20
+    println(byKey.len, byKey[Key{id: 1, tag: "zzz"}])
+
+    let root = rc(Node{value: 1, parent: none})
+    let child = Node{value: 2, parent: root.downgrade()}
+    if let p = child.parent {
+        if let r = p.upgrade() {
+            println("parent value", r.value, root.count())
+        }
+    }
+    let shared = rc(Vec[int]{1, 2, 3})
+    let alias = shared.clone()
+    println(alias.len, shared.count(), alias[1])
+}

@@ -1,0 +1,9 @@
+use fmt
+
+pub fn shout(s str) String {
+    return s.toUpper() + "!"
+}
+
+pub fn num(x f64) String {
+    return fmt.sprint(x)
+}

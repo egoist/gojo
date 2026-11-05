@@ -1,0 +1,8 @@
+fn main() {
+    var users = Map[int, String]{1: "ann"}
+    if let u = users.get(1) {
+        users.remove(1)
+        println(u)
+    }
+    // error: cannot modify `users` while it is borrowed by `u`
+}

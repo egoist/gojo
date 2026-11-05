@@ -1,0 +1,93 @@
+use fmt
+
+struct Res {
+    name String
+
+    fn drop(self inout) {
+        println("drop", self.name)
+    }
+}
+
+fn make(n str) Res {
+    return Res{name: n.toString()}
+}
+
+fn consume(r sink Res) {
+    println("consume", r.name)
+}
+
+fn peek(r Res) {
+    println("peek", r.name)
+}
+
+struct Pair {
+    a Res
+    b Res
+}
+
+fn pick(flag bool) {
+    let x = make("x")
+    if flag {
+        consume(x)
+    }
+    println("end of pick", flag)
+}
+
+fn scopes() {
+    let a = make("a")
+    defer println("deferred in scopes")
+    {
+        let b = make("b")
+        defer println("inner defer")
+        peek(b)
+    }
+    let c = make("c")
+    peek(a)
+    peek(c)
+}
+
+fn early(n int) int {
+    let guard = make("guard")
+    if n > 0 {
+        return n
+    }
+    peek(guard)
+    return 0
+}
+
+fn loops() {
+    for i in 0..3 {
+        let r = make(fmt.sprint("loop", i).asStr())
+        if i == 1 {
+            continue
+        }
+        peek(r)
+    }
+}
+
+fn takePair(p sink Pair) Res {
+    return p.a
+}
+
+fn main() {
+    scopes()
+    pick(true)
+    pick(false)
+    println("early", early(1))
+    println("early", early(0))
+    loops()
+    let r = takePair(Pair{a: make("pa"), b: make("pb")})
+    peek(r)
+    var v = Vec[Res]{}
+    v.push(make("v1"))
+    v.push(make("v2"))
+    let popped = v.pop()
+    println("popped", popped.isSome())
+    var s = make("s1")
+    s = make("s2")
+    let names = Vec[String]{"x".toString(), "y".toString()}
+    let dup = names.clone()
+    println(names, dup)
+    drop(s)
+    println("main end")
+}

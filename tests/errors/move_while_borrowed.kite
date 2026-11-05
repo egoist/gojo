@@ -1,0 +1,9 @@
+fn take(v sink Vec[int]) {}
+fn main() {
+    let v = [1, 2, 3]
+    for x in v {
+        take(v)
+        _ = x
+    }
+    // error: cannot move `v` while it is borrowed
+}

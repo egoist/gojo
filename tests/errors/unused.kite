@@ -1,0 +1,10 @@
+use os
+use time.{sleep, now}
+
+fn main() {
+    let x = 1
+    println("hi", now())
+    // error: variable `x` is declared but never used
+    // error: `os` is imported but not used
+    // error: `sleep` is imported but not used
+}

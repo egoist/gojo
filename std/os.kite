@@ -1,0 +1,53 @@
+pub struct Error {
+    pub msg String
+    pub code int
+
+    pub fn message(self) String {
+        return self.msg.clone()
+    }
+}
+
+fn __readFile(path str, out inout Vec[byte]) int
+fn __writeFile(path str, data []byte) int
+fn __errMsg(path str, code int) String
+fn __getenv(name str, out inout String) bool
+
+fn newError(path str, code int) Error {
+    return Error{msg: __errMsg(path, code), code: code}
+}
+
+pub fn args() Vec[String]
+pub fn exit(code int) never
+
+pub fn readFile(path str) Vec[byte] ! Error {
+    var buf = Vec[byte]{}
+    let code = __readFile(path, &buf)
+    if code != 0 {
+        return err(newError(path, code))
+    }
+    return buf
+}
+
+pub fn readText(path str) String ! Error {
+    let b = try readFile(path)
+    return String(b)
+}
+
+pub fn writeFile(path str, data []byte) ! Error {
+    let code = __writeFile(path, data)
+    if code != 0 {
+        return err(newError(path, code))
+    }
+}
+
+pub fn writeText(path str, text str) ! Error {
+    return writeFile(path, text.bytes())
+}
+
+pub fn getenv(name str) ?String {
+    var out String = ""
+    if __getenv(name, &out) {
+        return out
+    }
+    return none
+}

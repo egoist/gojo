@@ -1,0 +1,7 @@
+fn keep(f sink fn() int) {}
+fn main() {
+    let s = "abc".toString()
+    let v = s.asStr()
+    keep(() => v.len)
+    // error: escaping closure cannot capture the borrowed view `v`
+}

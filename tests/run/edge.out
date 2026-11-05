@@ -1,0 +1,11 @@
+3 4
+6 11
+hello 5 single
+[10, 21, 32]
+Done("job ok") true
+6 10 18
+["aa", "ab", "ba", "bb"]
+6 default custom 0.5
+{"ann": [1, 2], "bob": []} some(2) none
+got 3
+false true true

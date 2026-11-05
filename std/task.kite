@@ -1,0 +1,8 @@
+// Structured concurrency.
+//
+//   try task.group((g) => {
+//       g.go(() => { ... })      // tasks may borrow data from outside the group
+//   })                           // waits for all tasks; returns the first error
+pub struct Group {
+    handle *u8
+}

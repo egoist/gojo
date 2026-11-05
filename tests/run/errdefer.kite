@@ -1,0 +1,43 @@
+use fmt
+
+struct Conn {
+    id int
+
+    fn drop(self inout) {
+        println("close conn", self.id)
+    }
+}
+
+fn open(id int, fail bool) Conn ! String {
+    println("open", id)
+    errdefer println("rollback", id)
+    defer println("leave", id)
+    if fail {
+        return err("refused".toString())
+    }
+    return Conn{id: id}
+}
+
+fn step(n int) int ! String {
+    errdefer println("undo step", n)
+    if n > 2 {
+        return err(fmt.sprint("step", n, "failed"))
+    }
+    return n
+}
+
+fn run(limit int) int ! String {
+    var total = 0
+    for i in 0..limit {
+        total += try step(i)
+    }
+    return total
+}
+
+fn main() {
+    let a = open(1, false)
+    println(a.isOk())
+    let b = open(2, true)
+    println(b.isErr())
+    println(run(2), run(5))
+}

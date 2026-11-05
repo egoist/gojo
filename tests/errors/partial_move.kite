@@ -1,0 +1,9 @@
+struct P { a String, b String }
+fn show(p P) {}
+fn main() {
+    let p = P{a: "1".toString(), b: "2".toString()}
+    let a = p.a
+    println(a, p.b)
+    show(p)
+    // error: use of `p` after part of it (`p.a`) was moved
+}

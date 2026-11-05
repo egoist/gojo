@@ -1,0 +1,8 @@
+extern "C" {
+    fn abs(x i32) i32
+}
+fn main() {
+    let x = abs(-3)
+    _ = x
+    // error: requires an `unsafe` block
+}

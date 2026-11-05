@@ -1,0 +1,11 @@
+fn both(a inout int, b inout int) {}
+fn mixed(a int, b inout Vec[int]) {}
+fn main() {
+    var a = 1
+    swap(&a, &a)
+    both(&a, &a)
+    var v = Vec[int]{}
+    v.extend(v)
+    // error: `a` is used by two arguments of the same call
+    // error: `v` is used by two arguments of the same call
+}

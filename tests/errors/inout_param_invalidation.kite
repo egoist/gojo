@@ -1,0 +1,10 @@
+fn grow(v inout Vec[int]) {
+    for x in v {
+        v.push(x)
+    }
+    // error: cannot modify `v` while it is borrowed by `x`
+}
+fn main() {
+    var v = [1]
+    grow(&v)
+}

@@ -1,0 +1,19 @@
+pub const Pi = 3.141592653589793
+pub const E = 2.718281828459045
+pub const MaxInt = 9223372036854775807
+pub const MinInt = -9223372036854775808
+
+pub fn sqrt(x f64) f64
+pub fn pow(x f64, y f64) f64
+pub fn abs(x f64) f64
+pub fn floor(x f64) f64
+pub fn ceil(x f64) f64
+pub fn round(x f64) f64
+pub fn sin(x f64) f64
+pub fn cos(x f64) f64
+pub fn tan(x f64) f64
+pub fn atan2(y f64, x f64) f64
+pub fn log(x f64) f64
+pub fn exp(x f64) f64
+pub fn isNaN(x f64) bool
+pub fn inf() f64

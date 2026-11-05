@@ -1,0 +1,7 @@
+fn main() {
+    var count = 0
+    go () => {
+        count += 1
+    }
+    // error: escaping closure cannot modify captured variable `count`
+}

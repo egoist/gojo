@@ -1,0 +1,21 @@
+// A growable string buffer.
+pub struct Builder {
+    buf String = ""
+
+    pub fn write(self inout, s str) {
+        self.buf.push(s)
+    }
+
+    pub fn writeRune(self inout, r rune) {
+        self.buf.pushRune(r)
+    }
+
+    pub fn len(self) int {
+        return self.buf.len()
+    }
+
+    pub fn finish(self sink) String {
+        return self.buf
+    }
+}
+

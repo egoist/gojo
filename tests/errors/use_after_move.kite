@@ -1,0 +1,7 @@
+fn take(s sink String) {}
+fn main() {
+    let s = "hello".toString()
+    take(s)
+    println(s)
+    // error: use of `s` after it was moved
+}

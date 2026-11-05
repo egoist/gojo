@@ -1,0 +1,6 @@
+fn f() int ! String { return 1 }
+fn main() {
+    let x = try f()
+    _ = x
+    // error: `try` needs the enclosing function to return a result
+}

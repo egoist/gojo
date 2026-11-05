@@ -1,0 +1,601 @@
+// The prelude: available in every Kite file without an import.
+// Functions without a body are implemented by the compiler or runtime.
+pub enum Ordering { Less, Equal, Greater }
+
+// Control signal for push-style iteration.
+pub enum Flow { Continue, Break }
+
+// The built-in error interface, for application-level error handling.
+pub interface error {
+    fn message(self) String
+}
+
+// Numeric types, for generic arithmetic.
+pub interface Number {
+    ~int | ~i8 | ~i16 | ~i32 | ~u8 | ~u16 | ~u32 | ~u64 | ~f32 | ~f64
+}
+
+// implemented by the compiler / runtime
+fn __panicErr[E any](msg str, e E) never
+fn __strFind(s str, sub str) int
+fn __parseInt(s str, out inout int) bool
+fn __parseFloat(s str, out inout f64) bool
+
+pub fn panic(msg str) never
+pub fn assert(cond bool)
+pub fn assertEq[T comparable](a T, b T)
+pub fn unreachable() never
+
+// Explicitly end the lifetime of a value.
+pub fn drop[T any](x sink T) {}
+pub fn swap[T any](a inout T, b inout T)
+pub fn replace[T any](dst inout T, value sink T) T
+pub fn take[T default](dst inout T) T
+
+pub fn min[T copy + ordered](a T, b T) T {
+    if a < b {
+        return a
+    }
+    return b
+}
+
+pub fn max[T copy + ordered](a T, b T) T {
+    if a > b {
+        return a
+    }
+    return b
+}
+
+// ---------------------------------------------------------------- ?T
+
+extend ?T {
+    pub fn isSome(self) bool {
+        return match self {
+            none => false
+            _ => true
+        }
+    }
+
+    pub fn isNone(self) bool {
+        return match self {
+            none => true
+            _ => false
+        }
+    }
+
+    pub fn unwrap(self sink) T {
+        return match self {
+            some(v) => v
+            none => panic("unwrap() called on none")
+        }
+    }
+
+    pub fn expect(self sink, msg str) T {
+        return match self {
+            some(v) => v
+            none => panic(msg)
+        }
+    }
+
+    pub fn unwrapOr(self sink, d sink T) T {
+        return match self {
+            some(v) => v
+            none => d
+        }
+    }
+
+    pub fn map[U any](self, f fn(T) U) ?U {
+        return match self {
+            some(v) => some(f(v))
+            none => none
+        }
+    }
+}
+
+// ---------------------------------------------------------------- T ! E
+
+extend T ! E {
+    pub fn isOk(self) bool {
+        return match self {
+            ok(_) => true
+            err(_) => false
+        }
+    }
+
+    pub fn isErr(self) bool {
+        return !self.isOk()
+    }
+
+    pub fn unwrap(self sink) T {
+        return match self {
+            ok(v) => v
+            err(e) => __panicErr("unwrap() called on an error", e)
+        }
+    }
+
+    pub fn expect(self sink, msg str) T {
+        return match self {
+            ok(v) => v
+            err(e) => __panicErr(msg, e)
+        }
+    }
+
+    pub fn unwrapOr(self sink, d sink T) T {
+        return match self {
+            ok(v) => v
+            err(_) => d
+        }
+    }
+
+    pub fn ok(self sink) ?T {
+        return match self {
+            ok(v) => some(v)
+            err(_) => none
+        }
+    }
+
+    pub fn err(self sink) ?E {
+        return match self {
+            ok(_) => none
+            err(e) => some(e)
+        }
+    }
+}
+
+// ---------------------------------------------------------------- str / String
+
+extend str {
+    pub fn len(self) int
+
+    // raw pointer to the bytes, for FFI
+    pub fn ptr(self) *u8
+
+    pub fn isEmpty(self) bool {
+        return self.len() == 0
+    }
+
+    pub fn contains(self, sub str) bool
+
+    pub fn startsWith(self, prefix str) bool
+
+    pub fn endsWith(self, suffix str) bool
+
+    pub fn find(self, sub str) ?int {
+        let i = __strFind(self, sub)
+        if i < 0 {
+            return none
+        }
+        return i
+    }
+
+    pub fn trim(self) str
+
+    pub fn trimStart(self) str
+
+    pub fn trimEnd(self) str
+
+    pub fn split(self, sep str) Vec[String]
+
+    pub fn lines(self) Vec[String]
+
+    pub fn fields(self) Vec[String]
+
+    pub fn toUpper(self) String
+
+    pub fn toLower(self) String
+
+    pub fn toString(self) String
+
+    pub fn repeat(self, n int) String
+
+    pub fn replace(self, from str, to str) String
+
+    pub fn bytes(self) []byte
+
+    pub fn runes(self) Vec[rune]
+
+    pub fn compare(self, other str) Ordering {
+        if self < other {
+            return .Less
+        }
+        if self > other {
+            return .Greater
+        }
+        return .Equal
+    }
+
+    pub fn parseInt(self) ?int {
+        var v = 0
+        if __parseInt(self, &v) {
+            return v
+        }
+        return none
+    }
+
+    pub fn parseFloat(self) ?f64 {
+        var v = 0.0
+        if __parseFloat(self, &v) {
+            return v
+        }
+        return none
+    }
+}
+
+extend String {
+    pub fn push(self inout, t str)
+
+    pub fn pushRune(self inout, r rune)
+
+    pub fn clear(self inout)
+
+    pub fn asStr(self) str
+}
+
+// ---------------------------------------------------------------- []T / Vec[T]
+
+extend []T {
+    pub fn len(self) int
+
+    // raw pointer to the first element, for FFI
+    pub fn ptr(self) *T
+
+    pub fn isEmpty(self) bool {
+        return self.len() == 0
+    }
+
+    pub fn get(self, i int) yield ?&T {
+        if i < 0 || i >= self.len() {
+            yield none
+        }
+        yield self[i]
+    }
+
+    pub fn first(self) yield ?&T {
+        if self.len() == 0 {
+            yield none
+        }
+        yield self[0]
+    }
+
+    pub fn last(self) yield ?&T {
+        if self.len() == 0 {
+            yield none
+        }
+        yield self[self.len() - 1]
+    }
+
+    pub fn contains(self, x T) bool where T: comparable {
+        for y in self {
+            if y == x {
+                return true
+            }
+        }
+        return false
+    }
+
+    pub fn indexOf(self, x T) ?int where T: comparable {
+        for i, y in self {
+            if y == x {
+                return i
+            }
+        }
+        return none
+    }
+
+    pub fn map[U any](self, f fn(T) U) Vec[U] {
+        var out = Vec[U]{}
+        for x in self {
+            out.push(f(x))
+        }
+        return out
+    }
+
+    pub fn filter(self, keep fn(T) bool) Vec[T] where T: clone {
+        var out = Vec[T]{}
+        for x in self {
+            if keep(x) {
+                out.push(x.clone())
+            }
+        }
+        return out
+    }
+
+    pub fn each(self, f fn(T)) {
+        for x in self {
+            f(x)
+        }
+    }
+
+    pub fn any(self, f fn(T) bool) bool {
+        for x in self {
+            if f(x) {
+                return true
+            }
+        }
+        return false
+    }
+
+    pub fn all(self, f fn(T) bool) bool {
+        for x in self {
+            if !f(x) {
+                return false
+            }
+        }
+        return true
+    }
+
+    pub fn count(self, f fn(T) bool) int {
+        var n = 0
+        for x in self {
+            if f(x) {
+                n += 1
+            }
+        }
+        return n
+    }
+
+    pub fn fold[A any](self, init sink A, f fn(sink A, T) A) A {
+        var acc = init
+        for x in self {
+            acc = f(acc, x)
+        }
+        return acc
+    }
+
+    pub fn sum(self) T where T: Number {
+        var total T = 0
+        for x in self {
+            total += x
+        }
+        return total
+    }
+
+    pub fn min(self) ?T where T: copy + ordered {
+        if self.len() == 0 {
+            return none
+        }
+        var m = self[0]
+        for x in self {
+            if x < m {
+                m = x
+            }
+        }
+        return m
+    }
+
+    pub fn max(self) ?T where T: copy + ordered {
+        if self.len() == 0 {
+            return none
+        }
+        var m = self[0]
+        for x in self {
+            if x > m {
+                m = x
+            }
+        }
+        return m
+    }
+
+    pub fn toVec(self) Vec[T] where T: clone {
+        var out = Vec[T]{}
+        for x in self {
+            out.push(x.clone())
+        }
+        return out
+    }
+}
+
+extend []String {
+    pub fn join(self, sep str) String {
+        var out String = ""
+        for i, s in self {
+            if i > 0 {
+                out += sep
+            }
+            out += s
+        }
+        return out
+    }
+}
+
+extend Vec[T] {
+    pub fn push(self inout, x sink T)
+
+    pub fn pop(self inout) ?T
+
+    pub fn insert(self inout, i int, x sink T)
+
+    pub fn remove(self inout, i int) T
+
+    pub fn swapRemove(self inout, i int) T
+
+    pub fn clear(self inout)
+
+    pub fn truncate(self inout, n int)
+
+    pub fn extend(self inout, other sink Vec[T])
+
+    pub fn reverse(self inout)
+
+    pub fn swap(self inout, i int, j int)
+
+    pub fn sort(self inout) where T: ordered
+
+    pub fn sortBy(self inout, less fn(T, T) bool)
+
+    pub fn reserve(self inout, n int)
+
+    pub fn cap(self) int
+}
+
+// ---------------------------------------------------------------- Map[K, V]
+
+extend Map[K, V] {
+    pub fn len(self) int
+
+    pub fn isEmpty(self) bool {
+        return self.len() == 0
+    }
+
+    pub fn get(self, k K) yield ?&V
+
+    pub fn getMut(self inout, k K) yield ?inout V
+
+    pub fn contains(self, k K) bool
+
+    pub fn insert(self inout, k sink K, v sink V) ?V
+
+    pub fn remove(self inout, k K) ?V
+
+    pub fn entry(self inout, k sink K) yield inout V where V: default
+
+    pub fn clear(self inout)
+
+    pub fn keys(self) Vec[K] where K: clone {
+        var out = Vec[K]{}
+        for k, _ in self {
+            out.push(k.clone())
+        }
+        return out
+    }
+
+    pub fn values(self) Vec[V] where V: clone {
+        var out = Vec[V]{}
+        for _, v in self {
+            out.push(v.clone())
+        }
+        return out
+    }
+}
+
+// ---------------------------------------------------------------- shared ownership
+
+extend rc[T] {
+    pub fn count(self) int
+
+    pub fn downgrade(self) weak[T]
+}
+
+extend weak[T] {
+    pub fn upgrade(self) ?rc[T]
+}
+
+extend arc[T] {
+    pub fn count(self) int
+}
+
+extend Cell[T] {
+    pub fn get(self) T
+
+    pub fn set(self, v T)
+}
+
+extend Mutex[T] {
+    // Locking is a projection: the guarded value can't escape the block.
+    pub fn lock(self) yield inout T
+}
+
+// ---------------------------------------------------------------- channels
+
+extend chan T {
+    pub fn send(self, x sink T)
+
+    pub fn recv(self) ?T
+
+    pub fn close(self)
+
+    pub fn len(self) int
+}
+
+// ---------------------------------------------------------------- hashing
+
+pub struct Hasher {
+    state u64 = 14695981039346656037
+
+    pub fn writeU64(self inout, x u64) {
+        self.state = (self.state ^ x) *% 1099511628211
+    }
+
+    pub fn write[T hash](self inout, x T)
+}
+
+// ---------------------------------------------------------------- arenas
+// Graphs, trees and other cyclic structures: nodes refer to each other by Id.
+// Ids carry a generation, so a stale Id yields none instead of a dangling pointer.
+
+pub copy struct Id[T any] {
+    index int
+    gen int
+}
+
+struct Slot[T any] {
+    gen int
+    value ?T
+}
+
+pub struct Arena[T any] {
+    slots Vec[Slot[T]] = Vec[Slot[T]]{}
+    free Vec[int] = Vec[int]{}
+    count int = 0
+
+    pub fn alloc(self inout, v sink T) Id[T] {
+        self.count += 1
+        if let i = self.free.pop() {
+            with s = self.slots[i] {
+                s.gen += 1
+                s.value = some(v)
+                return Id[T]{index: i, gen: s.gen}
+            }
+        }
+        self.slots.push(Slot[T]{gen: 0, value: some(v)})
+        return Id[T]{index: self.slots.len - 1, gen: 0}
+    }
+
+    pub fn get(self, id Id[T]) yield ?&T {
+        if id.index < 0 || id.index >= self.slots.len {
+            yield none
+        }
+        let s = self.slots[id.index]
+        if s.gen != id.gen {
+            yield none
+        }
+        if let v = s.value {
+            yield v
+        }
+        yield none
+    }
+
+    pub fn getMut(self inout, id Id[T]) yield ?inout T {
+        if id.index < 0 || id.index >= self.slots.len {
+            yield none
+        }
+        var s = self.slots[id.index]
+        if s.gen != id.gen {
+            yield none
+        }
+        if let v = s.value {
+            yield v
+        }
+        yield none
+    }
+
+    pub fn remove(self inout, id Id[T]) ?T {
+        if id.index < 0 || id.index >= self.slots.len {
+            return none
+        }
+        if self.slots[id.index].gen != id.gen {
+            return none
+        }
+        let old = take(&self.slots[id.index].value)
+        if old.isSome() {
+            self.count -= 1
+            self.free.push(id.index)
+        }
+        return old
+    }
+
+    pub fn len(self) int {
+        return self.count
+    }
+}
+

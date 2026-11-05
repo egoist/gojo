@@ -1,0 +1,15 @@
+struct Point {
+    x int
+
+    fn new(x int) Point { return Point{x: x} }
+    fn get(self) int { return self.x }
+    fn new(y int) Point { return Point{x: y} }
+    // error: `new` is declared twice for this type
+}
+
+extend Vec[int] {
+    fn total(self) int { return 0 }
+    // error: cannot define methods on built-in type `Vec[int]`
+}
+
+fn main() {}

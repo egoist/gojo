@@ -1,0 +1,10 @@
+open 1
+leave 1
+true
+open 2
+leave 2
+rollback 2
+true
+undo step 3
+ok(1) err("step 3 failed")
+close conn 1

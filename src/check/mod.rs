@@ -1,0 +1,1201 @@
+// Declaration collection, type resolution and capability rules.
+//
+// Everything here works from signatures and type declarations only; function
+// bodies are checked one at a time in `body.rs` and never influence other
+// functions' checking.
+
+pub mod body;
+pub mod pattern;
+
+use crate::ast::{self, Mode, TypeExpr, TypeExprKind};
+use crate::diag::{Diag, Span};
+use crate::tir::*;
+use crate::types::*;
+use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
+
+pub struct Unit {
+    pub name: String,
+    pub path: String,
+    pub is_std: bool,
+    pub files: Vec<ast::File>,
+}
+
+pub struct FileCx {
+    pub pkg: PkgId,
+    /// `use os` / `use ./geom as g`: package bindings.
+    pub imports: HashMap<String, (PkgId, Span)>,
+    /// `use ./geom.{Vec2}`: names brought directly into scope.
+    pub names: HashMap<String, (PkgId, Span)>,
+    pub used_imports: HashSet<String>,
+}
+
+pub struct Checker {
+    pub prog: Program,
+    pub files: Vec<ast::File>,
+    pub file_cx: Vec<FileCx>,
+    pub diags: Vec<Diag>,
+    pub tfuncs: Vec<TFunc>,
+    pub tests: Vec<(String, FuncId)>,
+    /// Memo for recursive capability checks.
+    send_memo: HashMap<DefId, bool>,
+    pub iface_error: Option<DefId>,
+    pub pending_infer: Vec<(Span, String, Vec<String>, TExpr)>,
+}
+
+#[derive(Clone)]
+pub struct TyEnv {
+    pub file: usize,
+    pub pkg: PkgId,
+    pub tparams: HashMap<String, Ty>,
+}
+
+pub fn check_program(units: Vec<Unit>) -> Result<(Program, Vec<TFunc>, Vec<(String, FuncId)>), Vec<Diag>> {
+    let mut c = Checker {
+        prog: Program::default(),
+        files: vec![],
+        file_cx: vec![],
+        diags: vec![],
+        tfuncs: vec![],
+        tests: vec![],
+        send_memo: HashMap::new(),
+        iface_error: None,
+        pending_infer: vec![],
+    };
+    c.collect(units);
+    if !c.diags.is_empty() {
+        return Err(c.diags);
+    }
+    c.check_bodies();
+    c.check_unused_imports();
+    if !c.diags.is_empty() {
+        return Err(c.diags);
+    }
+    Ok((c.prog, c.tfuncs, c.tests))
+}
+
+impl Checker {
+    pub fn err(&mut self, span: Span, msg: impl Into<String>) {
+        self.diags.push(Diag::new(span, msg));
+    }
+
+    // ------------------------------------------------------------------
+    // Collection
+    // ------------------------------------------------------------------
+
+    fn collect(&mut self, units: Vec<Unit>) {
+        // 1. packages and files
+        let mut pkg_by_path: HashMap<String, PkgId> = HashMap::new();
+        for u in &units {
+            let id = self.prog.packages.len() as PkgId;
+            self.prog.packages.push(Package { name: u.name.clone(), path: u.path.clone(), items: HashMap::new(), is_std: u.is_std });
+            pkg_by_path.insert(u.path.clone(), id);
+            if u.path == "prelude" {
+                self.prog.prelude = id;
+            }
+        }
+        self.prog.main_pkg = (units.len() - 1) as PkgId;
+        for (pi, u) in units.into_iter().enumerate() {
+            for f in u.files {
+                self.file_cx.push(FileCx { pkg: pi as PkgId, imports: HashMap::new(), names: HashMap::new(), used_imports: HashSet::new() });
+                self.files.push(f);
+            }
+        }
+        // imports
+        for fi in 0..self.files.len() {
+            let imports = self.files[fi].imports.clone();
+            for imp in imports {
+                match pkg_by_path.get(&imp.path) {
+                    Some(&p) => match &imp.names {
+                        Some(ns) => {
+                            for (n, sp) in ns {
+                                if self.file_cx[fi].names.insert(n.clone(), (p, *sp)).is_some() {
+                                    self.err(*sp, format!("`{}` is imported twice", n));
+                                }
+                            }
+                        }
+                        None => {
+                            let name = imp.alias.clone().unwrap_or_else(|| self.prog.packages[p as usize].name.clone());
+                            if self.file_cx[fi].imports.insert(name.clone(), (p, imp.span)).is_some() {
+                                self.err(imp.span, format!("`{}` is imported twice", name));
+                            }
+                        }
+                    },
+                    None => self.err(imp.span, format!("cannot find package `{}`", imp.path)),
+                }
+            }
+        }
+
+        // 2. type names
+        let mut type_items: Vec<(usize, usize, DefId)> = vec![];
+        let mut alias_items: Vec<(usize, usize)> = vec![];
+        for fi in 0..self.files.len() {
+            let pkg = self.file_cx[fi].pkg;
+            for ii in 0..self.files[fi].items.len() {
+                let item = &self.files[fi].items[ii];
+                let (name, kind, tps, is_copy, unsafe_send) = match &item.kind {
+                    ast::ItemKind::Struct(s) => (s.name.clone(), TypeDefKind::Struct { fields: vec![] }, s.tparams.clone(), s.is_copy, s.unsafe_send),
+                    ast::ItemKind::Enum(e) => (e.name.clone(), TypeDefKind::Enum { variants: vec![] }, e.tparams.clone(), e.is_copy, false),
+                    ast::ItemKind::Interface(i) => (i.name.clone(), TypeDefKind::Iface { methods: vec![], type_set: None }, i.tparams.clone(), false, false),
+                    ast::ItemKind::TypeAlias { newtype: true, name, tparams, .. } => (name.clone(), TypeDefKind::Struct { fields: vec![] }, tparams.clone(), false, false),
+                    ast::ItemKind::TypeAlias { .. } => {
+                        alias_items.push((fi, ii));
+                        continue;
+                    }
+                    _ => continue,
+                };
+                let span = item.span;
+                let is_pub = item.is_pub;
+                let newtype = matches!(item.kind, ast::ItemKind::TypeAlias { .. });
+                let id = self.prog.types.len() as DefId;
+                let mut tparams = vec![];
+                for tp in &tps {
+                    tparams.push(self.new_tparam(&tp.name, tp.is_int));
+                }
+                self.prog.types.push(TypeDef { name: name.clone(), pkg, tparams, kind, is_copy, is_pub, unsafe_send, newtype, span, has_drop: false });
+                if self.prog.packages[pkg as usize].items.insert(name.clone(), Sym::Type(id)).is_some() {
+                    self.err(span, format!("`{}` is declared twice", name));
+                }
+                type_items.push((fi, ii, id));
+            }
+        }
+        if let Some(Sym::Type(d)) = self.prog.packages[self.prog.prelude as usize].items.get("error") {
+            self.iface_error = Some(*d);
+        }
+        // aliases (may refer to each other in order)
+        for (fi, ii) in alias_items {
+            if let ast::ItemKind::TypeAlias { name, ty, .. } = self.files[fi].items[ii].kind.clone() {
+                let env = self.file_env(fi);
+                let t = self.resolve_type(&ty, &env);
+                let pkg = self.file_cx[fi].pkg;
+                self.prog.packages[pkg as usize].items.insert(name, Sym::Alias(t));
+            }
+        }
+
+        // 3. type bodies
+        for &(fi, ii, id) in &type_items {
+            let item = self.files[fi].items[ii].clone();
+            let mut env = self.file_env(fi);
+            let tps = self.prog.def(id).tparams.clone();
+            let decl_tps: Vec<ast::TParam> = match &item.kind {
+                ast::ItemKind::Struct(s) => s.tparams.clone(),
+                ast::ItemKind::Enum(e) => e.tparams.clone(),
+                ast::ItemKind::Interface(i) => i.tparams.clone(),
+                ast::ItemKind::TypeAlias { tparams, .. } => tparams.clone(),
+                _ => vec![],
+            };
+            for (tp, &pid) in decl_tps.iter().zip(tps.iter()) {
+                env.tparams.insert(tp.name.clone(), if tp.is_int { Ty::Param(pid) } else { Ty::Param(pid) });
+            }
+            for (tp, &pid) in decl_tps.iter().zip(tps.iter()) {
+                let bounds = tp.bounds.iter().filter_map(|b| self.resolve_bound(b, &env)).collect();
+                self.prog.tparams[pid as usize].bounds = bounds;
+            }
+            match &item.kind {
+                ast::ItemKind::Struct(s) => {
+                    let mut fields = vec![];
+                    let mut seen = HashSet::new();
+                    for f in &s.fields {
+                        if !seen.insert(f.name.clone()) {
+                            self.err(f.span, format!("duplicate field `{}`", f.name));
+                        }
+                        let ty = self.resolve_type(&f.ty, &env);
+                        if ty.is_view() {
+                            self.err(f.ty.span, format!("field `{}` has borrowed view type `{}`; fields must own their data (use `String` / `Vec[T]`)", f.name, self.prog.show(&ty)));
+                        }
+                        fields.push(FieldInfo { name: f.name.clone(), ty, default: None, is_pub: f.is_pub || self.prog.packages[self.prog.def(id).pkg as usize].is_std, embedded: f.embedded, span: f.span });
+                    }
+                    self.prog.types[id as usize].kind = TypeDefKind::Struct { fields };
+                }
+                ast::ItemKind::TypeAlias { ty, .. } => {
+                    let t = self.resolve_type(ty, &env);
+                    let is_copy = self.is_copy(&t);
+                    self.prog.types[id as usize].kind = TypeDefKind::Struct { fields: vec![FieldInfo { name: "value".into(), ty: t, default: None, is_pub: true, embedded: false, span: item.span }] };
+                    self.prog.types[id as usize].is_copy = is_copy;
+                }
+                ast::ItemKind::Enum(e) => {
+                    let mut variants = vec![];
+                    let mut seen = HashSet::new();
+                    for v in &e.variants {
+                        if !seen.insert(v.name.clone()) {
+                            self.err(v.span, format!("duplicate variant `{}`", v.name));
+                        }
+                        let mut fs = vec![];
+                        for (n, t) in &v.fields {
+                            let ty = self.resolve_type(t, &env);
+                            if ty.is_view() {
+                                self.err(t.span, "enum payloads must own their data; borrowed views are not allowed here");
+                            }
+                            fs.push((n.clone(), ty));
+                        }
+                        variants.push(VariantInfo { name: v.name.clone(), fields: fs, span: v.span });
+                    }
+                    self.prog.types[id as usize].kind = TypeDefKind::Enum { variants };
+                }
+                ast::ItemKind::Interface(i) => {
+                    let mut methods = vec![];
+                    for m in &i.methods {
+                        let params = m.params.iter().map(|p| (p.name.clone(), p.mode, self.resolve_type(&p.ty, &env))).collect();
+                        let ret = m.ret.as_ref().map(|t| self.resolve_type(t, &env)).unwrap_or(Ty::Unit);
+                        methods.push(IfaceMethodInfo { name: m.name.clone(), recv_mode: m.recv_mode, params, ret });
+                    }
+                    let type_set = if i.type_set.is_empty() { None } else { Some(i.type_set.iter().map(|(a, t)| (*a, self.resolve_type(t, &env))).collect()) };
+                    self.prog.types[id as usize].kind = TypeDefKind::Iface { methods, type_set };
+                }
+                _ => {}
+            }
+        }
+        // interface embedding (second pass so embedded ifaces are resolved)
+        for &(fi, ii, id) in &type_items {
+            if let ast::ItemKind::Interface(i) = &self.files[fi].items[ii].kind.clone() {
+                let env = self.file_env(fi);
+                for e in &i.embeds {
+                    let t = self.resolve_type(e, &env);
+                    match t {
+                        Ty::Iface(d, _) => {
+                            let extra = match &self.prog.def(d).kind {
+                                TypeDefKind::Iface { methods, .. } => methods.clone(),
+                                _ => vec![],
+                            };
+                            if let TypeDefKind::Iface { methods, .. } = &mut self.prog.types[id as usize].kind {
+                                methods.extend(extra);
+                            }
+                        }
+                        Ty::Error => {}
+                        _ => {
+                            // single non-interface type: a one-element type set
+                            if let TypeDefKind::Iface { type_set, .. } = &mut self.prog.types[id as usize].kind {
+                                type_set.get_or_insert_with(Vec::new).push((false, t));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 4. functions & consts
+        for fi in 0..self.files.len() {
+            let pkg = self.file_cx[fi].pkg;
+            for ii in 0..self.files[fi].items.len() {
+                let item = self.files[fi].items[ii].clone();
+                match &item.kind {
+                    ast::ItemKind::Func(f) => {
+                        let kind = if f.body.is_none() {
+                            if self.prog.packages[pkg as usize].is_std {
+                                FuncKind::Intrinsic
+                            } else {
+                                self.err(f.name_span, "function declaration is missing a body");
+                                FuncKind::Intrinsic
+                            }
+                        } else {
+                            FuncKind::Normal
+                        };
+                        self.declare_func(fi, ii, None, f, item.is_pub, kind);
+                    }
+                    ast::ItemKind::Extern(ext) => {
+                        for (ei, f) in ext.funcs.iter().enumerate() {
+                            self.declare_func(fi, ii, Some(ei), f, item.is_pub, FuncKind::ExternC { lib: ext.lib.clone() });
+                        }
+                    }
+                    ast::ItemKind::Test { name, .. } => {
+                        let id = self.prog.funcs.len() as FuncId;
+                        self.prog.funcs.push(FuncDef {
+                            name: format!("test_{}", id),
+                            pkg,
+                            file: self.files[fi].file_id,
+                            recv: None,
+                            tparams: vec![],
+                            params: vec![],
+                            ret: Ty::Unit,
+                            yields: None,
+                            yield_opt: false,
+                            is_pub: false,
+                            kind: FuncKind::Test,
+                            span: item.span,
+                            ast: Some((fi, ii, None)),
+                            recv_key: None,
+                            is_extern_c_export: false,
+                            owner_ty: None,
+                        });
+                        if pkg == self.prog.main_pkg {
+                            self.tests.push((name.clone(), id));
+                        }
+                    }
+                    ast::ItemKind::Const { name, ty, .. } => {
+                        let env = self.file_env(fi);
+                        let t = ty.as_ref().map(|t| self.resolve_type(t, &env)).unwrap_or(Ty::Error);
+                        let id = self.prog.consts.len() as u32;
+                        self.prog.consts.push(ConstDef { name: name.clone(), ty: t, value: None, pkg, is_pub: item.is_pub, span: item.span });
+                        if self.prog.packages[pkg as usize].items.insert(name.clone(), Sym::Const(id)).is_some() {
+                            self.err(item.span, format!("`{}` is declared twice", name));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        // selected names must exist, be public and not clash with the package's own items
+        for fi in 0..self.file_cx.len() {
+            let mut names: Vec<(String, (PkgId, Span))> = self.file_cx[fi].names.iter().map(|(k, v)| (k.clone(), *v)).collect();
+            names.sort_by_key(|x| x.1 .1.lo);
+            let own = self.file_cx[fi].pkg;
+            for (n, (p, sp)) in names {
+                let pname = self.prog.packages[p as usize].name.clone();
+                match self.prog.packages[p as usize].items.get(&n).cloned() {
+                    None => self.err(sp, format!("package `{}` has no `{}`", pname, n)),
+                    Some(sym) => {
+                        if !self.sym_is_pub(&sym) {
+                            self.err(sp, format!("`{}` is not public in package `{}`", n, pname));
+                        }
+                        if self.prog.packages[own as usize].items.contains_key(&n) {
+                            self.err(sp, format!("`{}` is imported but this package also declares `{}`", n, n));
+                        }
+                    }
+                }
+            }
+        }
+
+        // 5. drop methods, copy validation, recursive types
+        for id in 0..self.prog.types.len() {
+            let key = TyKey::Adt(id as DefId);
+            if self.prog.methods.contains_key(&(key, "drop".to_string())) {
+                self.prog.types[id].has_drop = true;
+            }
+        }
+        for id in 0..self.prog.types.len() as DefId {
+            let def = self.prog.def(id).clone();
+            if def.is_copy {
+                let tys: Vec<Ty> = match &def.kind {
+                    TypeDefKind::Struct { fields } => fields.iter().map(|f| f.ty.clone()).collect(),
+                    TypeDefKind::Enum { variants } => variants.iter().flat_map(|v| v.fields.iter().map(|f| f.1.clone())).collect(),
+                    _ => vec![],
+                };
+                for t in tys {
+                    if !self.is_copy(&t) {
+                        let s = self.prog.show(&t);
+                        self.err(def.span, format!("`{}` is declared `copy` but contains `{}`, which is not copy", def.name, s));
+                    }
+                }
+                if def.has_drop {
+                    self.err(def.span, format!("`{}` is declared `copy` but has a `drop` method", def.name));
+                }
+            }
+            if self.is_infinite(id, &mut vec![]) {
+                self.err(def.span, format!("recursive type `{}` has infinite size; use Box[T] or Vec[T] for the recursive field", def.name));
+            }
+        }
+    }
+
+    fn is_infinite(&self, id: DefId, stack: &mut Vec<DefId>) -> bool {
+        if stack.contains(&id) {
+            return true;
+        }
+        stack.push(id);
+        let def = self.prog.def(id);
+        let tys: Vec<Ty> = match &def.kind {
+            TypeDefKind::Struct { fields } => fields.iter().map(|f| f.ty.clone()).collect(),
+            TypeDefKind::Enum { variants } => variants.iter().flat_map(|v| v.fields.iter().map(|f| f.1.clone())).collect(),
+            _ => vec![],
+        };
+        let mut r = false;
+        for t in tys {
+            if self.inline_contains(&t, stack) {
+                r = true;
+                break;
+            }
+        }
+        stack.pop();
+        r
+    }
+
+    fn inline_contains(&self, t: &Ty, stack: &mut Vec<DefId>) -> bool {
+        match t {
+            Ty::Adt(d, _) => self.is_infinite(*d, stack),
+            Ty::Option(a) | Ty::Array(a, _) => self.inline_contains(a, stack),
+            Ty::Result(a, b) => self.inline_contains(a, stack) || self.inline_contains(b, stack),
+            _ => false,
+        }
+    }
+
+    pub fn new_tparam(&mut self, name: &str, is_int: bool) -> TParamId {
+        self.prog.tparams.push(TParamInfo { name: name.to_string(), bounds: vec![], is_int });
+        (self.prog.tparams.len() - 1) as TParamId
+    }
+
+    pub fn file_env(&self, fi: usize) -> TyEnv {
+        TyEnv { file: fi, pkg: self.file_cx[fi].pkg, tparams: HashMap::new() }
+    }
+
+    fn declare_func(&mut self, fi: usize, ii: usize, ei: Option<usize>, f: &ast::FuncDecl, is_pub: bool, kind: FuncKind) {
+        let pkg = self.file_cx[fi].pkg;
+        let mut env = self.file_env(fi);
+        let mut tparams = vec![];
+        // receiver: unknown names in type-argument position introduce type params
+        let mut recv = None;
+        let mut recv_key = None;
+        let mut owner_ty = None;
+        if let Some(o) = &f.owner {
+            let mut intro = vec![];
+            self.collect_recv_params(o, &env, &mut intro, true);
+            for n in intro {
+                let id = self.new_tparam(&n, false);
+                env.tparams.insert(n, Ty::Param(id));
+                tparams.push(id);
+            }
+            let ty = self.resolve_type(o, &env);
+            recv_key = TyKey::of(&ty);
+            if let Some(TyKey::Adt(d)) = recv_key {
+                if self.prog.def(d).pkg != pkg {
+                    self.err(o.span, "functions can only be added to a type in the package that defines it");
+                }
+            } else if recv_key.is_some() && !self.prog.packages[pkg as usize].is_std {
+                self.err(o.span, format!("cannot add functions to built-in type `{}`", self.prog.show(&ty)));
+            }
+            owner_ty = Some(ty);
+        }
+        if let Some(r) = &f.recv {
+            let mut intro = vec![];
+            self.collect_recv_params(&r.ty, &env, &mut intro, true);
+            for n in intro {
+                let id = self.new_tparam(&n, false);
+                env.tparams.insert(n, Ty::Param(id));
+                tparams.push(id);
+            }
+            let ty = self.resolve_type(&r.ty, &env);
+            recv_key = TyKey::of(&ty);
+            match recv_key {
+                Some(TyKey::Adt(d)) => {
+                    if self.prog.def(d).pkg != pkg {
+                        self.err(r.ty.span, "methods can only be declared in the package that defines the type");
+                    }
+                }
+                Some(_) => {
+                    if !self.prog.packages[pkg as usize].is_std {
+                        self.err(r.ty.span, format!("cannot define methods on built-in type `{}`", self.prog.show(&ty)));
+                    }
+                }
+                None => {
+                    if !ty.is_error() {
+                        self.err(r.ty.span, format!("invalid receiver type `{}`", self.prog.show(&ty)));
+                    }
+                }
+            }
+            recv = Some(FuncParam { name: r.name.clone(), mode: r.mode, ty, span: r.span });
+        }
+        for tp in &f.tparams {
+            let id = self.new_tparam(&tp.name, tp.is_int);
+            env.tparams.insert(tp.name.clone(), Ty::Param(id));
+            tparams.push(id);
+        }
+        for tp in &f.tparams {
+            let id = match env.tparams.get(&tp.name) {
+                Some(Ty::Param(p)) => *p,
+                _ => continue,
+            };
+            let bounds: Vec<Bound> = tp.bounds.iter().filter_map(|b| self.resolve_bound(b, &env)).collect();
+            self.prog.tparams[id as usize].bounds.extend(bounds);
+        }
+        for (n, bs, sp) in &f.wheres {
+            match env.tparams.get(n).cloned() {
+                Some(Ty::Param(p)) => {
+                    let bounds: Vec<Bound> = bs.iter().filter_map(|b| self.resolve_bound(b, &env)).collect();
+                    self.prog.tparams[p as usize].bounds.extend(bounds);
+                }
+                _ => self.err(*sp, format!("`{}` is not a type parameter of this function", n)),
+            }
+        }
+        let mut params = vec![];
+        let mut seen = HashSet::new();
+        if let Some(r) = &recv {
+            seen.insert(r.name.clone());
+        }
+        for p in &f.params {
+            if !seen.insert(p.name.clone()) && p.name != "_" {
+                self.err(p.span, format!("duplicate parameter `{}`", p.name));
+            }
+            let ty = self.resolve_type(&p.ty, &env);
+            if p.mode == Mode::Sink && ty.is_view() {
+                self.err(p.ty.span, "`sink` cannot take a borrowed view; take an owned type (String / Vec[T]) instead");
+            }
+            params.push(FuncParam { name: p.name.clone(), mode: p.mode, ty, span: p.span });
+        }
+        let mut ret = match &f.ret {
+            Some(t) => self.resolve_type(t, &env),
+            None => Ty::Unit,
+        };
+        if matches!(&f.ret, Some(TypeExpr { kind: TypeExprKind::Named { path, .. }, .. }) if path.len() == 1 && path[0] == "never") {
+            ret = Ty::Never;
+        }
+        if f.yields.is_some() && f.yield_opt {
+            // stored as the element type; Proj with opt
+        }
+        let id = self.prog.funcs.len() as FuncId;
+        self.prog.funcs.push(FuncDef {
+            name: f.name.clone(),
+            pkg,
+            file: self.files[fi].file_id,
+            recv,
+            tparams,
+            params,
+            ret,
+            yields: f.yields,
+            yield_opt: f.yield_opt,
+            is_pub,
+            kind,
+            span: f.name_span,
+            ast: Some((fi, ii, ei)),
+            recv_key,
+            is_extern_c_export: f.is_extern_c && f.body.is_some(),
+            owner_ty: owner_ty.clone(),
+        });
+        if owner_ty.is_some() {
+            if let Some(k) = recv_key {
+                if self.prog.assoc.insert((k, f.name.clone()), id).is_some() || self.prog.methods.contains_key(&(k, f.name.clone())) {
+                    self.err(f.name_span, format!("`{}` is declared twice for this type", f.name));
+                }
+            }
+            return;
+        }
+        match recv_key {
+            Some(k) => {
+                if self.prog.assoc.contains_key(&(k, f.name.clone())) {
+                    self.err(f.name_span, format!("`{}` is declared twice for this type", f.name));
+                }
+                let list = self.prog.methods.entry((k, f.name.clone())).or_default();
+                list.push(id);
+                if let TyKey::Adt(d) = k {
+                    if list.len() > 1 {
+                        self.err(f.name_span, format!("method `{}` is declared twice for `{}`", f.name, self.prog.def(d).name));
+                    }
+                    let def = self.prog.def(d);
+                    if def.fields().iter().any(|fl| fl.name == f.name) {
+                        self.err(f.name_span, format!("`{}` has both a field and a method named `{}`", self.prog.def(d).name.clone(), f.name));
+                    }
+                }
+            }
+            None if f.recv.is_none() => {
+                if self.prog.packages[pkg as usize].items.insert(f.name.clone(), Sym::Func(id)).is_some() {
+                    self.err(f.name_span, format!("`{}` is declared twice", f.name));
+                }
+            }
+            None => {}
+        }
+    }
+
+    fn collect_recv_params(&self, te: &TypeExpr, env: &TyEnv, out: &mut Vec<String>, top: bool) {
+        match &te.kind {
+            TypeExprKind::Named { path, args } => {
+                if !top && path.len() == 1 && args.is_empty() && self.lookup_type_name(&path[0], env).is_none() && !out.contains(&path[0]) {
+                    out.push(path[0].clone());
+                }
+                for a in args {
+                    self.collect_recv_params(a, env, out, false);
+                }
+            }
+            TypeExprKind::Option(a) | TypeExprKind::Slice(a) | TypeExprKind::Ptr(a) | TypeExprKind::Chan(a) => self.collect_recv_params(a, env, out, false),
+            TypeExprKind::Array(_, a) => self.collect_recv_params(a, env, out, false),
+            TypeExprKind::Result(a, b) => {
+                self.collect_recv_params(a, env, out, false);
+                self.collect_recv_params(b, env, out, false);
+            }
+            _ => {}
+        }
+    }
+
+    fn lookup_type_name(&self, name: &str, env: &TyEnv) -> Option<()> {
+        if env.tparams.contains_key(name) || builtin_type(name).is_some() || is_generic_builtin(name) {
+            return Some(());
+        }
+        if self.prog.packages[env.pkg as usize].items.contains_key(name) || self.file_cx[env.file].names.contains_key(name) || self.prog.packages[self.prog.prelude as usize].items.contains_key(name) {
+            return Some(());
+        }
+        None
+    }
+
+    pub fn sym_is_pub(&self, sym: &Sym) -> bool {
+        match sym {
+            Sym::Type(d) => self.prog.def(*d).is_pub,
+            Sym::Func(f) => self.prog.func(*f).is_pub,
+            Sym::Const(c) => self.prog.consts[*c as usize].is_pub,
+            Sym::Alias(_) => true,
+        }
+    }
+
+    /// An unqualified name: this package's items, then names from `use x.{...}`, then the prelude.
+    pub fn lookup_unqualified(&mut self, fi: usize, pkg: PkgId, name: &str) -> Option<Sym> {
+        if let Some(sym) = self.prog.packages[pkg as usize].items.get(name) {
+            return Some(sym.clone());
+        }
+        if let Some((p, _)) = self.file_cx[fi].names.get(name).cloned() {
+            if let Some(sym) = self.prog.packages[p as usize].items.get(name).cloned() {
+                self.file_cx[fi].used_imports.insert(name.to_string());
+                return Some(sym);
+            }
+        }
+        self.prog.packages[self.prog.prelude as usize].items.get(name).cloned()
+    }
+
+    // ------------------------------------------------------------------
+    // Type resolution
+    // ------------------------------------------------------------------
+
+    pub fn resolve_bound(&mut self, te: &TypeExpr, env: &TyEnv) -> Option<Bound> {
+        if let TypeExprKind::Named { path, args } = &te.kind {
+            if path.len() == 1 && args.is_empty() {
+                if let Some(c) = Cap::from_name(&path[0]) {
+                    return Some(Bound::Cap(c));
+                }
+            }
+        }
+        match self.resolve_type(te, env) {
+            Ty::Iface(d, args) => Some(Bound::Iface(d, args.to_vec())),
+            Ty::Error => None,
+            t => {
+                let s = self.prog.show(&t);
+                self.err(te.span, format!("`{}` is not a constraint; use an interface or a capability (copy, clone, ordered, ...)", s));
+                None
+            }
+        }
+    }
+
+    pub fn resolve_type(&mut self, te: &TypeExpr, env: &TyEnv) -> Ty {
+        match &te.kind {
+            TypeExprKind::Unit => Ty::Unit,
+            TypeExprKind::IntLit(n) => Ty::ConstInt(*n as u64),
+            TypeExprKind::Option(a) => {
+                let t = self.resolve_type(a, env);
+                if matches!(t, Ty::Option(_)) {
+                    self.err(te.span, "nested optional `??T` is not allowed");
+                }
+                Ty::opt(t)
+            }
+            TypeExprKind::Result(a, b) => Ty::result(self.resolve_type(a, env), self.resolve_type(b, env)),
+            TypeExprKind::Slice(a) => Ty::Slice(Rc::new(self.resolve_type(a, env))),
+            TypeExprKind::Ptr(a) => Ty::Ptr(Rc::new(self.resolve_type(a, env))),
+            TypeExprKind::Chan(a) => {
+                let t = self.resolve_type(a, env);
+                if t.contains_view() {
+                    self.err(te.span, "channels cannot carry borrowed views; send owned values");
+                }
+                Ty::Chan(Rc::new(t))
+            }
+            TypeExprKind::Array(n, a) => {
+                let elem = self.resolve_type(a, env);
+                match &n.kind {
+                    ast::ExprKind::Int(v) => Ty::Array(Rc::new(elem), *v as u64),
+                    ast::ExprKind::Ident(name) => match env.tparams.get(name) {
+                        Some(Ty::Param(_)) => {
+                            self.err(n.span, "arrays sized by an integer type parameter are not supported yet");
+                            Ty::Error
+                        }
+                        _ => match self.lookup_const_int(name, env) {
+                            Some(v) => Ty::Array(Rc::new(elem), v),
+                            None => {
+                                self.err(n.span, "array length must be an integer constant");
+                                Ty::Error
+                            }
+                        },
+                    },
+                    _ => {
+                        self.err(n.span, "array length must be an integer constant");
+                        Ty::Error
+                    }
+                }
+            }
+            TypeExprKind::Func { params, ret } => {
+                let ps = params.iter().map(|(m, t)| (*m, self.resolve_type(t, env))).collect();
+                let r = ret.as_ref().map(|t| self.resolve_type(t, env)).unwrap_or(Ty::Unit);
+                Ty::Func(Rc::new(FuncTy { params: ps, ret: r }))
+            }
+            TypeExprKind::Named { path, args } => self.resolve_named(path, args, te.span, env),
+        }
+    }
+
+    fn lookup_const_int(&self, name: &str, env: &TyEnv) -> Option<u64> {
+        let sel = self.file_cx[env.file].names.get(name).map(|x| x.0);
+        for p in [Some(env.pkg), sel, Some(self.prog.prelude)].into_iter().flatten() {
+            if let Some(Sym::Const(c)) = self.prog.packages[p as usize].items.get(name) {
+                if let Some(v) = &self.prog.consts[*c as usize].value {
+                    if let TK::Int(n) = v.kind {
+                        return Some(n as u64);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    fn resolve_named(&mut self, path: &[String], args: &[TypeExpr], span: Span, env: &TyEnv) -> Ty {
+        let targs: Vec<Ty> = args.iter().map(|a| self.resolve_type(a, env)).collect();
+        if path.len() == 1 {
+            let name = &path[0];
+            if let Some(t) = env.tparams.get(name) {
+                if !args.is_empty() {
+                    self.err(span, "type parameters cannot take type arguments");
+                }
+                return t.clone();
+            }
+            if let Some(t) = builtin_type(name) {
+                if !args.is_empty() {
+                    self.err(span, format!("`{}` does not take type arguments", name));
+                }
+                return t;
+            }
+            if is_generic_builtin(name) {
+                let need = if name == "Map" { 2 } else { 1 };
+                if targs.len() != need {
+                    self.err(span, format!("`{}` expects {} type argument{}", name, need, if need == 1 { "" } else { "s" }));
+                    return Ty::Error;
+                }
+                let a = Rc::new(targs[0].clone());
+                if a.contains_view() {
+                    self.err(span, format!("`{}` cannot hold the borrowed view `{}`; use an owned type", name, self.prog.show(&a)));
+                }
+                return match name.as_str() {
+                    "Vec" => Ty::Vec(a),
+                    "Map" => {
+                        let v = Rc::new(targs[1].clone());
+                        if v.contains_view() {
+                            self.err(span, "`Map` values cannot be borrowed views");
+                        }
+                        Ty::Map(a, v)
+                    }
+                    "Box" => Ty::Box(a),
+                    "rc" => Ty::Rc(a),
+                    "arc" => Ty::Arc(a),
+                    "weak" => Ty::Weak(a),
+                    "Cell" => Ty::Cell(a),
+                    "Mutex" => Ty::Mutex(a),
+                    _ => unreachable!(),
+                };
+            }
+            if let Some(sym) = self.lookup_unqualified(env.file, env.pkg, name) {
+                return self.type_from_sym(sym, name, targs, span);
+            }
+            self.err(span, format!("unknown type `{}`", name));
+            return Ty::Error;
+        }
+        if path.len() == 2 {
+            if let Some((p, _)) = self.file_cx[env.file].imports.get(&path[0]).cloned() {
+                self.file_cx[env.file].used_imports.insert(path[0].clone());
+                match self.prog.packages[p as usize].items.get(&path[1]).cloned() {
+                    Some(sym) => {
+                        if let Sym::Type(d) = &sym {
+                            if !self.prog.def(*d).is_pub {
+                                self.err(span, format!("type `{}` is not public in package `{}`", path[1], path[0]));
+                            }
+                        }
+                        return self.type_from_sym(sym, &path[1], targs, span);
+                    }
+                    None => {
+                        self.err(span, format!("package `{}` has no type `{}`", path[0], path[1]));
+                        return Ty::Error;
+                    }
+                }
+            }
+            self.err(span, format!("unknown package `{}`", path[0]));
+            return Ty::Error;
+        }
+        self.err(span, "invalid type path");
+        Ty::Error
+    }
+
+    fn type_from_sym(&mut self, sym: Sym, name: &str, targs: Vec<Ty>, span: Span) -> Ty {
+        match sym {
+            Sym::Type(d) => {
+                if targs.iter().any(|t| t.contains_view()) && !matches!(self.prog.def(d).kind, TypeDefKind::Iface { .. }) {
+                    self.err(span, format!("`{}` cannot be instantiated with a borrowed view type; use an owned type (String / Vec[T])", name));
+                }
+                let def = self.prog.def(d);
+                if def.tparams.len() != targs.len() {
+                    if targs.is_empty() {
+                        // generic type without args: resolved as fresh params by caller context
+                        self.err(span, format!("`{}` expects {} type argument(s)", name, def.tparams.len()));
+                    } else {
+                        self.err(span, format!("`{}` expects {} type argument(s), found {}", name, def.tparams.len(), targs.len()));
+                    }
+                    return Ty::Error;
+                }
+                match def.kind {
+                    TypeDefKind::Iface { .. } => Ty::Iface(d, Rc::new(targs)),
+                    _ => Ty::Adt(d, Rc::new(targs)),
+                }
+            }
+            Sym::Alias(t) => t,
+            _ => {
+                self.err(span, format!("`{}` is not a type", name));
+                Ty::Error
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Capabilities
+    // ------------------------------------------------------------------
+
+    pub fn has_bound(&self, p: TParamId, cap: Cap) -> bool {
+        let info = self.prog.tparam(p);
+        info.bounds.iter().any(|b| match b {
+            Bound::Cap(c) => {
+                *c == cap
+                    || (cap == Cap::Clone && *c == Cap::Copy)
+                    || (cap == Cap::Comparable && matches!(c, Cap::Ordered | Cap::Hash))
+            }
+            Bound::Iface(d, _) => {
+                // interfaces with type sets of numbers/strings imply ordered/comparable/copy
+                if let TypeDefKind::Iface { type_set: Some(ts), .. } = &self.prog.def(*d).kind {
+                    ts.iter().all(|(_, t)| match cap {
+                        Cap::Copy | Cap::Clone => self.is_copy(t),
+                        Cap::Comparable => self.is_comparable(t),
+                        Cap::Ordered => self.is_ordered(t),
+                        Cap::Hash => self.is_hash(t),
+                        Cap::Default => self.is_default(t),
+                        Cap::Send => true,
+                        Cap::Any => true,
+                    })
+                } else {
+                    false
+                }
+            }
+        })
+    }
+
+    pub fn is_copy(&self, t: &Ty) -> bool {
+        match t {
+            Ty::Unit | Ty::Never | Ty::Bool | Ty::Int(_) | Ty::F32 | Ty::F64 | Ty::Str | Ty::Slice(_) | Ty::Ptr(_) | Ty::Error | Ty::ConstInt(_) => true,
+            Ty::Option(a) | Ty::Array(a, _) => self.is_copy(a),
+            Ty::Result(a, b) => self.is_copy(a) && self.is_copy(b),
+            Ty::Adt(d, _) => self.prog.def(*d).is_copy,
+            Ty::Param(p) => self.has_bound(*p, Cap::Copy),
+            _ => false,
+        }
+    }
+
+    pub fn is_comparable(&self, t: &Ty) -> bool {
+        match t {
+            Ty::Unit | Ty::Bool | Ty::Int(_) | Ty::F32 | Ty::F64 | Ty::Str | Ty::String | Ty::Error | Ty::Ptr(_) => true,
+            Ty::Option(a) | Ty::Vec(a) | Ty::Slice(a) | Ty::Array(a, _) | Ty::Box(a) => self.is_comparable(a),
+            Ty::Result(a, b) => self.is_comparable(a) && self.is_comparable(b),
+            Ty::Adt(d, args) => {
+                if self.prog.methods.contains_key(&(TyKey::Adt(*d), "equal".into())) {
+                    return true;
+                }
+                self.all_fields(*d, args, &|c, t| c.is_comparable(t))
+            }
+            Ty::Param(p) => self.has_bound(*p, Cap::Comparable),
+            _ => false,
+        }
+    }
+
+    pub fn is_ordered(&self, t: &Ty) -> bool {
+        match t {
+            Ty::Int(_) | Ty::F32 | Ty::F64 | Ty::Str | Ty::String | Ty::Error | Ty::Bool => true,
+            Ty::Adt(d, _) => self.prog.methods.contains_key(&(TyKey::Adt(*d), "compare".into())) || self.prog.def(*d).is_simple_enum(),
+            Ty::Param(p) => self.has_bound(*p, Cap::Ordered),
+            _ => false,
+        }
+    }
+
+    pub fn is_hash(&self, t: &Ty) -> bool {
+        match t {
+            Ty::Unit | Ty::Bool | Ty::Int(_) | Ty::Str | Ty::String | Ty::Error => true,
+            Ty::Option(a) | Ty::Vec(a) | Ty::Slice(a) | Ty::Array(a, _) | Ty::Box(a) => self.is_hash(a),
+            Ty::Adt(d, args) => {
+                if self.prog.methods.contains_key(&(TyKey::Adt(*d), "hash".into())) {
+                    return true;
+                }
+                if self.prog.methods.contains_key(&(TyKey::Adt(*d), "equal".into())) {
+                    // custom equality without custom hash would break the map invariant
+                    return false;
+                }
+                self.all_fields(*d, args, &|c, t| c.is_hash(t))
+            }
+            Ty::Param(p) => self.has_bound(*p, Cap::Hash),
+            _ => false,
+        }
+    }
+
+    pub fn is_clone(&self, t: &Ty) -> bool {
+        if self.is_copy(t) {
+            return true;
+        }
+        match t {
+            Ty::String | Ty::Rc(_) | Ty::Arc(_) | Ty::Weak(_) | Ty::Chan(_) => true,
+            Ty::Vec(a) | Ty::Option(a) | Ty::Box(a) | Ty::Cell(a) => self.is_clone(a),
+            Ty::Map(a, b) | Ty::Result(a, b) => self.is_clone(a) && self.is_clone(b),
+            Ty::Adt(d, args) => {
+                if self.prog.methods.contains_key(&(TyKey::Adt(*d), "clone".into())) {
+                    return true;
+                }
+                if self.prog.def(*d).has_drop {
+                    return false;
+                }
+                self.all_fields(*d, args, &|c, t| c.is_clone(t))
+            }
+            Ty::Param(p) => self.has_bound(*p, Cap::Clone),
+            _ => false,
+        }
+    }
+
+    /// Default values: scalars, String, Vec, Map, ?T, and structs whose fields all have defaults.
+    pub fn is_default(&self, t: &Ty) -> bool {
+        match t {
+            Ty::Unit | Ty::Bool | Ty::Int(_) | Ty::F32 | Ty::F64 | Ty::String | Ty::Vec(_) | Ty::Map(..) | Ty::Option(_) | Ty::Error | Ty::Str => true,
+            Ty::Array(a, _) | Ty::Mutex(a) | Ty::Cell(a) => self.is_default(a),
+            Ty::Adt(d, _) => {
+                let def = self.prog.def(*d);
+                match &def.kind {
+                    TypeDefKind::Struct { fields } => !def.newtype && fields.iter().all(|f| f.default.is_some() || matches!(f.ty, Ty::Option(_))),
+                    _ => false,
+                }
+            }
+            Ty::Param(p) => self.has_bound(*p, Cap::Default),
+            _ => false,
+        }
+    }
+
+    pub fn is_send(&mut self, t: &Ty) -> bool {
+        match t {
+            Ty::Rc(_) | Ty::Weak(_) | Ty::Cell(_) | Ty::Ptr(_) | Ty::Func(_) => false,
+            Ty::Vec(a) | Ty::Slice(a) | Ty::Array(a, _) | Ty::Option(a) | Ty::Box(a) | Ty::Arc(a) | Ty::Mutex(a) | Ty::Chan(a) => self.is_send(a),
+            Ty::Map(a, b) | Ty::Result(a, b) => self.is_send(a) && self.is_send(b),
+            Ty::Adt(d, args) => {
+                let d = *d;
+                if self.prog.def(d).unsafe_send {
+                    return true;
+                }
+                if let Some(&v) = self.send_memo.get(&d) {
+                    if args.is_empty() {
+                        return v;
+                    }
+                }
+                self.send_memo.insert(d, true); // assume for recursion
+                let def = self.prog.def(d).clone();
+                let s = self.prog.def_subst(d, args);
+                let tys: Vec<Ty> = match &def.kind {
+                    TypeDefKind::Struct { fields } => fields.iter().map(|f| f.ty.subst(&s)).collect(),
+                    TypeDefKind::Enum { variants } => variants.iter().flat_map(|v| v.fields.iter().map(|f| f.1.subst(&s))).collect(),
+                    _ => vec![],
+                };
+                let r = tys.iter().all(|t| self.is_send(t));
+                if args.is_empty() {
+                    self.send_memo.insert(d, r);
+                } else {
+                    self.send_memo.remove(&d);
+                }
+                r
+            }
+            Ty::Iface(..) => false,
+            Ty::Param(p) => self.has_bound(*p, Cap::Send),
+            _ => true,
+        }
+    }
+
+    fn all_fields(&self, d: DefId, args: &[Ty], f: &dyn Fn(&Checker, &Ty) -> bool) -> bool {
+        let def = self.prog.def(d);
+        let s = self.prog.def_subst(d, args);
+        match &def.kind {
+            TypeDefKind::Struct { fields } => fields.iter().all(|fl| {
+                let t = fl.ty.subst(&s);
+                // avoid infinite recursion on recursive types through Box/Vec
+                if let Ty::Adt(d2, _) = &t {
+                    if *d2 == d {
+                        return true;
+                    }
+                }
+                f(self, &t)
+            }),
+            TypeDefKind::Enum { variants } => variants.iter().all(|v| {
+                v.fields.iter().all(|(_, t)| {
+                    let t = t.subst(&s);
+                    if let Ty::Box(inner) | Ty::Vec(inner) = &t {
+                        if let Ty::Adt(d2, _) = &**inner {
+                            if *d2 == d {
+                                return true;
+                            }
+                        }
+                    }
+                    f(self, &t)
+                })
+            }),
+            _ => false,
+        }
+    }
+
+    pub fn satisfies(&mut self, t: &Ty, b: &Bound) -> Result<(), String> {
+        match b {
+            Bound::Cap(c) => {
+                let ok = match c {
+                    Cap::Any => true,
+                    Cap::Copy => self.is_copy(t),
+                    Cap::Clone => self.is_clone(t),
+                    Cap::Default => self.is_default(t),
+                    Cap::Send => self.is_send(t),
+                    Cap::Comparable => self.is_comparable(t),
+                    Cap::Ordered => self.is_ordered(t),
+                    Cap::Hash => self.is_hash(t),
+                };
+                if ok {
+                    Ok(())
+                } else {
+                    Err(format!("`{}` does not satisfy `{}`", self.prog.show(t), c.name()))
+                }
+            }
+            Bound::Iface(d, args) => {
+                if let Ty::Param(p) = t {
+                    let info = self.prog.tparam(*p).clone();
+                    if info.bounds.iter().any(|b2| matches!(b2, Bound::Iface(d2, _) if d2 == d)) {
+                        return Ok(());
+                    }
+                }
+                let def = self.prog.def(*d).clone();
+                if let TypeDefKind::Iface { type_set: Some(ts), .. } = &def.kind {
+                    let ok = ts.iter().any(|(approx, et)| {
+                        if et == t {
+                            return true;
+                        }
+                        if *approx {
+                            if let Ty::Adt(td, _) = t {
+                                let tdef = self.prog.def(*td);
+                                if tdef.newtype && tdef.fields().first().map(|f| &f.ty) == Some(et) {
+                                    return true;
+                                }
+                            }
+                        }
+                        false
+                    });
+                    if !ok {
+                        return Err(format!("`{}` is not in the type set of `{}`", self.prog.show(t), def.name));
+                    }
+                }
+                self.implements(t, *d, args)
+            }
+        }
+    }
+
+    /// Structural interface satisfaction.
+    pub fn implements(&mut self, t: &Ty, iface: DefId, iargs: &[Ty]) -> Result<(), String> {
+        let def = self.prog.def(iface).clone();
+        let methods = match &def.kind {
+            TypeDefKind::Iface { methods, .. } => methods.clone(),
+            _ => return Err("not an interface".into()),
+        };
+        let s = self.prog.def_subst(iface, iargs);
+        for m in &methods {
+            let found = self.find_method_for_iface(t, &m.name);
+            let fid = match found {
+                Some(f) => f,
+                None => return Err(format!("`{}` does not implement `{}`: missing method `{}`", self.prog.show(t), def.name, m.name)),
+            };
+            let fd = self.prog.func(fid).clone();
+            if !fd.tparams.is_empty() && fd.recv.as_ref().map(|r| !r.ty.has_params()).unwrap_or(true) {
+                return Err(format!("method `{}` has type parameters and cannot satisfy an interface", m.name));
+            }
+            let recv_mode = fd.recv.as_ref().map(|r| r.mode).unwrap_or(Mode::Borrow);
+            let mode_name = |m: Mode| match m {
+                Mode::Borrow => "borrowed",
+                Mode::Inout => "inout",
+                Mode::Sink => "sink",
+            };
+            if recv_mode != m.recv_mode {
+                return Err(format!("method `{}` of `{}` has a {} receiver, but `{}` requires {}", m.name, self.prog.show(t), mode_name(recv_mode), def.name, mode_name(m.recv_mode)));
+            }
+            // substitute receiver params from the concrete type
+            let mut rs = HashMap::new();
+            if let Some(r) = &fd.recv {
+                bind_params(&r.ty, t, &mut rs);
+            }
+            if fd.params.len() != m.params.len() {
+                return Err(format!("method `{}` has {} parameter(s), interface `{}` expects {}", m.name, fd.params.len(), def.name, m.params.len()));
+            }
+            for (fp, (_, im, it)) in fd.params.iter().zip(m.params.iter()) {
+                if fp.mode != *im || fp.ty.subst(&rs) != it.subst(&s) {
+                    return Err(format!("method `{}` has a different signature than interface `{}` requires", m.name, def.name));
+                }
+            }
+            if fd.ret.subst(&rs) != m.ret.subst(&s) {
+                return Err(format!("method `{}` returns `{}`, interface `{}` requires `{}`", m.name, self.prog.show(&fd.ret.subst(&rs)), def.name, self.prog.show(&m.ret.subst(&s))));
+            }
+        }
+        Ok(())
+    }
+
+    pub fn find_method_for_iface(&self, t: &Ty, name: &str) -> Option<FuncId> {
+        let key = TyKey::of(t)?;
+        let list = self.prog.methods.get(&(key, name.to_string()))?;
+        for &f in list {
+            let fd = self.prog.func(f);
+            if let Some(r) = &fd.recv {
+                let mut s = HashMap::new();
+                if bind_params(&r.ty, t, &mut s) {
+                    return Some(f);
+                }
+            }
+        }
+        None
+    }
+
+    fn check_unused_imports(&mut self) {
+        for fi in 0..self.file_cx.len() {
+            let pkg = self.file_cx[fi].pkg;
+            if self.prog.packages[pkg as usize].is_std {
+                continue;
+            }
+            let mut unused: Vec<(String, Span)> = vec![];
+            for (name, (_, sp)) in self.file_cx[fi].imports.iter().chain(self.file_cx[fi].names.iter()) {
+                if !self.file_cx[fi].used_imports.contains(name) {
+                    unused.push((name.clone(), *sp));
+                }
+            }
+            unused.sort_by_key(|u| u.1.lo);
+            for (n, sp) in unused {
+                self.err(sp, format!("`{}` is imported but not used", n));
+            }
+        }
+    }
+}
+
+/// Match a pattern type containing params against a concrete type, binding params.
+pub fn bind_params(pat: &Ty, t: &Ty, s: &mut HashMap<TParamId, Ty>) -> bool {
+    match (pat, t) {
+        (Ty::Param(p), _) => {
+            if let Some(prev) = s.get(p) {
+                return prev == t;
+            }
+            s.insert(*p, t.clone());
+            true
+        }
+        (Ty::Vec(a), Ty::Vec(b)) | (Ty::Slice(a), Ty::Slice(b)) | (Ty::Option(a), Ty::Option(b)) | (Ty::Box(a), Ty::Box(b)) | (Ty::Rc(a), Ty::Rc(b)) | (Ty::Arc(a), Ty::Arc(b)) | (Ty::Weak(a), Ty::Weak(b)) | (Ty::Cell(a), Ty::Cell(b)) | (Ty::Mutex(a), Ty::Mutex(b)) | (Ty::Chan(a), Ty::Chan(b)) | (Ty::Ptr(a), Ty::Ptr(b)) => bind_params(a, b, s),
+        (Ty::Array(a, n), Ty::Array(b, m)) => n == m && bind_params(a, b, s),
+        (Ty::Map(a, b), Ty::Map(c, d)) | (Ty::Result(a, b), Ty::Result(c, d)) => bind_params(a, c, s) && bind_params(b, d, s),
+        (Ty::Adt(d1, a1), Ty::Adt(d2, a2)) | (Ty::Iface(d1, a1), Ty::Iface(d2, a2)) => d1 == d2 && a1.iter().zip(a2.iter()).all(|(x, y)| bind_params(x, y, s)),
+        (Ty::Func(f1), Ty::Func(f2)) => f1.params.len() == f2.params.len() && f1.params.iter().zip(f2.params.iter()).all(|((m1, x), (m2, y))| m1 == m2 && bind_params(x, y, s)) && bind_params(&f1.ret, &f2.ret, s),
+        (a, b) => a == b,
+    }
+}
+
+pub fn builtin_type(name: &str) -> Option<Ty> {
+    Some(match name {
+        "int" | "i64" => Ty::Int(IntTy::I64),
+        "i8" => Ty::Int(IntTy::I8),
+        "i16" => Ty::Int(IntTy::I16),
+        "i32" | "rune" => Ty::Int(IntTy::I32),
+        "uint" | "u64" => Ty::Int(IntTy::U64),
+        "u8" | "byte" => Ty::Int(IntTy::U8),
+        "u16" => Ty::Int(IntTy::U16),
+        "u32" => Ty::Int(IntTy::U32),
+        "f32" => Ty::F32,
+        "f64" => Ty::F64,
+        "bool" => Ty::Bool,
+        "String" => Ty::String,
+        "str" => Ty::Str,
+        "never" => Ty::Never,
+        "void" => Ty::Unit,
+        _ => return None,
+    })
+}
+
+pub fn is_generic_builtin(name: &str) -> bool {
+    matches!(name, "Vec" | "Map" | "Box" | "rc" | "arc" | "weak" | "Cell" | "Mutex")
+}

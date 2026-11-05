@@ -1,0 +1,6 @@
+fn first(words []String) str {
+    let s = "local".toString()
+    return s.asStr()
+    // error: returns a view of `s`, which is dropped when the function returns
+}
+fn main() { _ = first([]) }

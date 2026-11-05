@@ -1,0 +1,10 @@
+worker 1 did job 0 1
+worker 1 did job 1 2
+worker 1 did job 2 3
+sum of squares 30
+hits 4000 ["g 0", "g 1", "g 2", "g 3"]
+b some("hello")
+nothing ready
+drained 0
+sent 3 buffered 2 rounds 4
+group ok true total 360

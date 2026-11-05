@@ -1,0 +1,7 @@
+fn main() {
+    var hits = 0
+    for i in 0..10 {
+        hits += i
+    }
+    println("hello", hits)
+}

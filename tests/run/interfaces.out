@@ -1,0 +1,17 @@
+rex says woof
+cat says meow
+dog named fido
+cat with 9 lives
+2 woof
+2 2
+{"the": 3, "quick": 1, "lazy": 1, "end": 1} 4
+3 some(1) none true
+the appears 3 times
+some(1) some(1) {"the": 3, "lazy": 100, "end": 7}
+["end", "lazy", "the"]
+big: lazy 100
+big: end 7
+two ( 1 , 2 ) [( 3 , 4 )]
+1 20
+parent value 1 2
+3 2 2

@@ -1,0 +1,13 @@
+// Durations are integer nanoseconds.
+pub const nanosecond = 1
+pub const microsecond = 1000
+pub const millisecond = 1000000
+pub const second = 1000000000
+
+pub fn sleep(d int)
+// Monotonic clock in nanoseconds.
+pub fn now() int
+
+pub fn since(start int) int {
+    return now() - start
+}

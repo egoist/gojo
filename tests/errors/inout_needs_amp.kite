@@ -1,0 +1,7 @@
+struct User { name String }
+fn rename(u inout User) { u.name = "x".toString() }
+fn main() {
+    var u = User{name: "a".toString()}
+    rename(u)
+    // error: parameter `u` is inout: pass a mutable reference with `&`
+}

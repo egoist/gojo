@@ -1,0 +1,131 @@
+use fmt, time, task
+
+struct Job {
+    id int
+    payload String
+}
+
+struct Stats {
+    hits int
+    names Vec[String]
+}
+
+fn worker(id int, jobs chan Job, results chan String) {
+    for j in jobs {
+        results <- fmt.sprint("worker", id, "did job", j.id, j.payload.len)
+    }
+}
+
+fn producer(n int, out chan int) {
+    for i in 0..n {
+        out <- i * i
+    }
+    out.close()
+}
+
+fn main() {
+    // channels move ownership
+    let jobs = chan[Job](10)
+    let results = chan[String](10)
+    go worker(1, jobs.clone(), results.clone())
+    for i in 0..3 {
+        let j = Job{id: i, payload: "x".repeat(i + 1)}
+        jobs <- j
+    }
+    jobs.close()
+    var got = Vec[String]{}
+    for _ in 0..3 {
+        if let r = <-results {
+            got.push(r)
+        }
+    }
+    got.sort()
+    for g in got {
+        println(g)
+    }
+
+    // unbuffered channel + closing
+    let sq = chan[int]()
+    go producer(5, sq.clone())
+    var sum = 0
+    for v in sq {
+        sum += v
+    }
+    println("sum of squares", sum)
+
+    // shared state behind a mutex
+    let stats = arc(Mutex(Stats{hits: 0, names: Vec[String]{}}))
+    let done = chan[bool](4)
+    for i in 0..4 {
+        let s = stats.clone()
+        let d = done.clone()
+        go () => {
+            for _ in 0..1000 {
+                with st = s.lock() {
+                    st.hits += 1
+                }
+            }
+            with st = s.lock() {
+                st.names.push(fmt.sprint("g", i))
+            }
+            d <- true
+        }
+    }
+    for _ in 0..4 {
+        _ = <-done
+    }
+    with st = stats.lock() {
+        st.names.sort()
+        println("hits", st.hits, st.names)
+    }
+
+    // select with timeout-ish default
+    let a = chan[int](1)
+    let b = chan[String](1)
+    b <- "hello"
+    select {
+        let x = <-a => println("a", x)
+        let y = <-b => println("b", y)
+    }
+    select {
+        let x = <-a => println("a", x)
+        _ => println("nothing ready")
+    }
+
+    // select in a loop: a send arm, a bare receive and a default arm
+    let out = chan[int](2)
+    let quit = chan[bool](1)
+    var sent = 0
+    var rounds = 0
+    for sent < 3 {
+        rounds += 1
+        select {
+            out <- sent => sent += 1
+            <-quit => break
+            _ => {
+                // the buffer is full: take one value out
+                if let v = <-out {
+                    println("drained", v)
+                }
+            }
+        }
+    }
+    println("sent", sent, "buffered", out.len(), "rounds", rounds)
+
+    // structured concurrency: tasks borrow data from outside the group
+    let inputs = [1, 2, 3, 4, 5, 6, 7, 8]
+    let total = Mutex(0)
+    let r = task.group((g) => {
+        for x in inputs {
+            g.go(() => {
+                time.sleep(time.millisecond)
+                with t = total.lock() {
+                    t += x * 10
+                }
+            })
+        }
+    })
+    with t = total.lock() {
+        println("group ok", r.isOk(), "total", t)
+    }
+}

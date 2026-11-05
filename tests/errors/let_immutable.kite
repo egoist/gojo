@@ -1,0 +1,7 @@
+fn main() {
+    let x = 1
+    x = 2
+    println(x)
+    // error: cannot assign to variable `x`: it is not mutable
+    // error: declare it with `var`
+}

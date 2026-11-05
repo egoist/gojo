@@ -1,0 +1,8 @@
+fn main() {
+    var counts = Map[String, int]{}
+    with e = counts.entry("a".toString()) {
+        println(counts.len)
+        e += 1
+    }
+    // error: cannot use `counts` while it is mutably borrowed by `e`
+}

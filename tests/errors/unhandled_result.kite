@@ -1,0 +1,9 @@
+fn check(n int) ! String {
+    if n < 0 {
+        return err("negative".toString())
+    }
+}
+fn main() {
+    check(1)
+    // error: result of type `! String` is not handled
+}

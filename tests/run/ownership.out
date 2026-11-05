@@ -1,0 +1,33 @@
+peek b
+inner defer
+drop b
+peek a
+peek c
+drop c
+deferred in scopes
+drop a
+consume x
+drop x
+end of pick true
+end of pick false
+drop x
+drop guard
+early 1
+peek guard
+drop guard
+early 0
+peek loop 0
+drop loop 0
+drop loop 1
+peek loop 2
+drop loop 2
+drop pb
+peek pa
+popped true
+drop s1
+["x", "y"] ["x", "y"]
+drop s2
+main end
+drop v2
+drop v1
+drop pa

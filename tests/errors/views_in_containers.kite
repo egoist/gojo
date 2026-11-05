@@ -1,0 +1,18 @@
+struct Stack[T any] { items Vec[T] }
+fn wrap[T any](x T) Vec[T] {
+    var v = Vec[T]{}
+    v.push(x)
+    return v
+}
+fn main() {
+    let s = "abc".toString()
+    let v = [s.asStr()]
+    let st = Stack[str]{items: Vec[str]{}}
+    let w = wrap(s.asStr())
+    _ = v
+    _ = st
+    _ = w
+    // error: a list cannot hold borrowed views
+    // error: `Stack` cannot be instantiated with a borrowed view type
+    // error: calling `wrap` here would store a borrowed view inside `Vec[str]`
+}

@@ -1,0 +1,10 @@
+fn take(s sink String) {}
+fn f(c bool) {
+    let s = "x".toString()
+    if c {
+        take(s)
+    }
+    println(s)
+    // error: use of `s` after it was moved
+}
+fn main() { f(true) }
