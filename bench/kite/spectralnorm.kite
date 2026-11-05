@@ -1,0 +1,55 @@
+use math
+
+fn a(i int, j int) f64 {
+    return 1.0 / f64((i + j) * (i + j + 1) / 2 + i + 1)
+}
+
+fn mulAv(v []f64, out inout Vec[f64]) {
+    let n = v.len
+    for i in 0..n {
+        var s = 0.0
+        for j in 0..n {
+            s += a(i, j) * v[j]
+        }
+        out[i] = s
+    }
+}
+
+fn mulAtv(v []f64, out inout Vec[f64]) {
+    let n = v.len
+    for i in 0..n {
+        var s = 0.0
+        for j in 0..n {
+            s += a(j, i) * v[j]
+        }
+        out[i] = s
+    }
+}
+
+fn mulAtAv(v []f64, out inout Vec[f64], tmp inout Vec[f64]) {
+    mulAv(v, &tmp)
+    mulAtv(tmp, &out)
+}
+
+fn main() {
+    let n = 2000
+    var u = Vec[f64]{}
+    var v = Vec[f64]{}
+    var tmp = Vec[f64]{}
+    for _ in 0..n {
+        u.push(1.0)
+        v.push(0.0)
+        tmp.push(0.0)
+    }
+    for _ in 0..10 {
+        mulAtAv(u, &v, &tmp)
+        mulAtAv(v, &u, &tmp)
+    }
+    var vBv = 0.0
+    var vv = 0.0
+    for i in 0..n {
+        vBv += u[i] * v[i]
+        vv += v[i] * v[i]
+    }
+    println(i64(math.round(math.sqrt(vBv / vv) * 1e9)))
+}

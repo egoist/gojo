@@ -1,0 +1,8 @@
+5 some(4)
+true true
+some(none) some(some(7)) none
+some(1) some(2) none
+got some(3)
+got none
+closed none
+some(10) some("hi") hi

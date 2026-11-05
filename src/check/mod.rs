@@ -41,6 +41,8 @@ pub struct Checker {
     send_memo: HashMap<DefId, bool>,
     pub iface_error: Option<DefId>,
     pub pending_infer: Vec<(Span, String, Vec<String>, TExpr)>,
+    /// Types whose capabilities are being checked (for recursive types).
+    cap_stack: std::cell::RefCell<Vec<(DefId, Vec<Ty>, &'static str)>>,
 }
 
 #[derive(Clone)]
@@ -61,6 +63,7 @@ pub fn check_program(units: Vec<Unit>) -> Result<(Program, Vec<TFunc>, Vec<(Stri
         send_memo: HashMap::new(),
         iface_error: None,
         pending_infer: vec![],
+        cap_stack: std::cell::RefCell::new(vec![]),
     };
     c.collect(units);
     if !c.diags.is_empty() {
@@ -881,7 +884,7 @@ impl Checker {
                 if self.prog.methods.contains_key(&(TyKey::Adt(*d), "equal".into())) {
                     return true;
                 }
-                self.all_fields(*d, args, &|c, t| c.is_comparable(t))
+                self.all_fields(*d, args, "comparable", &|c, t| c.is_comparable(t))
             }
             Ty::Param(p) => self.has_bound(*p, Cap::Comparable),
             _ => false,
@@ -909,7 +912,7 @@ impl Checker {
                     // custom equality without custom hash would break the map invariant
                     return false;
                 }
-                self.all_fields(*d, args, &|c, t| c.is_hash(t))
+                self.all_fields(*d, args, "hash", &|c, t| c.is_hash(t))
             }
             Ty::Param(p) => self.has_bound(*p, Cap::Hash),
             _ => false,
@@ -931,7 +934,7 @@ impl Checker {
                 if self.prog.def(*d).has_drop {
                     return false;
                 }
-                self.all_fields(*d, args, &|c, t| c.is_clone(t))
+                self.all_fields(*d, args, "clone", &|c, t| c.is_clone(t))
             }
             Ty::Param(p) => self.has_bound(*p, Cap::Clone),
             _ => false,
@@ -992,35 +995,23 @@ impl Checker {
         }
     }
 
-    fn all_fields(&self, d: DefId, args: &[Ty], f: &dyn Fn(&Checker, &Ty) -> bool) -> bool {
+    /// Does every field (of every variant) satisfy `f`? A type that is already
+    /// being checked counts as satisfying it, so recursive types terminate.
+    fn all_fields(&self, d: DefId, args: &[Ty], cap: &'static str, f: &dyn Fn(&Checker, &Ty) -> bool) -> bool {
+        let key = (d, args.to_vec(), cap);
+        if self.cap_stack.borrow().contains(&key) {
+            return true;
+        }
+        self.cap_stack.borrow_mut().push(key);
         let def = self.prog.def(d);
         let s = self.prog.def_subst(d, args);
-        match &def.kind {
-            TypeDefKind::Struct { fields } => fields.iter().all(|fl| {
-                let t = fl.ty.subst(&s);
-                // avoid infinite recursion on recursive types through Box/Vec
-                if let Ty::Adt(d2, _) = &t {
-                    if *d2 == d {
-                        return true;
-                    }
-                }
-                f(self, &t)
-            }),
-            TypeDefKind::Enum { variants } => variants.iter().all(|v| {
-                v.fields.iter().all(|(_, t)| {
-                    let t = t.subst(&s);
-                    if let Ty::Box(inner) | Ty::Vec(inner) = &t {
-                        if let Ty::Adt(d2, _) = &**inner {
-                            if *d2 == d {
-                                return true;
-                            }
-                        }
-                    }
-                    f(self, &t)
-                })
-            }),
+        let r = match &def.kind {
+            TypeDefKind::Struct { fields } => fields.iter().all(|fl| f(self, &fl.ty.subst(&s))),
+            TypeDefKind::Enum { variants } => variants.iter().all(|v| v.fields.iter().all(|(_, t)| f(self, &t.subst(&s)))),
             _ => false,
-        }
+        };
+        self.cap_stack.borrow_mut().pop();
+        r
     }
 
     pub fn satisfies(&mut self, t: &Ty, b: &Bound) -> Result<(), String> {

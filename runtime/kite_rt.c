@@ -75,6 +75,38 @@ void *kite_realloc(void *p, size_t n) {
     return q;
 }
 
+// ------------------------------------------------------------------ small-object allocator
+
+__thread kite_box_node *kite_box_lists[KITE_BOX_MAX / 16 + 1];
+
+// Slabs are carved into blocks of one size class. They are kept on a global
+// list (never returned to the OS), like most size-class allocators.
+#define KITE_SLAB (64 * 1024)
+typedef struct kite_slab { struct kite_slab *next; } kite_slab;
+static kite_slab *g_slabs;
+static pthread_mutex_t g_slab_lock = PTHREAD_MUTEX_INITIALIZER;
+
+void *kite_box_refill(size_t cls) {
+    size_t sz = cls << 4;
+    kite_slab *s = kite_alloc(KITE_SLAB);
+    pthread_mutex_lock(&g_slab_lock);
+    s->next = g_slabs;
+    g_slabs = s;
+    pthread_mutex_unlock(&g_slab_lock);
+    // the first 16 bytes hold the slab header; the rest becomes blocks
+    uint8_t *start = (uint8_t *)s + 16, *end = (uint8_t *)s + KITE_SLAB;
+    size_t count = (size_t)(end - start) / sz;
+    // keep the first block, thread the rest onto the free list
+    kite_box_node *head = kite_box_lists[cls];
+    for (size_t i = count; i-- > 1;) {
+        kite_box_node *f = (kite_box_node *)(start + i * sz);
+        f->next = head;
+        head = f;
+    }
+    kite_box_lists[cls] = head;
+    return start;
+}
+
 // ------------------------------------------------------------------ strings
 
 static void string_reserve(kite_string *s, int64_t extra) {
@@ -133,12 +165,22 @@ int kite_str_cmp(kite_str a, kite_str b) {
 }
 
 uint64_t kite_str_hash(kite_str s) {
-    uint64_t h = 0xcbf29ce484222325ULL;
-    for (int64_t i = 0; i < s.len; i++) {
-        h ^= s.ptr[i];
-        h *= 0x100000001b3ULL;
+    // 8 bytes per step, then a final avalanche
+    uint64_t h = 0x9e3779b97f4a7c15ULL ^ (uint64_t)s.len;
+    const uint8_t *p = s.ptr;
+    int64_t n = s.len;
+    while (n >= 8) {
+        uint64_t w;
+        memcpy(&w, p, 8);
+        h = (h ^ w) * 0xbf58476d1ce4e5b9ULL;
+        h ^= h >> 31;
+        p += 8;
+        n -= 8;
     }
-    return kite_hash_u64(h ^ (uint64_t)s.len);
+    uint64_t w = 0;
+    for (int64_t i = 0; i < n; i++) w |= (uint64_t)p[i] << (8 * i);
+    h = (h ^ w) * 0x94d049bb133111ebULL;
+    return kite_hash_u64(h);
 }
 
 kite_string kite_str_concat(kite_str a, kite_str b) {
@@ -359,16 +401,24 @@ void kite_fmt_cstr(kite_string *b, const char *s) {
     kite_string_push(b, t);
 }
 
-void kite_fmt_i64(kite_string *b, int64_t v) {
-    char buf[32];
-    snprintf(buf, sizeof buf, "%lld", (long long)v);
-    kite_fmt_cstr(b, buf);
+void kite_fmt_u64(kite_string *b, uint64_t v) {
+    uint8_t buf[24];
+    int i = 24;
+    do {
+        buf[--i] = (uint8_t)('0' + v % 10);
+        v /= 10;
+    } while (v);
+    kite_str t = { buf + i, 24 - i };
+    kite_string_push(b, t);
 }
 
-void kite_fmt_u64(kite_string *b, uint64_t v) {
-    char buf[32];
-    snprintf(buf, sizeof buf, "%llu", (unsigned long long)v);
-    kite_fmt_cstr(b, buf);
+void kite_fmt_i64(kite_string *b, int64_t v) {
+    if (v < 0) {
+        kite_string_push_byte(b, '-');
+        kite_fmt_u64(b, (uint64_t)0 - (uint64_t)v);
+    } else {
+        kite_fmt_u64(b, (uint64_t)v);
+    }
 }
 
 void kite_fmt_f64(kite_string *b, double v) {
@@ -532,6 +582,27 @@ void *kite_map_find(const kite_map *m, const kite_map_desc *d, const void *key) 
     uint64_t h = d->hash(key);
     int64_t ix = map_lookup(m, d, key, h, NULL);
     return ix >= 0 ? ENT(m, d, ix) : NULL;
+}
+
+// Make room for one more entry: compact away removed entries or grow, and keep
+// the index below 75% load. Needs only the stored hashes, not the key type.
+void kite_map_reserve1(kite_map *m, size_t esize) {
+    kite_map_desc d = { esize, 0, 0, NULL, NULL };
+    if (m->n_entries == m->cap_entries) {
+        if (m->len < m->n_entries * 3 / 4) {
+            map_compact(m, &d);
+            map_reindex(m, &d, m->index_cap);
+        } else {
+            int64_t nc = m->cap_entries ? m->cap_entries * 2 : 8;
+            m->entries = kite_realloc(m->entries, (size_t)nc * esize);
+            m->cap_entries = nc;
+        }
+    }
+    if ((m->n_entries + 1) * 4 > m->index_cap * 3) {
+        int64_t ic = m->index_cap ? m->index_cap * 2 : 16;
+        while ((m->n_entries + 1) * 4 > ic * 3) ic *= 2;
+        map_reindex(m, &d, ic);
+    }
 }
 
 void *kite_map_slot(kite_map *m, const kite_map_desc *d, const void *key, bool *existed) {

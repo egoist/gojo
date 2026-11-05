@@ -1,0 +1,52 @@
+// ?Box[T], ?rc[T], ?arc[T] and ?weak[T] are stored as a single pointer.
+struct Node {
+    value int
+    next ?Box[Node]
+}
+
+fn length(n Node) int {
+    return match n.next {
+        some(rest) => 1 + length(rest)
+        none => 1
+    }
+}
+
+fn main() {
+    var list = Node{value: 1, next: none}
+    for i in 2..6 {
+        list = Node{value: i, next: Box(list)}
+    }
+    println(length(list), list.next?.value)
+
+    let dup = list.clone()
+    println(dup == list, dup.next.isSome())
+
+    var boxes = Vec[?Box[int]]{}
+    boxes.push(Box(7))
+    boxes.push(none)
+    let last = boxes.pop()
+    let first = boxes.pop()
+    println(last, first, boxes.pop())
+
+    var m = Map[String, Box[int]]{}
+    m["a"] = Box(1)
+    let old = m.insert("a".toString(), Box(2))
+    let gone = m.remove("a")
+    println(old, gone, m.remove("a"))
+
+    let ch = chan[?Box[int]](2)
+    ch <- Box(3)
+    ch <- none
+    ch.close()
+    for v in ch {
+        println("got", v)
+    }
+    let r = <-ch
+    println("closed", r)
+
+    let shared = rc(10)
+    let w = shared.downgrade()
+    let up ?rc[int] = w.upgrade()
+    let opt ?arc[String] = arc("hi".toString())
+    println(up, opt, opt ?? arc("no".toString()))
+}

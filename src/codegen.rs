@@ -347,6 +347,7 @@ impl<'a> Gen<'a> {
                 format!("{}*", n)
             }
             Ty::Param(_) | Ty::Var(_) => panic!("unsubstituted type {:?}", t),
+            Ty::Option(inner) if self.niche(t) => self.cname(inner),
             _ => {
                 if let Some(n) = self.names.get(t) {
                     return n.clone();
@@ -366,6 +367,9 @@ impl<'a> Gen<'a> {
     }
 
     fn ensure(&mut self, t: &Ty) {
+        if self.niche(t) {
+            return;
+        }
         match t {
             Ty::Array(..) | Ty::Option(_) | Ty::Result(..) | Ty::Mutex(_) | Ty::Adt(..) => {}
             Ty::Cell(a) => return self.ensure(a),
@@ -449,22 +453,103 @@ impl<'a> Gen<'a> {
         n
     }
 
+    /// Entry type of `Map[K, V]` plus lookup / insert / remove functions
+    /// specialized for the key type. Returns (entry type, function suffix):
+    /// `mf_<m>` finds, `ms_<m>` finds or inserts, `mr_<m>` removes.
     fn map_ent(&mut self, k: &Ty, v: &Ty) -> (String, String) {
         let m = format!("{}_{}", self.mangle(k), self.mangle(v));
         let ent = format!("MapEnt_{}", m);
-        let desc = format!("md_{}", m);
         self.fwd_struct(&ent);
         if self.defined.insert(ent.clone()) {
             let kc = self.cty(k);
             let vc = self.cty(v);
             let _ = writeln!(self.tdefs, "struct {} {{ uint64_t h; int64_t live; {} k; {} v; }};", ent, kc, vc);
-            let hf = self.hash_fn(k);
-            let ef = self.eq_fn(k);
-            let _ = writeln!(self.protos, "static uint64_t hw_{}(const void *p);\nstatic bool ew_{}(const void *a, const void *b);", m, m);
-            let _ = writeln!(self.bodies, "static uint64_t hw_{}(const void *p) {{ return {}(({}*)p); }}\nstatic bool ew_{}(const void *a, const void *b) {{ return {}(({}*)a, ({}*)b); }}", m, hf, kc, m, ef, kc, kc);
-            let _ = writeln!(self.statics, "static const kite_map_desc {} = {{ sizeof({}), offsetof({}, k), offsetof({}, v), hw_{}, ew_{} }};", desc, ent, ent, ent, m, m);
+            let (hash, eq) = match k {
+                Ty::Int(_) | Ty::Bool => ("kite_hash_u64((uint64_t)*(p))".to_string(), "(*(a) == *(b))".to_string()),
+                Ty::Str => ("kite_str_hash(*(p))".to_string(), "kite_str_eq(*(a), *(b))".to_string()),
+                Ty::String => ("kite_str_hash(kite_string_view(p))".to_string(), "kite_str_eq(kite_string_view(a), kite_string_view(b))".to_string()),
+                _ => {
+                    let hf = self.hash_fn(k);
+                    let ef = self.eq_fn(k);
+                    (format!("{}(({} *)(p))", hf, kc), format!("{}(({} *)(a), ({} *)(b))", ef, kc, kc))
+                }
+            };
+            let _ = writeln!(self.protos, "static {e} *mf_{m}(const kite_map *mp, const {k} *key);\nstatic {e} *ms_{m}(kite_map *mp, const {k} *key, bool *existed);\nstatic bool mr_{m}(kite_map *mp, const {k} *key, {e} *out);", e = ent, m = m, k = kc);
+            let _ = writeln!(
+                self.bodies,
+                "static inline uint64_t mh_{m}(const {k} *p) {{ return {hash}; }}\n\
+static inline bool meq_{m}(const {k} *a, const {k} *b) {{ return {eq}; }}\n\
+static inline int64_t ml_{m}(const kite_map *mp, const {k} *key, uint64_t h, int64_t *slot_out) {{\n\
+    if (!mp->index_cap) {{ if (slot_out) *slot_out = -1; return -1; }}\n\
+    const {e} *es = (const {e} *)mp->entries;\n\
+    uint64_t mask = (uint64_t)mp->index_cap - 1;\n\
+    int64_t s = (int64_t)(h & mask), tomb = -1;\n\
+    for (;;) {{\n\
+        int64_t ix = mp->index[s];\n\
+        if (ix == -1) {{ if (slot_out) *slot_out = tomb >= 0 ? tomb : s; return -1; }}\n\
+        if (ix == -2) {{ if (tomb < 0) tomb = s; }}\n\
+        else if (es[ix].h == h && meq_{m}(&es[ix].k, key)) {{ if (slot_out) *slot_out = s; return ix; }}\n\
+        s = (int64_t)(((uint64_t)s + 1) & mask);\n\
+    }}\n\
+}}\n\
+static {e} *mf_{m}(const kite_map *mp, const {k} *key) {{\n\
+    if (!mp->len) return NULL;\n\
+    int64_t ix = ml_{m}(mp, key, mh_{m}(key), NULL);\n\
+    return ix >= 0 ? (({e} *)mp->entries) + ix : NULL;\n\
+}}\n\
+static {e} *ms_{m}(kite_map *mp, const {k} *key, bool *existed) {{\n\
+    uint64_t h = mh_{m}(key);\n\
+    int64_t ix = ml_{m}(mp, key, h, NULL);\n\
+    if (ix >= 0) {{ *existed = true; return (({e} *)mp->entries) + ix; }}\n\
+    *existed = false;\n\
+    kite_map_reserve1(mp, sizeof({e}));\n\
+    int64_t slot;\n\
+    ml_{m}(mp, key, h, &slot);\n\
+    int64_t ni = mp->n_entries++;\n\
+    mp->index[slot] = ni;\n\
+    {e} *e = (({e} *)mp->entries) + ni;\n\
+    e->h = h; e->live = 1; mp->len++;\n\
+    return e;\n\
+}}\n\
+static bool mr_{m}(kite_map *mp, const {k} *key, {e} *out) {{\n\
+    if (!mp->len) return false;\n\
+    int64_t slot;\n\
+    int64_t ix = ml_{m}(mp, key, mh_{m}(key), &slot);\n\
+    if (ix < 0) return false;\n\
+    {e} *e = (({e} *)mp->entries) + ix;\n\
+    *out = *e; e->live = 0; mp->index[slot] = -2; mp->len--;\n\
+    if (ix == mp->n_entries - 1) mp->n_entries--;\n\
+    return true;\n\
+}}",
+                m = m, k = kc, e = ent, hash = hash, eq = eq
+            );
         }
-        (ent, desc)
+        (ent, m)
+    }
+
+    /// `?Box[T]`, `?rc[T]`, `?arc[T]`, `?weak[T]` are a single pointer; none is NULL.
+    fn niche(&self, t: &Ty) -> bool {
+        matches!(t, Ty::Option(i) if matches!(**i, Ty::Box(_) | Ty::Rc(_) | Ty::Arc(_) | Ty::Weak(_)))
+    }
+    /// C condition: the optional value at `p` holds a value.
+    fn osome(&self, t: &Ty, p: &str) -> String {
+        if self.niche(t) { format!("({} != NULL)", p) } else { format!("{}.some", p) }
+    }
+    /// The payload of the optional value at `p` (an lvalue).
+    fn oval(&self, t: &Ty, p: &str) -> String {
+        if self.niche(t) { p.to_string() } else { format!("{}.val", p) }
+    }
+    fn omake(&mut self, t: &Ty, v: &str) -> String {
+        if self.niche(t) {
+            format!("({})", v)
+        } else {
+            let c = self.cty(t);
+            format!("(({}){{ 1, {} }})", c, v)
+        }
+    }
+    /// Statement storing `some(v)` into `p`.
+    fn oset(&self, t: &Ty, p: &str, v: &str) -> String {
+        if self.niche(t) { format!("{} = {};", p, v) } else { format!("{}.some = 1; {}.val = {};", p, p, v) }
     }
 
     fn type_id(&mut self, t: &Ty) -> u64 {
@@ -559,7 +644,15 @@ impl<'a> Gen<'a> {
             self.ret_cty(&ret)
         };
         let mut s = String::new();
-        let linkage = if fd.is_extern_c_export { "" } else { "static " };
+        // small functions get an inline hint: overflow and bounds checks make them
+        // look bigger to the C compiler than they are
+        let small = self.tf.get(&f).map(|tf| {
+            let mut n = 0usize;
+            let mut b = tf.body.clone();
+            crate::check::body::zonk_walk_block(&mut b, &mut |_| n += 1);
+            n <= 60
+        }).unwrap_or(false);
+        let linkage = if fd.is_extern_c_export { "" } else if small { "static inline " } else { "static " };
         let _ = write!(s, "{}{} {}(", linkage, rc, name);
         if ps.is_empty() {
             s.push_str("void");
@@ -667,7 +760,7 @@ impl<'a> Gen<'a> {
                 self.emit(fs, &format!("{} {} = {};", rc, r, val));
                 fs.err_mode = match &ret {
                     Ty::Result(..) => Some(format!("!{}.ok", r)),
-                    Ty::Option(_) => Some(format!("!{}.some", r)),
+                    Ty::Option(_) => Some(format!("!{}", self.osome(&ret, &r))),
                     _ => None,
                 };
                 self.cleanup_to(fs, 0);
@@ -959,7 +1052,7 @@ impl<'a> Gen<'a> {
                         self.emit(fs, &format!("{} {} = {};", rc, r, v));
                         fs.err_mode = match &ret {
                             Ty::Result(..) => Some(format!("!{}.ok", r)),
-                            Ty::Option(_) => Some(format!("!{}.some", r)),
+                            Ty::Option(_) => Some(format!("!{}", self.osome(&ret, &r))),
                             _ => None,
                         };
                         self.cleanup_to(fs, 0);
@@ -1409,7 +1502,7 @@ impl<'a> Gen<'a> {
                 let _ = v;
                 let r = self.tmp();
                 let l = self.loc(e.span);
-                self.emit(fs, &format!("{} *{} = kite_map_find(&{}, &{}, {});", ent, r, b, desc, kp));
+                self.emit(fs, &format!("{} *{} = mf_{}(&{}, {});", ent, r, desc, b, kp));
                 self.emit(fs, &format!("if (!{}) kite_panic(\"key not found in map\", {});", r, l));
                 format!("{}->v", r)
             }
@@ -1572,7 +1665,8 @@ impl<'a> Gen<'a> {
                 let oc = self.cty(&t);
                 let r = self.tmp();
                 self.emit(fs, &format!("{} *{} = {};", ic, r, p));
-                format!("({} ? ({}){{ 1, *{} }} : ({}){{0}})", r, oc, r, oc)
+                let some = self.omake(&t, &format!("*{}", r));
+                format!("({} ? {} : ({}){{0}})", r, some, oc)
             }
             TK::Intrinsic { name, targs, args } => self.magic(fs, name, targs, args, &t, e.span),
             TK::Unary { op, e: x } => {
@@ -1631,8 +1725,7 @@ impl<'a> Gen<'a> {
             }
             TK::SomeLit(x) => {
                 let v = self.expr(fs, x);
-                let c = self.cty(&t);
-                format!("(({}){{ 1, {} }})", c, v)
+                self.omake(&t, &v)
             }
             TK::OkLit(x) => {
                 let v = self.expr(fs, x);
@@ -1742,8 +1835,8 @@ impl<'a> Gen<'a> {
                     None
                 };
                 let is_opt = matches!(xt, Ty::Option(_));
-                let okf = if is_opt { format!("{}.some", tv) } else { format!("{}.ok", tv) };
-                let valf = if is_opt { format!("{}.val", tv) } else { format!("{}.u.val", tv) };
+                let okf = if is_opt { self.osome(&xt, &tv) } else { format!("{}.ok", tv) };
+                let valf = if is_opt { self.oval(&xt, &tv) } else { format!("{}.u.val", tv) };
                 self.emit(fs, &format!("if ({}) {{", okf));
                 if let Some(r) = &r {
                     self.emit(fs, &format!("    {} = {};", r, valf));
@@ -1788,7 +1881,9 @@ impl<'a> Gen<'a> {
                 let res = self.tmp();
                 self.emit(fs, &format!("{} {};", c, res));
                 let flat = matches!(t, Ty::Option(_)) && t == lt;
-                self.emit(fs, &format!("if ({}.some) {} = {}; else {{", tv, res, if flat { tv.clone() } else { format!("{}.val", tv) }));
+                let cond = self.osome(&lt, &tv);
+                let val = if flat { tv.clone() } else { self.oval(&lt, &tv) };
+                self.emit(fs, &format!("if ({}) {} = {}; else {{", cond, res, val));
                 fs.ind += 1;
                 self.push_scope(fs, SK::Stmt);
                 let rv = self.expr(fs, r);
@@ -1826,7 +1921,8 @@ impl<'a> Gen<'a> {
                 if flat {
                     self.emit(fs, &format!("{} = {}.val.f_{};", res, tb, fname));
                 } else {
-                    self.emit(fs, &format!("{}.some = 1; {}.val = {}.val.f_{};", res, res, tb, fname));
+                    let st = self.oset(&t, &res, &format!("{}.val.f_{}", tb, fname));
+                    self.emit(fs, &st);
                 }
                 if owned {
                     for (i, (n2, t2)) in fsx.iter().enumerate() {
@@ -1855,7 +1951,11 @@ impl<'a> Gen<'a> {
                 let oc = self.cty(&t);
                 let r = self.tmp();
                 self.emit(fs, &format!("{} {} = {{0}};", oc, r));
-                self.emit(fs, &format!("{}.some = kite_chan_recv({}, &{}.val);", r, c, r));
+                if self.niche(&t) {
+                    self.emit(fs, &format!("if (!kite_chan_recv({}, &{})) {} = NULL;", c, r, r));
+                } else {
+                    self.emit(fs, &format!("{}.some = kite_chan_recv({}, &{}.val);", r, c, r));
+                }
                 r
             }
             TK::Wrap(x) => {
@@ -1864,13 +1964,13 @@ impl<'a> Gen<'a> {
                     Ty::Box(inner) => {
                         let ic = self.cty(inner);
                         let r = self.tmp();
-                        self.emit(fs, &format!("{} *{} = kite_alloc(sizeof({})); *{} = {};", ic, r, ic, r, v));
+                        self.emit(fs, &format!("{} *{} = kite_box_alloc(sizeof({})); *{} = {};", ic, r, ic, r, v));
                         r
                     }
                     Ty::Rc(inner) | Ty::Arc(inner) => {
                         let bx = self.ensure_rcbox(inner);
                         let r = self.tmp();
-                        self.emit(fs, &format!("{} *{} = kite_alloc(sizeof({})); {}->strong = 1; {}->weak = 0; {}->val = {};", bx, r, bx, r, r, r, v));
+                        self.emit(fs, &format!("{} *{} = kite_box_alloc(sizeof({})); {}->strong = 1; {}->weak = 0; {}->val = {};", bx, r, bx, r, r, r, v));
                         r
                     }
                     Ty::Mutex(_) => {
@@ -1895,7 +1995,7 @@ impl<'a> Gen<'a> {
                 let c = self.cty(&t);
                 let bp = self.tmp();
                 let r = self.tmp();
-                self.emit(fs, &format!("{} *{} = {}; {} {} = *{}; free({});", c, bp, b, c, r, bp, bp));
+                self.emit(fs, &format!("{} *{} = {}; {} {} = *{}; kite_box_free({}, sizeof({}));", c, bp, b, c, r, bp, bp, c));
                 r
             }
             TK::Error => "0".into(),
@@ -2026,7 +2126,7 @@ impl<'a> Gen<'a> {
                     let v = self.expr(fs, x);
                     let c = self.cty(&xt);
                     let b = self.tmp();
-                    self.emit(fs, &format!("{} *{} = kite_alloc(sizeof({})); *{} = {};", c, b, c, b, v));
+                    self.emit(fs, &format!("{} *{} = kite_box_alloc(sizeof({})); *{} = {};", c, b, c, b, v));
                     format!("((kite_iface){{ {}, &{} }})", b, vt)
                 } else {
                     let p = self.addr(fs, x);
@@ -2345,8 +2445,9 @@ impl<'a> Gen<'a> {
             match &rt {
                 Ty::Option(_) => {
                     let m = msg.unwrap_or_else(|| "kite_str_lit(\"unwrap() called on none\", 23)".into());
-                    self.emit(fs, &format!("if (!{}.some) kite_panic_str({}, {});", t, m, l));
-                    return if *ret == Ty::Unit { "0".into() } else { format!("{}.val", t) };
+                    let cond = self.osome(&rt, &t);
+                    self.emit(fs, &format!("if (!{}) kite_panic_str({}, {});", cond, m, l));
+                    return if *ret == Ty::Unit { "0".into() } else { self.oval(&rt, &t) };
                 }
                 Ty::Result(_, e) => {
                     let e = (**e).clone();
@@ -2750,7 +2851,7 @@ impl<'a> Gen<'a> {
                 if optptr {
                     vec![(format!("(*{})", place), inner)]
                 } else {
-                    vec![(format!("{}.val", place), inner)]
+                    vec![(self.oval(ty, place), inner)]
                 }
             }
             TPat::Ok(_) => match ty {
@@ -2775,10 +2876,10 @@ impl<'a> Gen<'a> {
                 let v = if *ty == Ty::String { format!("kite_string_view(&{})", place) } else { place.to_string() };
                 format!("kite_str_eq({}, kite_str_lit({}, {}))", v, c_string(s), s.len())
             }
-            TPat::None => if optptr { format!("({} == NULL)", place) } else { format!("(!{}.some)", place) },
+            TPat::None => if optptr { format!("({} == NULL)", place) } else { format!("(!{})", self.osome(ty, place)) },
             TPat::Some(sub) | TPat::Ok(sub) | TPat::Err(sub) => {
                 let head = match pat {
-                    TPat::Some(_) => if optptr { format!("({} != NULL)", place) } else { format!("{}.some", place) },
+                    TPat::Some(_) => if optptr { format!("({} != NULL)", place) } else { self.osome(ty, place) },
                     TPat::Ok(_) => format!("{}.ok", place),
                     _ => format!("(!{}.ok)", place),
                 };
@@ -2882,7 +2983,8 @@ impl<'a> Gen<'a> {
         let rc = self.cty(&ret);
         match &xt {
             Ty::Option(_) => {
-                self.emit(fs, &format!("if (!{}.some) {{", tv));
+                let cond = self.osome(&xt, &tv);
+                self.emit(fs, &format!("if (!{}) {{", cond));
                 fs.ind += 1;
                 fs.err_mode = Some("1".into());
                 self.cleanup_to(fs, 0);
@@ -2893,7 +2995,7 @@ impl<'a> Gen<'a> {
                 if *t == Ty::Unit {
                     "0".into()
                 } else {
-                    format!("{}.val", tv)
+                    self.oval(&xt, &tv)
                 }
             }
             Ty::Result(_, e1) => {
@@ -2910,7 +3012,7 @@ impl<'a> Gen<'a> {
                         let vt = self.vtable(&e1, &et);
                         let ec = self.cty(&e1);
                         let b = self.tmp();
-                        self.emit(fs, &format!("{} *{} = kite_alloc(sizeof({})); *{} = {}.u.err;", ec, b, ec, b, tv));
+                        self.emit(fs, &format!("{} *{} = kite_box_alloc(sizeof({})); *{} = {}.u.err;", ec, b, ec, b, tv));
                         format!("((kite_iface){{ {}, &{} }})", b, vt)
                     }
                     Some(TryWrap::Call(hid, w)) => {
@@ -3079,11 +3181,16 @@ impl<'a> Gen<'a> {
                     let oc = self.cty(&ot);
                     let r = self.tmp();
                     let st = self.tmp();
-                    self.emit(fs, &format!("{{ {} {} = {{0}}; int {} = kite_chan_try_recv({}, &{}.val);", oc, r, st, chans[i].as_ref().unwrap(), r));
+                    let slot = self.oval(&ot, &r);
+                    self.emit(fs, &format!("{{ {} {} = {{0}}; int {} = kite_chan_try_recv({}, &{});", oc, r, st, chans[i].as_ref().unwrap(), slot));
                     self.emit(fs, &format!("if ({}) {{", st));
                     fs.ind += 1;
                     self.push_scope(fs, SK::Block);
-                    self.emit(fs, &format!("{}.some = ({} == 1);", r, st));
+                    if self.niche(&ot) {
+                        self.emit(fs, &format!("if ({} != 1) {} = NULL;", st, r));
+                    } else {
+                        self.emit(fs, &format!("{}.some = ({} == 1);", r, st));
+                    }
                     match bind {
                         Some(b) => {
                             let n = self.local_cname(fs, *b);
@@ -3150,14 +3257,15 @@ impl<'a> Gen<'a> {
         let e = self.tmp();
         let old = self.tmp();
         self.emit(fs, &format!("{} {} = {}; {} {} = {}; bool {}; {} {} = {{0}};", kc, tk, kv, vc, tvv, vv, ex, oc, old));
-        self.emit(fs, &format!("{} *{} = kite_map_slot({}, &{}, &{}, &{});", ent, e, mptr, desc, tk, ex));
+        self.emit(fs, &format!("{} *{} = ms_{}({}, &{}, &{});", ent, e, desc, mptr, tk, ex));
         let dk = if self.needs_drop(k) {
             let d = self.drop_fn(k);
             format!(" {}(&{});", d, tk)
         } else {
             String::new()
         };
-        self.emit(fs, &format!("if ({}) {{ {}.some = 1; {}.val = {}->v;{} }} else {{ {}->k = {}; }}", ex, old, old, e, dk, e, tk));
+        let set = self.oset(&ot, &old, &format!("{}->v", e));
+        self.emit(fs, &format!("if ({}) {{ {}{} }} else {{ {}->k = {}; }}", ex, set, dk, e, tk));
         self.emit(fs, &format!("{}->v = {};", e, tvv));
         old
     }
@@ -3399,7 +3507,8 @@ impl<'a> Gen<'a> {
                 self.ensure_rcbox(&e);
                 let c = self.cty(ret);
                 let r = self.tmp();
-                self.emit(fs, &format!("{} {} = {{0}}; if (({})->strong > 0) {{ ({})->strong++; {}.some = 1; {}.val = {}; }}", c, r, a, a, r, r, a));
+                let set = self.oset(ret, &r, &a);
+                self.emit(fs, &format!("{} {} = {{0}}; if (({})->strong > 0) {{ ({})->strong++; {} }}", c, r, a, a, set));
                 r
             }
             "Cell.get" => {
@@ -3433,7 +3542,11 @@ impl<'a> Gen<'a> {
                 let c = self.expr(fs, &args[0].e);
                 let oc = self.cty(ret);
                 let r = self.tmp();
-                self.emit(fs, &format!("{} {} = {{0}}; {}.some = kite_chan_recv({}, &{}.val);", oc, r, r, c, r));
+                if self.niche(ret) {
+                    self.emit(fs, &format!("{} {} = {{0}}; if (!kite_chan_recv({}, &{})) {} = NULL;", oc, r, c, r, r));
+                } else {
+                    self.emit(fs, &format!("{} {} = {{0}}; {}.some = kite_chan_recv({}, &{}.val);", oc, r, r, c, r));
+                }
                 r
             }
             "Chan.close" => {
@@ -3520,7 +3633,8 @@ impl<'a> Gen<'a> {
             "pop" => {
                 let oc = self.cty(ret);
                 let r = self.tmp();
-                self.emit(fs, &format!("{} {} = {{0}}; if ({}->len) {{ {}.some = 1; {}.val = {}[--{}->len]; }}", oc, r, vp, r, r, arr, vp));
+                let set = self.oset(ret, &r, &format!("{}[--{}->len]", arr, vp));
+                self.emit(fs, &format!("{} {} = {{0}}; if ({}->len) {{ {} }}", oc, r, vp, set));
                 r
             }
             "insert" => {
@@ -3579,13 +3693,8 @@ impl<'a> Gen<'a> {
             }
             "cap" => format!("{}->cap", vp),
             "sort" => {
-                let cf = self.cmp_fn(el);
-                let w = format!("cmpw_{}", self.mangle(el));
-                if self.helpers.insert(w.clone()) {
-                    let _ = writeln!(self.protos, "static int {}(const void *a, const void *b, void *c);", w);
-                    let _ = writeln!(self.bodies, "static int {}(const void *a, const void *b, void *c) {{ (void)c; return {}(({} *)a, ({} *)b); }}", w, cf, ec, ec);
-                }
-                self.emit(fs, &format!("kite_sort({}->ptr, {}->len, sizeof({}), {}, NULL);", vp, vp, ec, w));
+                let f = self.sort_fn(el);
+                self.emit(fs, &format!("{}(({} *){}->ptr, {}->len);", f, ec, vp, vp));
                 "0".into()
             }
             "sortBy" => {
@@ -3614,7 +3723,7 @@ impl<'a> Gen<'a> {
             "get" | "getMut" | "contains" => {
                 let kp = self.borrow_ptr(fs, &args[1].e);
                 let e = self.tmp();
-                self.emit(fs, &format!("{} *{} = kite_map_find({}, &{}, {});", ent, e, m, desc, kp));
+                self.emit(fs, &format!("{} *{} = mf_{}({}, {});", ent, e, desc, m, kp));
                 if name == "contains" {
                     format!("({} != NULL)", e)
                 } else {
@@ -3638,7 +3747,8 @@ impl<'a> Gen<'a> {
                 } else {
                     String::new()
                 };
-                self.emit(fs, &format!("if (kite_map_remove({}, &{}, {}, &{})) {{ {}.some = 1; {}.val = {}.v;{} }}", m, desc, kp, tmpe, r, r, tmpe, dk));
+                let set = self.oset(ret, &r, &format!("{}.v", tmpe));
+                self.emit(fs, &format!("if (mr_{}({}, {}, &{})) {{ {}{} }}", desc, m, kp, tmpe, set, dk));
                 r
             }
             "entry" => {
@@ -3648,7 +3758,7 @@ impl<'a> Gen<'a> {
                 let ex = self.tmp();
                 let e = self.tmp();
                 self.emit(fs, &format!("{} {} = {}; bool {};", kc, tk, kv, ex));
-                self.emit(fs, &format!("{} *{} = kite_map_slot({}, &{}, &{}, &{});", ent, e, m, desc, tk, ex));
+                self.emit(fs, &format!("{} *{} = ms_{}({}, &{}, &{});", ent, e, desc, m, tk, ex));
                 let dv = self.default_value(fs, v);
                 let dk = if self.needs_drop(k) {
                     let d = self.drop_fn(k);
@@ -3807,7 +3917,7 @@ impl<'a> Gen<'a> {
                     let d = self.drop_fn(&inner);
                     let _ = writeln!(b, "    if (*p) {}(*p);", d);
                 }
-                b.push_str("    free(*p);\n");
+                b.push_str("    kite_box_free(*p, sizeof(**p));\n");
             }
             Ty::Rc(inner) | Ty::Arc(inner) => {
                 let inner = (**inner).clone();
@@ -3818,12 +3928,12 @@ impl<'a> Gen<'a> {
                     let d = self.drop_fn(&inner);
                     let _ = writeln!(b, "        {}(&(*p)->val);", d);
                 }
-                b.push_str("        if ((*p)->weak == 0) free(*p);\n    }\n");
+                b.push_str("        if ((*p)->weak == 0) kite_box_free(*p, sizeof(**p));\n    }\n");
             }
             Ty::Weak(inner) => {
                 let inner = (**inner).clone();
                 self.ensure_rcbox(&inner);
-                b.push_str("    if (*p && --(*p)->weak == 0 && (*p)->strong == 0) free(*p);\n");
+                b.push_str("    if (*p && --(*p)->weak == 0 && (*p)->strong == 0) kite_box_free(*p, sizeof(**p));\n");
             }
             Ty::Chan(el) => {
                 let el = (**el).clone();
@@ -3842,7 +3952,7 @@ impl<'a> Gen<'a> {
                 let _ = writeln!(b, "    kite_chan_release(*p, {});", df);
             }
             Ty::Func(_) => b.push_str("    if (p->drop) p->drop(p->env);\n"),
-            Ty::Iface(..) => b.push_str("    if (p->data) { ((const kite_vt_base *)p->vt)->drop(p->data); free(p->data); }\n"),
+            Ty::Iface(..) => b.push_str("    if (p->data) { const kite_vt_base *vt = p->vt; vt->drop(p->data); kite_box_free(p->data, vt->size); }\n"),
             Ty::Mutex(inner) => {
                 let inner = (**inner).clone();
                 if self.needs_drop(&inner) {
@@ -3855,7 +3965,7 @@ impl<'a> Gen<'a> {
                 let inner = (**inner).clone();
                 if self.needs_drop(&inner) {
                     let d = self.drop_fn(&inner);
-                    let _ = writeln!(b, "    if (p->some) {}(&p->val);", d);
+                    let _ = writeln!(b, "    if ({}) {}(&{});", self.osome(t, "(*p)"), d, self.oval(t, "(*p)"));
                 }
             }
             Ty::Result(a, e) => {
@@ -3984,12 +4094,13 @@ impl<'a> Gen<'a> {
                 let (ent, desc) = self.map_ent(&k, &v);
                 let ck = self.clone_fn(&k);
                 let cv = self.clone_fn(&v);
-                let _ = writeln!(b, "    kite_map r = {{0}};\n    for (int64_t i = 0; i < p->n_entries; i++) {{\n        {} *e = (({} *)p->entries) + i; if (!e->live) continue;\n        bool ex; {} *n = kite_map_slot(&r, &{}, &e->k, &ex);\n        n->k = {}(&e->k); n->v = {}(&e->v);\n    }}\n    return r;", ent, ent, ent, desc, ck, cv);
+                let _ = writeln!(b, "    kite_map r = {{0}};\n    for (int64_t i = 0; i < p->n_entries; i++) {{\n        {} *e = (({} *)p->entries) + i; if (!e->live) continue;\n        bool ex; {} *n = ms_{}(&r, &e->k, &ex);\n        n->k = {}(&e->k); n->v = {}(&e->v);\n    }}\n    return r;", ent, ent, ent, desc, ck, cv);
             }
             Ty::Option(inner) => {
                 let inner = (**inner).clone();
                 let cf = self.clone_fn(&inner);
-                let _ = writeln!(b, "    {} r = {{0}};\n    if (p->some) {{ r.some = 1; r.val = {}(&p->val); }}\n    return r;", c, cf);
+                let set = self.oset(t, "r", &format!("{}(&{})", cf, self.oval(t, "(*p)")));
+                let _ = writeln!(b, "    {} r = {{0}};\n    if ({}) {{ {} }}\n    return r;", c, self.osome(t, "(*p)"), set);
             }
             Ty::Result(a, e) => {
                 let (a, e) = ((**a).clone(), (**e).clone());
@@ -4001,7 +4112,7 @@ impl<'a> Gen<'a> {
                 let inner = (**inner).clone();
                 let ic = self.cty(&inner);
                 let cf = self.clone_fn(&inner);
-                let _ = writeln!(b, "    {} *r = kite_alloc(sizeof({})); *r = {}(*p);\n    return r;", ic, ic, cf);
+                let _ = writeln!(b, "    {} *r = kite_box_alloc(sizeof({})); *r = {}(*p);\n    return r;", ic, ic, cf);
             }
             Ty::Rc(inner) => {
                 let inner = (**inner).clone();
@@ -4101,7 +4212,9 @@ impl<'a> Gen<'a> {
             Ty::Option(inner) => {
                 let inner = (**inner).clone();
                 let ef = self.eq_fn(&inner);
-                let _ = writeln!(b, "    if (a->some != b->some) return false;\n    return !a->some || {}(&a->val, &b->val);", ef);
+                let (sa, sb) = (self.osome(t, "(*a)"), self.osome(t, "(*b)"));
+                let (va, vb) = (self.oval(t, "(*a)"), self.oval(t, "(*b)"));
+                let _ = writeln!(b, "    if ({} != {}) return false;\n    return !{} || {}(&{}, &{});", sa, sb, sa, ef, va, vb);
             }
             Ty::Result(x, y) => {
                 let (x, y) = ((**x).clone(), (**y).clone());
@@ -4146,6 +4259,48 @@ impl<'a> Gen<'a> {
             _ => b.push_str("    return a == b;\n"),
         }
         b.push_str("}\n");
+        self.bodies.push_str(&b);
+        name
+    }
+
+    /// A sort specialized for the element type. Scalars and strings use an
+    /// introsort (their order among equals is unobservable); other types use a
+    /// stable merge sort. Comparisons are direct, never through a pointer.
+    fn sort_fn(&mut self, t: &Ty) -> String {
+        let m = self.mangle(t);
+        let name = format!("sort_{}", m);
+        let c = self.cty(t);
+        let sig = format!("static void {}({} *a, int64_t n)", name, c);
+        if !self.helper_header(&name, &sig) {
+            return name;
+        }
+        let lt = match t {
+            Ty::Int(_) | Ty::F32 | Ty::F64 | Ty::Bool => "(*(x) < *(y))".to_string(),
+            Ty::Str => "(kite_str_cmp(*(x), *(y)) < 0)".to_string(),
+            Ty::String => "(kite_str_cmp(kite_string_view(x), kite_string_view(y)) < 0)".to_string(),
+            _ => {
+                let cf = self.cmp_fn(t);
+                format!("({}((x), (y)) < 0)", cf)
+            }
+        };
+        let unstable_ok = matches!(t, Ty::Int(_) | Ty::F32 | Ty::F64 | Ty::Bool | Ty::Str | Ty::String);
+        let mut b = String::new();
+        let _ = writeln!(b, "#define LT_{m}(x, y) {lt}");
+        let _ = writeln!(b, "static void isort_{m}({c} *a, int64_t n) {{\n    for (int64_t i = 1; i < n; i++) {{\n        {c} t = a[i]; int64_t j = i;\n        while (j > 0 && LT_{m}(&t, &a[j - 1])) {{ a[j] = a[j - 1]; j--; }}\n        a[j] = t;\n    }}\n}}");
+        if unstable_ok {
+            let _ = writeln!(
+                b,
+                "static void sift_{m}({c} *a, int64_t i, int64_t n) {{\n    for (;;) {{\n        int64_t l = 2 * i + 1, big = i;\n        if (l < n && LT_{m}(&a[big], &a[l])) big = l;\n        if (l + 1 < n && LT_{m}(&a[big], &a[l + 1])) big = l + 1;\n        if (big == i) return;\n        {c} t = a[i]; a[i] = a[big]; a[big] = t; i = big;\n    }}\n}}\n\
+static void intro_{m}({c} *a, int64_t n, int depth) {{\n    while (n > 24) {{\n        if (depth-- == 0) {{\n            for (int64_t i = n / 2 - 1; i >= 0; i--) sift_{m}(a, i, n);\n            for (int64_t e = n - 1; e > 0; e--) {{ {c} t = a[0]; a[0] = a[e]; a[e] = t; sift_{m}(a, 0, e); }}\n            return;\n        }}\n        int64_t mid = n / 2;\n        if (LT_{m}(&a[mid], &a[0])) {{ {c} t = a[mid]; a[mid] = a[0]; a[0] = t; }}\n        if (LT_{m}(&a[n - 1], &a[mid])) {{ {c} t = a[mid]; a[mid] = a[n - 1]; a[n - 1] = t; }}\n        if (LT_{m}(&a[mid], &a[0])) {{ {c} t = a[mid]; a[mid] = a[0]; a[0] = t; }}\n        {c} p = a[mid];\n        int64_t i = -1, j = n;\n        for (;;) {{\n            do i++; while (LT_{m}(&a[i], &p));\n            do j--; while (LT_{m}(&p, &a[j]));\n            if (i >= j) break;\n            {c} t = a[i]; a[i] = a[j]; a[j] = t;\n        }}\n        int64_t left = j + 1;\n        if (left < n - left) {{ intro_{m}(a, left, depth); a += left; n -= left; }}\n        else {{ intro_{m}(a + left, n - left, depth); n = left; }}\n    }}\n    isort_{m}(a, n);\n}}"
+            );
+            let _ = writeln!(b, "{sig} {{\n    int depth = 0;\n    for (int64_t k = n; k > 1; k >>= 1) depth += 2;\n    intro_{m}(a, n, depth);\n}}");
+        } else {
+            let _ = writeln!(
+                b,
+                "static void msort_{m}({c} *a, {c} *tmp, int64_t n) {{\n    if (n <= 16) {{ isort_{m}(a, n); return; }}\n    int64_t h = n / 2;\n    msort_{m}(a, tmp, h);\n    msort_{m}(a + h, tmp, n - h);\n    if (!LT_{m}(&a[h], &a[h - 1])) return;\n    memcpy(tmp, a, (size_t)n * sizeof({c}));\n    int64_t i = 0, j = h, k = 0;\n    while (i < h && j < n) a[k++] = LT_{m}(&tmp[j], &tmp[i]) ? tmp[j++] : tmp[i++];\n    while (i < h) a[k++] = tmp[i++];\n    while (j < n) a[k++] = tmp[j++];\n}}"
+            );
+            let _ = writeln!(b, "{sig} {{\n    if (n < 2) return;\n    {c} *tmp = kite_alloc((size_t)n * sizeof({c}));\n    msort_{m}(a, tmp, n);\n    free(tmp);\n}}");
+        }
         self.bodies.push_str(&b);
         name
     }
@@ -4214,7 +4369,7 @@ impl<'a> Gen<'a> {
             Ty::Option(inner) => {
                 let inner = (**inner).clone();
                 let hf = self.hash_fn(&inner);
-                let _ = writeln!(b, "    return p->some ? kite_hash_mix(1, {}(&p->val)) : 0;", hf);
+                let _ = writeln!(b, "    return {} ? kite_hash_mix(1, {}(&{})) : 0;", self.osome(t, "(*p)"), hf, self.oval(t, "(*p)"));
             }
             Ty::Box(inner) => {
                 let inner = (**inner).clone();
@@ -4308,7 +4463,7 @@ impl<'a> Gen<'a> {
             Ty::Option(inner) => {
                 let inner = (**inner).clone();
                 let ff = self.fmt_fn(&inner);
-                let _ = writeln!(b, "    if (p->some) {{ kite_fmt_cstr(b, \"some(\"); {}(b, &p->val, 1); kite_fmt_cstr(b, \")\"); }} else kite_fmt_cstr(b, \"none\");", ff);
+                let _ = writeln!(b, "    if ({}) {{ kite_fmt_cstr(b, \"some(\"); {}(b, &{}, 1); kite_fmt_cstr(b, \")\"); }} else kite_fmt_cstr(b, \"none\");", self.osome(t, "(*p)"), ff, self.oval(t, "(*p)"));
             }
             Ty::Result(x, y) => {
                 let (x, y) = ((**x).clone(), (**y).clone());

@@ -1,0 +1,71 @@
+fn main() {
+    let n = 10
+    var perm = Vec[int]{}
+    var perm1 = Vec[int]{}
+    var count = Vec[int]{}
+    for i in 0..n {
+        perm.push(0)
+        perm1.push(i)
+        count.push(0)
+    }
+    var maxFlips = 0
+    var checksum = 0
+    var permCount = 0
+    var r = n
+    for {
+        for r != 1 {
+            count[r - 1] = r
+            r -= 1
+        }
+        for i in 0..n {
+            perm[i] = perm1[i]
+        }
+        var flips = 0
+        var k = perm[0]
+        for k != 0 {
+            var lo = 0
+            var hi = k
+            for lo < hi {
+                let t = perm[lo]
+                perm[lo] = perm[hi]
+                perm[hi] = t
+                lo += 1
+                hi -= 1
+            }
+            flips += 1
+            k = perm[0]
+        }
+        if flips > maxFlips {
+            maxFlips = flips
+        }
+        if permCount % 2 == 0 {
+            checksum += flips
+        } else {
+            checksum -= flips
+        }
+        // next permutation
+        var done = false
+        for {
+            if r == n {
+                done = true
+                break
+            }
+            let p0 = perm1[0]
+            for i in 0..r {
+                perm1[i] = perm1[i + 1]
+            }
+            perm1[r] = p0
+            count[r] -= 1
+            if count[r] > 0 {
+                break
+            }
+            r += 1
+        }
+        if done {
+            break
+        }
+        permCount += 1
+    }
+    println(checksum)
+    println("Pfannkuchen(", n, ") =", maxFlips)
+}

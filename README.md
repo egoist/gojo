@@ -141,7 +141,7 @@ src/check/        声明收集、类型解析与能力规则（mod.rs）
                   模式、match、穷尽性（pattern.rs）
 src/borrowck.rs   所有权与借用检查（逐函数、单遍 + 循环两遍）
 src/codegen.rs    IR → C：单态化、析构插入、虚表、闭包、内建函数
-runtime/          C 运行时：字符串、Vec、插入有序哈希表、panic、线程、channel、mutex、FFI
+runtime/          C 运行时：字符串、Vec、插入有序哈希表、小对象分配器、panic、线程、channel、mutex、FFI
 std/              用 Kite 写的标准库（编译进二进制）
 ```
 
@@ -149,10 +149,13 @@ std/              用 Kite 写的标准库（编译进二进制）
 
 ## 性能
 
-在 Apple Silicon 上（release 版编译器）：
+[`bench/`](bench/README.md) 里有 8 个常见基准（fib、binary-trees、nbody、spectral-norm、fannkuch-redux、mandelbrot、hashmap、sort）的 Kite / Go / Zig 等价实现，`bench/run.sh` 会先校验三边输出一致再测量。Apple M5 上的结果：
 
-- 一个 4 万行的合成程序：解析 23 ms、类型检查 34 ms、借用检查 3 ms、生成 C 6 ms，加上 C 编译完整构建 0.26 s；等价的 Go 程序 `go build` 约 0.63 s（Go 会编译全部 1500 个类型，Kite 只为 `main` 可达的代码生成实例，所以这只是量级上的对比）。
-- 一个普通的小程序完整构建约 55 ms，主要是 C 编译器的时间。
+- 运行时间（几何平均）：Kite 是 Go 的 0.81 倍、Zig ReleaseSafe 的 0.81 倍、Zig ReleaseFast 的 0.89 倍，而且溢出和下标检查都开着。binary-trees 受益于 Kite 的小对象分配器，不计它时分别是 0.89、0.93、1.03 倍。
+- 8 项里 Kite 在 binary-trees、mandelbrot、hashmap、sort 上最快；fib 的差距是溢出检查本身的代价（和 Zig ReleaseSafe 持平）；nbody 和 Go 持平，比 Zig 慢。
+- 编译时间：nbody 的 `kite build` 约 50 ms（其中前端约 3 ms），`go build` 97 ms，`zig build-exe` Debug 924 ms。
+
+在一个 4 万行的合成程序上，Kite 前端耗时约 66 ms（解析 23 ms、类型检查 34 ms、借用检查 3 ms、生成 C 6 ms）。
 
 ## 与设计文档的差异和改进
 

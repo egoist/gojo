@@ -1,0 +1,18 @@
+fn main() {
+    let n = 5000000
+    var v = Vec[int]{}
+    v.reserve(n)
+    var seed = 42
+    for _ in 0..n {
+        seed = (seed *% 1103515245 +% 12345) % 2147483648
+        v.push(seed)
+    }
+    v.sort()
+    var ok = true
+    for i in 1..n {
+        if v[i - 1] > v[i] {
+            ok = false
+        }
+    }
+    println(ok, v[0], v[n / 2], v[n - 1])
+}

@@ -93,6 +93,47 @@ void *kite_alloc(size_t n);
 void *kite_realloc(void *p, size_t n);
 static inline void kite_free(void *p) { free(p); }
 
+// Small-object allocator for Box / rc / arc / interface boxes. Ownership tells
+// the compiler the exact size at every free, so blocks go back to a per-thread
+// free list for their size class instead of through malloc.
+#define KITE_BOX_MAX 256
+typedef struct kite_box_node { struct kite_box_node *next; } kite_box_node;
+extern __thread kite_box_node *kite_box_lists[KITE_BOX_MAX / 16 + 1];
+void *kite_box_refill(size_t cls);
+#if defined(__has_feature)
+#if __has_feature(address_sanitizer)
+#define KITE_NO_BOX_POOL 1
+#endif
+#endif
+#if defined(__SANITIZE_ADDRESS__)
+#define KITE_NO_BOX_POOL 1
+#endif
+static inline void *kite_box_alloc(size_t n) {
+#ifdef KITE_NO_BOX_POOL
+    return kite_alloc(n);   // let the sanitizer see every block
+#endif
+    if (n > KITE_BOX_MAX) return kite_alloc(n);
+    size_t cls = n ? (n + 15) >> 4 : 1;
+    kite_box_node *f = kite_box_lists[cls];
+    if (__builtin_expect(f != NULL, 1)) {
+        kite_box_lists[cls] = f->next;
+        return f;
+    }
+    return kite_box_refill(cls);
+}
+static inline void kite_box_free(void *p, size_t n) {
+    if (!p) return;
+#ifdef KITE_NO_BOX_POOL
+    free(p);
+    return;
+#endif
+    if (n > KITE_BOX_MAX) { free(p); return; }
+    size_t cls = n ? (n + 15) >> 4 : 1;
+    kite_box_node *f = p;
+    f->next = kite_box_lists[cls];
+    kite_box_lists[cls] = f;
+}
+
 // ---- strings
 static inline kite_str kite_str_lit(const char *s, int64_t n) { kite_str r = { (const uint8_t *)s, n }; return r; }
 static inline kite_str kite_string_view(const kite_string *s) { kite_str r = { s->ptr, s->len }; return r; }
@@ -153,6 +194,7 @@ void *kite_map_find(const kite_map *m, const kite_map_desc *d, const void *key);
 void *kite_map_slot(kite_map *m, const kite_map_desc *d, const void *key, bool *existed);
 bool kite_map_remove(kite_map *m, const kite_map_desc *d, const void *key, void *out_entry);
 void kite_map_free(kite_map *m);
+void kite_map_reserve1(kite_map *m, size_t esize);
 static inline uint64_t kite_hash_u64(uint64_t x) {
     x ^= x >> 33; x *= 0xff51afd7ed558ccdULL; x ^= x >> 33; x *= 0xc4ceb9fe1a85ec53ULL; x ^= x >> 33;
     return x;

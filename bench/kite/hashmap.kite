@@ -1,0 +1,30 @@
+use fmt
+
+fn main() {
+    let n = 1000000
+    var m = Map[int, int]{}
+    for i in 0..n {
+        m[(i * 7919) % 2000003] = i
+    }
+    var sum = 0
+    for i in 0..n {
+        if let v = m.get(i) {
+            sum += v
+        }
+    }
+    println(m.len, sum)
+
+    let k = 200000
+    var s = Map[String, int]{}
+    for i in 0..k {
+        s[fmt.sprint(i)] = i
+    }
+    var hits = 0
+    for i in 0..k * 2 {
+        let key = fmt.sprint(i)
+        if s.contains(key) {
+            hits += 1
+        }
+    }
+    println(s.len, hits)
+}
