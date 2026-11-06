@@ -1,0 +1,6 @@
+fn main() {
+    let x = -(-1.0)
+    let y = - -2.5
+    let z f32 = -(-(-0.5))
+    println(x, y, z)
+}

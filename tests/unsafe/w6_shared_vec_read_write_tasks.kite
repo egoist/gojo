@@ -1,0 +1,12 @@
+use task
+fn main() {
+    var v = [1, 2, 3]
+    _ = task.group((g) => {
+        g.go(() => {
+            for x in &v {
+                x += 1
+            }
+        })
+        g.go(() => println(v.len()))
+    })
+}

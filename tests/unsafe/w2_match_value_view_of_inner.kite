@@ -1,0 +1,11 @@
+fn main() {
+    let n = 1
+    let v = match n {
+        1 => {
+            let s = "abc".toString()
+            s.asStr()
+        }
+        _ => "x",
+    }
+    println(v)
+}

@@ -1,0 +1,18 @@
+// A view that comes out of `try` still borrows what it came from.
+fn firstWord(s str) ?str {
+    let i = try s.find(" ")
+    return some(s[0..i])
+}
+
+fn run() ?int {
+    var s = "hello world, a long enough string".toString()
+    let w = try firstWord(s.asStr())
+    s = "z".toString()
+    // error: cannot modify `s` while it is borrowed by `w`
+    println(w)
+    return some(1)
+}
+
+fn main() {
+    _ = run()
+}

@@ -1,0 +1,6 @@
+fn main() {
+    var s = "abc".toString()
+    let f = () => println(s)
+    s.push("x")
+    f()
+}

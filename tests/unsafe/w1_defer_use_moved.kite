@@ -1,0 +1,6 @@
+fn take(s sink String) {}
+fn main() {
+    let s = "abc".toString()
+    defer println(s)
+    take(s)
+}

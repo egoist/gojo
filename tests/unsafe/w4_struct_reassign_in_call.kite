@@ -1,0 +1,11 @@
+struct P {
+    s String
+}
+fn both(p inout P, v str) {
+    p = P{s: "replaced with something else entirely".toString()}
+    println(v)
+}
+fn main() {
+    var p = P{s: "abcdefghijklmnopqrstuvwxyz0123456789".toString()}
+    both(&p, p.s.asStr())
+}

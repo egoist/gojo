@@ -1,0 +1,35 @@
+// A view set in one iteration of a loop still points where it did when the
+// next one starts.
+fn read_first() {
+    var s = "0123456789abcdefghijklmnop".toString()
+    var w = ""
+    for i in 0..3 {
+        if i > 0 {
+            s.push("grow the buffer so that it moves")
+            // error: cannot modify `s` here: `w` may still view it from the previous iteration of the loop
+        }
+        println(w)
+        w = s.asStr()
+    }
+}
+
+fn leave_first() {
+    var s = "0123456789abcdefghijklmnop".toString()
+    var w = ""
+    for i in 0..3 {
+        if i > 0 {
+            s.push("grow the buffer so that it moves")
+            // error: cannot modify `s` here: `w` may still view it from the previous iteration of the loop
+        }
+        if i == 2 {
+            break
+        }
+        w = s.asStr()
+    }
+    println(w)
+}
+
+fn main() {
+    read_first()
+    leave_first()
+}

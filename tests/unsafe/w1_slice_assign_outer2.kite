@@ -1,0 +1,9 @@
+fn main() {
+    let a = [1, 2]
+    var sl []int = a
+    {
+        let b = [3, 4, 5]
+        sl = b
+    }
+    println(sl.len())
+}

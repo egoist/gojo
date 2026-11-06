@@ -1,0 +1,9 @@
+fn take(s sink String) {}
+fn main() {
+    let v = [some("abcdefghijklmnopqrstuvwxyz0123456789".toString())]
+    match v[0] {
+        some(x) => take(x)
+        none => {}
+    }
+    println(v.len())
+}

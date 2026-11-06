@@ -1,0 +1,8 @@
+fn take(s sink String) {}
+fn main() {
+    let s = "abc".toString()
+    if s.len() > 1 {
+        take(s)
+    }
+    println(s)
+}

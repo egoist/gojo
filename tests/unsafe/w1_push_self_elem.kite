@@ -1,0 +1,5 @@
+fn main() {
+    var v = ["a".toString()]
+    v.push(v[0])
+    println(v.len())
+}

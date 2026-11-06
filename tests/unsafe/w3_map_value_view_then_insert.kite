@@ -1,0 +1,9 @@
+fn main() {
+    var m = Map[int, String]{1: "abcdefghijklmnopqrstuvwxyz".toString()}
+    var keep = ""
+    if let s = m.get(1) {
+        keep = s.asStr()
+    }
+    _ = m.insert(1, "z".toString())
+    println(keep)
+}

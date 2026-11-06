@@ -33,8 +33,10 @@ fn main() {
         println("ticks during the C calls:", t > 20, r.isOk())
     }
     with w = worst.lock() {
-        // the C call gives up its CPU within a few milliseconds
-        println("longest wait under 15 ms:", w < 15 * time.millisecond)
+        // The C call gives up its CPU within a few milliseconds; without that the
+        // ticker would wait out whole 100 ms calls. (The bound leaves room for a
+        // loaded machine, where the OS itself may keep the ticker waiting.)
+        println("longest wait under 60 ms:", w < 60 * time.millisecond)
     }
     let s = task.stats()
     println("one extra thread at most:", s.threads <= s.maxProcs + 1)

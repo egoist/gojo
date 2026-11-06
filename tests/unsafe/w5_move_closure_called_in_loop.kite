@@ -1,0 +1,10 @@
+fn take(s sink String) {}
+fn run(f fn()) {
+    f()
+}
+fn main() {
+    let s = "abcdefghijklmnopqrstuvwxyz0123456789".toString()
+    for _ in 0..2 {
+        run(() => take(s))
+    }
+}

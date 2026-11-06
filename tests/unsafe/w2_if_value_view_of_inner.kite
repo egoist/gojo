@@ -1,0 +1,10 @@
+fn main() {
+    let c = true
+    let v = if c {
+        let s = "abc".toString()
+        s.asStr()
+    } else {
+        "x"
+    }
+    println(v)
+}

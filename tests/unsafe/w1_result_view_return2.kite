@@ -1,0 +1,8 @@
+fn get() str ! String {
+    let s = "abc".toString()
+    return s.asStr()
+}
+fn main() {
+    let r = get() catch { "" }
+    println(r)
+}

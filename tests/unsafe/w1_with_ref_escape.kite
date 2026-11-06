@@ -1,0 +1,8 @@
+fn main() {
+    let mu = Mutex("abc".toString())
+    var keep = ""
+    with s = mu.lock() {
+        keep = s.asStr()
+    }
+    println(keep)
+}

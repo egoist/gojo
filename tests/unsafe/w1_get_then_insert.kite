@@ -1,0 +1,7 @@
+fn main() {
+    var m = Map[int, String]{1: "a"}
+    if let u = m.get(1) {
+        m.insert(1, "z")
+        println(u)
+    }
+}

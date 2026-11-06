@@ -1,0 +1,8 @@
+use task
+fn main() {
+    _ = task.group((g) => {
+        let s = "abc".toString()
+        g.go(() => println(s))
+        println(s)
+    })
+}

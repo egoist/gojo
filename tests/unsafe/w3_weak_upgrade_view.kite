@@ -1,0 +1,10 @@
+fn main() {
+    var r = rc("abcdefghijklmnopqrstuvwxyz".toString())
+    let w = r.downgrade()
+    var keep = ""
+    if let x = w.upgrade() {
+        keep = x.asStr()
+    }
+    r = rc("z".toString())
+    println(keep)
+}

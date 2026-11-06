@@ -1,0 +1,19 @@
+interface Named {
+    fn name(self) str
+}
+struct P {
+    s String
+
+    fn name(self) str {
+        return self.s.asStr()
+    }
+}
+fn get(n Named) str {
+    return n.name()
+}
+fn main() {
+    var p = P{s: "abcdefghijklmnopqrstuvwxyz".toString()}
+    let v = get(p)
+    p = P{s: "z".toString()}
+    println(v)
+}

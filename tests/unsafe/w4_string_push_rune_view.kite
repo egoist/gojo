@@ -1,0 +1,6 @@
+fn main() {
+    var s = "abcdefghijklmnopqrstuvwxyz0123456789".toString()
+    let t = s[0..3]
+    s.pushRune('é')
+    println(t)
+}

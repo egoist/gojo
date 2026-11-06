@@ -96,13 +96,13 @@ cargo build --release
 
 ## 安全保证，以及它们怎样被保证
 
-所有检查都只看函数签名和单个函数体，没有跨函数推断，也没有生命周期标注。每一条都有对应的编译错误测试（`tests/errors/`，共 36 个）。
+所有检查都只看函数签名和单个函数体，没有跨函数推断，也没有生命周期标注。每一条都有对应的编译错误测试（`tests/errors/`，共 70 个）。
 
 | 保证 | 机制 | 典型报错 |
 | --- | --- | --- |
 | 没有 nil | 只有 `?T` 能为空，用前必须解开 | `` undefined: `nil` `` / `` `none` is not a value of type `int` `` |
 | 没有释放后使用 | move 语义 + "可能已移动"数据流分析，循环跑两遍以发现上一轮的 move | `` use of `s` after it was moved `` / `moved here in a previous iteration of the loop` |
-| 引用不会悬垂 | 引用只能作参数、投影（`yield`）或块级绑定；视图类型（`str`、`[]T`）不能进字段、集合、泛型实参或逃逸闭包 | `this temporary value is dropped at the end of the statement` / `` returns a view of `s` `` |
+| 引用不会悬垂 | 引用只能作参数、投影（`yield`）或块级绑定；视图（`str`、`[]T`）只存在于变量里，不能进字段、集合、盒子、接口值、泛型类型或逃逸闭包（推断出的类型也一样）；赋给外层变量的视图，被借的值必须活得至少一样长；锁里的数据的视图不能离开 `with` 块 | `this temporary value is dropped at the end of the statement` / `` returns a view of `s` `` / `` `s` does not live long enough `` |
 | 迭代器不失效 | `for`/`with`/`if let` 绑定在块内持有借用 | `` cannot modify `v` while it is borrowed by `x` `` |
 | 独占的可变借用 | 同一次调用里的实参互斥检查，`inout` 在调用处必须写 `&` | `` `a` is used by two arguments of the same call `` |
 | 编译期没有数据竞争 | `send` 按类型结构推导；`rc`/`Cell`/裸指针不能跨 goroutine；共享可变状态只能经过 `Mutex` | `` argument of type `rc[int]` cannot be sent to another goroutine `` / `a task cannot modify the captured variable` |
@@ -112,7 +112,7 @@ cargo build --release
 
 此外：`let` 不可变、同一函数内禁止遮蔽、未使用的变量和导入报错、`copy` 类型不能含需要释放的字段、无限大小的递归类型报错、调用 `extern` 函数和解引用裸指针必须在 `unsafe` 块中。
 
-生成代码的内存正确性单独验证过：全部测试程序在 AddressSanitizer + UndefinedBehaviorSanitizer 下无报错（`cargo test -- --ignored`），macOS `leaks` 检测无泄漏。
+生成代码的内存正确性单独验证过：全部测试程序在 AddressSanitizer + UndefinedBehaviorSanitizer 下无报错（`cargo test -- --ignored`），macOS `leaks` 检测无泄漏。这些检查本身也被系统地攻击过：`kite-fuzz` 对编译器做变异模糊测试和差分测试（见下面“测试”），另有一组专门构造的绕过借用检查的程序，找到的漏洞都已修复并加进了 `tests/errors/`。
 
 ## 已实现的语言特性
 
@@ -142,8 +142,11 @@ src/parser.rs     递归下降语法分析
 src/check/        声明收集、类型解析与能力规则（mod.rs）
                   函数体类型检查 → 类型化 IR（body.rs）
                   模式、match、穷尽性（pattern.rs）
-src/borrowck.rs   所有权与借用检查（逐函数、单遍 + 循环两遍）
+src/borrowck.rs   所有权与借用检查（逐函数、单遍 + 循环两遍；外加两个全程序检查：
+                  不能存储视图的值、保留类型参数的泛型函数）
 src/codegen.rs    IR → C：单态化、析构插入、虚表、闭包、内建函数
+src/lib.rs        前端的库接口（驱动程序和模糊测试共用）；src/main.rs 是 `kite` 命令
+src/bin/kite-fuzz 变异模糊测试、差分测试（progen.rs 生成随机程序）、借用检查器攻击（borrowgen.rs）、化简
 runtime/          C 运行时：字符串、Vec、插入有序哈希表、小对象分配器、panic、FFI（kite_rt.c）；
                   M:N 调度器、上下文切换、channel、select、mutex、任务组与取消、
                   计时器、kqueue/epoll 网络轮询（kite_sched.c）
@@ -208,3 +211,17 @@ cargo test -- --ignored     # 在 ASan + UBSan 下运行全部程序，在 TSan 
 - `tests/errors/*.kite`：必须编译失败，`// error: ...` 注释列出期望的报错
 - `tests/panic/*.kite`：必须以退出码 2 panic，并报出调用处位置
 - `tests/projects/*/`、`examples/*/`：多包项目，比对 `expected.out` 或 `expected.err`
+- `tests/fuzz/*.kite`：模糊测试找到过的编译器崩溃（已化简），必须得到诊断信息或编译成功
+- `tests/unsafe/*.kite`：151 个专门构造的绕过安全检查的程序，必须全部被拒绝
+
+### 模糊测试
+
+```sh
+cargo build --profile fuzz              # 优化构建，保留调试断言和溢出检查
+target/fuzz/kite-fuzz --jobs 4          # 变异模糊测试：编译器崩溃、超时、生成的 C 编不过、ASan 报错
+target/fuzz/kite-fuzz diff --jobs 2     # 差分测试：随机生成的程序在 debug / release / sanitizer 下结果必须一致
+target/fuzz/kite-fuzz borrow --jobs 2   # 借用检查器：随机摆弄视图的程序，被接受的必须在 ASan 下干净
+target/fuzz/kite-fuzz reduce fuzz-out/findings/xxx.kite   # 化简复现
+```
+
+结果在 `fuzz-out/findings/`。规则和限制见 [`docs/spec.md`](docs/spec.md) 第 14 节。

@@ -1,0 +1,8 @@
+const Limit = max
+struct Settings {
+    retries int = Limit
+}
+fn main() {
+    let s = Settings{}
+    println(s.retries + Limit)
+}

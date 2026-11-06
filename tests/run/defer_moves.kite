@@ -1,0 +1,30 @@
+// Moves in `defer` and `errdefer`, on every way out of a block.
+fn take(s sink String) {}
+fn f(fail bool) String ! String {
+    let s = "abcdefghijklmnopqrstuvwxyz0123456789".toString()
+    errdefer take(s)
+    if fail {
+        return err("e".toString())
+    }
+    return s
+}
+fn g() {
+    let s = "abcdefghijklmnopqrstuvwxyz0123456789".toString()
+    defer take(s)
+    println("g")
+}
+fn main() {
+    println(f(false) catch e { e })
+    println(f(true) catch e { e })
+    g()
+    for i in 0..3 {
+        let t = "abcdefghijklmnopqrstuvwxyz0123456789".toString()
+        defer take(t)
+        if i == 1 {
+            continue
+        }
+        if i == 2 {
+            break
+        }
+    }
+}

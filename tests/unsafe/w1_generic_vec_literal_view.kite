@@ -1,0 +1,6 @@
+fn main() {
+    var v = Vec[int]{}
+    let s = "abc".toString()
+    let w = [s.asStr()]
+    println(w.len(), v.len())
+}

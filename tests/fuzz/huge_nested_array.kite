@@ -1,0 +1,4 @@
+fn main() {
+  var a [65536][65536][65536]u8
+  println(a.len())
+}

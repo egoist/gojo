@@ -1,0 +1,9 @@
+fn apply(f fn(str) str, s str) str {
+    return f(s)
+}
+fn main() {
+    var s = "abcdefghijklmnopqrstuvwxyz".toString()
+    let v = apply((x) => x.trim(), s.asStr())
+    s = "z".toString()
+    println(v)
+}

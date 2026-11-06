@@ -1,0 +1,6 @@
+fn main() {
+    var s = "hello".toString()
+    let t = s[0..2]
+    s.push("!")
+    println(t)
+}

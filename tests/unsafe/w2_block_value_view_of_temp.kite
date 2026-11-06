@@ -1,0 +1,9 @@
+fn make() String {
+    return "abc".toString()
+}
+fn main() {
+    let v = {
+        make().asStr()
+    }
+    println(v)
+}

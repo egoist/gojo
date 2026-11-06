@@ -1,0 +1,15 @@
+// Package-level declarations can be used before they are written.
+type Names = Vec[Name]
+type Name = String
+
+const Total = Base * 2 + Extra
+const Base = 20
+const Extra = Base / 4
+
+fn main() {
+    var ns Names = []
+    ns.push("kite".toString())
+    var grid [Base]int
+    grid[0] = Total
+    println(ns.len(), ns[0], Total, Extra, grid.len(), grid[0])
+}

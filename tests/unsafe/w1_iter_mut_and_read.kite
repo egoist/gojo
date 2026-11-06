@@ -1,0 +1,6 @@
+fn main() {
+    var v = ["a".toString(), "b".toString()]
+    for x in &v {
+        x.push(v[1].asStr())
+    }
+}

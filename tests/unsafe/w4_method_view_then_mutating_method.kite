@@ -1,0 +1,17 @@
+struct P {
+    s String
+
+    fn name(self) str {
+        return self.s.asStr()
+    }
+
+    fn rename(self inout) {
+        self.s = "a completely new and longer name".toString()
+    }
+}
+fn main() {
+    var p = P{s: "abcdefghijklmnopqrstuvwxyz0123456789".toString()}
+    let n = p.name()
+    p.rename()
+    println(n)
+}

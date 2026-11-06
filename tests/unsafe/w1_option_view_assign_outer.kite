@@ -1,0 +1,8 @@
+fn main() {
+    var o ?str = none
+    {
+        let s = "abc".toString()
+        o = some(s.asStr())
+    }
+    println(o ?? "")
+}

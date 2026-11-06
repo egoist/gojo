@@ -1,0 +1,9 @@
+fn take(s sink String) {}
+fn twice(f fn()) {
+    f()
+    f()
+}
+fn main() {
+    let s = "abc".toString()
+    twice(() => take(s))
+}

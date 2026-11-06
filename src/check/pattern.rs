@@ -243,10 +243,12 @@ impl Checker {
             PatternKind::Ident(n) => {
                 if let Ty::Adt(d, _) = &ty {
                     if let Some(vi) = self.prog.def(*d).variants().iter().position(|v| v.name == *n) {
-                        if !self.prog.def(*d).variants()[vi].fields.is_empty() {
+                        let nfields = self.prog.def(*d).variants()[vi].fields.len();
+                        if nfields > 0 {
                             self.err(sp, format!("variant `{}` has values; match them with `{}(...)`", n, n));
                         }
-                        return TPat::Variant { def: *d, variant: vi, subs: vec![] };
+                        // one sub-pattern per field, as the exhaustiveness check expects
+                        return TPat::Variant { def: *d, variant: vi, subs: vec![TPat::Wild; nfields] };
                     }
                 }
                 self.bind(cx, n, ty, bm, sp, binds)
@@ -330,9 +332,20 @@ impl Checker {
                 TPat::Int(*c as i128)
             }
             PatternKind::Range(lo, hi, inc) => {
-                if !ty.is_int() {
-                    let s = self.prog.show(&ty);
-                    self.err(sp, format!("range pattern does not match a value of type `{}`", s));
+                match &ty {
+                    Ty::Int(k) => {
+                        for v in [*lo, *hi] {
+                            if v < k.min() || v > k.max() {
+                                self.err(sp, format!("pattern bound {} does not fit in `{}`", v, k.name()));
+                                return TPat::Wild;
+                            }
+                        }
+                    }
+                    t if t.is_int() => {}
+                    _ => {
+                        let s = self.prog.show(&ty);
+                        self.err(sp, format!("range pattern does not match a value of type `{}`", s));
+                    }
                 }
                 TPat::Range(*lo, *hi, *inc)
             }

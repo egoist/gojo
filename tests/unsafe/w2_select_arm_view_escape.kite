@@ -1,0 +1,13 @@
+fn main() {
+    let ch = chan[String](1)
+    ch <- "abc".toString()
+    var keep = ""
+    select {
+        let x = <-ch => {
+            if let y = x {
+                keep = y.asStr()
+            }
+        }
+    }
+    println(keep)
+}

@@ -1,0 +1,15 @@
+use task
+fn bump(v inout Vec[int]) {
+    v.push(1)
+}
+fn main() {
+    var v = [1, 2, 3]
+    _ = task.group((g) => {
+        g.go(() => {
+            bump(&v)
+        })
+        g.go(() => {
+            println(v.len())
+        })
+    })
+}

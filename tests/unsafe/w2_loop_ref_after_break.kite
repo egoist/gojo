@@ -1,0 +1,10 @@
+fn main() {
+    var v = ["a".toString(), "b".toString()]
+    var keep = ""
+    for x in v {
+        keep = x.asStr()
+        break
+    }
+    v.clear()
+    println(keep)
+}

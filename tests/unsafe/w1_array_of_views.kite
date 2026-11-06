@@ -1,0 +1,8 @@
+fn main() {
+    var a [1]str
+    {
+        let s = "abc".toString()
+        a[0] = s.asStr()
+    }
+    println(a[0])
+}

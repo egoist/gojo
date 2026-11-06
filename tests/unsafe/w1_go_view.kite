@@ -1,0 +1,7 @@
+fn main() {
+    let s = "abc".toString()
+    let v = s.asStr()
+    go () => {
+        println(v)
+    }
+}

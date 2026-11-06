@@ -1,0 +1,6 @@
+fn main() {
+    var v = ["abcdefghijklmnopqrstuvwxyz0123456789".toString(), "b".toString()]
+    let x = v[0].asStr()
+    _ = v.swapRemove(0)
+    println(x)
+}

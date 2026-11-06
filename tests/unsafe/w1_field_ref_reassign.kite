@@ -1,0 +1,9 @@
+struct P {
+    name String
+}
+fn main() {
+    var p = P{name: "abc".toString()}
+    let n = p.name.asStr()
+    p = P{name: "z".toString()}
+    println(n)
+}

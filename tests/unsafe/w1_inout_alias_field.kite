@@ -1,0 +1,11 @@
+struct P {
+    name String
+}
+fn f(p inout P, s str) {
+    p.name = "z".toString()
+    println(s)
+}
+fn main() {
+    var p = P{name: "abc".toString()}
+    f(&p, p.name.asStr())
+}

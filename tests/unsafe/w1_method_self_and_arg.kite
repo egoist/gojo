@@ -1,0 +1,12 @@
+struct S {
+    v Vec[String]
+
+    fn add(self inout, s str) {
+        self.v.clear()
+        println(s)
+    }
+}
+fn main() {
+    var s = S{v: ["a".toString()]}
+    s.add(s.v[0].asStr())
+}

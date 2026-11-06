@@ -1,0 +1,30 @@
+struct Clicks {
+    n int
+
+    fn toString(self inout) int {
+        self.n += 1
+        return self.n
+    }
+}
+
+struct Named {
+    s String
+
+    fn toString(self) String {
+        return "<" + self.s + ">"
+    }
+}
+
+struct Odd {
+    x int
+
+    fn message(self, extra int) String {
+        return "odd"
+    }
+}
+
+fn main() {
+    var c = Clicks{n: 1}
+    println(c, Named{s: "n".toString()}, Odd{x: 3})
+    println(c.toString(), Odd{x: 1}.message(2))
+}

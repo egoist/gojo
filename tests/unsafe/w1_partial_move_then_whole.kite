@@ -1,0 +1,11 @@
+struct P {
+    a String
+    b String
+}
+fn take(s sink String) {}
+fn takep(p sink P) {}
+fn main() {
+    let p = P{a: "a".toString(), b: "b".toString()}
+    take(p.a)
+    takep(p)
+}

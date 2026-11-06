@@ -1,0 +1,9 @@
+fn main() {
+    var m = Map[int, String]{1: "abcdefghijklmnopqrstuvwxyz0123456789".toString()}
+    var keep = ""
+    for _, v in m {
+        keep = v.asStr()
+    }
+    m.clear()
+    println(keep)
+}

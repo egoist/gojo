@@ -1,0 +1,8 @@
+fn main() {
+    var sent = 0
+    select {
+        sent <- 5 => println("x")
+        _ => {}
+    }
+    println(sent)
+}

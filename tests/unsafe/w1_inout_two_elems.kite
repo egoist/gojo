@@ -1,0 +1,8 @@
+fn f(a inout String, b inout String) {
+    a.push("x")
+    b.push("y")
+}
+fn main() {
+    var v = ["a".toString(), "b".toString()]
+    f(&v[0], &v[0])
+}

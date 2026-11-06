@@ -1,0 +1,34 @@
+// Methods that replace built-in behavior must have the signature the compiler
+// calls them with.
+struct A {
+    x int
+
+    fn clone(self) int {
+        // error: `clone` on `A` must be `fn clone(self) A`
+        return self.x
+    }
+
+    fn equal(self, other int) bool {
+        // error: `equal` on `A` must be `fn equal(self, other A) bool`
+        return self.x == other
+    }
+
+    fn hash(self) String {
+        // error: `hash` on `A` must be `fn hash(self, h inout Hasher)`
+        return "h".toString()
+    }
+
+    fn compare(self, other A) int {
+        // error: `compare` on `A` must be `fn compare(self, other A) Ordering`
+        return self.x - other.x
+    }
+
+    fn drop(self) {
+        // error: `drop` on `A` must be `fn drop(self inout)`
+    }
+}
+
+fn main() {
+    let a = A{x: 1}
+    println(a.x)
+}

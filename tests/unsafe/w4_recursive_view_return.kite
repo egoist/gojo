@@ -1,0 +1,12 @@
+fn tail(s str, n int) str {
+    if n == 0 || s.len() == 0 {
+        return s
+    }
+    return tail(s[1..], n - 1)
+}
+fn main() {
+    var s = "abcdefghijklmnopqrstuvwxyz0123456789".toString()
+    let t = tail(s.asStr(), 3)
+    s = "z".toString()
+    println(t)
+}

@@ -1,0 +1,18 @@
+enum E {
+    A(s String)
+    B
+}
+fn main() {
+    let e E = .A("abcdefghijklmnopqrstuvwxyz0123456789".toString())
+    match e {
+        .A(s) => {
+            let t = s
+            println(t)
+        }
+        .B => {}
+    }
+    match e {
+        .A(s) => println(s)
+        .B => {}
+    }
+}

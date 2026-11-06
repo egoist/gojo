@@ -1,0 +1,14 @@
+use task
+fn main() {
+    var n = 0
+    _ = task.group((g) => {
+        g.go(() => {
+            _ = task.group((h) => {
+                h.go(() => {
+                    n += 1
+                })
+            })
+        })
+        g.go(() => println(n))
+    })
+}

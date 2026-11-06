@@ -1,0 +1,14 @@
+enum E {
+    A(s String)
+    B
+}
+fn main() {
+    var e E = .A("abcdefghijklmnopqrstuvwxyz0123456789".toString())
+    var keep = ""
+    match e {
+        .A(s) => keep = s.asStr()
+        .B => {}
+    }
+    e = .B
+    println(keep)
+}

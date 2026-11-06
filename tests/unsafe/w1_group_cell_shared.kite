@@ -1,0 +1,9 @@
+use task
+fn main() {
+    let c = Cell(0)
+    _ = task.group((g) => {
+        g.go(() => c.set(c.get() + 1))
+        g.go(() => c.set(c.get() + 1))
+    })
+    println(c.get())
+}

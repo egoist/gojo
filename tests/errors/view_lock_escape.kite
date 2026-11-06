@@ -1,0 +1,39 @@
+// A view into data guarded by a lock must not outlive the `with` block: the
+// lock is released at its end.
+fn peek(mu Mutex[String]) str {
+    with s = mu.lock() {
+        return s.asStr()
+        // error: a view into data locked by `mu` cannot leave the `with` block
+    }
+    return ""
+}
+
+fn keep() {
+    let mu = Mutex("abc".toString())
+    var kept = ""
+    with s = mu.lock() {
+        kept = s.asStr()
+        // error: a view into data locked by `mu` cannot leave the `with` block
+    }
+    println(kept)
+}
+
+fn borrowed_lock() {
+    var n = "abc".toString()
+    let mu = Mutex(&n)
+    var kept = ""
+    with s = mu.lock() {
+        let inside = s.asStr()
+        println(inside)
+        kept = s.asStr()
+        // error: a view into data locked by `mu` cannot leave the `with` block
+    }
+    println(kept)
+}
+
+fn main() {
+    let mu = Mutex("x".toString())
+    println(peek(mu))
+    keep()
+    borrowed_lock()
+}

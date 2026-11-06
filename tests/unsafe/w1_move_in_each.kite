@@ -1,0 +1,17 @@
+fn take(s sink String) {}
+struct C {
+    n int
+
+    fn each(self, body fn(&int) Flow) {
+        _ = body(&self.n)
+        _ = body(&self.n)
+    }
+}
+fn main() {
+    let s = "abc".toString()
+    let c = C{n: 1}
+    for x in c {
+        take(s)
+        println(x)
+    }
+}

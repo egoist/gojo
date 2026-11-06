@@ -1,0 +1,12 @@
+fn div(a int, b int) int {
+    return return a / b
+}
+fn validate(x int) int ! String {
+    if x == 2 {
+        return return err("bad two")
+    }
+    return x
+}
+fn main() {
+    println(div(6, 3), validate(2).isErr(), validate(3).unwrap())
+}

@@ -10,16 +10,61 @@ pub struct Parser {
     file: u32,
     /// When false, `Name {` is not parsed as a struct literal (if/for/match headers).
     allow_struct: bool,
+    /// Current recursion depth, and the deepest syntax tree level reached (see `nested`).
+    nest: u32,
+    peak: u32,
 }
+
+/// How deeply expressions, blocks, types and patterns may nest. Every later
+/// phase walks the tree recursively, so this bounds the compiler's stack use;
+/// it counts parser levels, a few per source level of nesting.
+pub const MAX_NEST: u32 = 1000;
 
 type PResult<T> = Result<T, Diag>;
 
 pub fn parse_file(file: u32, toks: Vec<Token>) -> PResult<File> {
-    let mut p = Parser { toks, pos: 0, file, allow_struct: true };
+    let mut p = Parser { toks, pos: 0, file, allow_struct: true, nest: 0, peak: 0 };
     p.file()
 }
 
 impl Parser {
+    // ---------- nesting ----------
+    /// Runs `f` one level deeper. Recursion is bounded by `MAX_NEST`; trees that
+    /// loops build (`a + b + c`, `x.f().g()`) are bounded through `grown`.
+    fn nested<T>(&mut self, f: impl FnOnce(&mut Self) -> PResult<T>) -> PResult<T> {
+        if self.nest >= MAX_NEST {
+            return self.too_deep();
+        }
+        self.nest += 1;
+        self.peak = self.peak.max(self.nest);
+        let r = f(self);
+        self.nest -= 1;
+        r
+    }
+
+    /// Starts measuring the height of a tree built at the current level.
+    fn measure(&mut self) -> u32 {
+        std::mem::replace(&mut self.peak, self.nest)
+    }
+
+    /// The node built at this level now wraps everything parsed since `measure`
+    /// once more: one more level for the later phases to recurse through.
+    fn grown(&mut self) -> PResult<()> {
+        self.peak += 1;
+        if self.peak > MAX_NEST {
+            return self.too_deep();
+        }
+        Ok(())
+    }
+
+    fn measured(&mut self, saved: u32) {
+        self.peak = self.peak.max(saved);
+    }
+
+    fn too_deep<T>(&self) -> PResult<T> {
+        self.err("this is nested too deeply for the compiler; split it up with `let` bindings or helper functions")
+    }
+
     // ---------- token helpers ----------
     fn peek(&self) -> &Tok {
         &self.toks[self.pos].tok
@@ -76,7 +121,7 @@ impl Parser {
             Tok::Int(_) | Tok::Float(_) => "number".into(),
             Tok::Str(_) => "string".into(),
             Tok::Char(_) => "rune literal".into(),
-            Tok::Kw(k) => format!("keyword `{}`", format!("{:?}", k).to_lowercase()),
+            Tok::Kw(k) => format!("keyword `{}`", k.text()),
             Tok::P(p) => format!("`{}`", p),
             Tok::Newline => "newline".into(),
             Tok::Eof => "end of file".into(),
@@ -86,8 +131,32 @@ impl Parser {
         if self.is_p(p) {
             Ok(self.bump().span)
         } else {
-            self.err(format!("expected `{}`, found {}", p, self.describe()))
+            Err(self.with_opener(Diag::new(self.span(), format!("expected `{}`, found {}", p, self.describe())), p))
         }
+    }
+
+    /// For a missing `)`, `]` or `}`: points at the bracket it should close.
+    fn with_opener(&self, d: Diag, close: &str) -> Diag {
+        let open = match close {
+            ")" => "(",
+            "]" => "[",
+            "}" => "{",
+            _ => return d,
+        };
+        let mut depth = 0;
+        for t in self.toks[..self.pos.min(self.toks.len())].iter().rev() {
+            match &t.tok {
+                Tok::P(x) if *x == close => depth += 1,
+                Tok::P(x) if *x == open => {
+                    if depth == 0 {
+                        return d.note(Some(t.span), format!("this `{}` is not closed", open));
+                    }
+                    depth -= 1;
+                }
+                _ => {}
+            }
+        }
+        d
     }
     fn expect_kw(&mut self, k: Kw) -> PResult<Span> {
         if self.is_kw(k) {
@@ -675,6 +744,10 @@ impl Parser {
     }
 
     fn ty_atom(&mut self) -> PResult<TypeExpr> {
+        self.nested(|p| p.ty_atom_inner())
+    }
+
+    fn ty_atom_inner(&mut self) -> PResult<TypeExpr> {
         let lo = self.span();
         let kind = match self.peek().clone() {
             Tok::P("?") => {
@@ -766,6 +839,10 @@ impl Parser {
 
     // ---------- blocks & statements ----------
     pub fn block(&mut self) -> PResult<Block> {
+        self.nested(|p| p.block_inner())
+    }
+
+    fn block_inner(&mut self) -> PResult<Block> {
         let lo = self.expect_p("{")?;
         let save = self.allow_struct;
         self.allow_struct = true;
@@ -773,7 +850,7 @@ impl Parser {
         let mut stmts = vec![];
         while !self.is_p("}") {
             if matches!(self.peek(), Tok::Eof) {
-                return self.err("unexpected end of file; missing `}`");
+                return Err(self.with_opener(Diag::new(self.span(), "unexpected end of file; missing `}`"), "}"));
             }
             stmts.push(self.stmt()?);
             self.end_stmt()?;
@@ -1012,7 +1089,18 @@ impl Parser {
     }
 
     fn binary(&mut self, min: u8) -> PResult<Expr> {
+        self.nested(|p| p.binary_inner(min))
+    }
+
+    fn binary_inner(&mut self, min: u8) -> PResult<Expr> {
         let lo = self.span();
+        let saved = self.measure();
+        let r = self.binary_chain(min, lo);
+        self.measured(saved);
+        r
+    }
+
+    fn binary_chain(&mut self, min: u8, lo: Span) -> PResult<Expr> {
         let mut lhs = self.unary()?;
         loop {
             let p = match self.peek() {
@@ -1033,6 +1121,7 @@ impl Parser {
             }
             let rhs = self.binary(if right { prec } else { prec + 1 })?;
             let span = self.sp_from(lo);
+            self.grown()?;
             lhs = if p == "??" {
                 Expr { kind: ExprKind::Coalesce(Box::new(lhs), Box::new(rhs)), span }
             } else {
@@ -1043,6 +1132,10 @@ impl Parser {
     }
 
     fn unary(&mut self) -> PResult<Expr> {
+        self.nested(|p| p.unary_inner())
+    }
+
+    fn unary_inner(&mut self) -> PResult<Expr> {
         let lo = self.span();
         let op = match self.peek() {
             Tok::P(p) if matches!(*p, "-" | "!" | "~" | "&" | "<-" | "*") => *p,
@@ -1084,9 +1177,22 @@ impl Parser {
     }
 
     fn postfix(&mut self) -> PResult<Expr> {
+        let saved = self.measure();
+        let r = self.postfix_chain();
+        self.measured(saved);
+        r
+    }
+
+    fn postfix_chain(&mut self) -> PResult<Expr> {
         let lo = self.span();
         let mut e = self.primary()?;
+        let mut first = true;
         loop {
+            // every iteration after the first follows a wrap of `e`
+            if !first {
+                self.grown()?;
+            }
+            first = false;
             let nl = self.toks[self.pos].nl_before;
             if self.is_p(".") {
                 self.bump();
@@ -1382,7 +1488,12 @@ impl Parser {
                 ExprKind::Match { scrut: Box::new(scrut), arms }
             }
             Tok::Kw(Kw::Func) => {
-                // Go-style function literal: func(x int) int { ... }
+                // `fn name` inside a function: most likely a `}` is missing above
+                if matches!(self.peek_at(1), Tok::Ident(_)) {
+                    let d = Diag::new(self.span(), "functions can't be declared inside other functions").note(None, "if this is meant to be a separate function, a `}` is missing above it; for a local function, use a closure: `let name = (x) => ...`");
+                    return Err(self.with_opener(d, "}"));
+                }
+                // function literal: fn(x int) int { ... }
                 self.bump();
                 let params = self.params()?;
                 let ret = self.ret_type()?;
@@ -1437,6 +1548,10 @@ impl Parser {
     }
 
     fn if_expr(&mut self) -> PResult<Expr> {
+        self.nested(|p| p.if_expr_inner())
+    }
+
+    fn if_expr_inner(&mut self) -> PResult<Expr> {
         let lo = self.expect_kw(Kw::If)?;
         let save = self.allow_struct;
         self.allow_struct = false;
@@ -1511,9 +1626,16 @@ impl Parser {
             self.bump();
         }
         if let Tok::Int(n) = self.peek().clone() {
+            // no integer type holds more than 64 bits; this only keeps the
+            // value exact until the checker compares it with the type
+            let v = match (neg, i128::try_from(n)) {
+                (false, Ok(v)) => v,
+                (true, Ok(v)) => -v,
+                (true, Err(_)) if n == 1u128 << 127 => i128::MIN,
+                _ => return self.err("integer pattern is too large for any integer type"),
+            };
             self.bump();
-            let v = n as i128;
-            return Ok(Some(if neg { -v } else { v }));
+            return Ok(Some(v));
         }
         if let Tok::Char(c) = self.peek().clone() {
             if !neg {
@@ -1525,6 +1647,10 @@ impl Parser {
     }
 
     fn pattern_atom(&mut self) -> PResult<Pattern> {
+        self.nested(|p| p.pattern_atom_inner())
+    }
+
+    fn pattern_atom_inner(&mut self) -> PResult<Pattern> {
         let lo = self.span();
         let is_char = matches!(self.peek(), Tok::Char(_));
         if let Some(v) = self.int_pat()? {

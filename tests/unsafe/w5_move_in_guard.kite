@@ -1,0 +1,12 @@
+fn take(s sink String) bool {
+    return true
+}
+fn main() {
+    let s = "abcdefghijklmnopqrstuvwxyz0123456789".toString()
+    let n = 1
+    match n {
+        1 if take(s) => println("a")
+        _ => println("b")
+    }
+    println(s)
+}

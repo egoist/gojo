@@ -2,3 +2,4 @@ target/
 *.o
 .zig-cache/
 zig-out/
+fuzz-out/

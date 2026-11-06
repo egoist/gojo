@@ -1,0 +1,4 @@
+fn main() {
+  var a [9223372036854775807]i64
+  println(a.len())
+}

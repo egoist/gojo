@@ -1,0 +1,6 @@
+fn main() {
+    var v = [1, 2, 3]
+    let s = v[0..2]
+    v.push(4)
+    println(s.len())
+}

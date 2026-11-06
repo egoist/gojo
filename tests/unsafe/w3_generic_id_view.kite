@@ -1,0 +1,9 @@
+fn id[T copy](x T) T {
+    return x
+}
+fn main() {
+    var s = "abcdefghijklmnopqrstuvwxyz".toString()
+    let v = id(s.asStr())
+    s = "z".toString()
+    println(v)
+}

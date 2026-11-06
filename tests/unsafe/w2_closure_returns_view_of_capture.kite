@@ -1,0 +1,9 @@
+fn run(f fn() str) str {
+    return f()
+}
+fn main() {
+    var s = "abc".toString()
+    let v = run(() => s.asStr())
+    s.clear()
+    println(v)
+}

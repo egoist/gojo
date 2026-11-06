@@ -1,0 +1,8 @@
+fn main() {
+    var a = "abcdefghijklmnopqrstuvwxyz".toString()
+    var b = "z".toString()
+    let v = a.asStr()
+    swap(&a, &b)
+    drop(b)
+    println(v)
+}

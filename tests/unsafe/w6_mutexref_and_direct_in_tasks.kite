@@ -1,0 +1,13 @@
+use task
+fn main() {
+    var n = 0
+    let mu = Mutex(&n)
+    _ = task.group((g) => {
+        g.go(() => {
+            with c = mu.lock() {
+                c += 1
+            }
+        })
+        g.go(() => println(n))
+    })
+}

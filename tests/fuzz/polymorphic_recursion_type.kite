@@ -1,0 +1,8 @@
+struct Node[T] {
+    v T
+    next ?Box[Node[Vec[T]]]
+}
+fn main() {
+    let n = Node[int]{v: 1, next: none}
+    println(n.v)
+}

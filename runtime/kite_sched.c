@@ -31,6 +31,7 @@
 #include <sched.h>
 #if defined(__APPLE__)
 #include <sys/event.h>
+#include <mach/mach.h>
 #else
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
@@ -379,6 +380,13 @@ typedef struct kite_worker {
     int released;           // its CPU slot was handed to another worker
     uint64_t seen_tick, seen_sysseq;    // monitor-only
     int64_t seen_since, preempt_since;  // monitor-only
+    int64_t preempt_cpu;                // monitor-only: thread CPU time at the request
+    int cpu_ok;                         // the thread's CPU clock below is set
+#if defined(__APPLE__)
+    thread_t mthread;
+#else
+    clockid_t cpuclock;
+#endif
     uint32_t schedtick;
     uint64_t rng;
     kite_g *free_gs;
@@ -1146,6 +1154,30 @@ static void worker_init(kite_worker *w) {
 #endif
     worker_setup_signals();
     kite_thread_init();
+#if defined(__APPLE__)
+    w->mthread = pthread_mach_thread_np(pthread_self());
+    KITE_STORE(&w->cpu_ok, 1);
+#else
+    if (pthread_getcpuclockid(pthread_self(), &w->cpuclock) == 0) KITE_STORE(&w->cpu_ok, 1);
+#endif
+}
+
+// CPU time the worker's thread has used, in ns; -1 if unknown. The monitor uses
+// it to tell a goroutine that doesn't answer a preemption request apart from a
+// thread the OS isn't running (when the machine is overloaded): only the first
+// is helped by handing its slot to another thread.
+static int64_t worker_cpu_ns(kite_worker *w) {
+    if (!KITE_LOAD(&w->cpu_ok)) return -1;
+#if defined(__APPLE__)
+    thread_basic_info_data_t info;
+    mach_msg_type_number_t n = THREAD_BASIC_INFO_COUNT;
+    if (thread_info(w->mthread, THREAD_BASIC_INFO, (thread_info_t)&info, &n) != KERN_SUCCESS) return -1;
+    return ((int64_t)info.user_time.seconds + info.system_time.seconds) * 1000000000LL + ((int64_t)info.user_time.microseconds + info.system_time.microseconds) * 1000LL;
+#else
+    struct timespec ts;
+    if (clock_gettime(w->cpuclock, &ts) != 0) return -1;
+    return (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
+#endif
 }
 
 static void *worker_main(void *p) {
@@ -1930,9 +1962,15 @@ static void monitor_tick(void) {
         if (!queued || now - w->seen_since < PREEMPT_AFTER) continue;
         if (!w->preempt_since) {
             w->preempt_since = now;
+            w->preempt_cpu = worker_cpu_ns(w);
             if (!__atomic_exchange_n(&w->preempt, 1, __ATOMIC_ACQ_REL)) KITE_ADD(&kite_preempt_flag, 1);
         } else if (now - w->preempt_since >= UNRESPONSIVE) {
-            // not polling: a long loop inside C, like a big sort
+            // Not polling: a long loop inside C, like a big sort -- if the thread
+            // has really been running. One the OS has kept off the CPU (an
+            // overloaded machine) would answer once it runs, and another thread
+            // would only add to the overload.
+            int64_t cpu = worker_cpu_ns(w);
+            if (cpu >= 0 && w->preempt_cpu >= 0 && cpu - w->preempt_cpu < UNRESPONSIVE / 2) continue;
             cancel_preempt(w);
             worker_release(w);
         }

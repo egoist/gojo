@@ -1,0 +1,50 @@
+// Views of loop elements that could outlive what the iterator lent.
+struct Lines {
+    n int
+
+    fn cursor(self) Cur {
+        return Cur{i: 0, buf: "".toString()}
+    }
+
+    // a lending cursor: each element lives in the cursor until the next step
+    fn next(self, c inout Cur) yield ?&String {
+        if c.i >= self.n {
+            yield none
+        }
+        c.i += 1
+        c.buf = "line".toString()
+        yield c.buf
+    }
+}
+
+struct Cur {
+    i int
+    buf String
+}
+
+struct Names {
+    items Vec[String]
+
+    fn each(self, body fn(&String) Flow) {
+        for x in self.items {
+            if body(x) == Flow.Break {
+                return
+            }
+        }
+    }
+}
+
+fn main() {
+    var keep = ""
+    let lines = Lines{n: 3}
+    for s in lines {
+        keep = s.asStr()
+        // error: `keep` would still view a loop element after the loop's cursor moved on
+    }
+    let ns = Names{items: ["ann".toString()]}
+    for n in ns {
+        keep = n.asStr()
+        // error: `keep` can't keep a view of a loop element past the iteration
+    }
+    println(keep)
+}

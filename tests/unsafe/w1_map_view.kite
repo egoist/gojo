@@ -1,0 +1,6 @@
+fn main() {
+    var m = Map[int, str]{}
+    let s = "abc".toString()
+    m.insert(1, s.asStr())
+    println(m.len())
+}

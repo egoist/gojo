@@ -1,0 +1,7 @@
+fn main() {
+    var x ?String = some("abc".toString())
+    if let s = x {
+        x = none
+        println(s)
+    }
+}

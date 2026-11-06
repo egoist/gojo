@@ -1,0 +1,7 @@
+fn main() {
+    var a = "abcdefghijklmnopqrstuvwxyz".toString()
+    let v = a.asStr()
+    let old = replace(&a, "z".toString())
+    drop(old)
+    println(v)
+}

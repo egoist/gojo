@@ -1,0 +1,12 @@
+fn main() {
+    var v = ["a".toString(), "b".toString()]
+    var keep = ""
+    outer: for _ in 0..2 {
+        for x in v {
+            keep = x.asStr()
+            break outer
+        }
+    }
+    v.push("c".toString())
+    println(keep)
+}

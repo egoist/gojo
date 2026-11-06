@@ -1,0 +1,11 @@
+type A = B
+// error: type alias `A` refers to itself
+type B = A
+
+type L = ?Box[L]
+// error: type alias `L` refers to itself
+
+fn main() {
+    let x A = 1
+    println(x)
+}

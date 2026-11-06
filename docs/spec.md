@@ -7,7 +7,13 @@
 - `panic/`：运行时必须以退出码 2 终止，并给出 `// panic:` 后面写的信息；
 - `projects/`：多包项目；`testblocks/`：`kite test`；`examples/`（仓库根目录下）：示例程序，同样比对输出。
 
-测试都在 `tests/` 目录下，由 `cargo test` 运行；`cargo test -- --include-ignored` 还会在 AddressSanitizer / UBSan 下重跑所有 `run/` 程序，并在 ThreadSanitizer 下重跑其中的并发程序。
+测试都在 `tests/` 目录下，由 `cargo test` 运行；`cargo test -- --include-ignored` 还会在 AddressSanitizer / UBSan 下重跑所有 `run/` 程序，并在 ThreadSanitizer 下重跑其中的并发程序。另外两类测试：
+
+- `fuzz/`：模糊测试找到过的、曾经让编译器崩溃的输入（已化简）。每个都必须得到诊断信息或者编译成功；
+- `unsafe/`：专门写来绕过安全检查的程序（悬垂视图、逃出锁和循环的视图、藏在 `defer` 和闭包里的 move、数据竞争……），每个都必须被拒绝。其中不少在写出来的时候能通过编译，在 AddressSanitizer 下确实会出错；
+- `cargo test` 里的 `nesting_limits`：各种嵌套到接近上限的程序必须能编译运行，远超上限的必须得到错误而不是崩溃（第 14 节）。
+
+模糊测试工具是 `kite-fuzz`（第 14 节）。
 
 ## 1. 词法
 
@@ -41,8 +47,9 @@
 - **同一函数内禁止遮蔽**：内层块不能声明和外层局部变量同名的变量。
 - 声明了却从未使用的局部变量是编译错误；以 `_` 开头的名字和 `_` 本身不受此限制。
 - `const Name = 常量表达式`，可以引用其他常量，整数常量可以用作数组长度。
+- 包级声明（函数、类型、别名、常量）的书写顺序无关，可以使用写在后面的声明。别名或常量直接或间接引用自己是编译错误（递归的类型要用结构体或枚举）。
 
-测试：`run/basics`、`run/decls`、`errors/let_immutable`、`errors/shadowing`、`errors/unused`、`errors/constraints`。
+测试：`run/basics`、`run/decls`、`run/forward_decls`、`errors/let_immutable`、`errors/shadowing`、`errors/unused`、`errors/constraints`、`errors/decl_cycles`、`errors/const_cycle`。
 
 ### 3.2 类型声明
 
@@ -96,10 +103,10 @@
 - 字段可以写默认值：`port int = 8080`；`?T` 字段默认是 `none`。字面量里漏掉没有默认值的字段是编译错误。
 - `copy struct` 声明按位复制的类型；字段必须都是 copy，类型不能有 `drop` 方法。
 - **copy 推导**：包内私有、非泛型、所有字段都是 copy 且没有 `drop` 方法的结构体和枚举自动成为 copy。`pub` 类型必须显式写 `copy`。
-- 字段都可比较时自动获得 `==`；字段都可哈希时可以做 `Map` 的键；字段都可 clone 时自动获得 `.clone()`。定义 `equal`、`hash`、`compare`、`clone` 方法可以替换自动生成的实现；只定义 `equal` 不定义 `hash` 的类型不能做键。
+- 字段都可比较时自动获得 `==`；字段都可哈希时可以做 `Map` 的键；字段都可 clone 时自动获得 `.clone()`。定义 `equal`、`hash`、`compare`、`clone` 方法可以替换自动生成的实现；只定义 `equal` 不定义 `hash` 的类型不能做键。这些方法的签名是固定的，写错是编译错误：`fn equal(self, other T) bool`、`fn compare(self, other T) Ordering`、`fn hash(self, h inout Hasher)`、`fn clone(self) T`、`fn drop(self inout)`。`fn toString(self) String`（或 `fn message(self) String`）决定 `print` 怎样显示这个类型；签名不同的同名方法只是普通方法。
 - 结构体字段不能是视图类型（`str`、`[]T`、`MutexRef`）。
 
-测试：`run/basics`、`run/copyinfer`、`run/interfaces`、`errors/bad_copy`、`errors/copy_exported`、`errors/missing_field`、`errors/view_field`。
+测试：`run/basics`、`run/copyinfer`、`run/interfaces`、`errors/bad_copy`、`errors/copy_exported`、`errors/missing_field`、`errors/view_field`、`errors/protocol_methods`。
 
 ### 4.3 枚举
 
@@ -151,7 +158,7 @@
 - 每个值只有一个所有者。赋值、传给 `sink` 参数、返回、存进集合、发送到 channel 都转移所有权；之后使用原变量是编译错误。
 - copy 类型按位复制，不会被 move。其他类型用 `.clone()` 显式复制。
 - 只在部分分支里被 move 的变量，之后的使用是“可能已被 move”的编译错误；编译器为它的释放插入标志位。
-- 循环体里不能 move 循环外的变量（下一轮会再 move 一次）。
+- 循环体里不能 move 循环外的变量（下一轮会再 move 一次）。同理，循环里赋给循环外视图变量的视图，到下一轮开始时还在：如果下一轮在给它重新赋值之前可能读它（或者离开循环），被借的值在下一轮里就不能修改。
 - 可以 move 结构体的单个字段（部分移动），之后不能再整体使用这个结构体，未被 move 的字段照常释放。
 - 不能从借用的位置 move：`return v[0]`（`v` 是借用参数）是编译错误，要写 `.clone()`。
 
@@ -175,11 +182,11 @@
 - `fn drop(self inout)` 方法在释放时被调用；有 `drop` 方法的类型不能是 copy。
 - `drop(x)` 提前释放，它是一个普通的 `sink` 函数。
 - `defer stmt` 在**当前块**结束时执行，多个 defer 逆序执行；`errdefer stmt` 只在函数以错误返回时执行，只能用在返回结果或可选值的函数里。
-- `break`、`continue`、`return`、`try` 离开作用域时同样执行释放和 defer。
+- `break`、`continue`、`return`、`try` 离开作用域时同样执行释放和 defer。被推迟的代码里的 move 发生在它执行的地方（块的末尾，或离开块的 `break`/`continue`/`return`），按执行顺序（逆序）计算：两个 defer 先后 move 同一个值、块后再使用 defer 里 move 掉的值都是编译错误。`errdefer` 只在以错误（或 `none`）返回、或 `try` 传播错误时执行。
 - 被推迟的代码不能离开它自己：其中不能写 `return`、`try`、`yield`，也不能 `break`/`continue` 外层循环。里面自己的循环、闭包不受影响。
 - 一条语句里的临时值（例如 `String(try readBytes())` 里的 `Vec`）活到这条语句用完它们为止。
 
-测试：`run/ownership`、`run/errdefer`、`run/labels`、`run/push_flow`、`run/temporaries`、`errors/defer_exit`、`errors/rules`。
+测试：`run/ownership`、`run/errdefer`、`run/labels`、`run/push_flow`、`run/temporaries`、`run/defer_moves`、`errors/defer_exit`、`errors/rules`、`errors/defer_moves`。
 
 ### 5.4 视图与投影
 
@@ -190,8 +197,16 @@
 - **最后一次使用**：绑定到 `let` 的视图或引用，在块内最后一次使用之后不再占用被借的值，之后可以修改原值。
 - 视图不能比它借用的值活得更久；不能从临时值取视图并保存（`let s str = make()`）。
 - 存在视图时不能修改被借的 `Vec`/`String`，所以 `push` 不会让视图悬空。
+- **视图只存在于变量里**（也可以在变量的 `?T` / `T ! E` 里）。任何把视图放进别的存储的值都不能存在，不管类型是写出来的还是推断出来的：`[s]`、`rc(s)`、`Box(s)`、`[2]str`、`Map[int, str]`、`Vec[MutexRef[T]]`，以及把视图装进接口值（`xs.push(s)`，`xs` 是 `Vec[Len]`）。
+- **给视图变量赋值**：`v = s.asStr()` 要求被借的值（`s`，或者 `s` 借用的最终所有者）至少和 `v` 活得一样长：声明在更外层的块，或者在同一个块里、写在 `v` 前面（同一块的值按声明的逆序释放，写在后面的先释放，夹在中间的 `defer` 会看到它已经没了）；之后在 `v` 的整个作用域里（到最后一次使用为止）被借的值都不能修改。`let v = { let s = ...; s.asStr() }` 同理被拒绝。
+- `inout` 视图参数只能被赋值为它自己的子视图（`rest = rest[1..]`）或字面量：调用方看不到新的借用。闭包不能把视图赋给捕获的外层变量。
+- 调用返回的视图被看作借用了所有实参，包括函数值实参捕获的变量（`run(() => s.asStr())` 借用 `s`；`f()` 借用闭包 `f` 本身）和作为接口传入的值。用 Kite 写的投影函数借出的引用，看作借用了它的 `yield` 实际指向的那些参数。
+- `if let x = f()`、`match f() { }` 绑定到临时值内部的引用只在这个 `match` 里有效，它的视图不能带出去。
+- 函数里的 `defer` 在返回值算出来之后才执行，所以不能修改返回的视图指向的数据。
+- **锁里的数据**：`with s = mu.lock() { }` 里得到的视图（包括 `Mutex(&x)` 的锁）不能离开这个块，不能赋给块外的变量，也不能 `return`：块结束时锁就释放了，其他任务随后可以修改数据。
+- **泛型与视图**：泛型函数如果在调用结束后还保留类型参数 `T` 的值（被逃逸的闭包或 goroutine 捕获，或者传给另一个会保留它的泛型函数），调用时 `T` 就不能是视图类型。
 
-测试：`run/lastuse`、`run/generics`、`run/spans`、`errors/view_field`、`errors/view_return`、`errors/view_temporary`、`errors/view_outlives_owner`、`errors/views_in_containers`、`errors/escaping_view`、`errors/projection_borrow`、`errors/mutable_ref_conflict`、`errors/iterator_invalidation`、`errors/move_while_borrowed`。
+测试：`run/lastuse`、`run/generics`、`run/spans`、`run/mutexref`、`errors/view_field`、`errors/view_return`、`errors/view_temporary`、`errors/view_outlives_owner`、`errors/views_in_containers`、`errors/escaping_view`、`errors/projection_borrow`、`errors/mutable_ref_conflict`、`errors/iterator_invalidation`、`errors/move_while_borrowed`、`errors/view_assign_scope`、`errors/view_lock_escape`、`errors/stored_views`、`errors/generic_keeps_view`、`errors/closure_view`、`errors/defer_returned_view`、`errors/temp_and_iface_views`。
 
 ### 5.5 共享所有权
 
@@ -213,14 +228,15 @@
 
 - 运算符优先级从低到高：`??`（右结合）、`||`、`&&`、比较、`|`、`^`、`&`、`<< >>`、`+ - +% -%`、`* / % *%`，然后是一元 `- ! ~ & <- *` 和后缀 `.f`、`?.f`、`(...)`、`[...]`。
 - 两边类型必须相同，没有隐式提升。字符串 `+` 拼接。
-- `+ - *` 在整数溢出时 panic（debug 和 release 都是）；`+% -% *%` 回绕。`/`、`%` 除零 panic。下标越界 panic。
+- `+ - *` 在整数溢出时 panic（debug 和 release 都是）；`+% -% *%` 回绕。`/`、`%` 除零 panic。下标越界 panic。`<<`、`>>` 的移位量不在 `0` 到位宽减一之间时 panic。
+- 数字转换 `T(x)` 只把目标类型用来确定字面量的类型（`u64(18446744073709551615)`、`u64(1 << 63)`）；其他实参按自己的类型转换（`b` 是 `u8` 时 `int(~b)` 先在 `u8` 上取反）。
 - `if`、`match`、块都是表达式，值是最后一个表达式。
 - `?T` 的操作：`if let v = x { }`、`x ?? d`、`x?.field`（结果仍是可选的，`field` 必须是 copy 类型；其他情况用 `if let`）、`x.unwrap()`（`none` 时 panic）、`match`。
 - `[a, b]` 是 `Vec` 字面量，`Map[K, V]{k: v}`、`Vec[T]{}` 是带类型的字面量；全是字符串字面量的列表推断为 `Vec[String]`。
 - `a..b` 是半开区间，`a..=b` 是闭区间；`s[a..b]` 对字符串和切片取视图。
 - `T ! E` 的结果必须被处理；丢弃写 `_ = f()`。
 
-测试：`run/basics`、`run/edge`、`run/misc`、`run/constraints`、`run/patterns`、`panic/overflow`、`panic/div_zero`、`panic/bounds`、`panic/unwrap_none`、`errors/unhandled_result`、`errors/rules`。
+测试：`run/basics`、`run/edge`、`run/misc`、`run/constraints`、`run/patterns`、`panic/overflow`、`panic/div_zero`、`panic/bounds`、`panic/shift`、`panic/unwrap_none`、`errors/unhandled_result`、`errors/rules`。
 
 ## 7. 语句与控制流
 
@@ -232,7 +248,7 @@
 - 被匹配的是位置时，绑定默认是引用；分支把绑定 move 走时，这个分支消耗被匹配的值。
 - 没有 `switch`。
 
-测试：`run/basics`、`run/labels`、`run/edge`、`run/misc`、`run/patterns`、`errors/labels`、`errors/non_exhaustive`、`errors/iterator_invalidation`、`errors/iter_mutation`、`errors/iter_let`、`errors/rules`。
+测试：`run/basics`、`run/labels`、`run/edge`、`run/misc`、`run/patterns`、`run/loop_views`、`errors/labels`、`errors/non_exhaustive`、`errors/iterator_invalidation`、`errors/iter_mutation`、`errors/iter_let`、`errors/rules`、`errors/loop_exits`、`errors/loop_carried_view`。
 
 ### 7.1 自定义迭代
 
@@ -243,7 +259,9 @@
 
 两种协议都提供时用游标。不满足任何协议的类型不能 `for`。遍历期间不能修改被遍历的值。
 
-测试：`run/iterators`、`run/constraints`、`run/push_flow`、`errors/iter_misuse`、`errors/iter_mutation`。
+元素的视图能不能留到这一轮之后：游标协议里，`next` 借出的是 `self` 的一部分时可以（和遍历 `Vec` 一样，被遍历的值随后不能修改）；`next` 借出的是游标里的数据时不行，因为下一步会改变游标。推送协议里不行，因为 `each` 传给循环体的可能是只在一次调用里有效的值。
+
+测试：`run/iterators`、`run/iterator_views`、`run/constraints`、`run/push_flow`、`errors/iter_misuse`、`errors/iter_mutation`、`errors/iterator_views`。
 
 ## 8. 错误处理
 
@@ -297,7 +315,7 @@
 ### 10.4 运行时
 
 - goroutine 是有栈协程，由 M:N 调度器分配到工作线程上。同时运行 Kite 代码的 goroutine 数量（`maxProcs`）默认等于 CPU 核数，可以用环境变量 `KITE_MAXPROCS` 或 `task.setMaxProcs(n)` 修改。channel、锁、`time.sleep`、网络操作只挂起当前 goroutine。
-- **抢占**：有其他 goroutine 在等待时，一个 goroutine 连续运行约 10 ms 后会被要求让出 CPU。它在下一个检查点响应：可能递归的函数入口、含嵌套循环或调用的循环的每次迭代、纯计算的计数循环每 65536 次迭代。所以不阻塞的计算也不会饿死其他 goroutine。其他纯计算循环（`for cond {}`）不检查，由外层循环负责；如果它迟迟不响应，20 ms 后按 C 调用处理。
+- **抢占**：有其他 goroutine 在等待时，一个 goroutine 连续运行约 10 ms 后会被要求让出 CPU。它在下一个检查点响应：可能递归的函数入口、含嵌套循环或调用的循环的每次迭代、纯计算的计数循环每 65536 次迭代。所以不阻塞的计算也不会饿死其他 goroutine。其他纯计算循环（`for cond {}`）不检查，由外层循环负责；如果它迟迟不响应，20 ms 后按 C 调用处理。这里看的是线程实际用掉的 CPU 时间：机器过载、线程没拿到 CPU 时，它不会被当成不响应，也就不会多开线程加重过载。
 - **C 调用**：`extern` 函数、文件读写和 DNS 查询运行期间，所在线程把它的 CPU 名额让给另一个线程（文件读写和 DNS 立即让出，其他 C 调用超过约 1 ms 后让出）。所以线程数是 `maxProcs` 加上正在 C 调用里的 goroutine 数。没有检查点的长循环（例如运行时内部的大排序）超过 20 ms 也按 C 调用处理。
 - `task.stats()` 返回活着的 goroutine 数、线程数和 `maxProcs`。
 - 每个 goroutine 的栈固定在一个地址，不会移动（任务可以借用其他 goroutine 栈上的数据）。默认 2 MB（`KITE_GOROUTINE_STACK` 可改），`main` 为 1 GB；只有用到的页占内存。栈溢出由保护页捕获，以 panic 结束。
@@ -337,3 +355,25 @@
 - `Box`、`rc`/`arc`、接口盒子用按大小分级的线程本地空闲链表分配；`Vec`/`String` 缓冲区用 `malloc`。
 - goroutine 是 M:N 调度的有栈协程，见 10.4。
 - `Map` 保持插入顺序。浮点按最短往返表示打印，指数在 [-4, 21) 内时不用科学计数法。
+- 返回值的函数如果执行到了末尾（类型检查证明不会发生），程序以内部错误 panic，而不是返回未定义的值。
+- Linux 目标用 `-fstack-clash-protection` 编译：大于保护页的栈帧（比如很大的数组局部变量）也会逐页触碰，所以栈溢出总是落在保护页上并 panic，不会越过它写到别的内存。Darwin 的编译器默认就这样做。
+- C 编译器以 64 MB 的栈限制运行（clang 还会加 `-fbracket-depth`），这样嵌套到上限的程序生成的 C 也能编译。
+
+## 14. 限制与模糊测试
+
+**限制**（超出时是编译错误，不会让编译器崩溃）：
+
+- 表达式、块、类型、模式的嵌套深度：解析器最多 1000 层（`parser::MAX_NEST`）。每层源码嵌套占几层解析器层级，所以实际上限是几百层括号或几百个 `else if`。`a + b + c ...` 这样的长链也计入深度（每个运算符一层）。编译器在 1 GB（只占用用到的部分）的栈上运行，这个深度下所有阶段都不会栈溢出，也没有随深度指数增长的分析。
+- 数组长度最多 2³² − 1；任何值（实例化泛型之后）最多 2⁴⁰ 字节，更大的数据用 `Vec`。
+- 整数字面量、整数模式和整数常量运算超出任何整数类型的范围时报错；浮点字面量超出 `f64`（或期望类型 `f32`）的范围时报错，而不是变成无穷大。
+- 泛型实例化后的类型最多嵌套 400 层。泛型函数或类型每次都用更大的类型实例化自己（`grow[T]` 里调用 `grow[Vec[T]]`，`Node[T]` 里有 `Node[Vec[T]]` 字段）永远不会结束，编译器在到达这个深度时报错。
+
+**`kite-fuzz`**（`cargo build --profile fuzz` 生成 `target/fuzz/kite-fuzz`；`fuzz` 配置是带调试断言和溢出检查的优化构建）：
+
+- `kite-fuzz [--jobs N] [--time SECS]`：以仓库里的所有 Kite 程序为语料，按词法单元做变异（删除、复制、替换、拼接其他程序的片段、换名、换成边界整数），在进程内运行前端和代码生成。编译器 panic、崩溃（栈溢出）、超过时限都会记录下来；被接受的变异程序会编译出 C 并在 AddressSanitizer / UBSan 下运行（不含 `unsafe`、C 调用、文件和网络的程序）：生成的 C 编译不过，或者运行时 sanitizer 报错，就是编译器的 bug 或安全检查的漏洞。产生新错误信息或新程序的变异会加入语料。
+- `kite-fuzz diff`：生成随机的、类型正确、一定终止、结果确定的程序，分别用 debug、release 和两种 sanitizer 构建运行，四者的输出和结束方式必须完全一致。程序里还有生成器自己按 Kite 语义算好结果的整数表达式（回绕运算、移位、转换、除法），程序检查算出来的值是否一致：四种构建都一样错的问题（字面量类型、转换、生成的 C 里的整数提升）也能发现。编译器拒绝生成的程序时也记录下来（生成器的 bug，或者编译器的误报）。
+- `kite-fuzz borrow`：生成一些小程序，对几个拥有值和它们的视图做随机操作（创建、重新赋值、修改和移动拥有者、`defer`、嵌套块、循环、闭包、锁和 `Map` 投影），不保证合法。大多数会被拒绝；被接受的每一个都在 AddressSanitizer 下运行，报错就说明借用检查器放过了不安全的程序。
+- `kite-fuzz reduce <file>`：按词法单元和行删减输入，保持同样的失败特征，得到最小的复现。
+- `kite-fuzz msgs N`：统计 N 个变异程序最常见的第一条错误信息并给出例子，用来审查用户看到的报错。
+
+找到的问题放在 `fuzz-out/findings/`；化简后的回归用例放进 `tests/fuzz/`。

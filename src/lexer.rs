@@ -25,6 +25,19 @@ pub enum Kw {
     None, True, False, Inout, Sink, Where, Test, Const, Chan, Select,
 }
 
+const KEYWORDS: &[&str] = &[
+    "use", "extend", "pub", "fn", "struct", "enum", "interface", "type", "copy", "let", "var", "if", "else", "for", "in", "match", "return", "break",
+    "continue", "defer", "errdefer", "go", "try", "catch", "with", "yield", "unsafe", "extern", "none", "true", "false", "inout", "sink", "where", "test",
+    "const", "chan", "select",
+];
+
+impl Kw {
+    /// The keyword as written in source.
+    pub fn text(self) -> &'static str {
+        KEYWORDS.iter().copied().find(|w| keyword(w) == Some(self)).unwrap_or("?")
+    }
+}
+
 fn keyword(s: &str) -> Option<Kw> {
     use Kw::*;
     Some(match s {

@@ -1,0 +1,6 @@
+fn main() {
+    let r = rc(1)
+    let r2 = r.clone()
+    go () => println(r2)
+    println(r)
+}

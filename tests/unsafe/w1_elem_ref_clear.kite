@@ -1,0 +1,6 @@
+fn main() {
+    var v = ["a".toString(), "b".toString()]
+    let r = v[0]
+    v = []
+    println(r)
+}

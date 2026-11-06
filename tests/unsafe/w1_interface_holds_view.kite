@@ -1,0 +1,11 @@
+interface Len {
+    fn len(self) int
+}
+fn main() {
+    var xs = Vec[Len]{}
+    {
+        let s = "abc".toString()
+        xs.push(s.asStr())
+    }
+    println(xs.len())
+}

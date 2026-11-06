@@ -1,0 +1,12 @@
+struct P {
+    s ?String
+}
+fn take(s sink String) {}
+fn f(p P) {
+    if let x = p.s {
+        take(x)
+    }
+}
+fn main() {
+    f(P{s: some("abcdefghijklmnopqrstuvwxyz0123456789".toString())})
+}

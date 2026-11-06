@@ -1,0 +1,10 @@
+fn bump(v inout Vec[int]) {
+    v.push(1)
+}
+fn main() {
+    var v = [1, 2, 3]
+    for x in v {
+        bump(&v)
+        println(x)
+    }
+}

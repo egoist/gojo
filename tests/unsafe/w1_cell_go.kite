@@ -1,0 +1,4 @@
+fn main() {
+    let c = Cell(1)
+    go () => c.set(2)
+}

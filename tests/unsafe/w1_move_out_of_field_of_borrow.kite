@@ -1,0 +1,10 @@
+struct P {
+    name String
+}
+fn take(s sink String) {}
+fn f(p P) {
+    take(p.name)
+}
+fn main() {
+    f(P{name: "x".toString()})
+}

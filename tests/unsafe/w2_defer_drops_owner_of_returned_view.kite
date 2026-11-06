@@ -1,0 +1,11 @@
+struct W {
+    s String
+}
+fn pick(w inout W) str {
+    defer w.s = "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz".toString()
+    return w.s.asStr()
+}
+fn main() {
+    var w = W{s: "abc".toString()}
+    println(pick(&w))
+}

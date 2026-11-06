@@ -1,0 +1,6 @@
+fn main() {
+    var s = "   abcdefghijklmnopqrstuvwxyz   ".toString()
+    let t = s.trim()
+    s = "z".toString()
+    println(t)
+}

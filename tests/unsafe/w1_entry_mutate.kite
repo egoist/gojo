@@ -1,0 +1,7 @@
+fn main() {
+    var m = Map[int, String]{1: "a"}
+    with e = m.entry(1) {
+        m.insert(2, "b")
+        println(e)
+    }
+}

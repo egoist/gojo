@@ -1,0 +1,9 @@
+fn take(v sink Vec[int]) {}
+fn main() {
+    let v = [1, 2, 3]
+    let base = [0]
+    var keep []int = base
+    keep = v[0..2]
+    take(v)
+    println(keep.len())
+}

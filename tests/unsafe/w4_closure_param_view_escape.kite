@@ -1,0 +1,14 @@
+fn each2(xs []String, f fn(str)) {
+    for x in xs {
+        f(x.asStr())
+    }
+}
+fn main() {
+    var names = ["abcdefghijklmnopqrstuvwxyz0123456789".toString()]
+    var keep = ""
+    each2(names, (n) => {
+        keep = n
+    })
+    names.clear()
+    println(keep)
+}

@@ -1,0 +1,8 @@
+fn main() {
+    let r = rc("abcdefghijklmnopqrstuvwxyz".toString())
+    let r2 = r.clone()
+    let v = r2.asStr()
+    drop(r2)
+    drop(r)
+    println(v)
+}

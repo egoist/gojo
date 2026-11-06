@@ -1,0 +1,9 @@
+use task
+fn main() {
+    let r = rc(1)
+    let w = r.downgrade()
+    _ = task.group((g) => {
+        g.go(() => println(w.upgrade() != none))
+    })
+    println(r)
+}

@@ -1,0 +1,14 @@
+fn firstWord(s str) ?str {
+    let i = try s.find(" ")
+    return some(s[0..i])
+}
+fn run() ?int {
+    var s = "hello world, a long enough string".toString()
+    let w = try firstWord(s.asStr())
+    s = "z".toString()
+    println(w)
+    return some(1)
+}
+fn main() {
+    _ = run()
+}

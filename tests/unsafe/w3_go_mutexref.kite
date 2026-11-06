@@ -1,0 +1,10 @@
+fn main() {
+    var n = 0
+    let mu = Mutex(&n)
+    go () => {
+        with c = mu.lock() {
+            c += 1
+        }
+    }
+    println(n)
+}

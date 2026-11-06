@@ -1,0 +1,12 @@
+fn run(f fn()) {
+    f()
+}
+fn main() {
+    var v = [1, 2, 3]
+    for x in v {
+        run(() => {
+            v.push(4)
+        })
+        println(x)
+    }
+}

@@ -1,0 +1,6 @@
+fn take(s sink String) {}
+fn main() {
+    let v = ["a".toString()]
+    take(v[0])
+    println(v[0])
+}

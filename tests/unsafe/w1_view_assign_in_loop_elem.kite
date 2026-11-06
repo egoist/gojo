@@ -1,0 +1,14 @@
+struct U {
+    name String
+}
+fn main() {
+    var us = [U{name: "a".toString()}, U{name: "bb".toString()}]
+    var best = ""
+    for u in us {
+        if u.name.len() > best.len() {
+            best = u.name.asStr()
+        }
+    }
+    us.clear()
+    println(best)
+}

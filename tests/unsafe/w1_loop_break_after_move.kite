@@ -1,0 +1,9 @@
+fn take(s sink String) {}
+fn main() {
+    let s = "abc".toString()
+    for {
+        take(s)
+        break
+    }
+    println(s)
+}

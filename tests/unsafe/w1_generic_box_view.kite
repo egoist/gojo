@@ -1,0 +1,14 @@
+struct Holder[T] {
+    x T
+}
+fn keep[T](x T) Holder[T] {
+    return Holder[T]{x: x}
+}
+fn make() Holder[str] {
+    let s = "abc".toString()
+    return keep(s.asStr())
+}
+fn main() {
+    let h = make()
+    println(h.x)
+}

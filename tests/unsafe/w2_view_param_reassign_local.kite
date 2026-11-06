@@ -1,0 +1,9 @@
+fn f(x str) str {
+    var v = x
+    let s = "zzz".toString()
+    v = s.asStr()
+    return v
+}
+fn main() {
+    println(f("a"))
+}

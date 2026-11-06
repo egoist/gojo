@@ -1,0 +1,14 @@
+enum E {
+    A(s String)
+    B
+}
+fn main() {
+    var e E = .A("abc".toString())
+    match e {
+        .A(s) => {
+            e = .B
+            println(s)
+        }
+        .B => {}
+    }
+}

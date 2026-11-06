@@ -1,0 +1,7 @@
+fn get() ?str {
+    let s = "abc".toString()
+    return some(s.asStr())
+}
+fn main() {
+    println(get() ?? "")
+}

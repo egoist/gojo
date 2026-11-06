@@ -1,0 +1,12 @@
+fn use1[T](x T) int {
+    return 1
+}
+fn spawn[T send](x sink T) {
+    go () => {
+        _ = use1(x)
+    }
+}
+fn main() {
+    let s = "abc".toString()
+    spawn(s.asStr())
+}

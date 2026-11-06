@@ -1,0 +1,8 @@
+fn main() {
+    if true {
+        println(1)
+    // error: functions can't be declared inside other functions
+    // error: this `{` is not closed
+}
+
+fn other() {}

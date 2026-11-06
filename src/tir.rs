@@ -351,73 +351,95 @@ impl TExpr {
 // ---------- generic traversal ----------
 
 /// Calls `f` on every expression in the block (pre-order), including closure bodies.
+/// Calls `f` on every expression in the block, nested blocks and closures included.
 pub fn visit_block(b: &TBlock, f: &mut dyn FnMut(&TExpr)) {
-    for s in &b.stmts {
-        visit_stmt(s, f);
-    }
-    if let Some(v) = &b.value {
-        visit_expr(v, f);
-    }
+    walk_block(b, &mut |n| if let Node::Expr(e) = n { f(e) })
 }
 
 pub fn visit_stmt(s: &TStmt, f: &mut dyn FnMut(&TExpr)) {
+    walk_stmt(s, &mut |n| if let Node::Expr(e) = n { f(e) })
+}
+
+pub fn visit_expr(e: &TExpr, f: &mut dyn FnMut(&TExpr)) {
+    walk_expr(e, &mut |n| if let Node::Expr(e) = n { f(e) })
+}
+
+/// A statement or an expression, for `walk_*`.
+#[derive(Clone, Copy)]
+pub enum Node<'a> {
+    Stmt(&'a TStmt),
+    Expr(&'a TExpr),
+}
+
+/// Like `visit_*`, but also calls `f` on every statement, nested ones included.
+pub fn walk_block(b: &TBlock, f: &mut dyn FnMut(Node)) {
+    for s in &b.stmts {
+        walk_stmt(s, f);
+    }
+    if let Some(v) = &b.value {
+        walk_expr(v, f);
+    }
+}
+
+pub fn walk_stmt(s: &TStmt, f: &mut dyn FnMut(Node)) {
+    f(Node::Stmt(s));
     match s {
-        TStmt::Let { init, .. } => visit_expr(init, f),
-        TStmt::LetRef { place, .. } => visit_expr(place, f),
-        TStmt::Expr(e) => visit_expr(e, f),
+        TStmt::Let { init, .. } => walk_expr(init, f),
+        TStmt::LetRef { place, .. } => walk_expr(place, f),
+        TStmt::Expr(e) => walk_expr(e, f),
         TStmt::Assign { place, value, .. } => {
-            visit_expr(place, f);
-            visit_expr(value, f)
+            walk_expr(place, f);
+            walk_expr(value, f)
         }
         TStmt::MapInsert { map, key, value } => {
-            visit_expr(map, f);
-            visit_expr(key, f);
-            visit_expr(value, f)
+            walk_expr(map, f);
+            walk_expr(key, f);
+            walk_expr(value, f)
         }
-        TStmt::Return(Some(e), _) | TStmt::Yield(Some(e), _) => visit_expr(e, f),
-        TStmt::Defer(b) | TStmt::ErrDefer(b) => visit_block(b, f),
+        TStmt::Return(Some(e), _) | TStmt::Yield(Some(e), _) => walk_expr(e, f),
+        TStmt::Defer(b) | TStmt::ErrDefer(b) => walk_block(b, f),
         TStmt::While { cond, body, .. } => {
             if let Some(c) = cond {
-                visit_expr(c, f)
+                walk_expr(c, f)
             }
-            visit_block(body, f)
+            walk_block(body, f)
         }
         TStmt::For { iter, hi, body, .. } => {
-            visit_expr(iter, f);
+            walk_expr(iter, f);
             if let Some(h) = hi {
-                visit_expr(h, f)
+                walk_expr(h, f)
             }
-            visit_block(body, f)
+            walk_block(body, f)
         }
-        TStmt::Go { call, .. } | TStmt::ForEach { call, .. } => visit_expr(call, f),
+        TStmt::Go { call, .. } | TStmt::ForEach { call, .. } => walk_expr(call, f),
         TStmt::Send { chan, value } => {
-            visit_expr(chan, f);
-            visit_expr(value, f)
+            walk_expr(chan, f);
+            walk_expr(value, f)
         }
         TStmt::With { place, body, .. } => {
-            visit_expr(place, f);
-            visit_block(body, f)
+            walk_expr(place, f);
+            walk_block(body, f)
         }
         TStmt::Select { arms, .. } => {
             for a in arms {
                 match &a.kind {
-                    TSelectKind::Recv { chan, .. } => visit_expr(chan, f),
+                    TSelectKind::Recv { chan, .. } => walk_expr(chan, f),
                     TSelectKind::Send { chan, value } => {
-                        visit_expr(chan, f);
-                        visit_expr(value, f)
+                        walk_expr(chan, f);
+                        walk_expr(value, f)
                     }
                     TSelectKind::Default => {}
                 }
-                visit_block(&a.body, f)
+                walk_block(&a.body, f)
             }
         }
         _ => {}
     }
 }
 
-pub fn visit_expr(e: &TExpr, f: &mut dyn FnMut(&TExpr)) {
-    f(e);
-    let mut g = |x: &TExpr| visit_expr(x, f);
+pub fn walk_expr(e: &TExpr, f: &mut dyn FnMut(Node)) {
+    f(Node::Expr(e));
+    let mut g = |x: &TExpr| walk_expr(x, f);
     match &e.kind {
         TK::Field { base, .. } | TK::Deref(base) | TK::OptField { base, .. } => g(base),
         TK::Index { base, index } | TK::StrIndex { base, index } => {
@@ -461,33 +483,33 @@ pub fn visit_expr(e: &TExpr, f: &mut dyn FnMut(&TExpr)) {
             g(k);
             g(v)
         }),
-        TK::Closure(c) => visit_block(&c.body, f),
+        TK::Closure(c) => walk_block(&c.body, f),
         TK::If { cond, then, else_ } => {
             g(cond);
-            visit_block(then, f);
+            walk_block(then, f);
             if let Some(b) = else_ {
-                visit_block(b, f)
+                walk_block(b, f)
             }
         }
         TK::Match { scrut, arms, .. } => {
             g(scrut);
             for a in arms {
                 if let Some(gd) = &a.guard {
-                    visit_expr(gd, f)
+                    walk_expr(gd, f)
                 }
-                visit_expr(&a.body, f)
+                walk_expr(&a.body, f)
             }
         }
-        TK::Block(b) | TK::Unsafe(b) => visit_block(b, f),
+        TK::Block(b) | TK::Unsafe(b) => walk_block(b, f),
         TK::Try { e: x, wrap } => {
-            visit_expr(x, f);
+            walk_expr(x, f);
             if let Some(TryWrap::Call(_, w)) = wrap {
-                visit_expr(w, f)
+                walk_expr(w, f)
             }
         }
         TK::Catch { e: x, handler, .. } => {
-            visit_expr(x, f);
-            visit_block(handler, f)
+            walk_expr(x, f);
+            walk_block(handler, f)
         }
         _ => {}
     }

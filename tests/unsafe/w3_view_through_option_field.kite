@@ -1,0 +1,9 @@
+fn main() {
+    var o ?String = some("abcdefghijklmnopqrstuvwxyz".toString())
+    var keep = ""
+    if let s = o {
+        keep = s.asStr()
+    }
+    o = none
+    println(keep)
+}

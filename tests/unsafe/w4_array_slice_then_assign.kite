@@ -1,0 +1,6 @@
+fn main() {
+    var a = ["abcdefghijklmnopqrstuvwxyz0123456789".toString(), "y".toString()]
+    let s = a[0..1]
+    a = ["z".toString()]
+    println(s.len())
+}

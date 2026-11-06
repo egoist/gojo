@@ -1,0 +1,9 @@
+fn bump(x inout int) {
+    x += 1
+}
+fn main() {
+    var n = 0
+    go bump(&n)
+    n += 1
+    println(n)
+}

@@ -1,0 +1,41 @@
+// Views through an interface argument, and views of a binding into a temporary.
+interface Named {
+    fn name(self) str
+}
+
+struct P {
+    s String
+
+    fn name(self) str {
+        return self.s.asStr()
+    }
+}
+
+fn get(n Named) str {
+    return n.name()
+}
+
+fn through_interface() {
+    var p = P{s: "abcdefghijklmnopqrstuvwxyz".toString()}
+    let v = get(p)
+    p = P{s: "z".toString()}
+    // error: cannot modify `p` while it is borrowed by `v`
+    println(v)
+}
+
+fn from_temporary() {
+    var r = rc("abcdefghijklmnopqrstuvwxyz".toString())
+    let w = r.downgrade()
+    var keep = ""
+    if let x = w.upgrade() {
+        keep = x.asStr()
+        // error: `x` does not live long enough: `keep` would still view it after it is dropped
+    }
+    r = rc("z".toString())
+    println(keep)
+}
+
+fn main() {
+    through_interface()
+    from_temporary()
+}

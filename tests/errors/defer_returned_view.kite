@@ -1,0 +1,32 @@
+// `defer` runs after the return value is computed: it must not change what a
+// returned view points into (a push may move the buffer).
+fn head(v inout Vec[int]) []int {
+    defer {
+        for i in 0..1000 {
+            v.push(i)
+        }
+    }
+    return v[0..2]
+    // error: a `defer` cannot modify `v`: the view being returned points into it
+}
+
+fn name(s inout String) str {
+    defer s.push("a longer suffix")
+    // error: a `defer` cannot modify `s`: the view being returned points into it
+    return s.asStr()
+}
+
+fn fine(v inout Vec[int]) []int {
+    defer println(v.len())
+    return v[0..1]
+}
+
+fn main() {
+    var v = [1, 2, 3]
+    let h = head(&v)
+    println(h.len())
+    var s = "ab".toString()
+    println(name(&s))
+    var w = [1]
+    println(fine(&w).len())
+}

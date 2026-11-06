@@ -1,0 +1,102 @@
+// A view assigned to a variable must not outlive what it points into.
+struct U {
+    name String
+}
+
+fn outer_block() {
+    var v = "x"
+    {
+        let s = "abc".toString()
+        v = s.asStr()
+        // error: `s` does not live long enough: `v` would still view it after it is dropped
+    }
+    println(v)
+}
+
+fn optional() {
+    var o ?str = none
+    {
+        let s = "abc".toString()
+        o = some(s.asStr())
+        // error: `s` does not live long enough: `o` would still view it after it is dropped
+    }
+    println(o ?? "")
+}
+
+fn slices() {
+    let a = [1, 2]
+    var sl []int = a
+    {
+        let b = [3, 4, 5]
+        sl = b
+        // error: `b` does not live long enough: `sl` would still view it after it is dropped
+    }
+    println(sl.len())
+}
+
+fn block_value() {
+    let v = {
+        let s = "abc".toString()
+        s.asStr()
+    }
+    // error: `s` does not live long enough: `v` would still view it after it is dropped
+    println(v)
+}
+
+fn longest() {
+    var us = [U{name: "a".toString()}, U{name: "bb".toString()}]
+    var best = ""
+    for u in us {
+        if u.name.len() > best.len() {
+            best = u.name.asStr()
+        }
+    }
+    us.clear()
+    // error: cannot modify `us` while it is borrowed by `best`
+    println(best)
+}
+
+fn into_inout(out inout str, src str) {
+    out = src
+    // error: cannot store a view of `src` in the `inout` parameter `out`
+}
+
+fn reslice(rest inout str) {
+    rest = rest[1..]
+}
+
+fn run(f fn()) {
+    f()
+}
+
+fn from_closure() {
+    var v = "x"
+    let s = "abc".toString()
+    run(() => {
+        v = s.asStr()
+    })
+    // error: a closure cannot store a borrowed view in the captured variable `v`
+    println(v)
+}
+
+fn deferred() {
+    // `s` is dropped before `v`, and before the defer that prints `v` runs
+    var v = ""
+    defer println(v)
+    let s = "abc".toString()
+    v = s.asStr()
+    // error: `s` is declared after `v`, so it is dropped first
+}
+
+fn main() {
+    deferred()
+    outer_block()
+    optional()
+    slices()
+    block_value()
+    longest()
+    var o = "abc"
+    into_inout(&o, "def")
+    reslice(&o)
+    from_closure()
+}

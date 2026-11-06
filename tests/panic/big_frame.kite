@@ -1,0 +1,26 @@
+// A frame far bigger than a goroutine's stack (and its guard page) must still
+// end in a clean stack-overflow panic, never in writes past the guard page.
+use os
+
+fn big(n int) int {
+    var a [100000000]u8
+    for i in 0..n {
+        a[i] = u8(i % 251)
+    }
+    var s = 0
+    for i in 0..n {
+        s += int(a[(i * 7919) % n])
+    }
+    return s
+}
+
+fn main() {
+    let n = os.args().len() * 50000000
+    let ch = chan[int](1)
+    let c2 = ch.clone()
+    go () => {
+        c2 <- big(n)
+    }
+    println(<-ch ?? 0)
+    // panic: stack overflow
+}

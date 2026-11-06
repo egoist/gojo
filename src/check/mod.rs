@@ -14,6 +14,10 @@ use crate::types::*;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
+/// The longest array type. Arrays are values (on the stack, or inline in other
+/// values); code generation also bounds their total size in bytes.
+pub const MAX_ARRAY_LEN: u64 = u32::MAX as u64;
+
 pub struct Unit {
     pub name: String,
     pub path: String,
@@ -49,6 +53,8 @@ pub struct Checker {
     copy_candidates: Vec<DefId>,
     /// Types whose capabilities are being checked (for recursive types).
     cap_stack: std::cell::RefCell<Vec<(DefId, Vec<Ty>, &'static str)>>,
+    /// Per constant: 0 not checked yet, 1 being checked, 2 checked.
+    pub const_state: Vec<u8>,
 }
 
 #[derive(Clone)]
@@ -73,17 +79,28 @@ pub fn check_program(units: Vec<Unit>) -> Result<(Program, Vec<TFunc>, Vec<(Stri
         inferred_copy: vec![],
         allow_typeset: false,
         copy_candidates: vec![],
+        const_state: vec![],
     };
     c.collect(units);
     if !c.diags.is_empty() {
-        return Err(c.diags);
+        return Err(without_cascades(c.diags));
     }
     c.check_bodies();
     c.check_unused_imports();
     if !c.diags.is_empty() {
-        return Err(c.diags);
+        return Err(without_cascades(c.diags));
     }
     Ok((c.prog, c.tfuncs, c.tests))
+}
+
+/// Drops messages about types that failed to resolve (shown as `<error>`): each
+/// repeats an error reported where the type failed.
+fn without_cascades(diags: Vec<Diag>) -> Vec<Diag> {
+    let mentions = |d: &Diag| d.msg.contains("<error>") || d.notes.iter().any(|n| n.1.contains("<error>"));
+    if diags.iter().all(mentions) {
+        return diags;
+    }
+    diags.into_iter().filter(|d| !mentions(d)).collect()
 }
 
 impl Checker {
@@ -174,14 +191,16 @@ impl Checker {
         if let Some(Sym::Type(d)) = self.prog.packages[self.prog.prelude as usize].items.get("error") {
             self.iface_error = Some(*d);
         }
-        // aliases (may refer to each other in order)
-        for (fi, ii) in alias_items {
-            if let ast::ItemKind::TypeAlias { name, ty, .. } = self.files[fi].items[ii].kind.clone() {
-                let env = self.file_env(fi);
-                let t = self.resolve_type(&ty, &env);
-                let pkg = self.file_cx[fi].pkg;
-                self.prog.packages[pkg as usize].items.insert(name, Sym::Alias(t));
+        // aliases, in dependency order: one may use another declared later
+        let mut by_name: HashMap<(PkgId, String), (usize, usize)> = HashMap::new();
+        for &(fi, ii) in &alias_items {
+            if let ast::ItemKind::TypeAlias { name, .. } = &self.files[fi].items[ii].kind {
+                by_name.insert((self.file_cx[fi].pkg, name.clone()), (fi, ii));
             }
+        }
+        let mut state: HashMap<(usize, usize), u8> = HashMap::new();
+        for &(fi, ii) in &alias_items {
+            self.resolve_alias(fi, ii, &by_name, &mut state);
         }
 
         // 3. type bodies
@@ -233,7 +252,11 @@ impl Checker {
                             self.err(v.span, format!("duplicate variant `{}`", v.name));
                         }
                         let mut fs = vec![];
+                        let mut names = HashSet::new();
                         for (n, t) in &v.fields {
+                            if !names.insert(n.clone()) {
+                                self.err(t.span, format!("variant `{}` has two values named `{}`", v.name, n));
+                            }
                             let ty = self.resolve_type(t, &env);
                             if ty.is_view() {
                                 self.err(t.span, "enum payloads must own their data; borrowed views are not allowed here");
@@ -375,6 +398,7 @@ impl Checker {
             if self.prog.methods.contains_key(&(key, "drop".to_string())) {
                 self.prog.types[id].has_drop = true;
             }
+            self.check_protocol_methods(id as DefId);
         }
         // Package-private, non-generic types are `copy` when all their fields
         // are (exported types must say `copy`, so adding a field to a public
@@ -766,7 +790,10 @@ impl Checker {
     fn resolve_type_inner(&mut self, te: &TypeExpr, env: &TyEnv) -> Ty {
         match &te.kind {
             TypeExprKind::Unit => Ty::Unit,
-            TypeExprKind::IntLit(n) => Ty::ConstInt(*n as u64),
+            TypeExprKind::IntLit(n) => match self.array_len((*n).min(i128::MAX as u128) as i128, *n, te.span) {
+                Some(v) => Ty::ConstInt(v),
+                None => Ty::Error,
+            },
             TypeExprKind::Option(a) => {
                 let t = self.resolve_type(a, env);
                 if matches!(t, Ty::Option(_)) {
@@ -787,7 +814,10 @@ impl Checker {
             TypeExprKind::Array(n, a) => {
                 let elem = self.resolve_type(a, env);
                 match &n.kind {
-                    ast::ExprKind::Int(v) => Ty::Array(Rc::new(elem), *v as u64),
+                    ast::ExprKind::Int(v) => match self.array_len((*v).min(i128::MAX as u128) as i128, *v, n.span) {
+                        Some(v) => Ty::Array(Rc::new(elem), v),
+                        None => Ty::Error,
+                    },
                     ast::ExprKind::Ident(name) => match env.tparams.get(name) {
                         Some(Ty::Param(p)) => {
                             let p = *p;
@@ -797,7 +827,10 @@ impl Checker {
                             Ty::ArrayT(Rc::new(elem), Rc::new(Ty::Param(p)))
                         }
                         _ => match self.lookup_const_int(name, env) {
-                            Some(v) => Ty::Array(Rc::new(elem), v),
+                            Some(v) => match self.array_len(v, v.max(0) as u128, n.span) {
+                                Some(v) => Ty::Array(Rc::new(elem), v),
+                                None => Ty::Error,
+                            },
                             None => {
                                 self.err(n.span, "array length must be an integer constant");
                                 Ty::Error
@@ -819,14 +852,132 @@ impl Checker {
         }
     }
 
-    fn lookup_const_int(&self, name: &str, env: &TyEnv) -> Option<u64> {
+    fn lookup_const_int(&self, name: &str, env: &TyEnv) -> Option<i128> {
         let sel = self.file_cx[env.file].names.get(name).map(|x| x.0);
         for p in [Some(env.pkg), sel, Some(self.prog.prelude)].into_iter().flatten() {
             if let Some(v) = self.const_int_ast(p, name, 0) {
-                return u64::try_from(v).ok();
+                return Some(v);
             }
         }
         None
+    }
+
+    fn resolve_alias(&mut self, fi: usize, ii: usize, by_name: &HashMap<(PkgId, String), (usize, usize)>, state: &mut HashMap<(usize, usize), u8>) {
+        match state.get(&(fi, ii)) {
+            Some(2) => return,
+            Some(1) => {
+                let item = &self.files[fi].items[ii];
+                if let ast::ItemKind::TypeAlias { name, .. } = &item.kind {
+                    let (name, sp) = (name.clone(), item.span);
+                    self.diags.push(Diag::new(sp, format!("type alias `{}` refers to itself", name)).note(None, "an alias is another name for an existing type; a recursive type needs a struct or an enum"));
+                    let pkg = self.file_cx[fi].pkg;
+                    self.prog.packages[pkg as usize].items.insert(name, Sym::Alias(Ty::Error));
+                }
+                return;
+            }
+            _ => {}
+        }
+        state.insert((fi, ii), 1);
+        let ast::ItemKind::TypeAlias { name, ty, .. } = self.files[fi].items[ii].kind.clone() else { return };
+        let pkg = self.file_cx[fi].pkg;
+        // the aliases it mentions first
+        fn names(t: &TypeExpr, out: &mut Vec<String>) {
+            match &t.kind {
+                TypeExprKind::Named { path, args } => {
+                    if path.len() == 1 {
+                        out.push(path[0].clone());
+                    }
+                    args.iter().for_each(|a| names(a, out));
+                }
+                TypeExprKind::Option(a) | TypeExprKind::Slice(a) | TypeExprKind::Ptr(a) | TypeExprKind::Chan(a) | TypeExprKind::Array(_, a) => names(a, out),
+                TypeExprKind::Result(a, b) => {
+                    names(a, out);
+                    names(b, out);
+                }
+                TypeExprKind::Func { params, ret } => {
+                    params.iter().for_each(|p| names(&p.1, out));
+                    if let Some(r) = ret {
+                        names(r, out);
+                    }
+                }
+                TypeExprKind::Unit | TypeExprKind::IntLit(_) => {}
+            }
+        }
+        let mut deps = vec![];
+        names(&ty, &mut deps);
+        for d in deps {
+            if let Some(&(dfi, dii)) = by_name.get(&(pkg, d)) {
+                self.resolve_alias(dfi, dii, by_name, state);
+            }
+        }
+        if state.get(&(fi, ii)) == Some(&1) {
+            let env = self.file_env(fi);
+            let t = self.resolve_type(&ty, &env);
+            // a cycle through this alias was reported (and the alias set) already
+            if !matches!(self.prog.packages[pkg as usize].items.get(&name), Some(Sym::Alias(Ty::Error))) {
+                self.prog.packages[pkg as usize].items.insert(name, Sym::Alias(t));
+            }
+        }
+        state.insert((fi, ii), 2);
+    }
+
+    /// Methods that replace built-in behavior must have exactly the signature
+    /// the compiler calls them with: `equal` (`==`), `compare` (ordering),
+    /// `hash` (map keys), `clone` and `drop`.
+    fn check_protocol_methods(&mut self, d: DefId) {
+        let def = self.prog.def(d).clone();
+        if matches!(def.kind, TypeDefKind::Iface { .. }) {
+            return;
+        }
+        let me = Ty::Adt(d, Rc::new(def.tparams.iter().map(|p| Ty::Param(*p)).collect()));
+        let tname = def.name.clone();
+        let hasher = self.prog.prelude_type("Hasher").map(|h| Ty::Adt(h, Rc::new(vec![])));
+        for (name, recv, params, ret, what) in [
+            ("equal", Mode::Borrow, vec![(Mode::Borrow, me.clone())], Some(Ty::Bool), "`==`"),
+            ("compare", Mode::Borrow, vec![(Mode::Borrow, me.clone())], self.prog.prelude_type("Ordering").map(|o| Ty::Adt(o, Rc::new(vec![]))), "ordering"),
+            ("hash", Mode::Borrow, hasher.iter().map(|h| (Mode::Inout, h.clone())).collect(), Some(Ty::Unit), "hashing (map keys)"),
+            ("clone", Mode::Borrow, vec![], Some(me.clone()), "`.clone()`"),
+            ("drop", Mode::Inout, vec![], Some(Ty::Unit), "dropping"),
+        ] {
+            let Some(fs) = self.prog.methods.get(&(TyKey::Adt(d), name.to_string())).cloned() else { continue };
+            let Some(ret) = ret else { continue };
+            for f in fs {
+                let fd = self.prog.func(f).clone();
+                if self.prog.packages[fd.pkg as usize].is_std {
+                    continue;
+                }
+                let Some(r) = &fd.recv else { continue };
+                // the method's own type parameters come after the type's
+                let ok = r.mode == recv
+                    && fd.tparams.len() == def.tparams.len()
+                    && fd.params.len() == params.len()
+                    && fd.params.iter().zip(&params).all(|(p, (m, t))| p.mode == *m && p.ty == *t)
+                    && fd.ret == ret;
+                if !ok {
+                    let self_part = match recv {
+                        Mode::Inout => "self inout",
+                        _ => "self",
+                    };
+                    let ps: Vec<String> = params.iter().map(|(m, t)| format!("{}{}{}", if name == "hash" { "h " } else { "other " }, if *m == Mode::Inout { "inout " } else { "" }, self.prog.show(t))).collect();
+                    let sig = format!("fn {}({}{}{}){}", name, self_part, if ps.is_empty() { "" } else { ", " }, ps.join(", "), if ret == Ty::Unit { String::new() } else { format!(" {}", self.prog.show(&ret)) });
+                    self.diags.push(Diag::new(fd.span, format!("`{}` on `{}` must be `{}`", name, tname, sig)).note(None, format!("a method named `{}` defines {} for the type; give a method with another meaning a different name", name, what)));
+                }
+            }
+        }
+    }
+
+    /// Checks an array length (or integer type argument). `big` is the literal's
+    /// full value, which may not fit in `v`.
+    fn array_len(&mut self, v: i128, big: u128, sp: Span) -> Option<u64> {
+        if v < 0 {
+            self.err(sp, format!("array length must not be negative (it is {})", v));
+            return None;
+        }
+        if big > MAX_ARRAY_LEN as u128 || v > MAX_ARRAY_LEN as i128 {
+            self.err(sp, format!("array length {} is too large: arrays hold at most {} elements; use a `Vec` for more", big, MAX_ARRAY_LEN));
+            return None;
+        }
+        Some(v as u64)
     }
 
     /// Evaluate an integer constant from its source (array lengths are needed
@@ -852,19 +1003,20 @@ impl Checker {
 
     fn eval_int(&self, pkg: PkgId, e: &ast::Expr, depth: u32) -> Option<i128> {
         use ast::ExprKind as E;
+        // checked: values this big are rejected as array lengths anyway
         Some(match &e.kind {
-            E::Int(v) => *v as i128,
+            E::Int(v) => i128::try_from(*v).ok()?,
             E::Ident(n) => self.const_int_ast(pkg, n, depth)?,
-            E::Unary("-", x) => -self.eval_int(pkg, x, depth)?,
+            E::Unary("-", x) => self.eval_int(pkg, x, depth)?.checked_neg()?,
             E::Binary(op, a, b) => {
                 let (x, y) = (self.eval_int(pkg, a, depth)?, self.eval_int(pkg, b, depth)?);
                 match *op {
-                    "+" => x + y,
-                    "-" => x - y,
-                    "*" => x * y,
-                    "/" if y != 0 => x / y,
-                    "%" if y != 0 => x % y,
-                    "<<" => x << y,
+                    "+" => x.checked_add(y)?,
+                    "-" => x.checked_sub(y)?,
+                    "*" => x.checked_mul(y)?,
+                    "/" => x.checked_div(y)?,
+                    "%" => x.checked_rem(y)?,
+                    "<<" if (0..64).contains(&y) => x.checked_mul(1i128 << y)?,
                     _ => return None,
                 }
             }

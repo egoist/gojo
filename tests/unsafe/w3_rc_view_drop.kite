@@ -1,0 +1,6 @@
+fn main() {
+    let r = rc("abcdefghijklmnopqrstuvwxyz".toString())
+    let v = r.asStr()
+    drop(r)
+    println(v)
+}

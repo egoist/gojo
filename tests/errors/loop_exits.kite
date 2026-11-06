@@ -1,0 +1,45 @@
+// A function whose last statement is `for { }` can still fall off its end if
+// a `break` anywhere inside leaves that loop.
+fn nested_break(x int) int {
+    for {
+        return break
+    }
+    // error: missing return value: function returns `int`
+}
+
+fn labeled(x int) int {
+    outer: for {
+        for {
+            if x > 0 {
+                break outer
+            }
+        }
+    }
+    // error: missing return value: function returns `int`
+}
+
+fn in_select(ch chan int) int {
+    for {
+        select {
+            let v = <-ch => {
+                if (v ?? 0) > 0 {
+                    break
+                }
+            }
+        }
+    }
+    // error: missing return value: function returns `int`
+}
+
+fn fine(x int) int {
+    for {
+        for {
+            break
+        }
+        return x
+    }
+}
+
+fn main() {
+    println(nested_break(1), labeled(1), in_select(chan[int](1)), fine(2))
+}

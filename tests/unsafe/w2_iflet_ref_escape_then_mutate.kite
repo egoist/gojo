@@ -1,0 +1,9 @@
+fn main() {
+    var m = Map[int, String]{1: "a"}
+    var keep = ""
+    if let u = m.get(1) {
+        keep = u.asStr()
+    }
+    m.clear()
+    println(keep)
+}

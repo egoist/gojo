@@ -1,0 +1,7 @@
+fn main() {
+    var a = "abcdefghijklmnopqrstuvwxyz".toString()
+    let v = a.asStr()
+    let old = take(&a)
+    drop(old)
+    println(v)
+}

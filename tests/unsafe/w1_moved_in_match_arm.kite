@@ -1,0 +1,10 @@
+fn take(s sink String) {}
+fn main() {
+    let s = "abc".toString()
+    let n = 3
+    match n {
+        1 => take(s)
+        _ => {}
+    }
+    println(s)
+}

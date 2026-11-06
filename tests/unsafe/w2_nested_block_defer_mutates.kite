@@ -1,0 +1,10 @@
+fn head(v inout Vec[int]) []int {
+    {
+        defer v.push(9)
+        return v[0..1]
+    }
+}
+fn main() {
+    var v = [1, 2, 3]
+    println(head(&v).len())
+}

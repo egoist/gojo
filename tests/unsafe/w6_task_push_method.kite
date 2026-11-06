@@ -1,0 +1,9 @@
+use task
+fn main() {
+    var v = [1, 2, 3]
+    _ = task.group((g) => {
+        g.go(() => v.push(4))
+        g.go(() => v.push(5))
+    })
+    println(v.len())
+}

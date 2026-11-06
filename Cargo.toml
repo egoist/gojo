@@ -4,3 +4,10 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+
+# Optimized, with the checks the fuzzer relies on (`kite-fuzz` finds integer
+# overflows and failed assertions in the compiler, not only panics).
+[profile.fuzz]
+inherits = "release"
+debug-assertions = true
+overflow-checks = true

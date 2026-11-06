@@ -1,0 +1,13 @@
+use task
+fn bump(x inout int) {
+    x += 1
+}
+fn main() {
+    var n = 0
+    _ = task.group((g) => {
+        for _ in 0..4 {
+            g.go(() => bump(&n))
+        }
+    })
+    println(n)
+}

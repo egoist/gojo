@@ -1,0 +1,7 @@
+const X = Y + 1
+const Y = X * 2
+// error: the value of constant `X` depends on itself
+
+fn main() {
+    println(X)
+}

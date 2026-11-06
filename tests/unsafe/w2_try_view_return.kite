@@ -1,0 +1,10 @@
+fn first(v Vec[String]) ?str {
+    let s = try v.get(0)
+    return some(s.asStr())
+}
+fn main() {
+    var v = ["a".toString()]
+    let f = first(v)
+    v.clear()
+    println(f ?? "")
+}

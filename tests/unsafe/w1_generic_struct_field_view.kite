@@ -1,0 +1,11 @@
+struct Holder[T] {
+    x T
+}
+fn main() {
+    var h = Holder[str]{x: "a"}
+    {
+        let s = "abc".toString()
+        h = Holder[str]{x: s.asStr()}
+    }
+    println(h.x)
+}

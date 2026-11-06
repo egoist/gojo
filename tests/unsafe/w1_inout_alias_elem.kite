@@ -1,0 +1,8 @@
+fn f(a inout Vec[String], s str) {
+    a.clear()
+    println(s)
+}
+fn main() {
+    var v = ["a".toString()]
+    f(&v, v[0].asStr())
+}

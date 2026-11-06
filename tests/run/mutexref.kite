@@ -51,4 +51,14 @@ fn main() {
         c += 5
     }
     println(count)
+
+    // views of the locked data are fine inside the block
+    var name = "kite".toString()
+    let nm = Mutex(&name)
+    with s = nm.lock() {
+        s.push("!")
+        let inside = s.asStr()
+        println(inside, inside.len)
+    }
+    println(name)
 }

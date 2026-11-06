@@ -1,0 +1,9 @@
+use os
+
+fn main() {
+    let n = os.args().len() + 63
+    let x = 1 << 3
+    println(x)
+    println(x << n)
+    // panic: shift amount out of range
+}

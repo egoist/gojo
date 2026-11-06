@@ -1,0 +1,6 @@
+fn main() {
+    var s = "abc".toString()
+    let v = s.asStr()
+    s = "zzz".toString()
+    println(v)
+}

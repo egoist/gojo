@@ -1,0 +1,6 @@
+fn main() {
+    var v = ["b".toString(), "a".toString()]
+    let x = v[0].asStr()
+    v.sort()
+    println(x)
+}

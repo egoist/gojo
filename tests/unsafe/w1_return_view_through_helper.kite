@@ -1,0 +1,13 @@
+struct W {
+    s String
+}
+fn get(w W) str {
+    return w.s.asStr()
+}
+fn bad() str {
+    let w = W{s: "abc".toString()}
+    return get(w)
+}
+fn main() {
+    println(bad())
+}

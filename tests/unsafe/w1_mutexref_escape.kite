@@ -1,0 +1,6 @@
+fn main() {
+    var n = 0
+    var keep = Vec[MutexRef[int]]{}
+    keep.push(Mutex(&n))
+    n += 1
+}

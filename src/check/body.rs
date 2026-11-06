@@ -126,9 +126,11 @@ impl Checker {
     // ------------------------------------------------------------------
 
     pub fn check_bodies(&mut self) {
-        // constants first (types of consts may be inferred)
+        // constants first (types of consts may be inferred); one that uses
+        // another is checked after it, in whatever order they are written
+        self.const_state = vec![0; self.prog.consts.len()];
         for ci in 0..self.prog.consts.len() {
-            self.check_const(ci);
+            self.ensure_const(ci, None);
         }
         // struct field defaults
         for d in 0..self.prog.types.len() {
@@ -164,7 +166,41 @@ impl Checker {
                     self.err(fd.span, "`main` must take no parameters and return nothing (or `! E`)");
                 }
             }
-            _ => {}
+            Some(other) => {
+                let sp = match other {
+                    Sym::Type(d) => Some(self.prog.def(*d).span),
+                    Sym::Const(c) => Some(self.prog.consts[*c as usize].span),
+                    _ => None,
+                };
+                let sp = sp.or_else(|| {
+                    // a type alias: find its declaration
+                    (0..self.files.len()).filter(|&fi| self.file_cx[fi].pkg == main_pkg).flat_map(|fi| self.files[fi].items.iter()).find(|it| matches!(&it.kind, ast::ItemKind::TypeAlias { name, .. } if name == "main")).map(|it| it.span)
+                });
+                if let Some(sp) = sp {
+                    self.err(sp, "`main` must be a function: the program starts by calling `fn main()`");
+                }
+            }
+            None => {}
+        }
+    }
+
+    /// Checks constant `ci` unless it already is. `use_sp`: where another
+    /// constant (being checked) refers to it.
+    fn ensure_const(&mut self, ci: usize, use_sp: Option<Span>) {
+        match self.const_state.get(ci).copied() {
+            // outside `check_bodies` (array lengths during collection)
+            None | Some(2) => {}
+            Some(1) => {
+                let name = self.prog.consts[ci].name.clone();
+                let sp = use_sp.unwrap_or(self.prog.consts[ci].span);
+                self.err(sp, format!("the value of constant `{}` depends on itself", name));
+                self.prog.consts[ci].ty = Ty::Error;
+            }
+            _ => {
+                self.const_state[ci] = 1;
+                self.check_const(ci);
+                self.const_state[ci] = 2;
+            }
         }
     }
 
@@ -195,7 +231,13 @@ impl Checker {
             };
             let e = self.zonk_expr(&mut cx, e);
             if !is_const_expr(&e) {
-                self.err(value.span, "constant value must be a literal or a simple constant expression");
+                // an error inside was reported where it happened
+                if !has_error_ty(&e.ty) && !matches!(e.kind, TK::Error) {
+                    self.err(value.span, "constant value must be a literal or a simple constant expression");
+                }
+                // its type may hold inference variables of this context only
+                self.prog.consts[ci].ty = Ty::Error;
+                return;
             }
             self.prog.consts[ci].ty = e.ty.clone();
             self.prog.consts[ci].value = Some(e);
@@ -245,6 +287,7 @@ impl Checker {
     }
 
     fn check_func(&mut self, fid: FuncId, fi: usize, body: &ast::Block, decl: Option<&ast::FuncDecl>) -> TFunc {
+        let diags_before = self.diags.len();
         let fd = self.prog.func(fid).clone();
         let mut env = self.file_env(fi);
         // type params in scope by name
@@ -274,6 +317,9 @@ impl Checker {
         self.finish_fn_body(&mut cx, &mut tb, &fd.ret, body.span, fd.yields.is_some());
         self.pop_scope(&mut cx);
         self.check_pending_infer(&mut cx);
+        if self.diags.len() == diags_before {
+            self.report_uninferred(&cx, &tb);
+        }
         let tb = self.zonk_block(&mut cx, tb);
         TFunc { func: fid, locals: cx.locals, params, recv, body: tb, n_arms: cx.n_arms }
     }
@@ -295,7 +341,7 @@ impl Checker {
                 Ty::Never => self.err(span, "function declared `never` may return"),
                 _ => {
                     let s = self.prog.show(&rty);
-                    self.err(Span { lo: span.hi.saturating_sub(1), ..span }, format!("missing return value: function returns `{}`", s));
+                    self.diags.push(Diag::new(Span { lo: span.hi.saturating_sub(1), ..span }, format!("missing return value: function returns `{}`", s)).note(None, "the end of the function can be reached: add a `return` there, or end the body with the value"));
                 }
             }
         }
@@ -507,6 +553,39 @@ impl Checker {
     pub fn zonk_expr(&mut self, cx: &mut FnCx, mut e: TExpr) -> TExpr {
         zonk_walk_expr(&mut e, &mut |t| *t = self.zonk_ty(cx, t));
         e
+    }
+
+    /// A type still unknown at the end of a function that had no errors (which
+    /// would explain it): `f` alone as a statement, for a generic `f`. Code
+    /// generation must never see one.
+    fn report_uninferred(&mut self, cx: &FnCx, b: &TBlock) {
+        let mut found: Option<(Span, String)> = None;
+        // an error type left by another item's error (a bad constant) is a
+        // cascade of that error
+        let no_errors = self.diags.is_empty();
+        crate::tir::visit_block(b, &mut |e| {
+            if found.is_some() {
+                return;
+            }
+            let unknown = |t: &Ty| self.resolve(cx, t).has_vars();
+            match &e.kind {
+                TK::FuncRef(f, targs) if targs.iter().any(|t| unknown(t)) => {
+                    let fd = self.prog.func(*f);
+                    let names: Vec<String> = fd.tparams.iter().zip(targs).filter(|(_, t)| unknown(t)).map(|(p, _)| format!("`{}`", self.prog.tparam(*p).name)).collect();
+                    found = Some((e.span, format!("cannot infer type parameter{} {} of `{}`; specify {}: `{}[T]`", if names.len() > 1 { "s" } else { "" }, names.join(", "), fd.name, if names.len() > 1 { "them" } else { "it" }, fd.name)));
+                }
+                TK::Call { callee: Callee::Func(f, targs), .. } if targs.iter().any(|t| unknown(t)) => {
+                    let fd = self.prog.func(*f);
+                    found = Some((e.span, format!("cannot infer the type arguments of `{}`; specify them: `{}[T](...)`", fd.name, fd.name)));
+                }
+                _ if unknown(&e.ty) => found = Some((e.span, "cannot infer the type of this expression; add a type annotation".to_string())),
+                _ if no_errors && has_error_ty(&self.resolve(cx, &e.ty)) => found = Some((e.span, "internal error: the compiler could not type this expression (please report it)".to_string())),
+                _ => {}
+            }
+        });
+        if let Some((sp, msg)) = found {
+            self.err(sp, msg);
+        }
     }
 
     fn zonk_block(&mut self, cx: &mut FnCx, mut b: TBlock) -> TBlock {
@@ -840,6 +919,14 @@ impl Checker {
         if actual.is_numeric() && target.is_numeric() {
             d = d.note(None, format!("use an explicit conversion: `{}(x)`", t));
         }
+        match (&actual, &target) {
+            (_, Ty::Option(inner)) if **inner == actual => d = d.note(None, "wrap the value: `some(x)`"),
+            (Ty::Option(inner), _) if **inner == target => d = d.note(None, "the value may be `none`: use `x ?? fallback`, `if let v = x { ... }`, or `x.unwrap()` if it can't be"),
+            (Ty::Result(inner, _), _) if **inner == target => d = d.note(None, "the value may be an error: use `try x`, `x catch e { ... }`, or `match`"),
+            (Ty::Unit, _) if target != Ty::Unit => d = d.note(None, "this has no value: a block's value is its last expression, without `;` or `return`"),
+            (Ty::String, Ty::Str) => d = d.note(None, "borrow it as a view: `s.asStr()`"),
+            _ => {}
+        }
         self.diags.push(d);
         TExpr::error(sp)
     }
@@ -990,7 +1077,7 @@ impl Checker {
                             self.err(*name_span, format!("`let {}` needs an initial value", name));
                         } else if !self.is_default(&ty) {
                             let s = self.prog.show(&ty);
-                            self.err(*name_span, format!("`var {} {}` needs an initial value: `{}` has no default value", name, s, s));
+                            self.diags.push(Diag::new(*name_span, format!("`var {} {}` needs an initial value: `{}` has no default value", name, s, s)).note(None, format!("give it one: `var {} {} = ...`", name, s)));
                         }
                         let id = self.declare(cx, name, ty.clone(), LocalKind::Var, *name_span, false);
                         TStmt::Let { local: id, init: TExpr::new(TK::DefaultOf, ty, sp) }
@@ -1588,7 +1675,12 @@ impl Checker {
                     let cty = self.resolve(cx, &ch.ty);
                     let elem = match &cty {
                         Ty::Chan(t) => (**t).clone(),
-                        _ => Ty::Error,
+                        Ty::Error => Ty::Error,
+                        _ => {
+                            let s = self.prog.show(&cty);
+                            self.err(chan.span, format!("cannot send on non-channel type `{}`", s));
+                            Ty::Error
+                        }
                     };
                     let v = self.expr(cx, value, Some(&elem));
                     let v = self.coerce(cx, v, &elem, Use::Value);
@@ -1633,12 +1725,21 @@ impl Checker {
         let sp = e.span;
         let expect = ex.ty().cloned();
         match &e.kind {
-            ExprKind::Int(n) => self.int_lit(cx, *n as i128, expect.as_ref(), sp),
+            ExprKind::Int(n) => match self.literal_value(*n, false, sp) {
+                Some(v) => self.int_lit(cx, v, expect.as_ref(), sp),
+                None => TExpr::error(sp),
+            },
             ExprKind::Float(f) => {
                 let t = match expect {
                     Some(Ty::F32) => Ty::F32,
                     _ => Ty::F64,
                 };
+                // rounding is fine; overflowing to infinity is not
+                let max = if t == Ty::F32 { f32::MAX as f64 } else { f64::MAX };
+                if !f.is_finite() || f.abs() > max {
+                    self.err(sp, format!("float literal is out of range for `{}`", self.prog.show(&t)));
+                    return TExpr::error(sp);
+                }
                 TExpr::new(TK::Float(*f), t, sp)
             }
             ExprKind::Str(s) => TExpr::new(TK::Str(s.clone()), Ty::Str, sp),
@@ -1877,6 +1978,16 @@ impl Checker {
         TExpr::new(TK::Match { scrut: Box::new(b), owned, arms }, rty, sp)
     }
 
+    /// A literal's value, exactly. Beyond 64 bits no type can hold it (and an
+    /// `i128` conversion could wrap).
+    fn literal_value(&mut self, n: u128, neg: bool, sp: Span) -> Option<i128> {
+        if n > u64::MAX as u128 {
+            self.err(sp, format!("integer literal {}{} is too large for any integer type", if neg { "-" } else { "" }, n));
+            return None;
+        }
+        Some(if neg { -(n as i128) } else { n as i128 })
+    }
+
     fn int_lit(&mut self, cx: &mut FnCx, v: i128, expect: Option<&Ty>, sp: Span) -> TExpr {
         let t = match expect.map(|t| self.shallow(cx, t)) {
             Some(Ty::Int(k)) => Ty::Int(k),
@@ -1909,6 +2020,7 @@ impl Checker {
         match self.resolve_path(cx, &e) {
             Some(PathRes::Func(f, targs)) => self.func_value(cx, f, targs, expect, sp),
             Some(PathRes::Const(c)) => {
+                self.ensure_const(c as usize, Some(sp));
                 let t = self.prog.consts[c as usize].ty.clone();
                 TExpr::new(TK::Const(c), t, sp)
             }
@@ -2155,6 +2267,7 @@ impl Checker {
                     if c == u32::MAX {
                         return TExpr::error(sp);
                     }
+                    self.ensure_const(c as usize, Some(sp));
                     let t = self.prog.consts[c as usize].ty.clone();
                     return TExpr::new(TK::Const(c), t, sp);
                 }
@@ -2292,7 +2405,10 @@ impl Checker {
         match op {
             "-" => {
                 if let ExprKind::Int(n) = inner.kind {
-                    return self.int_lit(cx, -(n as i128), expect, sp);
+                    return match self.literal_value(n, true, sp) {
+                        Some(v) => self.int_lit(cx, v, expect, sp),
+                        None => TExpr::error(sp),
+                    };
                 }
                 let e = self.expr_value(cx, inner, expect.filter(|t| t.is_numeric()));
                 let t = self.resolve(cx, &e.ty);
@@ -3259,7 +3375,11 @@ impl Checker {
                     self.err(sp, "conversion takes one value");
                     return TExpr::error(sp);
                 }
-                let e = self.expr(cx, &args[0], Some(&t));
+                // The target type only types literals (`u64(18446744073709551615)`,
+                // `u64(1 << 63)`); anything else converts from its own type
+                // (`int(~b)` for `b u8`).
+                let hint = if literal_only(&args[0]) { Some(&t) } else { None };
+                let e = self.expr(cx, &args[0], hint);
                 let e = self.value(cx, e);
                 let et = self.resolve(cx, &e.ty);
                 let ok = et.is_numeric() || et.is_error() || (matches!(et, Ty::Bool) && t.is_int()) || matches!(&et, Ty::Adt(d, _) if self.prog.def(*d).is_simple_enum()) || matches!(&et, Ty::Adt(d, _) if self.prog.def(*d).newtype) || self.param_numeric(&et);
@@ -3922,31 +4042,37 @@ pub fn block_diverges(b: &TBlock) -> bool {
     match b.stmts.last() {
         Some(TStmt::Return(..)) | Some(TStmt::Break(..)) | Some(TStmt::Continue(..)) => true,
         Some(TStmt::Expr(e)) => e.ty == Ty::Never,
-        Some(TStmt::While { cond: None, body, .. }) => !contains_break(body),
+        Some(TStmt::While { cond: None, body, id }) => !breaks_out_of(body, *id),
         _ => false,
     }
 }
 
-fn contains_break(b: &TBlock) -> bool {
-    fn stmt(s: &TStmt) -> bool {
-        match s {
-            TStmt::Break(..) => true,
-            TStmt::Expr(e) => expr(e),
-            TStmt::Let { init, .. } => expr(init),
-            TStmt::With { body, .. } | TStmt::Defer(body) | TStmt::ErrDefer(body) => contains_break(body),
-            _ => false,
-        }
+/// An expression made only of number literals and operators on them.
+fn literal_only(e: &Expr) -> bool {
+    match &e.kind {
+        ExprKind::Int(_) | ExprKind::Float(_) => true,
+        ExprKind::Unary(_, x) => literal_only(x),
+        ExprKind::Binary(_, a, b) => literal_only(a) && literal_only(b),
+        _ => false,
     }
-    fn expr(e: &TExpr) -> bool {
-        match &e.kind {
-            TK::If { then, else_, .. } => contains_break(then) || else_.as_ref().map(contains_break).unwrap_or(false),
-            TK::Match { arms, .. } => arms.iter().any(|a| expr(&a.body)),
-            TK::Block(b) | TK::Unsafe(b) => contains_break(b),
-            TK::Catch { handler, .. } => contains_break(handler),
-            _ => false,
+}
+
+fn has_error_ty(t: &Ty) -> bool {
+    let mut found = false;
+    t.walk(&mut |x| found |= matches!(x, Ty::Error));
+    found
+}
+
+/// Whether any `break` in the body, however deeply nested (in expressions,
+/// inner loops with a label, `select` arms, loop-body closures), leaves loop `id`.
+fn breaks_out_of(b: &TBlock, id: u32) -> bool {
+    let mut found = false;
+    crate::tir::walk_block(b, &mut |n| {
+        if let crate::tir::Node::Stmt(TStmt::Break(i, _)) = n {
+            found |= *i == id;
         }
-    }
-    b.stmts.iter().any(stmt) || b.value.as_ref().map(|v| expr(v)).unwrap_or(false)
+    });
+    found
 }
 
 fn is_const_expr(e: &TExpr) -> bool {

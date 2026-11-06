@@ -1,0 +1,8 @@
+fn mk() fn() int {
+    let s = "abc".toString()
+    let v = s.asStr()
+    return () => v.len()
+}
+fn main() {
+    println(mk()())
+}

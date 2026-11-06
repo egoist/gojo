@@ -1,0 +1,8 @@
+fn take(s sink String) bool {
+    return false
+}
+fn main() {
+    let s = "abcdefghijklmnopqrstuvwxyz0123456789".toString()
+    for take(s) {
+    }
+}

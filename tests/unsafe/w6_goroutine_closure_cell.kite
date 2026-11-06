@@ -1,0 +1,5 @@
+fn main() {
+    let c = Cell(1)
+    let f = () => c.set(2)
+    go f()
+}

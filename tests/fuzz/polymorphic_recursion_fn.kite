@@ -1,0 +1,10 @@
+fn grow[T](x sink T, n int) int {
+    if n == 0 {
+        return 0
+    }
+    let v = [x]
+    return grow(v, n - 1) + 1
+}
+fn main() {
+    println(grow(1, 3))
+}

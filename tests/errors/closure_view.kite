@@ -1,0 +1,26 @@
+// A view a closure returns can point into what the closure captured.
+fn run(f fn() str) str {
+    return f()
+}
+
+fn through_argument() {
+    var s = "abcdefghijklmnopqrstuvwxyz".toString()
+    let v = run(() => s.asStr())
+    s = "zzz".toString()
+    // error: cannot modify `s` while it is borrowed by `v`
+    println(v)
+}
+
+fn through_variable() {
+    var s = "abc".toString()
+    let f = () => s.asStr()
+    let v = f()
+    drop(f)
+    // error: cannot move `f` while it is borrowed
+    println(v)
+}
+
+fn main() {
+    through_argument()
+    through_variable()
+}

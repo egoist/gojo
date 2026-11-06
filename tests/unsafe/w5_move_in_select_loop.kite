@@ -1,0 +1,15 @@
+fn take(s sink String) {}
+fn main() {
+    let ch = chan[int](2)
+    ch <- 1
+    ch <- 2
+    let s = "abcdefghijklmnopqrstuvwxyz0123456789".toString()
+    for _ in 0..2 {
+        select {
+            let x = <-ch => {
+                take(s)
+                println(x)
+            }
+        }
+    }
+}

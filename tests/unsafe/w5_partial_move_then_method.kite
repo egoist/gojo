@@ -1,0 +1,14 @@
+struct P {
+    a String
+    b String
+
+    fn show(self) {
+        println(self.a, self.b)
+    }
+}
+fn take(s sink String) {}
+fn main() {
+    let p = P{a: "abcdefghijklmnopqrstuvwxyz0123456789".toString(), b: "b".toString()}
+    take(p.a)
+    p.show()
+}

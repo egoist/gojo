@@ -1,0 +1,37 @@
+// What a `defer` moves is moved where it runs: at the end of its block, or
+// where a `break`, `continue` or `return` leaves the block.
+fn take(s sink String) {}
+
+fn twice() {
+    let s = "abc".toString()
+    defer take(s)
+    defer take(s)
+    // error: use of `s` after it was moved
+}
+
+fn after_block() {
+    let s = "abc".toString()
+    {
+        defer take(s)
+    }
+    println(s)
+    // error: use of `s` after it was moved
+}
+
+fn after_break() {
+    let s = "abc".toString()
+    for {
+        {
+            defer take(s)
+            break
+        }
+    }
+    println(s)
+    // error: use of `s` after it was moved
+}
+
+fn main() {
+    twice()
+    after_block()
+    after_break()
+}

@@ -1,0 +1,10 @@
+fn main() {
+    var s = "abcdefghijklmnopqrstuvwxyz0123456789".toString()
+    var w = s.asStr()
+    var i = 0
+    for w.len() > 0 && i < 3 {
+        s.push("grow the buffer so that it has to move somewhere")
+        w = s.asStr()
+        i += 1
+    }
+}

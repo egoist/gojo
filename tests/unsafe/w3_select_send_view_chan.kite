@@ -1,0 +1,9 @@
+fn main() {
+    let ch = chan[String](1)
+    var s = "abc".toString()
+    select {
+        ch <- s => println("sent")
+        _ => {}
+    }
+    println(s)
+}

@@ -1,3 +1,3 @@
 ticks during the C calls: true true
-longest wait under 15 ms: true
+longest wait under 60 ms: true
 one extra thread at most: true

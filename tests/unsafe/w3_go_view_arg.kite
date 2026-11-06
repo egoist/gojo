@@ -1,0 +1,11 @@
+use time
+fn show(s str) {
+    time.sleep(10 * time.millisecond)
+    println(s)
+}
+fn main() {
+    var s = "abcdefghijklmnopqrstuvwxyz".toString()
+    go show(s.asStr())
+    s = "replaced".toString()
+    time.sleep(50 * time.millisecond)
+}
