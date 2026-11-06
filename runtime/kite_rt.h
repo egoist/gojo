@@ -229,6 +229,18 @@ static inline uint64_t kite_hash_u64(uint64_t x) {
 }
 static inline uint64_t kite_hash_mix(uint64_t h, uint64_t x) { return kite_hash_u64(h ^ (x + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2))); }
 
+// A fact for the optimizer, e.g. that a loop's block end is within the loop.
+#if defined(__clang__)
+#define KITE_ASSUME(x) __builtin_assume(x)
+#else
+#define KITE_ASSUME(x) do { if (!(x)) __builtin_unreachable(); } while (0)
+#endif
+
+// The assembler name of a C symbol (macOS prefixes an underscore).
+#define KITE_ASM_STR2(x) #x
+#define KITE_ASM_STR(x) KITE_ASM_STR2(x)
+#define KITE_ASM_NAME(n) KITE_ASM_STR(__USER_LABEL_PREFIX__) n
+
 // ---- concurrency (runtime/kite_sched.c)
 // A goroutine waiting in a channel queue. Lives on the waiting goroutine's stack.
 typedef struct kite_sudog {
@@ -247,6 +259,29 @@ typedef struct {
     kite_sudog s;
 } kite_sel_case;
 _Noreturn void kite_sched_main(void (*entry)(void));
+// Preemption: generated code polls this flag at loop heads and on entry to
+// functions that may recurse.
+extern int kite_preempt_flag;
+void kite_preempt_point(void);
+// The slow path goes through an assembly stub that saves all registers, from
+// an asm statement that changes nothing as far as the C compiler knows (see
+// kite_sched.c), so a poll doesn't force values out of registers.
+#if defined(__aarch64__)
+#define KITE_PREEMPT_CALL() __asm__ volatile("bl " KITE_ASM_NAME("kite_preempt_tramp") ::: "x30", "cc")
+#elif defined(__x86_64__)
+#define KITE_PREEMPT_CALL() __asm__ volatile("leaq -128(%%rsp), %%rsp\n\tcall " KITE_ASM_NAME("kite_preempt_tramp") "\n\tleaq 128(%%rsp), %%rsp" ::: "cc")
+#else
+#define KITE_PREEMPT_CALL() kite_preempt_point()
+#endif
+#ifdef KITE_NO_POLL
+#define KITE_POLL() do {} while (0)
+#else
+#define KITE_POLL() do { if (__builtin_expect(__atomic_load_n(&kite_preempt_flag, __ATOMIC_RELAXED), 0)) KITE_PREEMPT_CALL(); } while (0)
+#endif
+// Around C calls: the worker's CPU slot goes to another worker if the call takes long.
+void kite_ffi_enter(void);
+void kite_ffi_exit(void);
+void kite_blocking_enter(void);
 void kite_go(void (*fn)(void *), void *arg);
 kite_chan *kite_chan_new(size_t esize, int64_t cap);
 void kite_chan_retain(kite_chan *c);
@@ -270,6 +305,10 @@ uint8_t *kite_task___scopeEnter(int64_t ns);
 bool kite_task___scopeExit(uint8_t *s);
 void kite_task___groupCancel(uint8_t *state);
 void kite_task_yieldNow(void);
+int64_t kite_task___numGoroutines(void);
+int64_t kite_task___numThreads(void);
+int64_t kite_task___maxProcs(void);
+int64_t kite_task___setMaxProcs(int64_t n);
 int64_t kite_net___listen(kite_str addr);
 int64_t kite_net___connect(kite_str addr);
 int64_t kite_net___accept(int64_t fd);

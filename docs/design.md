@@ -384,7 +384,7 @@ for x in &v { x += 1 }      // 可变遍历：调用 eachMut
 
 goroutine、channel 和 `select` 保留，调度器仍是 M:N 的有栈协程，本来就不依赖 GC。所有权让数据竞争变成编译错误；结构化并发让子任务可以安全地借用外层数据。
 
-栈和 Go 不同：任务会借用别的 goroutine 栈上的数据，所以栈**不能移动**，也就不能像 Go 那样从 2 KB 开始、满了再整体复制。每个 goroutine 预留一段固定的虚拟地址（默认 2 MB，带保护页），只有用到的页才占内存：一个挂起的小 goroutine 占一页（Linux 4 KB，Apple Silicon 16 KB）。阻塞的 C 调用不需要特殊标注，调度器发现某个线程长时间被同一个 goroutine 占着，就另起线程运行其他 goroutine。
+栈和 Go 不同：任务会借用别的 goroutine 栈上的数据，所以栈**不能移动**，也就不能像 Go 那样从 2 KB 开始、满了再整体复制。每个 goroutine 预留一段固定的虚拟地址（默认 2 MB，带保护页），只有用到的页才占内存：一个挂起的小 goroutine 占一页（Linux 4 KB，Apple Silicon 16 KB）。阻塞的 C 调用不需要特殊标注：`extern` 调用期间线程把 CPU 名额让给别的线程。不阻塞的长计算会被抢占：生成的代码在循环和递归函数入口检查一个全局标志（一次读、一次分支），有 goroutine 在等时，运行超过 10 ms 的 goroutine 让出 CPU。8 个基准的周期数几何平均没有变化，单项最多 +5%（`bench/README.md`）。
 
 ```go
 // 结构化并发：块结束时等待所有子任务；任一失败就取消其余任务
@@ -459,7 +459,7 @@ struct Node {
 | `unsafe.forget(x)` | 放弃释放，把所有权交给外部代码 |
 
 - `unsafe` 块的范围尽量小。编译器会统计每个包的 unsafe 行数，并写进包的元数据，供审查和依赖策略使用。
-- `extern` 的库在运行时加载，和不依赖 cgo 的做法一样，交叉编译不需要目标平台的 C 工具链。需要静态链接时写 `extern "C" static "z"`。
+- `extern "C" lib "z"` 的库在运行时加载，和不依赖 cgo 的做法一样，交叉编译不需要目标平台的 C 工具链。libc 的函数（不写库）和 `extern "C" static "z"` 是普通的链接期调用。
 - 外部回调由 `extern "C" fn` 声明的 Kite 函数提供，不能捕获变量，上下文通过 `*void` 参数传递。
 - panic 不能穿过 `extern` 边界：在回调中发生 panic 时进程直接中止。
 

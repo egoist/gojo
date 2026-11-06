@@ -126,10 +126,10 @@ cargo build --release
 - **错误处理**：`try`、`try x else Wrap`、`catch e { ... }`、`match` 解构 `ok`/`err`、`?T` 上的 `try`、`??`、`?.`。
 - **接口**：结构化隐式满足、接口值（堆上盒子 + 虚表）、借用接口参数（胖指针，不分配）、`fn bump(self inout) int` 这种可变接收者方法、`match` 按具体类型分支、嵌入接口、带类型集的约束接口（`~int | ~f64`）。
 - **泛型**：泛型函数/结构体/枚举、方法自带类型参数、`where` 条件方法、内置能力约束（`copy`、`clone`、`default`、`send`、`comparable`、`ordered`、`hash`）、局部双向推断（含闭包返回类型）、整数常量泛型（`Mat[R, C]`，维度不匹配是编译错误）。自定义 `equal`/`hash`/`compare` 方法后可以作 Map 键或排序。
-- **并发**：M:N 调度的有栈协程（10 万个 goroutine 在 Linux 上约 440 MB），阻塞的 channel、锁、`time.sleep`、网络操作只挂起 goroutine；`go`、带缓冲/无缓冲 channel（发送即转移所有权）、`close`、`for x in ch`、`select`（分支写法同 `match`：`let x = <-ch => ...`、`ch <- v => ...`、`_ => ...`）、`arc(Mutex(x))`、`Mutex(&x)`（锁借用外部数据，用在 `task.group` 里）、死锁检测。
+- **并发**：M:N 调度的有栈协程（10 万个 goroutine 在 Linux 上约 440 MB），阻塞的 channel、锁、`time.sleep`、网络操作只挂起 goroutine；抢占（有其他 goroutine 在等时，运行 10 ms 后让出 CPU；8 个基准的周期数几何平均没有变化，单项最多 +5%）；C 调用和文件 I/O 期间把 CPU 让给其他线程；`task.setMaxProcs`、`task.stats()`；`go`、带缓冲/无缓冲 channel（发送即转移所有权）、`close`、`for x in ch`、`select`（分支写法同 `match`：`let x = <-ch => ...`、`ch <- v => ...`、`_ => ...`）、`arc(Mutex(x))`、`Mutex(&x)`（锁借用外部数据，用在 `task.group` 里）、死锁检测。
 - **结构化并发与取消**：`task.group`（任务借用组外数据、拿走组体里的值，首个错误作为组的结果），取消沿任务树传播（`g.cancel()`、失败的子任务、`task.timeout(d, body)` 的期限），被取消任务里的阻塞操作立即返回，`try task.check()` 检查点。
 - **网络**：`net.listen`/`accept`/`dial`，`Conn` 的读写不阻塞线程、可被取消。[`examples/http`](examples/http) 是一个带请求超时、客户端断开即取消、停机时取消在途请求的 HTTP/1.1 服务器。
-- **unsafe 与 FFI**：`extern "C" lib "libz" { ... }` 运行时 `dlopen`，构建时不需要 C 头文件；不写 `lib` 时查找 libc；`extern "C" static` 静态链接；`extern "C" fn` 导出 Kite 函数；`unsafe send struct` 由作者担保跨线程安全。没有 C 表示的类型（`String`、函数值等）不能出现在 `extern` 签名里。
+- **unsafe 与 FFI**：`extern "C" lib "libz" { ... }` 运行时 `dlopen`，构建时不需要 C 头文件；不写 `lib` 时直接调用 libc；`extern "C" static` 静态链接（静态的 musl 二进制里也能用）；`extern "C" fn` 导出 Kite 函数；`unsafe send struct` 由作者担保跨线程安全。没有 C 表示的类型（`String`、函数值等）不能出现在 `extern` 签名里。
 - **标准库**：prelude（Option/Result/字符串/切片/Vec/Map 方法、`Arena[T]` + 带代数的 `Id[T]`、`Hasher`）、`fmt`、`os`、`math`、`time`、`task`、`net`、`strings`。内置类型的方法签名用 Kite 写在 `std/prelude.kite`，其中 `map`/`filter`/`fold`/`join`/`Arena` 等本身就是 Kite 代码。
 
 `tests/run/` 下的程序覆盖了以上全部特性，可以当作语言示例阅读。精确的语言规则见 [`docs/spec.md`](docs/spec.md)，每一节都列出了覆盖它的测试。
@@ -189,8 +189,8 @@ std/              用 Kite 写的标准库（编译进二进制）
 
 ## 尚未实现
 
-- 调度器不抢占：一个不阻塞的长计算会一直占着它的线程（调度器会另起线程运行其他 goroutine，但这个 goroutine 本身不会被换下）。
-- 网络只有 TCP；没有 UDP、Unix socket、TLS。文件读写仍是阻塞调用（由调度器另起线程弥补）。
+- 网络只有 TCP；没有 UDP、Unix socket、TLS。
+- Linux 6.13 之前的内核上，每个 goroutine 占两个内存映射，默认的 `vm.max_map_count`（262144）约支持 13 万个同时存在的 goroutine，超过时报错并提示调大。
 - `#specialize`、PGO。
 - 设计文档里的 `Set[T]`、`RwLock[T]`、`Atomic[T]`、`saturatingAdd`、`unsafe.cast`、`unsafe.forget`，以及把 Kite 函数作为回调传给 C（`extern "C" fn` 目前只能导出和直接调用）。
 - 按包分开编译、导出数据缓存（目前每次整体编译，靠前端速度和二进制缓存弥补）。

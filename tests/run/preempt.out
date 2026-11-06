@@ -1,0 +1,4 @@
+busy goroutines done: 8 true
+sleeper never waited 60 ms: true
+no extra threads: true maxProcs 2
+goroutines left: 1

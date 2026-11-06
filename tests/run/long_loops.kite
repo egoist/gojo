@@ -1,0 +1,128 @@
+// Long counted loops poll for preemption between blocks of iterations. The
+// block boundary must not be visible: every way of iterating gives the same
+// result on either side of it.
+
+struct Tracked {
+    log arc[Mutex[int]]
+
+    fn drop(self inout) {
+        with n = self.log.lock() { n += 1 }
+    }
+}
+
+fn sumTo(n int) int {
+    var s = 0
+    for i in 0..n {
+        s += i
+    }
+    return s
+}
+
+fn firstOver(n int, limit int) int {
+    for i in 0..n {
+        if i * 2 > limit { return i }
+    }
+    return -1
+}
+
+fn main() {
+    // on both sides of the block size
+    for n in [0, 1, 65535, 65536, 65537, 131072, 131073, 200000] {
+        println(n, sumTo(n))
+    }
+
+    // empty and negative ranges
+    var hits = 0
+    for _ in 5..3 { hits += 1 }
+    for _ in 3..3 { hits += 1 }
+    for _ in -9223372036854775807..-9223372036854775807 { hits += 1 }
+    println("empty ranges:", hits)
+    var neg = 0
+    for i in -70000..70000 { neg += i }
+    println("negative start:", neg)
+    var wide = 0
+    let lo = -9223372036854775807
+    for i in lo..lo + 3 { wide = wide +% i }
+    println("near the minimum:", wide)
+
+    // the difference of an empty range can wrap around to something small
+    let big = 9223372036854775807
+    var wrapped = 0
+    for _ in big - 100000..-big { wrapped += 1 }
+    println("wrapped empty range:", wrapped)
+
+    // smaller integer types, including a full byte range
+    var bytes = 0
+    for b in u8(0)..u8(255) { bytes += int(b) }
+    println("u8:", bytes)
+    let start i32 = -100000
+    let end i32 = 100000
+    var small = 0
+    for x in start..end { small += int(x) }
+    println("i32:", small)
+
+    // `continue` and `break` in the block loop and in the tail loop
+    var evens = 0
+    for i in 0..200001 {
+        if i % 2 == 1 { continue }
+        evens += 1
+    }
+    println("continue:", evens)
+    var seen = 0
+    for i in 0..1000000 {
+        if i == 70000 { break }
+        seen += 1
+    }
+    println("break in the block loop:", seen)
+    seen = 0
+    for i in 0..70000 {
+        if i == 69999 { break }
+        seen += 1
+    }
+    println("break in the tail loop:", seen)
+
+    // `return` from either copy
+    println(firstOver(1000000, 140000), firstOver(100, 40), firstOver(10, 100))
+
+    // labels out of a counted loop that sits inside another
+    var found = 0
+    outer: for a in 0..3 {
+        for b in 0..100000 {
+            if b == 70000 {
+                found += a + 1
+                continue outer
+            }
+        }
+    }
+    println("labels:", found)
+
+    // Vec, slices and arrays; with an index, and in place
+    var v = Vec[int]{}
+    for i in 0..140000 { v.push(i) }
+    var total = 0
+    for x in v { total += x }
+    println("vec:", total)
+    var weighted = 0
+    for i, x in v {
+        if i % 50000 == 0 { weighted += x + i }
+    }
+    println("index:", weighted)
+    for x in &v { x += 1 }
+    println("in place:", v[0], v[65535], v[65536], v[139999])
+    var part = 0
+    for x in v[65530..65540] { part += x }
+    println("slice:", part)
+    var arr [70000]int
+    for i in 0..70000 { arr[i] = i }
+    var arrTotal = 0
+    for x in arr { arrTotal += x }
+    println("array:", arrTotal)
+
+    // a value made inside the body is dropped once per iteration, in both copies
+    let log = arc(Mutex(0))
+    for _ in 0..70000 {
+        let t = Tracked{log: log.clone()}
+        _ = t
+    }
+    with n = log.lock() { println("drops:", n) }
+}

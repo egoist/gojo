@@ -47,6 +47,31 @@ pub fn check() ! Cancelled {
 // Let other goroutines run.
 pub fn yieldNow()
 
+fn __numGoroutines() int
+fn __numThreads() int
+fn __maxProcs() int
+fn __setMaxProcs(n int) int
+
+pub struct Stats {
+    // goroutines alive, `main` included
+    pub goroutines int
+    // threads started to run goroutines (more than maxProcs only while some
+    // goroutines are in long C calls)
+    pub threads int
+    // goroutines running Kite code at the same time; defaults to the number of
+    // CPUs, or KITE_MAXPROCS
+    pub maxProcs int
+}
+
+pub fn stats() Stats {
+    return Stats{goroutines: __numGoroutines(), threads: __numThreads(), maxProcs: __maxProcs()}
+}
+
+// Changes how many goroutines run Kite code at the same time; returns the old value.
+pub fn setMaxProcs(n int) int {
+    return __setMaxProcs(n)
+}
+
 // Runs `body` with a deadline. When it passes, everything `body` started is
 // cancelled, and the result is none. Also none when the caller is cancelled.
 pub fn timeout[T any](d int, body fn() T) ?T {

@@ -5,9 +5,17 @@
 //    to a global queue.
 //  - A blocked goroutine is parked: it registers somewhere (channel queue, timer
 //    heap, poller) and switches back to the worker's scheduler loop.
-//  - A monitor, in the poller thread, notices workers stuck in one goroutine (a
-//    blocking C call or a long computation) and starts another worker, so queued
-//    goroutines still run. Nothing in generated code polls for preemption.
+//  - A monitor, in the poller thread, keeps the CPU shared:
+//      * a goroutine that has run for 10 ms while others wait is asked to yield;
+//        generated code polls a global flag at loop heads and on entry to
+//        functions that may recurse (one load and a branch);
+//      * a worker inside a C call (FFI, file I/O) gives up its CPU slot, so
+//        another worker runs the queued goroutines; known-blocking calls give
+//        it up at once;
+//      * a goroutine that doesn't answer a request to yield (a long loop in C)
+//        is treated like one in a C call.
+//    So there are as many workers running Kite code as CPUs, plus one per
+//    goroutine that is in C.
 //  - Goroutine stacks are large virtual reservations with a guard region; only
 //    touched pages use memory. Stacks never move, so tasks can borrow from them.
 //
@@ -165,6 +173,157 @@ __asm__(
 
 extern void kite_ctx_switch(void **save_sp, void *load_sp);
 
+// ------------------------------------------------------------------ preemption trampoline
+//
+// Generated code reaches kite_preempt_point through this stub, from an asm
+// statement that tells the C compiler nothing changes: no registers (besides
+// the return address and flags) and no memory. That keeps the poll from
+// forcing values out of registers in the loops it sits in. It's sound because
+// a preemption point is not a synchronization point: Kite code only sees
+// other goroutines' writes through locks and channels, which are real calls.
+// The stub saves every register the C call could change, vector state included.
+#if defined(__aarch64__)
+__asm__(
+    ".text\n.p2align 2\n"
+    ".globl " KITE_SYM(kite_preempt_tramp) "\n"
+    KITE_SYM(kite_preempt_tramp) ":\n"
+    // stay below the caller's 128-byte red zone
+    "    sub sp, sp, #816\n"
+    "    stp x0, x1, [sp, #0]\n"
+    "    stp x2, x3, [sp, #16]\n"
+    "    stp x4, x5, [sp, #32]\n"
+    "    stp x6, x7, [sp, #48]\n"
+    "    stp x8, x9, [sp, #64]\n"
+    "    stp x10, x11, [sp, #80]\n"
+    "    stp x12, x13, [sp, #96]\n"
+    "    stp x14, x15, [sp, #112]\n"
+    "    stp x16, x17, [sp, #128]\n"
+    "    stp x29, x30, [sp, #144]\n"
+    "    mrs x0, fpsr\n"
+    "    mrs x1, fpcr\n"
+    "    stp x0, x1, [sp, #160]\n"
+    "    stp q0, q1, [sp, #176]\n"
+    "    stp q2, q3, [sp, #208]\n"
+    "    stp q4, q5, [sp, #240]\n"
+    "    stp q6, q7, [sp, #272]\n"
+    "    stp q8, q9, [sp, #304]\n"
+    "    stp q10, q11, [sp, #336]\n"
+    "    stp q12, q13, [sp, #368]\n"
+    "    stp q14, q15, [sp, #400]\n"
+    "    stp q16, q17, [sp, #432]\n"
+    "    stp q18, q19, [sp, #464]\n"
+    "    stp q20, q21, [sp, #496]\n"
+    "    stp q22, q23, [sp, #528]\n"
+    "    stp q24, q25, [sp, #560]\n"
+    "    stp q26, q27, [sp, #592]\n"
+    "    stp q28, q29, [sp, #624]\n"
+    "    stp q30, q31, [sp, #656]\n"
+    "    add x29, sp, #144\n"
+    "    bl " KITE_SYM(kite_preempt_point) "\n"
+    "    ldp q0, q1, [sp, #176]\n"
+    "    ldp q2, q3, [sp, #208]\n"
+    "    ldp q4, q5, [sp, #240]\n"
+    "    ldp q6, q7, [sp, #272]\n"
+    "    ldp q8, q9, [sp, #304]\n"
+    "    ldp q10, q11, [sp, #336]\n"
+    "    ldp q12, q13, [sp, #368]\n"
+    "    ldp q14, q15, [sp, #400]\n"
+    "    ldp q16, q17, [sp, #432]\n"
+    "    ldp q18, q19, [sp, #464]\n"
+    "    ldp q20, q21, [sp, #496]\n"
+    "    ldp q22, q23, [sp, #528]\n"
+    "    ldp q24, q25, [sp, #560]\n"
+    "    ldp q26, q27, [sp, #592]\n"
+    "    ldp q28, q29, [sp, #624]\n"
+    "    ldp q30, q31, [sp, #656]\n"
+    "    ldp x0, x1, [sp, #160]\n"
+    "    msr fpsr, x0\n"
+    "    msr fpcr, x1\n"
+    "    ldp x0, x1, [sp, #0]\n"
+    "    ldp x2, x3, [sp, #16]\n"
+    "    ldp x4, x5, [sp, #32]\n"
+    "    ldp x6, x7, [sp, #48]\n"
+    "    ldp x8, x9, [sp, #64]\n"
+    "    ldp x10, x11, [sp, #80]\n"
+    "    ldp x12, x13, [sp, #96]\n"
+    "    ldp x14, x15, [sp, #112]\n"
+    "    ldp x16, x17, [sp, #128]\n"
+    "    ldp x29, x30, [sp, #144]\n"
+    "    add sp, sp, #816\n"
+    "    ret\n");
+#elif defined(__x86_64__)
+// Set at startup: XSAVE area size (0: use FXSAVE).
+int64_t kite_xsave_size;
+__asm__(
+    ".text\n.p2align 4\n"
+    ".globl " KITE_SYM(kite_preempt_tramp) "\n"
+    KITE_SYM(kite_preempt_tramp) ":\n"
+    // the caller already stepped over its red zone
+    "    pushq %rbp\n"
+    "    movq %rsp, %rbp\n"
+    "    pushq %rax\n"
+    "    pushq %rcx\n"
+    "    pushq %rdx\n"
+    "    pushq %rsi\n"
+    "    pushq %rdi\n"
+    "    pushq %r8\n"
+    "    pushq %r9\n"
+    "    pushq %r10\n"
+    "    pushq %r11\n"
+    "    andq $-64, %rsp\n"
+    "    movq " KITE_SYM(kite_xsave_size) "(%rip), %rcx\n"
+    "    testq %rcx, %rcx\n"
+    "    jz 1f\n"
+    "    subq %rcx, %rsp\n"
+    // the XSAVE header must start out zero
+    "    movq %rsp, %rdi\n"
+    "    xorl %eax, %eax\n"
+    "    movq %rax, 512(%rdi)\n"
+    "    movq %rax, 520(%rdi)\n"
+    "    movq %rax, 528(%rdi)\n"
+    "    movq %rax, 536(%rdi)\n"
+    "    movq %rax, 544(%rdi)\n"
+    "    movq %rax, 552(%rdi)\n"
+    "    movq %rax, 560(%rdi)\n"
+    "    movq %rax, 568(%rdi)\n"
+    "    movl $-1, %eax\n"
+    "    movl $-1, %edx\n"
+    "    xsave64 (%rsp)\n"
+    "    call " KITE_SYM(kite_preempt_point) "\n"
+    "    movl $-1, %eax\n"
+    "    movl $-1, %edx\n"
+    "    xrstor64 (%rsp)\n"
+    "    jmp 2f\n"
+    "1:\n"
+    "    subq $512, %rsp\n"
+    "    fxsave64 (%rsp)\n"
+    "    call " KITE_SYM(kite_preempt_point) "\n"
+    "    fxrstor64 (%rsp)\n"
+    "2:\n"
+    "    leaq -72(%rbp), %rsp\n"
+    "    popq %r11\n"
+    "    popq %r10\n"
+    "    popq %r9\n"
+    "    popq %r8\n"
+    "    popq %rdi\n"
+    "    popq %rsi\n"
+    "    popq %rdx\n"
+    "    popq %rcx\n"
+    "    popq %rax\n"
+    "    popq %rbp\n"
+    "    ret\n");
+
+static void xsave_setup(void) {
+    unsigned a, b, c, d;
+    __asm__ volatile("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d) : "a"(1), "c"(0));
+    if (!(c & (1u << 27))) return;      // no OSXSAVE: FXSAVE it is
+    __asm__ volatile("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d) : "a"(0xd), "c"(0));
+    if (b < 576) return;
+    kite_xsave_size = ((int64_t)b + 63) & ~(int64_t)63;
+}
+#endif
+
+
 // ------------------------------------------------------------------ core types
 
 enum { WAIT_NONE = 0, WAIT_CANCELLABLE = 1 };
@@ -213,9 +372,13 @@ typedef struct kite_worker {
     struct kite_worker *idle_next;
     bool spinning;
     uint64_t tick;          // goroutines started; read by the monitor
-    uint64_t seen_tick;     // monitor-only
-    int seen_rounds;        // monitor-only
-    bool stuck;
+    int preempt;            // the monitor asks the running goroutine to yield
+    bool yielded;           // the last goroutine yielded: check the global queue first
+    int insys;              // in a C call
+    uint64_t sysseq;        // C calls made, to tell one long call from many short ones
+    int released;           // its CPU slot was handed to another worker
+    uint64_t seen_tick, seen_sysseq;    // monitor-only
+    int64_t seen_since, preempt_since;  // monitor-only
     uint32_t schedtick;
     uint64_t rng;
     kite_g *free_gs;
@@ -245,7 +408,9 @@ static pthread_mutex_t s_lock = PTHREAD_MUTEX_INITIALIZER;
 static kite_g *s_gq_head, *s_gq_tail;
 static int64_t s_gq_size;
 static kite_worker *s_idle;
-static int s_nidle, s_nstarted, s_nspinning, s_nstuck, s_nprocs;
+static int s_nidle, s_nstarted, s_nspinning, s_nreleased, s_nprocs;
+int kite_preempt_flag;   // outstanding requests to yield; polled by generated code
+static int64_t s_ngoroutines;
 static kite_worker **s_workers;
 static kite_g *s_free_gs;
 static int64_t s_nfree_global;
@@ -294,6 +459,16 @@ static void global_put_locked(kite_g *g) {
     else s_gq_head = g;
     s_gq_tail = g;
     KITE_SET_RELAXED(&s_gq_size, s_gq_size + 1);
+}
+
+// Goroutines woken by timers and the network go first: they have waited already.
+static void global_put_front(kite_g *g) {
+    pthread_mutex_lock(&s_lock);
+    g->qnext = s_gq_head;
+    s_gq_head = g;
+    if (!s_gq_tail) s_gq_tail = g;
+    KITE_SET_RELAXED(&s_gq_size, s_gq_size + 1);
+    pthread_mutex_unlock(&s_lock);
 }
 
 static void global_put(kite_g *g) {
@@ -421,7 +596,7 @@ static kite_g *global_get_locked(kite_worker *w) {
 }
 
 static inline bool can_wake(void) {
-    int active = KITE_SC_LOAD(&s_nstarted) - KITE_SC_LOAD(&s_nidle) - KITE_SC_LOAD(&s_nstuck);
+    int active = KITE_SC_LOAD(&s_nstarted) - KITE_SC_LOAD(&s_nidle) - KITE_SC_LOAD(&s_nreleased);
     return active < s_nprocs;
 }
 
@@ -434,7 +609,7 @@ static inline void maybe_wake(void) {
 static void g_ready(kite_g *g) {
     kite_worker *w = cur_worker();
     if (w) runq_put(w, g, true);
-    else global_put(g);
+    else global_put_front(g);
     maybe_wake();
 }
 
@@ -796,19 +971,75 @@ static inline void stop_spinning(kite_worker *w) {
     if (KITE_ADD(&s_nspinning, -1) == 0) maybe_wake();
 }
 
+// The worker's goroutine is in C: let another worker have its CPU slot.
+static void worker_release(kite_worker *w) {
+    int expected = 0;
+    if (!__atomic_compare_exchange_n(&w->released, &expected, 1, false, __ATOMIC_SEQ_CST, __ATOMIC_RELAXED)) return;
+    KITE_ADD(&s_nreleased, 1);
+    maybe_wake();
+}
+
+static bool worker_reclaim(kite_worker *w) {
+    int expected = 1;
+    if (!__atomic_compare_exchange_n(&w->released, &expected, 0, false, __ATOMIC_SEQ_CST, __ATOMIC_RELAXED)) return false;
+    KITE_ADD(&s_nreleased, -1);
+    return true;
+}
+
+static void cancel_preempt(kite_worker *w) {
+    if (__atomic_exchange_n(&w->preempt, 0, __ATOMIC_ACQ_REL)) KITE_ADD(&kite_preempt_flag, -1);
+}
+
+// Generated code calls this when kite_preempt_flag is set.
+void kite_preempt_point(void) {
+    kite_worker *w = cur_worker();
+    if (!w || !__atomic_exchange_n(&w->preempt, 0, __ATOMIC_ACQ_REL)) return;
+    KITE_ADD(&kite_preempt_flag, -1);
+    kite_task_yieldNow();
+}
+
+// Around C calls that might take a while. Nothing switches goroutines in
+// between, so enter and exit run on the same worker.
+void kite_ffi_enter(void) {
+    kite_worker *w = cur_worker();
+    if (!w) return;
+    KITE_SET_RELAXED(&w->sysseq, w->sysseq + 1);
+    KITE_SC_STORE(&w->insys, 1);
+}
+
+void kite_ffi_exit(void) {
+    kite_worker *w = cur_worker();
+    if (!w) return;
+    KITE_SC_STORE(&w->insys, 0);
+    if (KITE_SC_LOAD(&w->released) && worker_reclaim(w)) {
+        // more workers than CPUs running Kite code now: get back in line
+        int active = KITE_SC_LOAD(&s_nstarted) - KITE_SC_LOAD(&s_nidle) - KITE_SC_LOAD(&s_nreleased);
+        if (active > s_nprocs) kite_task_yieldNow();
+    }
+}
+
+// For calls known to block (file I/O): hand the slot over right away.
+void kite_blocking_enter(void) {
+    kite_ffi_enter();
+    kite_worker *w = cur_worker();
+    if (w) worker_release(w);
+}
+
 static kite_g *find_work(kite_worker *w) {
     for (;;) {
-        // a worker that was replaced while stuck steps aside once it gets back
-        if (KITE_RELAXED(&w->stuck)) {
-            KITE_SET_RELAXED(&w->stuck, false);
-            KITE_ADD(&s_nstuck, -1);
-        }
-        int active = KITE_SC_LOAD(&s_nstarted) - KITE_SC_LOAD(&s_nidle) - KITE_SC_LOAD(&s_nstuck);
+        // back in the scheduler: the worker takes its CPU slot again (or parks
+        // below if all are taken)
+        worker_reclaim(w);
+        int active = KITE_SC_LOAD(&s_nstarted) - KITE_SC_LOAD(&s_nidle) - KITE_SC_LOAD(&s_nreleased);
         if (active > s_nprocs && !w->spinning) {
             worker_park(w);
             continue;
         }
-        if (++w->schedtick % 61 == 0 && KITE_RELAXED(&s_gq_size) > 0) {
+        // fairness: now and then, and right after a goroutine was asked to yield,
+        // look at the global queue first; woken goroutines wait at its front
+        bool global_first = w->yielded || ++w->schedtick % 61 == 0;
+        w->yielded = false;
+        if (global_first && KITE_RELAXED(&s_gq_size) > 0) {
             pthread_mutex_lock(&s_lock);
             kite_g *g = global_get_locked(w);
             pthread_mutex_unlock(&s_lock);
@@ -875,6 +1106,7 @@ static void schedule_loop(kite_worker *w) {
         if (post == POST_DEAD) {
             g_recycle(w, g);
         } else if (post == POST_YIELD) {
+            w->yielded = true;
             // to the back of the line: others get a turn even on one worker
             global_put(g);
             maybe_wake();
@@ -898,6 +1130,7 @@ static void g_entry(void) {
         kite_group_task_done(grp);
         w = cur_worker();
     }
+    KITE_ADD(&s_ngoroutines, -1);
     w->post = POST_DEAD;
     switch_to_sched(g, w, true);
     __builtin_unreachable();
@@ -1004,6 +1237,9 @@ _Noreturn void kite_sched_main(void (*entry)(void)) {
     if (env && atoll(env) >= (64 << 10)) s_stack_size = (size_t)atoll(env);
     size_t ps = (size_t)sysconf(_SC_PAGESIZE);
     s_stack_size = (s_stack_size + ps - 1) & ~(ps - 1);
+#if defined(__x86_64__)
+    xsave_setup();
+#endif
     s_workers = calloc(MAX_WORKERS, sizeof *s_workers);
     s_g_chunks = calloc(G_MAX_CHUNKS, sizeof *s_g_chunks);
     if (!s_workers || !s_g_chunks) kite_panic("out of memory", "<runtime>");
@@ -1023,6 +1259,7 @@ _Noreturn void kite_sched_main(void (*entry)(void)) {
 
 void kite_go(void (*fn)(void *), void *arg) {
     ensure_poller();
+    KITE_ADD(&s_ngoroutines, 1);
     kite_g *g = g_alloc(cur_worker(), s_stack_size);
     g->fn = fn;
     g->arg = arg;
@@ -1456,6 +1693,7 @@ void kite_group_go(kite_group *grp, void (*fn)(void *), void *arg) {
     g->fn = fn;
     g->arg = arg;
     g->group = grp;
+    KITE_ADD(&s_ngoroutines, 1);
     spin_lock(&grp->lock);
     grp->live++;
     spin_unlock(&grp->lock);
@@ -1650,23 +1888,53 @@ static void poller_wake(void) {
 #endif
 }
 
+#define PREEMPT_AFTER (10 * 1000000)    // a goroutine's time slice while others wait
+#define UNRESPONSIVE (20 * 1000000)     // no answer to a request to yield: it's in C
+#define SYSCALL_AFTER (1 * 1000000)     // a C call this long gives up its slot
+
 static void monitor_tick(void) {
+    int64_t now = kite_time_now();
     int started = KITE_LOAD(&s_nstarted);
     bool queued = KITE_RELAXED(&s_gq_size) > 0;
+    for (int i = 0; i < started && !queued; i++) {
+        kite_worker *w = KITE_LOAD(&s_workers[i]);
+        if (w && !runq_empty(w)) queued = true;
+    }
     for (int i = 0; i < started; i++) {
         kite_worker *w = KITE_LOAD(&s_workers[i]);
         if (!w) continue;
-        if (!runq_empty(w)) queued = true;
         uint64_t tick = KITE_RELAXED(&w->tick);
+        uint64_t seq = KITE_RELAXED(&w->sysseq);
         if (tick != w->seen_tick || !KITE_RELAXED(&w->cur)) {
+            // a new goroutine since the last look
             w->seen_tick = tick;
-            w->seen_rounds = 0;
+            w->seen_since = now;
+            w->seen_sysseq = seq;
+            w->preempt_since = 0;
+            cancel_preempt(w);
             continue;
         }
-        // the same goroutine for two ticks: in a C call or a long computation
-        if (++w->seen_rounds >= 2 && !__atomic_load_n(&w->stuck, __ATOMIC_RELAXED)) {
-            __atomic_store_n(&w->stuck, true, __ATOMIC_RELAXED);
-            KITE_ADD(&s_nstuck, 1);
+        if (KITE_SC_LOAD(&w->insys)) {
+            // one C call has been running since the last look
+            if (seq == w->seen_sysseq && now - w->seen_since >= SYSCALL_AFTER) {
+                worker_release(w);
+                // it may have returned in the meantime
+                if (!KITE_SC_LOAD(&w->insys)) worker_reclaim(w);
+            } else if (seq != w->seen_sysseq) {
+                w->seen_sysseq = seq;
+                w->seen_since = now;
+            }
+            continue;
+        }
+        if (KITE_RELAXED(&w->released)) continue;
+        if (!queued || now - w->seen_since < PREEMPT_AFTER) continue;
+        if (!w->preempt_since) {
+            w->preempt_since = now;
+            if (!__atomic_exchange_n(&w->preempt, 1, __ATOMIC_ACQ_REL)) KITE_ADD(&kite_preempt_flag, 1);
+        } else if (now - w->preempt_since >= UNRESPONSIVE) {
+            // not polling: a long loop inside C, like a big sort
+            cancel_preempt(w);
+            worker_release(w);
         }
     }
     if (queued && can_wake() && KITE_SC_LOAD(&s_nspinning) == 0) wake_one();
@@ -1716,7 +1984,7 @@ static void *poller_main(void *arg) {
         monitor_tick();
         // while anything runs, tick for the monitor; when all is idle, only events matter
         bool idle = KITE_SC_LOAD(&s_nidle) == KITE_SC_LOAD(&s_nstarted);
-        if (!idle && (next < 0 || next > 10000000)) next = 10000000;
+        if (!idle && (next < 0 || next > 2000000)) next = 2000000;
         if (next < 0 || next > 100000000) next = 100000000;
 #if defined(__APPLE__)
         struct kevent evs[64];
@@ -1861,7 +2129,10 @@ static int resolve(kite_str addr, bool passive, struct addrinfo **out) {
     hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
     if (passive) hints.ai_flags = AI_PASSIVE;
+    // name lookups can take seconds: give the CPU slot away meanwhile
+    kite_blocking_enter();
     int r = getaddrinfo(colon ? host : NULL, port, &hints, out);
+    kite_ffi_exit();
     return r == 0 ? 0 : EHOSTUNREACH;
 }
 
@@ -2005,4 +2276,19 @@ int kite_run_test(void (*fn)(void), const char *name) {
     bool ok = WIFEXITED(status) && WEXITSTATUS(status) == 0;
     fprintf(stderr, "%s %s (%.1f ms)\n", ok ? "  ok  " : "  FAIL", name, ms);
     return ok ? 0 : 1;
+}
+
+// ------------------------------------------------------------------ task stats
+
+int64_t kite_task___numGoroutines(void) { return KITE_SC_LOAD(&s_ngoroutines) + 1; }
+int64_t kite_task___numThreads(void) { return KITE_SC_LOAD(&s_nstarted); }
+int64_t kite_task___maxProcs(void) { return KITE_RELAXED(&s_nprocs); }
+
+int64_t kite_task___setMaxProcs(int64_t n) {
+    if (n < 1) n = 1;
+    if (n > MAX_WORKERS) n = MAX_WORKERS;
+    int old = __atomic_exchange_n(&s_nprocs, (int)n, __ATOMIC_SEQ_CST);
+    // more room: start using it; less: workers park as they reach the scheduler
+    if (n > old) maybe_wake();
+    return old;
 }

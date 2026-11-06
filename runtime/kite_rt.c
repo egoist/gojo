@@ -512,12 +512,15 @@ void kite_fmt_ptr(kite_string *b, const void *p) {
 static pthread_mutex_t g_out_lock = PTHREAD_MUTEX_INITIALIZER;
 
 void kite_write(int fd, kite_string *b) {
+    // a write to a full pipe blocks: mark it like a C call
+    kite_ffi_enter();
     pthread_mutex_lock(&g_out_lock);
     FILE *f = fd == 2 ? stderr : stdout;
     if (fd == 2) fflush(stdout);
     fwrite(b->ptr, 1, (size_t)b->len, f);
     if (fd == 2) fflush(stderr);
     pthread_mutex_unlock(&g_out_lock);
+    kite_ffi_exit();
     free(b->ptr);
 }
 
@@ -729,7 +732,7 @@ static char *cpath(kite_str p) {
     return s;
 }
 
-int64_t kite_os___readFile(kite_str path, kite_vec *out) {
+static int64_t os_readFile_impl(kite_str path, kite_vec *out) {
     char *p = cpath(path);
     FILE *f = fopen(p, "rb");
     free(p);
@@ -746,7 +749,7 @@ int64_t kite_os___readFile(kite_str path, kite_vec *out) {
     return bad ? EIO : 0;
 }
 
-int64_t kite_os___writeFile(kite_str path, kite_slice data) {
+static int64_t os_writeFile_impl(kite_str path, kite_slice data) {
     char *p = cpath(path);
     FILE *f = fopen(p, "wb");
     free(p);
@@ -812,3 +815,18 @@ void *kite_dlsym(const char *lib, const char *name) {
     return f;
 }
 
+
+// File I/O blocks its thread: give the CPU slot to another worker meanwhile.
+int64_t kite_os___readFile(kite_str path, kite_vec *out) {
+    kite_blocking_enter();
+    int64_t r = os_readFile_impl(path, out);
+    kite_ffi_exit();
+    return r;
+}
+
+int64_t kite_os___writeFile(kite_str path, kite_slice data) {
+    kite_blocking_enter();
+    int64_t r = os_writeFile_impl(path, data);
+    kite_ffi_exit();
+    return r;
+}

@@ -1,0 +1,41 @@
+// A goroutine in a long C call gives its CPU to another thread, so the other
+// goroutines keep running even with one CPU.
+use task, time
+
+extern "C" {
+    fn usleep(us u32) i32
+}
+
+fn main() {
+    _ = task.setMaxProcs(1)
+    let ticks = Mutex(0)
+    let worst = Mutex(0)
+    let r = task.group((g) => {
+        g.go(() => {
+            for _ in 0..3 {
+                _ = unsafe { usleep(100000) }
+            }
+        })
+        g.go(() => {
+            let start = time.now()
+            var prev = start
+            for time.since(start) < 250 * time.millisecond {
+                time.sleep(time.millisecond)
+                let now = time.now()
+                with w = worst.lock() { if now - prev > w { w = now - prev } }
+                prev = now
+                with t = ticks.lock() { t += 1 }
+            }
+        })
+    })
+    with t = ticks.lock() {
+        // about 250 if the C calls hold nothing up (fewer where timers are coarse); a few if they did
+        println("ticks during the C calls:", t > 20, r.isOk())
+    }
+    with w = worst.lock() {
+        // the C call gives up its CPU within a few milliseconds
+        println("longest wait under 15 ms:", w < 15 * time.millisecond)
+    }
+    let s = task.stats()
+    println("one extra thread at most:", s.threads <= s.maxProcs + 1)
+}

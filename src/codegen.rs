@@ -158,6 +158,10 @@ struct Gen<'a> {
     prog: &'a Program,
     sm: &'a SourceMap,
     tf: HashMap<FuncId, &'a TFunc>,
+    /// Functions that may call themselves, directly, through others, or through
+    /// a function value or interface: they poll for preemption on entry.
+    may_recurse: HashSet<FuncId>,
+    bounded: HashSet<FuncId>,
     fwd: String,
     tdefs: String,
     protos: String,
@@ -183,6 +187,8 @@ impl<'a> Gen<'a> {
             prog,
             sm,
             tf: tfuncs.iter().map(|t| (t.func, t)).collect(),
+            may_recurse: may_recurse(tfuncs),
+            bounded: { let r = may_recurse(tfuncs); bounded_funcs(tfuncs, &r) },
             fwd: String::new(),
             tdefs: String::new(),
             protos: String::new(),
@@ -610,6 +616,13 @@ static bool mr_{m}(kite_map *mp, const {k} *key, {e} *out) {{\n\
         }
     }
 
+    /// A loop that doesn't poll for preemption: no nested loops, and calls only
+    /// to bounded functions. One that runs forever is caught by the monitor's
+    /// fallback (it is treated like a long C call).
+    fn leaf_loop(&self, cond: Option<&TExpr>, body: &TBlock) -> bool {
+        leaf_body(&self.bounded, cond, body)
+    }
+
     /// A new type over a number, as `Some(number type)`.
     fn numeric_newtype(&self, t: &Ty) -> Option<Ty> {
         match t {
@@ -728,25 +741,36 @@ static bool mr_{m}(kite_map *mp, const {k} *key, {e} *out) {{\n\
             let plist = if ptys.is_empty() { "void".to_string() } else { ptys.join(", ") };
             let args: Vec<String> = (0..ptys.len()).map(|i| format!("a{}", i)).collect();
             let params: Vec<String> = ptys.iter().enumerate().map(|(i, t)| format!("{} a{}", t, i)).collect();
-            let lib_s = match lib {
-                Some(l) if !l.starts_with("static:") => c_string(l),
-                _ => "NULL".into(),
-            };
             let _ = writeln!(self.protos, "static {} {}({});", rc, name, plist);
+            let (call_target, setup) = match lib {
+                Some(l) if !l.starts_with("static:") => {
+                    // a library loaded at run time: no build-time dependency on it
+                    let setup = format!("    static {} (*fp)({});\n    if (!fp) fp = ({} (*)({}))kite_dlsym({}, {});\n", rc, plist, rc, plist, c_string(l), c_string(&fd.name));
+                    ("fp".to_string(), setup)
+                }
+                _ => {
+                    // libc, or a library linked statically: an ordinary call the linker
+                    // resolves. The C name is ours, bound to the real symbol, so it
+                    // can't clash with a system header's declaration.
+                    if let Some(l) = lib.as_ref().and_then(|l| l.strip_prefix("static:")) {
+                        let _ = writeln!(self.protos, "// kite-link: -l{}", l);
+                    }
+                    let xn = format!("kx_{}", name);
+                    let _ = writeln!(self.protos, "extern {} {}({}) __asm__(KITE_ASM_NAME({}));", rc, xn, plist, c_string(&fd.name));
+                    (xn, String::new())
+                }
+            };
             let _ = writeln!(
                 self.bodies,
-                "static {} {}({}) {{\n    static {} (*fp)({});\n    if (!fp) fp = ({} (*)({}))kite_dlsym({}, {});\n    {}fp({});\n}}",
+                "static {} {}({}) {{\n{}    kite_ffi_enter();\n    {}{}({});\n    kite_ffi_exit();{}\n}}",
                 rc,
                 name,
                 if params.is_empty() { "void".to_string() } else { params.join(", ") },
-                rc,
-                plist,
-                rc,
-                plist,
-                lib_s,
-                c_string(&fd.name),
-                if rc == "void" { "" } else { "return " },
-                args.join(", ")
+                setup,
+                if rc == "void" { String::new() } else { format!("{} r = ", rc) },
+                call_target,
+                args.join(", "),
+                if rc == "void" { "" } else { "\n    return r;" }
             );
             return;
         }
@@ -781,6 +805,9 @@ static bool mr_{m}(kite_map *mp, const {k} *key, {e} *out) {{\n\
             }
         }
         let body = tf.body.clone();
+        if self.may_recurse.contains(&f) {
+            self.emit(&mut fs, "KITE_POLL();");
+        }
         self.fn_body(&mut fs, &body);
         let _ = writeln!(self.bodies, "{} {{\n{}}}\n", sig, fs.out);
     }
@@ -1206,6 +1233,11 @@ static bool mr_{m}(kite_map *mp, const {k} *key, {e} *out) {{\n\
                 self.emit(fs, "for (;;) {");
                 fs.ind += 1;
                 self.push_scope(fs, SK::Loop(*id));
+                // an innermost loop without calls is polled by the loop around it
+                // (and, if it never ends, the monitor's fallback catches it)
+                if !self.leaf_loop(cond.as_ref(), body) {
+                    self.emit(fs, "KITE_POLL();");
+                }
                 if let Some(c) = cond {
                     self.push_scope(fs, SK::Stmt);
                     let cv = self.expr(fs, c);
@@ -1498,6 +1530,14 @@ static bool mr_{m}(kite_map *mp, const {k} *key, {e} *out) {{\n\
         let en = self.local_cname(fs, elem);
         let et = self.local_ty(fs, elem);
         let ec = self.cty(&et);
+        // Loops poll for preemption every iteration, except leaves (no nested
+        // loops, only bounded calls). A counted leaf is emitted twice: a loop
+        // over blocks of 65536 iterations that polls between blocks, then the
+        // plain loop for the rest, so short loops run exactly as without polls.
+        // Other leaves rely on the loop around them.
+        let leaf = self.leaf_loop(None, body);
+        // (counter, limit, counter type, per-iteration bindings) of a counted leaf
+        let mut counted: Option<(String, String, String, Vec<(String, LocalId, Repr)>)> = None;
         match kind {
             IterKind::Range { inclusive } => {
                 let lo = self.expr(fs, iter);
@@ -1510,11 +1550,18 @@ static bool mr_{m}(kite_map *mp, const {k} *key, {e} *out) {{\n\
                     self.emit(fs, &format!("for (; {}; {} = ({} != {}), {} += {}) {{", g, g, i, e, i, g));
                 } else {
                     self.emit(fs, &format!("{} {} = {}, {} = {};", ec, i, lo, e, hiv));
-                    self.emit(fs, &format!("for (; {} < {}; {}++) {{", i, e, i));
+                    if leaf {
+                        let bind = vec![(format!("{} {} = {};", ec, en, i), elem, Repr::Val(en.clone()))];
+                        counted = Some((i.clone(), e.clone(), ec.clone(), bind));
+                    } else {
+                        self.emit(fs, &format!("for (; {} < {}; {}++) {{", i, e, i));
+                    }
                 }
-                fs.ind += 1;
-                self.emit(fs, &format!("{} {} = {};", ec, en, i));
-                fs.repr.insert(elem, Repr::Val(en));
+                if counted.is_none() {
+                    fs.ind += 1;
+                    self.emit(fs, &format!("{} {} = {};", ec, en, i));
+                    fs.repr.insert(elem, Repr::Val(en));
+                }
             }
             IterKind::Vec | IterKind::Slice | IterKind::Array => {
                 let b = self.lval_scoped(fs, iter);
@@ -1532,14 +1579,24 @@ static bool mr_{m}(kite_map *mp, const {k} *key, {e} *out) {{\n\
                     }
                     _ => self.emit(fs, &format!("{} *{} = ({} *){}.ptr; int64_t {} = {}.len;", ec, p, ec, b, n, b)),
                 }
-                self.emit(fs, &format!("for (int64_t {} = 0; {} < {}; {}++) {{", i, i, n, i));
-                fs.ind += 1;
-                self.emit(fs, &format!("{} *{} = &{}[{}];", ec, en, p, i));
-                fs.repr.insert(elem, Repr::Ptr(en));
-                if let Some(ix) = index {
-                    let xn = self.local_cname(fs, ix);
-                    self.emit(fs, &format!("int64_t {} = {};", xn, i));
-                    fs.repr.insert(ix, Repr::Val(xn));
+                if leaf {
+                    self.emit(fs, &format!("int64_t {} = 0;", i));
+                    let mut bind = vec![(format!("{} *{} = &{}[{}];", ec, en, p, i), elem, Repr::Ptr(en.clone()))];
+                    if let Some(ix) = index {
+                        let xn = self.local_cname(fs, ix);
+                        bind.push((format!("int64_t {} = {};", xn, i), ix, Repr::Val(xn)));
+                    }
+                    counted = Some((i.clone(), n.clone(), "int64_t".into(), bind));
+                } else {
+                    self.emit(fs, &format!("for (int64_t {} = 0; {} < {}; {}++) {{", i, i, n, i));
+                    fs.ind += 1;
+                    self.emit(fs, &format!("{} *{} = &{}[{}];", ec, en, p, i));
+                    fs.repr.insert(elem, Repr::Ptr(en));
+                    if let Some(ix) = index {
+                        let xn = self.local_cname(fs, ix);
+                        self.emit(fs, &format!("int64_t {} = {};", xn, i));
+                        fs.repr.insert(ix, Repr::Val(xn));
+                    }
                 }
             }
             IterKind::Map => {
@@ -1599,9 +1656,39 @@ static bool mr_{m}(kite_map *mp, const {k} *key, {e} *out) {{\n\
                 fs.repr.insert(elem, Repr::Val(en));
             }
         }
+        if let Some((i, e, ity, bind)) = counted {
+            let lb = self.label();
+            let stop = self.tmp();
+            let lo = self.tmp();
+            self.emit(fs, &format!("const {} {} = {};", ity, lo, i));
+            // Short loops only pay for the first comparison. `i < e` is still needed:
+            // an empty range like i64::MAX..i64::MIN can wrap to a small difference.
+            // A range too long for the difference to fit just stays in the plain loop.
+            self.emit(fs, &format!("while ((int64_t)((uint64_t){} - (uint64_t){}) > 65536 && {} < {}) {{", e, i, i, e));
+            fs.ind += 1;
+            self.emit(fs, &format!("{} {} = ({})({} + 65536);", ity, stop, ity, i));
+            // what the C compiler can't see, and needs to drop bounds checks
+            self.emit(fs, &format!("KITE_ASSUME({} >= {} && {} <= {});", i, lo, stop, e));
+            self.emit(fs, &format!("for (; {} < {}; {}++) {{", i, stop, i));
+            self.counted_body(fs, id, &lb, &bind, body);
+            self.emit(fs, "KITE_POLL();");
+            fs.ind -= 1;
+            self.emit(fs, "}");
+            self.emit(fs, &format!("KITE_ASSUME({} >= {});", i, lo));
+            self.emit(fs, &format!("for (; {} < {}; {}++) {{", i, e, i));
+            self.counted_body(fs, id, &lb, &bind, body);
+            self.emit(fs, &format!("{}:;", lb));
+            self.pop_scope(fs);
+            fs.ind -= 1;
+            self.emit(fs, "}");
+            return;
+        }
         let (lb, lc) = (self.label(), self.label());
         fs.loop_labels.push((id, lb.clone(), lc.clone()));
         self.push_scope(fs, SK::Loop(id));
+        if !leaf {
+            self.emit(fs, "KITE_POLL();");
+        }
         if kind == IterKind::Chan && self.needs_drop(&et) {
             self.declare_flags(fs, elem);
             self.register(fs, Cl::DropLocal(elem));
@@ -1616,6 +1703,26 @@ static bool mr_{m}(kite_map *mp, const {k} *key, {e} *out) {{\n\
         self.emit(fs, &format!("{}:;", lb));
         fs.loop_labels.pop();
         self.pop_scope(fs);
+        fs.ind -= 1;
+        self.emit(fs, "}");
+    }
+
+    /// One copy of a counted leaf loop's body, after its `for (...) {` line.
+    fn counted_body(&mut self, fs: &mut Fs, id: u32, lb: &str, bind: &[(String, LocalId, Repr)], body: &TBlock) {
+        fs.ind += 1;
+        for (line, l, r) in bind {
+            self.emit(fs, line);
+            fs.repr.insert(*l, r.clone());
+        }
+        let lc = self.label();
+        fs.loop_labels.push((id, lb.to_string(), lc.clone()));
+        self.push_scope(fs, SK::Loop(id));
+        self.block_stmts(fs, body);
+        self.emit(fs, &format!("{}:;", lc));
+        let top = fs.scopes.len() - 1;
+        self.emit_scope_cleanups(fs, top);
+        fs.scopes.pop();
+        fs.loop_labels.pop();
         fs.ind -= 1;
         self.emit(fs, "}");
     }
@@ -5203,3 +5310,192 @@ fn collect_moves_expr(e: &TExpr, out: &mut HashSet<(LocalId, Vec<usize>)>, tf: &
 
 #[allow(dead_code)]
 fn yield_kind_unused(_: YieldKind) {}
+
+/// Functions in a cycle of direct calls, or making indirect calls (a cycle may
+/// go through a function value, an interface or a type parameter's method).
+fn may_recurse(tfuncs: &[TFunc]) -> HashSet<FuncId> {
+    let mut edges: HashMap<FuncId, Vec<FuncId>> = HashMap::new();
+    let mut out = HashSet::new();
+    for t in tfuncs {
+        let mut callees = vec![];
+        let mut indirect = false;
+        crate::tir::visit_block(&t.body, &mut |e| {
+            if let TK::Call { callee, .. } = &e.kind {
+                match callee {
+                    Callee::Func(f, _) => callees.push(*f),
+                    _ => indirect = true,
+                }
+            }
+        });
+        if indirect {
+            out.insert(t.func);
+        }
+        edges.insert(t.func, callees);
+    }
+    // Tarjan's strongly connected components, iteratively
+    let mut index: HashMap<FuncId, usize> = HashMap::new();
+    let mut low: HashMap<FuncId, usize> = HashMap::new();
+    let mut on_stack: HashSet<FuncId> = HashSet::new();
+    let mut stack: Vec<FuncId> = vec![];
+    let mut next = 0;
+    let empty = vec![];
+    for t in tfuncs {
+        if index.contains_key(&t.func) {
+            continue;
+        }
+        let mut work: Vec<(FuncId, usize)> = vec![(t.func, 0)];
+        index.insert(t.func, next);
+        low.insert(t.func, next);
+        next += 1;
+        stack.push(t.func);
+        on_stack.insert(t.func);
+        while let Some(&mut (v, ref mut i)) = work.last_mut() {
+            let succ = edges.get(&v).unwrap_or(&empty);
+            if *i < succ.len() {
+                let w = succ[*i];
+                *i += 1;
+                if w == v {
+                    out.insert(v);
+                }
+                if !edges.contains_key(&w) {
+                    continue;
+                }
+                if !index.contains_key(&w) {
+                    index.insert(w, next);
+                    low.insert(w, next);
+                    next += 1;
+                    stack.push(w);
+                    on_stack.insert(w);
+                    work.push((w, 0));
+                } else if on_stack.contains(&w) {
+                    let lw = index[&w];
+                    let lv = low.get_mut(&v).unwrap();
+                    *lv = (*lv).min(lw);
+                }
+            } else {
+                work.pop();
+                if let Some(&(p, _)) = work.last() {
+                    let lv = low[&v];
+                    let lp = low.get_mut(&p).unwrap();
+                    *lp = (*lp).min(lv);
+                }
+                if low[&v] == index[&v] {
+                    let mut comp = vec![];
+                    loop {
+                        let w = stack.pop().unwrap();
+                        on_stack.remove(&w);
+                        comp.push(w);
+                        if w == v {
+                            break;
+                        }
+                    }
+                    if comp.len() > 1 {
+                        out.extend(comp);
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Pure computation: no nested loops, and calls only to functions that finish in
+/// bounded time. Runtime operations (maps, allocation, formatting) don't count:
+/// next to one of those a poll costs nothing, and emitting such a body twice would
+/// stop the C compiler from inlining functions that had a single call site.
+fn leaf_body(bounded: &HashSet<FuncId>, cond: Option<&TExpr>, body: &TBlock) -> bool {
+    let mut leaf = true;
+    let mut check = |e: &TExpr| match &e.kind {
+        TK::Call { callee, .. } => {
+            if !matches!(callee, Callee::Func(f, _) if bounded.contains(f)) {
+                leaf = false;
+            }
+        }
+        TK::Intrinsic { name, .. } if name != "len" => leaf = false,
+        TK::MapIndex { .. } | TK::MapLit(_) | TK::VecLit(_) | TK::Closure(_) => leaf = false,
+        _ => {}
+    };
+    if let Some(c) = cond {
+        crate::tir::visit_expr(c, &mut check);
+    }
+    crate::tir::visit_block(body, &mut check);
+    leaf && !block_has_loop(body) && !block_has_map_insert(body)
+}
+
+fn block_has_map_insert(b: &TBlock) -> bool {
+    fn stmt(s: &TStmt) -> bool {
+        match s {
+            TStmt::MapInsert { .. } => true,
+            TStmt::With { body, .. } | TStmt::Defer(body) | TStmt::ErrDefer(body) => block_has_map_insert(body),
+            TStmt::Select { arms, .. } => arms.iter().any(|a| block_has_map_insert(&a.body)),
+            _ => {
+                let mut found = false;
+                crate::tir::visit_stmt(s, &mut |e| {
+                    found |= match &e.kind {
+                        TK::If { then, else_, .. } => block_has_map_insert(then) || else_.as_ref().map_or(false, |b| block_has_map_insert(b)),
+                        TK::Block(b) => block_has_map_insert(b),
+                        _ => false,
+                    }
+                });
+                found
+            }
+        }
+    }
+    b.stmts.iter().any(stmt)
+}
+
+/// Functions without loops that only call such functions: their running time
+/// is bounded, so a loop calling them doesn't need to poll for preemption.
+fn bounded_funcs(tfuncs: &[TFunc], may_recurse: &HashSet<FuncId>) -> HashSet<FuncId> {
+    let by_id: HashMap<FuncId, &TFunc> = tfuncs.iter().map(|t| (t.func, t)).collect();
+    let mut out: HashSet<FuncId> = HashSet::new();
+    loop {
+        let mut changed = false;
+        for t in tfuncs {
+            if out.contains(&t.func) || may_recurse.contains(&t.func) {
+                continue;
+            }
+            if leaf_body(&out, None, &t.body) {
+                out.insert(t.func);
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    let _ = by_id;
+    out
+}
+
+fn block_has_loop(b: &TBlock) -> bool {
+    b.stmts.iter().any(stmt_has_loop) || b.value.as_ref().map_or(false, |v| expr_has_loop(v))
+}
+
+fn stmt_has_loop(s: &TStmt) -> bool {
+    match s {
+        TStmt::While { .. } | TStmt::For { .. } | TStmt::ForEach { .. } => true,
+        TStmt::With { body, .. } | TStmt::Defer(body) | TStmt::ErrDefer(body) => block_has_loop(body),
+        TStmt::Select { arms, .. } => arms.iter().any(|a| block_has_loop(&a.body)),
+        _ => {
+            let mut found = false;
+            crate::tir::visit_stmt(s, &mut |e| found |= expr_blocks_have_loop(e));
+            found
+        }
+    }
+}
+
+fn expr_has_loop(e: &TExpr) -> bool {
+    let mut found = false;
+    crate::tir::visit_expr(e, &mut |x| found |= expr_blocks_have_loop(x));
+    found
+}
+
+/// The blocks directly inside an expression (the visitor reaches nested ones).
+fn expr_blocks_have_loop(e: &TExpr) -> bool {
+    match &e.kind {
+        TK::If { then, else_, .. } => then.stmts.iter().any(stmt_has_loop) || else_.as_ref().map_or(false, |b| b.stmts.iter().any(stmt_has_loop)),
+        TK::Block(b) => b.stmts.iter().any(stmt_has_loop),
+        _ => false,
+    }
+}

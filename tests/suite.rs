@@ -179,6 +179,28 @@ fn projects() {
     }
 }
 
+/// Parallel `kite` runs on an empty cache share the runtime and the binary being
+/// built: each must work, whichever finishes first.
+#[test]
+fn cold_cache_parallel() {
+    let f = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/run/lastuse.kite");
+    let expected = std::fs::read_to_string(f.with_extension("out")).unwrap();
+    for round in 0..3 {
+        let cache = std::env::temp_dir().join(format!("kite_cold_{}_{}", std::process::id(), round));
+        let _ = std::fs::remove_dir_all(&cache);
+        let runs: Vec<_> = (0..8).map(|_| Command::new(kite()).arg("run").arg(&f).env("KITE_CACHE", &cache).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn().unwrap()).collect();
+        for r in runs {
+            let out = r.wait_with_output().unwrap();
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            assert!(out.status.success(), "{:?}: {}", out.status, stderr);
+            assert_eq!(String::from_utf8_lossy(&out.stdout), expected, "{}", stderr);
+        }
+        let leftovers: Vec<_> = std::fs::read_dir(&cache).unwrap().filter_map(|e| e.ok()).map(|e| e.file_name().to_string_lossy().to_string()).filter(|n| n.ends_with(".tmp") || (n.starts_with("kite_rt_") && n.ends_with(".c"))).collect();
+        assert!(leftovers.is_empty(), "{:?}", leftovers);
+        let _ = std::fs::remove_dir_all(&cache);
+    }
+}
+
 /// `kite test`: each test runs in its own process, so a panic fails only that test.
 #[test]
 fn test_blocks() {

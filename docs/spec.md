@@ -296,12 +296,14 @@
 
 ### 10.4 运行时
 
-- goroutine 是有栈协程，由 M:N 调度器分配到工作线程上（默认与 CPU 核数相同，`KITE_MAXPROCS` 可改）。channel、锁、`time.sleep`、网络操作只挂起当前 goroutine。
-- 一个 goroutine 长时间占着线程（调用阻塞的 C 函数、长计算）时，调度器另起线程运行其他 goroutine。
+- goroutine 是有栈协程，由 M:N 调度器分配到工作线程上。同时运行 Kite 代码的 goroutine 数量（`maxProcs`）默认等于 CPU 核数，可以用环境变量 `KITE_MAXPROCS` 或 `task.setMaxProcs(n)` 修改。channel、锁、`time.sleep`、网络操作只挂起当前 goroutine。
+- **抢占**：有其他 goroutine 在等待时，一个 goroutine 连续运行约 10 ms 后会被要求让出 CPU。它在下一个检查点响应：可能递归的函数入口、含嵌套循环或调用的循环的每次迭代、纯计算的计数循环每 65536 次迭代。所以不阻塞的计算也不会饿死其他 goroutine。其他纯计算循环（`for cond {}`）不检查，由外层循环负责；如果它迟迟不响应，20 ms 后按 C 调用处理。
+- **C 调用**：`extern` 函数、文件读写和 DNS 查询运行期间，所在线程把它的 CPU 名额让给另一个线程（文件读写和 DNS 立即让出，其他 C 调用超过约 1 ms 后让出）。所以线程数是 `maxProcs` 加上正在 C 调用里的 goroutine 数。没有检查点的长循环（例如运行时内部的大排序）超过 20 ms 也按 C 调用处理。
+- `task.stats()` 返回活着的 goroutine 数、线程数和 `maxProcs`。
 - 每个 goroutine 的栈固定在一个地址，不会移动（任务可以借用其他 goroutine 栈上的数据）。默认 2 MB（`KITE_GOROUTINE_STACK` 可改），`main` 为 1 GB；只有用到的页占内存。栈溢出由保护页捕获，以 panic 结束。
 - 任何 goroutine 里的 panic 都终止进程。
 
-测试：`run/concurrency`、`run/sched`、`run/cancel`、`run/task_move`、`run/net`、`run/mutexref`、`panic/deadlock`、`errors/send_rc`、`errors/task_race`、`errors/task_capture`、`errors/task_moved`、`errors/go_closure_mutation`、`errors/select_arms`、`errors/mutexref`、`errors/mutexref_borrow`、`errors/mutexref_immutable`、`examples/http`。
+测试：`run/concurrency`、`run/sched`、`run/preempt`、`run/long_loops`、`run/ffi_block`、`run/cancel`、`run/task_move`、`run/net`、`run/mutexref`、`panic/deadlock`、`errors/send_rc`、`errors/task_race`、`errors/task_capture`、`errors/task_moved`、`errors/go_closure_mutation`、`errors/select_arms`、`errors/mutexref`、`errors/mutexref_borrow`、`errors/mutexref_immutable`、`examples/http`。
 
 ### 10.5 网络
 
@@ -314,12 +316,12 @@
 ## 11. unsafe 与 FFI
 
 - 解引用 `*T` 和调用 `extern` 函数必须在 `unsafe { }` 里。裸指针可以创建、传递、存进结构体。
-- `extern "C" lib "libz" { fn crc32(...) u64 }` 在运行时用 `dlopen` 加载；不写 `lib` 时在 libc 里查找。构建时不需要 C 头文件。`extern "C" static "m" { ... }` 改为静态链接。
+- `extern "C" { ... }`（不写库）调用 libc 的函数，是普通的直接调用；`extern "C" static "m" { ... }` 链接这个库；`extern "C" lib "libz" { ... }` 在运行时用 `dlopen` 加载，构建时不需要这个库和它的头文件（静态链接的二进制不能用 `lib`）。三种都不需要 C 头文件：编译器按 Kite 的声明生成调用。
 - `extern "C" fn name(...) { ... }` 是用 C 符号名导出的 Kite 函数，从 Kite 调用它不需要 `unsafe`。
 - `extern "C"` 函数的参数和返回值只能是数字、`bool`、裸指针和只由这些组成的结构体。`String`、`str`、`Vec`、`?T`、函数值等没有 C 表示，声明它们是编译错误。目前还不能把 Kite 函数作为回调传给 C。
 - 裸指针让类型不满足 `send`；`unsafe send struct Handle { ... }` 由作者担保它可以跨线程。
 
-测试：`run/ffi`、`run/unsafe_decls`、`errors/unsafe_extern`、`errors/ffi_types`、`errors/send_ptr`。
+测试：`run/ffi`、`run/unsafe_decls`、`run/ffi_block`、`errors/unsafe_extern`、`errors/ffi_types`、`errors/send_ptr`。
 
 ## 12. 测试块
 

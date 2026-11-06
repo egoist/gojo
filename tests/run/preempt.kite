@@ -1,0 +1,65 @@
+// Goroutines that never block still share the CPU: the scheduler asks a
+// goroutine that has run for a while to yield.
+use task, time
+
+fn spin(n int) int {
+    var x = 0
+    for i in 0..n {
+        x = (x +% i *% 2654435761) % 1000003
+    }
+    return x
+}
+
+fn collatz(limit int) int {
+    // a loop that isn't counted: `for cond {}`
+    var steps = 0
+    for s in 1..limit {
+        var v = s
+        for v != 1 {
+            v = if v % 2 == 0 { v / 2 } else { 3 * v + 1 }
+            steps += 1
+        }
+    }
+    return steps
+}
+
+fn fib(n int) int {
+    // recursion without loops
+    if n < 2 { return n }
+    return fib(n - 1) + fib(n - 2)
+}
+
+fn main() {
+    _ = task.setMaxProcs(2)
+    let results = Mutex(Vec[int]{})
+    var worst = 0
+    let r = task.group((g) => {
+        // eight busy goroutines on two CPUs
+        for k in 0..8 {
+            g.go(() => {
+                let v = match k % 3 {
+                    0 => spin(40000000)
+                    1 => collatz(400000)
+                    _ => fib(30)
+                }
+                with l = results.lock() { l.push(v) }
+            })
+        }
+        // and one that wants to run every millisecond
+        var prev = time.now()
+        for _ in 0..50 {
+            time.sleep(time.millisecond)
+            let now = time.now()
+            if now - prev > worst { worst = now - prev }
+            prev = now
+        }
+    })
+    with l = results.lock() {
+        println("busy goroutines done:", l.len, r.isOk())
+    }
+    // without preemption the sleeper would wait for a busy goroutine to finish
+    println("sleeper never waited 60 ms:", worst < 60 * time.millisecond)
+    let s = task.stats()
+    println("no extra threads:", s.threads <= s.maxProcs + 1, "maxProcs", s.maxProcs)
+    println("goroutines left:", s.goroutines)
+}

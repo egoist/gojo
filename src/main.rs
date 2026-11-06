@@ -371,11 +371,13 @@ fn runtime_object(opts: &Options) -> Result<PathBuf, String> {
     if obj.exists() {
         return Ok(obj);
     }
-    let c = dir.join(format!("kite_rt_{:016x}.c", key));
+    // per process: another `kite` may be compiling the same runtime right now
+    let c = dir.join(format!("kite_rt_{:016x}.{}.c", key, std::process::id()));
     let inc = runtime_include_dir()?;
     std::fs::write(&c, RUNTIME_C).map_err(|e| e.to_string())?;
     let tmp = dir.join(format!("kite_rt_{:016x}.{}.o", key, std::process::id()));
     let out = Command::new(&cc).args(&pre).arg("-c").arg(flags).arg("-w").arg("-I").arg(&inc).arg(&c).arg("-o").arg(&tmp).output().map_err(|e| format!("cannot run C compiler `{}`: {}", cc, e))?;
+    let _ = std::fs::remove_file(&c);
     if !out.status.success() {
         return Err(format!("runtime compilation failed:\n{}", String::from_utf8_lossy(&out.stderr)));
     }
@@ -445,7 +447,8 @@ fn drive(cmd: &str, input: &str, opts: &Options, prog_args: &[String]) -> Result
     let cached = dir.join(format!("bin_{:016x}", key));
     if cached.exists() && !opts.keep_c {
         // refresh the timestamp so eviction keeps recently used binaries
-        let _ = std::fs::File::options().append(true).open(&cached).and_then(|f| f.set_modified(std::time::SystemTime::now()));
+        // (read-only: on Linux, a binary open for writing can't be started by others)
+        let _ = std::fs::File::open(&cached).and_then(|f| f.set_modified(std::time::SystemTime::now()));
         if opts.verbose {
             eprintln!("parse {:?}  check {:?}  borrowck {:?}  codegen {:?}  cc (cached)", t_parse, t_check - t_parse, t_borrow - t_check, t_gen - t_borrow);
         }
@@ -462,6 +465,10 @@ fn drive(cmd: &str, input: &str, opts: &Options, prog_args: &[String]) -> Result
     c.arg("-w").arg("-fwrapv").arg("-I").arg(&inc).arg(&c_path).arg(&rt).arg("-o").arg(&out_path).arg("-lm").arg("-lpthread");
     if cfg!(target_os = "linux") {
         c.arg("-ldl");
+    }
+    // libraries named by `extern "C" static "z"`
+    for l in c_src.lines().filter_map(|l| l.strip_prefix("// kite-link: ")) {
+        c.arg(l);
     }
     let out = match c.output() {
         Ok(o) => o,
@@ -484,9 +491,22 @@ fn drive(cmd: &str, input: &str, opts: &Options, prog_args: &[String]) -> Result
     if opts.verbose {
         eprintln!("parse {:?}  check {:?}  borrowck {:?}  codegen {:?}  cc {:?}", t_parse, t_check - t_parse, t_borrow - t_check, t_gen - t_borrow, t_cc - t_gen);
     }
-    let _ = std::fs::rename(&out_path, &cached);
+    publish_binary(&out_path, &cached);
     evict_old_binaries(&dir);
     finish(cmd, &cached, opts, prog_args, &stem)
+}
+
+/// Moves a finished binary into the cache. Another `kite` may have built the same
+/// one, and may be starting it: the first one stays and is never replaced. (The
+/// binaries aren't byte-identical, since macOS code signatures name the output
+/// file, and swapping one out under a starting process gets that process killed.)
+fn publish_binary(tmp: &Path, cached: &Path) {
+    if std::fs::hard_link(tmp, cached).is_ok() || cached.exists() {
+        let _ = std::fs::remove_file(tmp);
+    } else {
+        // a file system without hard links
+        let _ = std::fs::rename(tmp, cached);
+    }
 }
 
 /// Keep the binary cache bounded.
@@ -523,8 +543,10 @@ fn finish(cmd: &str, bin: &Path, opts: &Options, prog_args: &[String], stem: &st
         Ok(s) => match s.code() {
             Some(c) => Ok(ExitCode::from(c as u8)),
             None => {
-                eprintln!("process terminated by signal");
-                Ok(ExitCode::from(134))
+                use std::os::unix::process::ExitStatusExt;
+                let sig = s.signal().unwrap_or(0);
+                eprintln!("process terminated by signal {}", sig);
+                Ok(ExitCode::from((128 + sig) as u8))
             }
         },
         Err(e) => {
