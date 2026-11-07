@@ -184,29 +184,6 @@ On a 40,000-line synthetic program, the Gojo front end takes about 66 ms (parsin
 
 Concurrency (see [bench/README.md](bench/README.md#goroutine)): 100,000 simultaneously suspended goroutines passing a value along a chain take 0.38 s / 441 MB with Gojo and 0.11 s / 284 MB with Go on Linux. 1,000,000 short-lived goroutines (in batches of 1,000) take 382 ms with Gojo and 278 ms with Go.
 
-## Differences from the design notes, and improvements
-
-These are deliberate trade-offs (section 12 of the design notes records the settled decisions):
-
-1. **Back end**: the prototype generates C, compiled by `cc` or `zig cc`, so cross-compilation comes for free (static musl binaries for `x86_64`/`aarch64` verified in Alpine containers). The front end is already in Go's speed range; the bottleneck is the C compiler. A built-in fast debug back end is the next step.
-2. **Generics use monomorphization**, not dictionary passing. Only reachable code is instantiated, and compile time is not a problem for now. Dictionary passing is left for when there is a custom back end.
-3. **panic has only an abort mode**: no unwind tables are generated, so binaries are smaller. A panic in any thread ends the whole process; there is no `recover` and no `task.Panic`. `gojo test` runs each test in a separate process, so one test's panic does not affect the others.
-4. **Binding mode in match**: when matching a "place", bindings are references by default. If a branch moves a binding out (for example `some(v) => v`), that branch automatically becomes consuming, and the owned value being matched is moved with it. So you never write `ref`, and you can still write `unwrap` with a `sink` receiver.
-5. **The `fn` keyword**: functions, methods, function types (`fn(int) int`) and function literals all use `fn`, replacing Go's `func`.
-6. **Packages and imports**: Go-style `package main` and quoted `import "fmt"` are gone, replaced by "a directory is a package" and `use` (see "Packages and imports" above). This also removes Go's redundancy of requiring the package name to match the directory name. `main` does not need `pub`.
-7. **Structs/enums get `clone`, `==` and `hash` automatically** (when all fields support them). To customize, write `clone`/`equal`/`hash`/`compare` methods. `copy` must be declared explicitly on exported types (so that adding a field to a public type cannot silently break downstream code); package-private non-generic types derive it automatically.
-8. **`errdefer` is added** (from Zig): it runs only when the function returns an error, which suits rollback.
-9. **A list of string literals is inferred as `Vec[String]`**, so borrowed views are not stored in collections.
-10. **Printing**: if a type has a `toString()` or `message()` method, it is used; otherwise the value is printed by structure (`Config{name: "app", port: 8080}`).
-11. **Map keeps insertion order**, so iteration order is deterministic.
-12. **Methods are written inside the type**, replacing Go's `func (p *Point) scale(k int)`. The receiver is an explicit `self` (`self` / `self inout` / `self sink`). A function without `self` is an associated function (`Point.new()`). `extend T { ... }` adds methods. Interface methods are declared with the same syntax.
-13. **`select` branches use `=>` like `match`**: `let x = <-ch => ...`, `<-done => ...`, `ch <- v => ...`, `_ => ...`, replacing Go's `case ...:` / `default:`. A `break` in a branch body applies to the enclosing loop.
-14. **`v[i]` bindings**: `let x = v[i]` gives a reference for non-copy elements (as documented). To get an owned value, write `.clone()`.
-15. Release builds keep overflow checks by default.
-16. **No `switch`**: `match` supports literals, ranges, `|` and guards, and is checked for exhaustiveness.
-17. **No `View[Owner, T]`**: structs never store references. Parsers store owned data and `Span` ranges, and lend views through methods.
-18. **`defer` cannot change where the function goes**: it cannot contain `return` or `try`, and cannot jump out of an enclosing loop (from Zig).
-
 ## Not yet implemented
 
 - Windows; a language server (LSP); a package manager (for now a program is the directories it uses). The debugger can set breakpoints on Gojo lines and show the call stack, but variable names are the names in the generated C (`p_x`, `l0_total`).

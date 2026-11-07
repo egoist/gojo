@@ -20,7 +20,7 @@ Gojo (a code name; it may change) is a systems language that keeps Go's simplici
 - Gojo is not compatible with Go source and cannot call Go code directly: Go's GC heap and Gojo's ownership model cannot be mixed safely.
 - No macros, compile-time evaluation, higher-kinded types or specialization.
 
-**Kept from Go as is**: the package as the compilation unit, acyclic imports, structural implicit interfaces, the semantics of goroutines, channels and `select`, composition instead of inheritance, struct embedding, a single gofmt-style format, a single static binary, built-in testing and toolchain.
+**Kept from Go as is**: the package (a directory) as the unit of code, acyclic imports, structural implicit interfaces, the semantics of goroutines, channels and `select`, composition instead of inheritance, struct embedding, a single gofmt-style format, a single static binary, built-in testing and toolchain.
 
 ## 2. Lexical structure and basic syntax
 
@@ -103,7 +103,7 @@ Every type states whether it owns its data, whether it can be empty and whether 
 | `String` / `str` | Owned UTF-8 string / borrowed string view | `String` does (empty string) |
 | `Vec[T]` / `[]T` | Owned dynamic array / borrowed slice view | `Vec` does |
 | `[N]T` | Fixed-length array, on the stack or inline in a struct | If `T` does |
-| `Map[K, V]`, `Set[T]` | Built-in hash tables | Yes |
+| `Map[K, V]`, `Set[T]` | Built-in hash tables; iteration follows insertion order, so it is deterministic | Yes |
 | `?T` | Optional value: `none` or a `T` | Yes (`none`) |
 | `T ! E` | Result: `T` on success, `E` on failure | No |
 | `Box[T]` | Unique ownership on the heap | No |
@@ -113,6 +113,8 @@ Every type states whether it owns its data, whether it can be empty and whether 
 | `*T` | Raw pointer; may be null; can only be dereferenced in `unsafe` | No |
 
 **Struct** fields can have default values. Leaving out a field without a default value in a literal is a compile error. A struct satisfies `default`, and you can write `var c Config`, only when all its fields have default values.
+
+Structs and enums get `==`, `hash` and `.clone()` automatically when all their fields support them. Writing an `equal`, `hash`, `compare` or `clone` method replaces the derived version. `print` shows a value by its structure (`Config{name: "app", port: 8080}`), unless the type has a `toString()` or `message()` method, which is used instead.
 
 **Enums** are true sum types, and variants can carry data. Without data they are plain enums and replace `iota`.
 
@@ -136,7 +138,7 @@ log(.Warn, "disk almost full")   // the enum name can be omitted when the type i
 
 **Optional values `?T`** support these operations: `if let v = x { }` unwraps, `x ?? d` supplies a default, `x?.field` chains access (the result is still optional), and `x.unwrap()` panics on none. The memory layout of `?T` uses the niche of non-null types: `?Box[T]` is the size of one pointer.
 
-**Integer overflow**: in debug builds, overflow in `+ - *` panics. Release builds also check by default, and checks can be turned off per package. Write `+%` explicitly when you want wrapping, and call `a.saturatingAdd(b)` when you want saturating arithmetic. Array and slice indexing is always bounds-checked.
+**Integer overflow**: in debug builds, overflow in `+ - *` panics. Release builds also check (turning the checks off per package, in `gojo.toml`, is planned). Write `+%` explicitly when you want wrapping; saturating arithmetic (`a.saturatingAdd(b)`) is planned. Array and slice indexing is always bounds-checked.
 
 ## 4. Ownership and borrowing
 
@@ -148,6 +150,7 @@ Every value has exactly one owner, and the value is released when its owner goes
 - Scalars and `copy` types are copied bitwise: `copy struct Point { x, y f64 }`. A type that has fields needing release (`String`, `Vec`, `Box`, ...) or a `drop` method cannot be `copy`.
 - Exported types must declare `copy` explicitly. A package-private, non-generic type becomes `copy` automatically when all its fields are copy and it has no `drop` method. This way, adding a field to a public type never silently changes the semantics of downstream code.
 - To copy any other type, call `.clone()` explicitly, so the cost is visible in the code.
+- `match` on a place (a variable, a field, an element) binds references by default. An arm that moves a binding out (`some(v) => v`) consumes the matched value instead, which needs an owned value. So there is no `ref` keyword, and `unwrap` can still be written with a `sink` receiver.
 
 ### 4.2 Parameter modes
 
@@ -204,6 +207,8 @@ with e = counts.entry(word) {   // with binds a projection to a block
 
 `Vec[T]` owns its data; `[]T` is only a borrowed view. `v.push(x)` requires an `inout` borrow, so the Vec cannot grow while any view exists. The Go problem of "two slices unexpectedly sharing a backing array after append" therefore cannot happen. `String` and `str` relate the same way.
 
+A list of string literals, `["a", "b"]`, is a `Vec[String]`, not a `Vec[str]`: views never end up inside collections.
+
 ### 4.7 Closure capture
 
 - A closure passed in as a parameter that does not escape (the default mode) can borrow outer variables, for example `v.each((x) => total += x)`.
@@ -239,6 +244,16 @@ match load(p) {                                      // handle case by case
 - `try x` propagates directly when the error types are the same or the outer error type is `error`; otherwise you must write `try x else wrapperFunction`. There is no implicit conversion.
 - `error` is a built-in interface (with a single method, `fn message(self) String`). It is used at the top level of applications, like Go's `error`. Libraries should return concrete enum errors.
 - `x.unwrap()` panics on error. Use it only in tests and in places that truly cannot fail.
+- `errdefer` (from Zig) runs only when the function leaves with an error (or `none`, or through `try`), which suits rolling back partial work:
+
+```zig
+fn createAccount(db inout Db, name str) Account ! DbError {
+    let id = try db.insert(name)
+    errdefer db.delete(id)            // only if a later step fails
+    try db.grant(id, "default")
+    return Account{id: id}
+}
+```
 
 **panic** signals only program bugs, such as out-of-bounds access, overflow or a failed `unwrap`. A panic prints the message and the source location, then **terminates the whole process** (exit code 2). It does not unwind the stack.
 
@@ -317,7 +332,7 @@ extend []String {                             // the standard library adds metho
 
 ## 7. Generics
 
-Generics fill the gaps Go users hit day to day: type parameters on methods, conditional methods, and the capability constraints that a language without GC requires. The type system itself is not made into a computation system. The default implementation is dictionary passing; besides the method table, the dictionary carries `size`, `align` and a `drop` function pointer.
+Generics fill the gaps Go users hit day to day: type parameters on methods, conditional methods, and the capability constraints that a language without GC requires. The type system itself is not made into a computation system. The compiler monomorphizes: each instantiation the program actually reaches is compiled on its own, so generic code runs as fast as hand-written code. Dictionary passing (a dictionary carrying the method table, `size`, `align` and a `drop` function pointer) is the plan for faster debug builds once Gojo has its own back end; see section 10.
 
 ```zig
 pub struct Vec[T any] {
@@ -345,12 +360,12 @@ let names = users.filter((u) => u.active).map((u) => u.name.clone())
 | --- | --- | --- |
 | `any` | Any type; can only be moved and borrowed | All types |
 | `copy` | Copied bitwise; assignment does not move | Scalars; types declared as `copy struct` |
-| `clone` | Can be explicitly `.clone()`d | Has a `clone()` method; `copy` types satisfy it automatically |
+| `clone` | Can be explicitly `.clone()`d | A `clone()` method, or all fields clonable (derived); `copy` types satisfy it automatically |
 | `default` | Has a default value; `var x T` is allowed | All fields have default values |
 | `send` | Can be transferred across goroutines | Derived structurally by the compiler: contains no `rc`, `Cell` or raw pointer |
-| `comparable` | Supports `==` | Built-in types; has an `equal(other T) bool` method |
+| `comparable` | Supports `==` | Built-in types; an `equal(other T) bool` method; or all fields comparable (derived) |
 | `ordered` | Supports `<` | Numbers and strings; has a `compare(other T) Ordering` method |
-| `hash` | Can be a `Map` key | `comparable` and has a `hash(h inout Hasher)` method |
+| `hash` | Can be a `Map` key | `comparable`, and a `hash(h inout Hasher)` method or all fields hashable (derived) |
 
 A user-defined type that implements `equal` and `hash` can be a map key, which Go cannot do. But Gojo opens this door only for `==` and comparison; there is no general operator overloading.
 
@@ -468,22 +483,33 @@ struct Node {
 
 ## 10. Compilation model and performance
 
-The goal is debug builds no slower than 1.3 times Go. This is an estimate, to be measured on the prototype. It depends on holding two lines: all checks look only at function signatures and a single function body; generics use dictionary passing by default, with no monomorphization.
+The goal is debug builds no slower than 1.3 times Go. The checks are built for it: type and borrow checking look only at function signatures and a single function body, never across functions, so they stay close to linear in program size.
 
-**The compilation unit is the package**, and imports cannot form cycles. Downstream packages read only the upstream export data: signatures, parameter modes, type layouts, and the derived capability constraints (`copy`, `send`, ...). Changing a function body does not trigger a recheck of downstream packages.
+**Today** the compiler works on the whole program at once:
+
+- It loads the program, the packages it uses and the standard modules they import, checks everything, and writes one C file. `cc`, `clang`, `gcc` or `zig cc` compiles it. Debug builds use `-O0 -g` with `#line` directives, so debuggers show Gojo lines; release builds use `-O2`. Overflow and bounds checks stay on in both.
+- The C runtime is compiled once per compiler and C toolchain, and binaries are cached by their C source and toolchain, so rebuilding an unchanged program costs only the front end.
+- Cross-compilation comes from `zig cc -target`, which gives static Linux binaries.
+- Generics are monomorphized (section 7).
 
 | Phase | Work | Cost |
 | --- | --- | --- |
 | Parsing and type checking | Same as Go; only local bidirectional type inference | On par with Go |
-| Borrow checking | One dataflow analysis pass per function body, functions in parallel | Low, close to linear |
-| Drop insertion | Inserts drops and flags at scope exits and conditional moves | Low, but the intermediate code grows |
-| Escape analysis | **No longer needed**: the type decides whether a value is on the stack or the heap | Saves this part of Go's work |
-| Generics | debug: dictionary passing everywhere; release: monomorphize hot spots and small functions | Low in debug, medium in release |
-| Backend | debug uses a built-in fast backend; release can optionally inline more | On par with Go in debug |
+| Borrow checking | One dataflow pass per function body | Low, close to linear |
+| Drop insertion | Drops and flags at scope exits and conditional moves | Low, but the generated code grows |
+| Escape analysis | **Not needed**: the type decides whether a value is on the stack or the heap | Saves this part of Go's work |
+| Generics | Monomorphization of the reachable instantiations | Grows with the instantiations |
+| Back end | The C compiler | Most of the build time |
 
-**Monomorphization in release builds** targets only three kinds of functions: hot spots marked by PGO data, small functions below the inlining threshold, and functions marked `#specialize`. Integer const generics are always instantiated per N.
+Measured on an Apple M5 (see the README): building the nbody benchmark takes about 50 ms, of which about 3 ms is the front end (`go build`: 97 ms). On a 40,000-line program, the front end takes about 66 ms. The C compiler dominates.
 
-Everything that would drag compile speed toward Rust is excluded: inferring parameter modes from function bodies, procedural macros, compile-time evaluation, overlapping implementations, and monomorphization by default.
+**Next steps**, in order, as programs grow:
+
+- **Separate compilation per package.** Downstream packages would read only upstream export data: signatures, parameter modes, type layouts and derived capabilities (`copy`, `send`, ...), so changing a function body would not recheck its dependents. The package manifest and lock file (packages.md) provide the cache keys.
+- **A built-in fast back end for debug builds**, so that debug builds don't wait for the C compiler, with dictionary passing for generics there.
+- Release builds keep monomorphizing, and C (or the C compiler's optimizer) stays the release back end.
+
+Everything that would drag compile speed toward Rust stays excluded: inferring parameter modes from function bodies, procedural macros, compile-time evaluation and overlapping implementations.
 
 ## 11. Quick reference: differences from Go
 
@@ -495,7 +521,7 @@ Everything that would drag compile speed toward Rust is excluded: inferring para
 | Type declarations | `type Config struct {}` | `struct Config {}`, `enum`, `interface` |
 | Zero values | Every type has one | Only types that satisfy `default` |
 | Package declaration | Every file writes `package name`, which must match the directory | None; the directory is the package |
-| Imports | `import "fmt"`, `import "example.com/m/geom"` | `use fmt`, `use ./geom`, `use ./geom.{Vec2}` |
+| Imports | `import "fmt"`, `import "example.com/m/geom"` | `use std/fmt`, `use ./geom`, `use yaml` (a dependency in gojo.toml), `use ./geom.{Vec2}` |
 | Functions | `func f(x int) int` | `fn f(x int) int` |
 | Methods | `func (p *Point) scale(k int)`, value / pointer receivers | Inside the type: `fn scale(self inout, k int)`; `extend T {}` for additions |
 | Constructors | Package-level function `NewStack()` | Associated function `Stack.new()` |
@@ -515,7 +541,7 @@ Everything that would drag compile speed toward Rust is excluded: inferring para
 | Cancellation | Pass `context.Context` by hand | Propagates automatically along the task tree |
 | Generic methods | Not supported | Supported; not part of interface method sets |
 | Map keys | Only built-in comparable types | Any type that satisfies `hash` |
-| C interop | cgo | `extern`, loaded at run time |
+| C interop | cgo | `extern "C"`: direct calls, no glue code or C headers; libraries linked (`static`) or loaded at run time (`lib`) |
 
 ## 12. Deliberately omitted features and settled decisions
 
@@ -543,4 +569,7 @@ Everything that would drag compile speed toward Rust is excluded: inferring para
 - [x] **How cancellation shows up**: blocking operations return early in the "no result" form they already have (`none` for a receive, an error for the network, `none` for `timeout`), instead of uniformly returning `task.Cancelled`. Otherwise every receive and every `sleep` would have to become a result type, with `try` everywhere. Use `try task.check()` when an explicit checkpoint is needed.
 - [x] **Goroutine stacks**: fixed addresses, pages committed on demand, never moved, because tasks can borrow data on other stacks. The cost is that each suspended goroutine takes at least one page of memory.
 - [x] **Interop with Go**: not part of the language. When needed, go through the C ABI and `extern`; tools that generate declarations are left to the ecosystem.
-- [x] **Name**: keep Gojo.
+- [x] **Back end**: generate C, compiled by the system C compiler or `zig cc`. It gives portable, well-optimized code and cross-compilation for free; the cost is build time, which a built-in debug back end will address (section 10).
+- [x] **Generics implementation**: monomorphization for now; dictionary passing comes with the built-in debug back end (sections 7 and 10).
+- [x] **Packages**: a manifest (`gojo.toml`) and lock file, short dependency names in source, the standard library under `std/`; see [packages.md](packages.md).
+- [x] **Name**: Gojo.
