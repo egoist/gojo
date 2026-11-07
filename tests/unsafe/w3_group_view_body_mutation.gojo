@@ -1,9 +1,8 @@
-use std/task
 fn main() {
     var s = "abcdefghijklmnopqrstuvwxyz".toString()
     let v = s.asStr()
-    _ = task.group((g) => {
-        g.go(() => println(v))
+    scope {
+        go () => println(v)
         s = "z".toString()
-    })
+    }
 }

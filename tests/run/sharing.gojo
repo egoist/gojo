@@ -1,0 +1,96 @@
+// Sharing between tasks: atomics, several locks at once, and `send interface`.
+use std/time
+
+struct Account {
+    name String
+    balance int
+}
+
+// both locks or neither, in one order whatever the arguments' order
+fn transfer(from Mutex[Account], to Mutex[Account], amount int) {
+    with a, b = lock(from, to) {
+        a.balance -= amount
+        b.balance += amount
+    }
+}
+
+send interface Job {
+    fn run(self) int
+}
+
+struct Square {
+    n int
+
+    fn run(self) int {
+        return self.n * self.n
+    }
+}
+
+struct Wait {
+    ms int
+
+    fn run(self) int {
+        time.sleep(self.ms * time.millisecond)
+        return self.ms
+    }
+}
+
+fn main() {
+    let x = Mutex(Account{name: String("x"), balance: 100})
+    let y = Mutex(Account{name: String("y"), balance: 100})
+    scope {
+        for i in 0..200 {
+            if i % 2 == 0 {
+                go transfer(x, y, 1)
+            } else {
+                go transfer(y, x, 2)
+            }
+        }
+    }
+    with a, b = lock(x, y) {
+        println(a.name, a.balance, b.name, b.balance, a.balance + b.balance)
+    }
+
+    // many tasks change one counter without a lock
+    let hits = Atomic.new(0)
+    var xs = Vec[int]{}
+    for i in 0..10000 {
+        xs.push(i)
+    }
+    par for v in xs {
+        if v % 2 == 0 {
+            _ = hits.add(1)
+        }
+    }
+    scope {
+        for _ in 0..8 {
+            go () => {
+                for _ in 0..100 {
+                    _ = hits.sub(1)
+                }
+            }
+        }
+    }
+    println(hits.load(), hits.swap(7), hits.load())
+    println(hits.compareSwap(7, 9), hits.compareSwap(7, 10), hits.load())
+    let small = Atomic.new(u8(250))
+    println(small.add(10))
+
+    // interface values that cross tasks
+    let jobs = chan[Job](4)
+    jobs.tx <- Square{n: 3}
+    jobs.tx <- Wait{ms: 1}
+    jobs.tx <- Square{n: 4}
+    drop(jobs.tx)
+    let total = scope {
+        let t = go () => {
+            var sum = 0
+            for j in jobs.rx {
+                sum += j.run()
+            }
+            return sum
+        }
+        t.join()
+    }
+    println("jobs", total)
+}

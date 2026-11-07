@@ -1,6 +1,6 @@
 // `gojo run examples/http`: starts the server and checks it with a few clients.
 // `gojo run examples/http serve`: serves on :8080 until interrupted.
-use std/{fmt, http, io, net, os, task, time}
+use std/{fmt, http, io, net, os, time}
 
 struct App {
     fn serve(self, req http.Request) http.Response {
@@ -45,23 +45,23 @@ fn main() ! io.Error {
     let start = time.now()
     let stop = chan[bool]()
     let opts = http.Options{deadline: 50 * time.millisecond}
-    _ = task.group((g) => {
-        // the server, in a group of its own so that it can be stopped alone
-        g.go(() => {
-            _ = task.group((sg) => {
-                sg.go(() => { http.serveCounting(ln, app, opts, stats) })
-                _ = <-stop
-                sg.cancel()
-            })
-        })
-        let fast = task.group((cg) => {
+    scope {
+        // the server, in a scope of its own so that it can be stopped alone
+        go () => {
+            scope server {
+                go http.serveCounting(ln, app, opts, stats)
+                _ = <-stop.rx
+                server.cancel()
+            }
+        }
+        let fast = scope {
             for _ in 0..20 {
-                cg.go(() => {
+                go () => {
                     let line = try status(port, "/")
                     if line != "200 OK" { println("unexpected", line) }
-                })
+                }
             }
-        })
+        }
         println("20 requests to /:", fast.isOk())
         println("/missing:", status(port, "/missing") catch _e { "?".toString() })
         let hi = http.get(fmt.format("http://127.0.0.1:{}/hi?name=k%C3%AFte+lang", port)) catch _e { http.text(0, "?") }
@@ -78,15 +78,15 @@ fn main() ! io.Error {
             time.sleep(time.millisecond)
         }
         // a request still in flight when the server stops
-        _ = task.group((cg) => {
-            cg.go(() => {
+        scope {
+            go () => {
                 let line = status(port, "/slow") catch _e { "connection closed".toString() }
                 println("in flight at shutdown:", line)
-            })
+            }
             time.sleep(10 * time.millisecond)
-            stop <- true
-        })
-    })
+            stop.tx <- true
+        }
+    }
     with s = stats.lock() {
         println("served", s.served, "timed out", s.timedOut, "hung up", s.hungUp, "stopped", s.stopped)
     }

@@ -1,0 +1,12 @@
+// A task started through a `Scope` value may outlive the function that
+// started it, so it must own what it uses.
+fn background(s Scope, name String) {
+    s.go(() => println(name))
+    // error: a task started through a `Scope` value borrows `name`
+}
+
+fn main() {
+    scope s {
+        background(s, String("x"))
+    }
+}

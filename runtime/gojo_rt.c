@@ -871,7 +871,15 @@ bool gojo_os___getenv(gojo_str name, gojo_string *out) {
 
 // ------------------------------------------------------------------ time
 
+// Simulation (deterministic tests): one thread, a seeded scheduler and a
+// virtual clock that jumps to the next timer when every task waits.
+int gojo_sim_on;
+int64_t gojo_sim_clock;
+// Debug builds: lock-order checking.
+int gojo_debug_checks;
+
 int64_t gojo_time_now(void) {
+    if (gojo_sim_on) return __atomic_load_n(&gojo_sim_clock, __ATOMIC_RELAXED);
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (int64_t)ts.tv_sec * 1000000000 + ts.tv_nsec;

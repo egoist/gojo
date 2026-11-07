@@ -10,7 +10,7 @@ Gojo (a code name; it may change) is a systems language that keeps Go's simplici
 
 - **No GC**: memory and resources (files, locks, connections) are released deterministically when they go out of scope. There are no pauses, so Gojo can be embedded in other programs and used for low-level code.
 - **No nil**: a value that may be empty must be written `?T` and must be unwrapped before use.
-- **No data races at compile time**: mutable state shared across goroutines can only go through types like `Mutex[T]`.
+- **No data races at compile time**: mutable state shared across tasks can only go through types like `Mutex[T]` and `Atomic[T]`.
 - **Compile speed on Go's order of magnitude**: checks look only at function signatures and a single function body. They never infer across functions.
 - **A learning curve close to Go's**: no lifetimes, no trait implementations, no macros.
 
@@ -20,7 +20,7 @@ Gojo (a code name; it may change) is a systems language that keeps Go's simplici
 - Gojo is not compatible with Go source and cannot call Go code directly: Go's GC heap and Gojo's ownership model cannot be mixed safely.
 - No macros, compile-time evaluation, higher-kinded types or specialization.
 
-**Kept from Go as is**: the package (a directory) as the unit of code, acyclic imports, structural implicit interfaces, the semantics of goroutines, channels and `select`, composition instead of inheritance, struct embedding, a single gofmt-style format, a single static binary, built-in testing and toolchain.
+**Kept from Go as is**: the package (a directory) as the unit of code, acyclic imports, structural implicit interfaces, `go`, channels and `select` (with structured scopes around them), composition instead of inheritance, struct embedding, a single gofmt-style format, a single static binary, built-in testing and toolchain.
 
 ## 2. Lexical structure and basic syntax
 
@@ -108,7 +108,7 @@ Every type states whether it owns its data, whether it can be empty and whether 
 | `T ! E` | Result: `T` on success, `E` on failure | No |
 | `Box[T]` | Unique ownership on the heap | No |
 | `rc[T]`, `arc[T]`, `weak[T]` | Shared ownership (single-threaded / atomic / weak reference) | No |
-| `chan T` | Channel; sending transfers ownership | No |
+| `Chan[T]` (`chan T`) | A channel's two ends, `Sender[T]` and `Receiver[T]`; sending transfers ownership | No |
 | `fn(A) R` | Functions and closures; never empty | No |
 | `*T` | Raw pointer; may be null; can only be dereferenced in `unsafe` | No |
 
@@ -188,7 +188,7 @@ with e = counts.entry(word) {   // with binds a projection to a block
 }
 ```
 
-**Views live only in variables.** Without lifetime annotations, the borrow checker can track only views held in local variables. So no value that would store a view elsewhere may exist: collections, `Box`, `rc`, interface values, generic types, whether the type is written out or inferred (`[s]`, `rc(s)`). When a view is assigned to an outer variable, the borrowed value must live at least as long. A view of data inside a lock cannot leave the `with` block, because the lock is released when the block ends. If a generic function keeps a value of `T` after the call returns (an escaping closure, a goroutine), `T` cannot be a view at the call. These rules were added during M2 while systematically constructing bypass cases; see `tests/errors/view_*`, `stored_views`, `generic_keeps_view`.
+**Views live only in variables.** Without lifetime annotations, the borrow checker can track only views held in local variables. So no value that would store a view elsewhere may exist: collections, `Box`, `rc`, interface values, generic types, whether the type is written out or inferred (`[s]`, `rc(s)`). When a view is assigned to an outer variable, the borrowed value must live at least as long. A view of data inside a lock cannot leave the `with` block, because the lock is released when the block ends. If a generic function keeps a value of `T` after the call returns (an escaping closure, a task started through a `Scope` value), `T` cannot be a view at the call. These rules were added during M2 while systematically constructing bypass cases; see `tests/errors/view_*`, `stored_views`, `generic_keeps_view`.
 
 ### 4.4 Release and defer
 
@@ -199,7 +199,7 @@ with e = counts.entry(word) {   // with binds a projection to a block
 
 ### 4.5 Shared ownership and cyclic structures
 
-- `rc[T]` uses a non-atomic count and cannot cross goroutines; `arc[T]` uses an atomic count. Both are read-only inside; to modify, wrap the value in `Cell[T]` (single-threaded) or `Mutex[T]`.
+- `rc[T]` uses a non-atomic count and cannot cross tasks (except inside an `isolate`d value); `arc[T]` uses an atomic count. Both are read-only inside; to modify, wrap the value in `Cell[T]` (single-threaded) or `Mutex[T]`.
 - The programmer breaks cycles with `weak[T]`. The language does no cycle detection.
 - For structures like graphs, ASTs and DOMs, the recommended approach is `arena[T]` plus indices: nodes refer to each other with `Id[T]`, and the whole arena is released at once. An `Id` carries a generation, so accessing through a deleted Id gives none instead of a dangling pointer.
 
@@ -257,7 +257,7 @@ fn createAccount(db inout Db, name str) Account ! DbError {
 
 **panic** signals only program bugs, such as out-of-bounds access, overflow or a failed `unwrap`. A panic prints the message and the source location, then **terminates the whole process** (exit code 2). It does not unwind the stack.
 
-- A panic in any goroutine or any task ends the process. There is no `recover` and no `task.Panic`.
+- A panic in any task ends the process. There is no `recover` and no `task.Panic`.
 - Rationale: no unwind tables are generated, binaries are smaller, and the normal path has zero overhead. After a bug, the state of memory and locks can no longer be trusted, and keeping the same process running is more dangerous than restarting it. Services that need fault isolation use process-level supervision (multiple processes or an external restart).
 - Exception for tests: `gojo test` runs each test in a separate process, so one test's panic does not affect the others.
 
@@ -362,7 +362,7 @@ let names = users.filter((u) => u.active).map((u) => u.name.clone())
 | `copy` | Copied bitwise; assignment does not move | Scalars; types declared as `copy struct` |
 | `clone` | Can be explicitly `.clone()`d | A `clone()` method, or all fields clonable (derived); `copy` types satisfy it automatically |
 | `default` | Has a default value; `var x T` is allowed | All fields have default values |
-| `send` | Can be transferred across goroutines | Derived structurally by the compiler: contains no `rc`, `Cell` or raw pointer |
+| `send` | Can be transferred across tasks | Derived structurally by the compiler: contains no `rc`, `Cell`, raw pointer, or function value that isn't a `send fn` |
 | `comparable` | Supports `==` | Built-in types; an `equal(other T) bool` method; or all fields comparable (derived) |
 | `ordered` | Supports `<` | Numbers and strings; has a `compare(other T) Ordering` method |
 | `hash` | Can be a `Map` key | `comparable`, and a `hash(h inout Hasher)` method or all fields hashable (derived) |
@@ -400,55 +400,47 @@ Loops can have labels: `outer: for row in grid { for x in row { if x == 0 { cont
 
 ## 8. Concurrency
 
-Goroutines, channels and `select` are kept, and the scheduler is still M:N stackful coroutines, which never depended on GC. Ownership turns data races into compile errors; structured concurrency lets child tasks safely borrow outer data.
-
-Stacks differ from Go: tasks borrow data on other goroutines' stacks, so stacks **cannot move**, and therefore cannot start at 2 KB and be copied wholesale when full, as Go does. Each goroutine reserves a fixed range of virtual addresses (2 MB by default, with a guard page), and only pages actually used take memory: a small suspended goroutine takes one page (4 KB on Linux, 16 KB on Apple Silicon). Blocking C calls need no special annotation: during an `extern` call, the thread gives its CPU slot to another thread. Long computations that don't block are preempted: generated code checks a global flag in loops and at the entry of recursive functions (one load, one branch), and when goroutines are waiting, a goroutine that has run for more than 10 ms yields the CPU. Across the 8 benchmarks, the geometric mean of cycle counts did not change, and no single benchmark got more than 5% slower (`bench/README.md`).
+Tasks are Go's goroutines made structured: every task belongs to a `scope`, and a scope ends only when its tasks have. That one rule removes goroutine leaks, lets tasks borrow their caller's data (the borrow checker already reasons about blocks), gives results back as values, and makes cancellation a property of the tree. [concurrency.md](concurrency.md) explains the choices against other languages; the rules are in the reference (section 10).
 
 ```zig
-// structured concurrency: the block end waits for all child tasks; if any fails, the rest are cancelled
+// tasks borrow `urls`; results come back with `join` or through a lock
 fn fetchAll(urls []String) Vec[Page] ! http.Error {
     var pages = Vec[Page]{}
-    let mu = Mutex(&pages)              // the lock borrows pages only within this scope
-    try task.group((g) => {
+    let mu = Mutex(&pages)              // a lock that borrows `pages`
+    try scope {
         for u in urls {
-            g.go(() => {                // can borrow u and mu: the group guarantees they outlive it
-                let p = try http.get(u)
+            go () => {
+                let p = try http.get(u)    // a failure cancels the other tasks
                 with list = mu.lock() { list.push(p) }
-            })
+            }
         }
-    })
+    }                                   // waits for every task
     return pages
 }
 
-// sending on a channel moves
-let ch = chan[Job](16)
-go worker(ch.clone())                   // bare go: arguments and captures must be owned and send
-ch <- job                               // job is moved; the sender can no longer touch it
-if let j = <-ch { run(j) }              // receive returns ?Job; none when the channel is closed
-
-// long-lived shared state
-let stats = arc(Mutex(Stats{}))
-with s = stats.lock() { s.hits += 1 }   // the lock is released at block end; references cannot leave the block
-```
-
-- **Values crossing goroutines must satisfy `send`**: the compiler derives it from the type's structure; users don't write it. Passing a value containing `rc` or `Cell` to `go`, or sending it on a channel, is a compile error.
-- **Shared mutable state can only go through `Mutex[T]`, `RwLock[T]` and `Atomic[T]`**: the lock owns the data, so you cannot reach it without locking. Locking is a projection, so a protected reference cannot be carried out of the critical section.
-- **`task.group` is the first choice**: child tasks can borrow data from outside the group, while values declared inside the group body are taken by the child tasks (as with `go`). The first error cancels the remaining child tasks and is then returned as the group's error (a panic terminates the process; see section 5). A child task can also cancel the whole group with `g.cancel()`.
-- **Cancellation propagates along the task tree**; there is no need to pass a `ctx` through every function signature. In a cancelled task, blocking operations return immediately: a receive gets `none`, a send does not happen, `time.sleep` wakes early, and network calls return an error for which `isCancelled()` holds. Long computations that don't block set checkpoints with `try task.check()`. Timeouts are written `task.timeout(5 * time.second, () => ...)`; when the deadline passes, the result is `none`.
-- Cancellation never makes results "vanish halfway": the group still waits for every child task to finish, so data borrowed by child tasks is always valid.
-- **Bare `go f(x)` is still kept** for background tasks that really must be detached from the caller. Its arguments and captures must be moved in and satisfy `send`. It belongs to no group and is never cancelled.
-- `select` keeps Go's semantics, and its arms are written like `match` arms:
-
-```zig
-select {
-    let job = <-jobs => run(job)      // receive and bind: job is ?Job, none when the channel is closed
-    <-done           => return        // receive only, no binding
-    results <- r     => sent += 1     // send
-    _                => idle()        // runs immediately when nothing is ready; without `_`, it waits
+fn dashboard(id int) Page ! Error {
+    return scope {
+        let user = go fetchUser(id)     // Task[User ! Error]
+        let orders = go fetchOrders(id)
+        Page{user: try user.join(), orders: try orders.join()}
+    }
 }
+
+// channels: the last sender gone closes the channel
+let jobs = chan[Job](16)
+go produce(jobs.tx)                     // moves the sender into the task
+for j in jobs.rx { run(j) }             // ends once `produce` returns
 ```
 
-  `break` / `continue` inside an arm apply to the enclosing loop (`select` itself is not a loop).
+- **Scopes.** `go` starts a task in the innermost `scope` (the bodies of `main` and tests are scopes). A task may borrow anything that lives until the scope ends, and one task may even modify a variable nothing else touches; values declared in blocks inside the scope move into the task. Leaving a scope early cancels its tasks; a failing task cancels its siblings. A function that starts long-lived tasks takes a `Scope` parameter, so where they live is visible in its signature.
+- **Values crossing tasks satisfy `send`**: the compiler derives it from the type's structure; users don't write it. `send fn` is a function type safe to call from several tasks at once, `send interface` an interface whose values may cross tasks, and `isolate { }` builds a value (even a graph of `rc`) that may cross as a whole because nothing outside points into it.
+- **Shared mutable state** goes through `Mutex[T]` (locking is a projection, so a reference can't leave the critical section), `with a, b = lock(m1, m2)` for several locks in one global order, and `Atomic[T]`. Waiting (on a channel, a task, a timer) directly inside a lock block is an error.
+- **Channels** have two ends, `Sender[T]` and `Receiver[T]`. Ownership knows when the last sender is gone, so that closes the channel: there is no `close`, and no channel operation panics. `select` waits on channels, task handles, timers (`time.after(d)`) and cancellation, with `if` guards on arms (Gojo has no nil channels to disable an arm with).
+- **Cancellation propagates along the task tree**, without a `ctx` in every signature. In a cancelled task, blocking operations return immediately in the "no result" form they already have: a receive gets `none`, a send doesn't happen, `time.sleep` wakes early, network calls fail with an error for which `isCancelled()` holds. `task.reason()` says why, `task.deadline()` gives the deadline to pass on, `task.shield` protects cleanup, and `drop` methods run shielded for a moment so that cleanup which blocks still happens. Ctrl-C cancels `main`'s scope: programs shut down cleanly by default.
+- **Data parallelism**: `par for x in &v { }` runs iterations on every CPU, each owning its element; `task.map`, `task.each` and `task.race` cover the rest.
+- **Testing**: `gojo test` runs on a simulated scheduler with a seed and a virtual clock. Since there are no data races, tasks affect each other only at runtime operations, which the scheduler controls, so a seed reproduces an interleaving exactly; `--explore n` tries n of them and prints the seed of a failure.
+
+Stacks differ from Go: tasks borrow data on other tasks' stacks, so stacks **cannot move**, and therefore cannot start at 2 KB and be copied wholesale when full, as Go does. Each task reserves a fixed range of virtual addresses (2 MB by default, with a guard page), and only pages actually used take memory: a suspended task takes one page (4 KB on Linux, 16 KB on Apple Silicon) while it runs, and, once it has been parked for a while, only the bytes it really uses: its stack is **hibernated**, copied out and brought back at the same address (100,000 idle tasks: 1.7 GB → 0.2 GB on macOS). Blocking C calls need no special annotation: during an `extern` call, the thread gives its CPU slot to another thread. Long computations that don't block are preempted: generated code checks a global flag in loops and at the entry of recursive functions (one load, one branch), and when tasks are waiting, a task that has run for more than 10 ms yields the CPU. Across the 8 benchmarks, the geometric mean of cycle counts did not change, and no single benchmark got more than 5% slower (`bench/README.md`).
 
 ## 9. unsafe and FFI
 
@@ -538,7 +530,10 @@ Everything that would drag compile speed toward Rust stays excluded: inferring p
 | `select` | `case v := <-ch:`, `default:` | `let v = <-ch => ...`, `_ => ...`, same form as `match` |
 | Integer overflow | Wraps silently | panics; write `+%` to wrap |
 | Data races | Runtime race detector | Ruled out at compile time |
-| Cancellation | Pass `context.Context` by hand | Propagates automatically along the task tree |
+| Goroutines | Detached; leaks need a profiler to find | Tasks belong to a `scope`, which waits for them; `let t = go f()` gives the result with `t.join()` |
+| Channels | Closed by hand; send on a closed channel panics | `Sender` / `Receiver` ends; closes when the last sender is dropped; never panics |
+| Cancellation | Pass `context.Context` by hand | Propagates automatically along the task tree; Ctrl-C cancels `main` |
+| Testing concurrency | `-race`, `synctest` | A seeded, simulated scheduler with virtual time: `gojo test --explore n` |
 | Generic methods | Not supported | Supported; not part of interface method sets |
 | Map keys | Only built-in comparable types | Any type that satisfies `hash` |
 | C interop | cgo | `extern "C"`: direct calls, no glue code or C headers; libraries linked (`static`) or loaded at run time (`lib`) |
@@ -567,7 +562,7 @@ Everything that would drag compile speed toward Rust stays excluded: inferring p
 - [x] **Cost of panic unwinding**: the default, and only, mode is abort; see section 5.
 - [x] **Default integer overflow behavior in release**: checked by default. Measurements (`bench/`) show that once the small functions containing the check branches are inlined, most benchmarks match the unchecked versions; code dense with recursive calls is about 1.6 times slower, and hot spots use `+%` for explicit wrapping. Turning checks off per package waits until there is a package manifest.
 - [x] **How cancellation shows up**: blocking operations return early in the "no result" form they already have (`none` for a receive, an error for the network, `none` for `timeout`), instead of uniformly returning `task.Cancelled`. Otherwise every receive and every `sleep` would have to become a result type, with `try` everywhere. Use `try task.check()` when an explicit checkpoint is needed.
-- [x] **Goroutine stacks**: fixed addresses, pages committed on demand, never moved, because tasks can borrow data on other stacks. The cost is that each suspended goroutine takes at least one page of memory.
+- [x] **Task stacks**: fixed addresses, pages committed on demand, never moved, because tasks can borrow data on other stacks. A task parked for a while is hibernated: its used bytes are copied out and its pages given back, and both return at the same address before it runs.
 - [x] **Interop with Go**: not part of the language. When needed, go through the C ABI and `extern`; tools that generate declarations are left to the ecosystem.
 - [x] **Back end**: generate C, compiled by the system C compiler or `zig cc`. It gives portable, well-optimized code and cross-compilation for free; the cost is build time, which a built-in debug back end will address (section 10).
 - [x] **Generics implementation**: monomorphization for now; dictionary passing comes with the built-in debug back end (sections 7 and 10).

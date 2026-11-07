@@ -1,0 +1,8 @@
+// A scope handle can't be sent anywhere: it is a view of the running scope.
+fn main() {
+    let ch = chan[Scope](1)
+    // error: channels cannot carry borrowed views
+    scope s {
+        ch.tx <- s
+    }
+}

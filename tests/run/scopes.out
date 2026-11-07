@@ -1,0 +1,8 @@
+failed: err(Bad(3)) fast: true
+early: err(Bad(3)) fast: true
+handles: 25
+["w: alpha", "w: gamma"] longest 5 count 3
+["v 0!", "v 1!", "v 2!"]
+cancelled through the handle, fast: true
+background tasks: 3
+main waits for its tasks

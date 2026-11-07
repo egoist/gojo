@@ -6,11 +6,11 @@ methods of the built-in types (`str`, `String`, slices, `Vec`, `Map`, `?T`,
 `assert`, and a few general types: `Set`, `Arena`, `Hasher`, `Span`.
 Functions without a body are implemented by the compiler or runtime.
 
-**Types:** [`enum Ordering`](#enum-ordering), [`enum Flow`](#enum-flow), [`interface error`](#interface-error), [`interface Number`](#interface-number), [`struct Hasher`](#struct-hasher), [`struct Id`](#struct-id), [`struct Arena`](#struct-arena), [`struct Span`](#struct-span), [`struct Set`](#struct-set)
+**Types:** [`enum Ordering`](#enum-ordering), [`enum Flow`](#enum-flow), [`interface error`](#interface-error), [`interface Number`](#interface-number), [`interface Integer`](#interface-integer), [`struct Atomic`](#struct-atomic), [`struct Chan`](#struct-chan), [`struct Hasher`](#struct-hasher), [`struct Id`](#struct-id), [`struct Arena`](#struct-arena), [`struct Span`](#struct-span), [`struct Set`](#struct-set)
 
 **Functions:** [`panic`](#panic), [`assert`](#assert), [`assertEq`](#asserteq), [`unreachable`](#unreachable), [`drop`](#drop), [`swap`](#swap), [`replace`](#replace), [`take`](#take), [`min`](#min), [`max`](#max), [`setOf`](#setof)
 
-**Methods on other types:** [`extend ?T`](#extend-t), [`extend T ! E`](#extend-t--e), [`extend str`](#extend-str), [`extend String`](#extend-string), [`extend []T`](#extend-t-1), [`extend []String`](#extend-string-1), [`extend Vec[T]`](#extend-vect), [`extend Map[K, V]`](#extend-mapk-v), [`extend rc[T]`](#extend-rct), [`extend weak[T]`](#extend-weakt), [`extend arc[T]`](#extend-arct), [`extend Cell[T]`](#extend-cellt), [`extend Mutex[T]`](#extend-mutext), [`extend chan T`](#extend-chan-t), [`extend MutexRef[T]`](#extend-mutexreft)
+**Methods on other types:** [`extend ?T`](#extend-t), [`extend T ! E`](#extend-t--e), [`extend str`](#extend-str), [`extend String`](#extend-string), [`extend []T`](#extend-t-1), [`extend []String`](#extend-string-1), [`extend Vec[T]`](#extend-vect), [`extend Map[K, V]`](#extend-mapk-v), [`extend rc[T]`](#extend-rct), [`extend weak[T]`](#extend-weakt), [`extend arc[T]`](#extend-arct), [`extend Cell[T]`](#extend-cellt), [`extend Mutex[T]`](#extend-mutext), [`extend Sender[T]`](#extend-sendert), [`extend Receiver[T]`](#extend-receivert), [`extend Task[T]`](#extend-taskt), [`extend Iso[T]`](#extend-isot), [`extend Scope`](#extend-scope), [`extend MutexRef[T]`](#extend-mutexreft)
 
 ## Types
 
@@ -49,6 +49,115 @@ pub interface Number {
 ```
 
 Numeric types, for generic arithmetic.
+
+### interface Integer
+
+```zig
+pub interface Integer {
+    ~int | ~i8 | ~i16 | ~i32 | ~u8 | ~u16 | ~u32 | ~u64
+}
+```
+
+Integer types, for `Atomic`.
+
+### struct Atomic
+
+```zig
+pub unsafe send struct Atomic[T Integer] {
+    // and private fields
+}
+```
+
+An integer that tasks share and change without a lock: each operation is
+atomic and sequentially consistent. Tasks borrow it and call its methods at
+the same time:
+
+```zig
+let hits = Atomic.new(0)
+par for r in requests { if r.ok { _ = hits.add(1) } }
+```
+
+#### Atomic.new
+
+```zig
+pub fn new(x T) Atomic[T]
+```
+
+#### Atomic.load
+
+```zig
+pub fn load(self) T
+```
+
+The value now.
+
+#### Atomic.store
+
+```zig
+pub fn store(self, x T)
+```
+
+Replaces the value.
+
+#### Atomic.add
+
+```zig
+pub fn add(self, d T) T
+```
+
+Adds `d`, wrapping around on overflow, and gives the new value.
+
+#### Atomic.sub
+
+```zig
+pub fn sub(self, d T) T
+```
+
+Subtracts `d`, wrapping around on overflow, and gives the new value.
+
+#### Atomic.swap
+
+```zig
+pub fn swap(self, x T) T
+```
+
+Replaces the value and gives the old one.
+
+#### Atomic.compareSwap
+
+```zig
+pub fn compareSwap(self, old T, new T) bool
+```
+
+Replaces the value with `new` if it is `old`; true if it did.
+
+#### Atomic.clone
+
+```zig
+pub fn clone(self) Atomic[T]
+```
+
+A new `Atomic` with the value now.
+
+### struct Chan
+
+```zig
+pub struct Chan[T] {
+    // The sending end; `.clone()` it for more senders.
+    pub tx Sender[T]
+    // The receiving end; `.clone()` it for more receivers.
+    pub rx Receiver[T]
+}
+```
+
+`chan[T](n)` makes a channel with room for `n` values (`chan[T]()`: none, so
+a send waits for a receiver). Its two ends are handed out separately:
+
+```zig
+let ch = chan[Job](16)
+go produce(ch.tx)          // the channel closes when the last sender is dropped
+for job in ch.rx { run(job) }
+```
 
 ### struct Hasher
 
@@ -1166,42 +1275,83 @@ pub fn lock(self) yield inout T
 
 Locking is a projection: the guarded value can't escape the block.
 
-### extend chan T
+### extend Sender[T]
 
-#### chan T.send
-
-```zig
-pub fn send(self, x sink T)
-```
-
-Sends `x` (`ch <- x`): waits while the channel is full, or, unbuffered,
-until a receiver takes it. Panics when the channel is closed.
-
-#### chan T.recv
+#### Sender[T].send
 
 ```zig
-pub fn recv(self) ?T
+pub fn send(self, x sink T) bool
 ```
 
-Receives a value (`<-ch`), waiting for one; none once the channel is closed
-and empty.
+Sends `x` (`tx <- x`): waits while the channel is full, or, unbuffered,
+until a receiver takes it. False, and `x` is dropped, when every
+receiver is gone or the task is cancelled.
 
-#### chan T.close
-
-```zig
-pub fn close(self)
-```
-
-Closes the channel: receivers get what is left, then none. Panics when it
-is already closed.
-
-#### chan T.len
+#### Sender[T].len
 
 ```zig
 pub fn len(self) int
 ```
 
 The number of values waiting in the buffer.
+
+### extend Receiver[T]
+
+#### Receiver[T].recv
+
+```zig
+pub fn recv(self) ?T
+```
+
+Receives a value (`<-rx`), waiting for one; none once every sender is
+gone and the buffer is empty (or the task is cancelled).
+
+#### Receiver[T].len
+
+```zig
+pub fn len(self) int
+```
+
+The number of values waiting in the buffer.
+
+### extend Task[T]
+
+#### Task[T].join
+
+```zig
+pub fn join(self sink) T
+```
+
+Waits for the task to finish and gives its result.
+
+#### Task[T].cancel
+
+```zig
+pub fn cancel(self sink)
+```
+
+Cancels the task; the scope still waits for it, and its result is
+dropped.
+
+### extend Iso[T]
+
+#### Iso[T].take
+
+```zig
+pub fn take(self sink) T
+```
+
+The value, to use in this task.
+
+### extend Scope
+
+#### Scope.cancel
+
+```zig
+pub fn cancel(self)
+```
+
+Cancels the scope: every task in it, and its body.
 
 ### extend MutexRef[T]
 

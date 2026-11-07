@@ -1,0 +1,29 @@
+// Waiting while a lock is held: every task that wants the lock waits too.
+use std/time
+
+fn work() int {
+    return 1
+}
+
+fn main() {
+    let m = Mutex(0)
+    let ch = chan[int](1)
+    with v = m.lock() {
+        ch.tx <- v
+        // error: this send can wait while `m` is locked
+        _ = <-ch.rx
+        // error: this receive waits while `m` is locked
+        time.sleep(time.millisecond)
+        // error: this sleep waits while `m` is locked
+        scope {
+            // error: this `scope` waits for its tasks while `m` is locked
+            let t = go work()
+            println(t.join())
+            // error: this `join` waits for a task while `m` is locked
+        }
+    }
+    with a, b = lock(m, m) {
+        a += b
+    }
+    // error: `lock(...)` is given `m` twice
+}

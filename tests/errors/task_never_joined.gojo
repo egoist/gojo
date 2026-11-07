@@ -1,0 +1,13 @@
+fn compute() int {
+    return 42
+}
+
+fn main() {
+    scope {
+        let t = go compute()
+        if compute() > 1 {
+            println(t.join())
+        }
+        // error: task `t` is never joined
+    }
+}

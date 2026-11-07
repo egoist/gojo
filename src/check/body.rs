@@ -35,7 +35,13 @@ pub struct FnCx {
     pub vars: Vec<Option<Ty>>,
     pub closure_ids: u32,
     pub hidden: u32,
-    pub group_err: Vec<(Ty, u32)>,
+    /// Enclosing `scope` blocks, innermost last.
+    pub task_scopes: Vec<TaskScopeCx>,
+    pub next_scope: u32,
+    /// Closure depths of `par for` bodies being checked.
+    pub par_frames: Vec<u32>,
+    /// `with ... lock()` bodies being checked: (closure depth, the lock's name).
+    pub locked: Vec<(u32, String)>,
     /// Owner type for the next associated-function call (`Stack[String].new()`).
     pub call_owner: Option<Ty>,
     /// The next closure checked is the body of a push-style `for` loop.
@@ -43,6 +49,20 @@ pub struct FnCx {
     /// Inside `defer` / `errdefer`: the deferred code can't leave the function.
     /// An ordinary closure starts over at 0; a loop body doesn't.
     pub defer_depth: u32,
+}
+
+/// A `scope` block being checked.
+#[derive(Clone, Debug)]
+pub struct TaskScopeCx {
+    pub id: u32,
+    /// Closure depth of the scope: `go` must be at the same depth.
+    pub depth: u32,
+    /// Block level of the scope's body: locals declared at this level or
+    /// outside live until the scope has waited for its tasks.
+    pub block: u32,
+    /// The error plain `go` tasks can fail with, and where the first one is.
+    pub errt: Option<(Ty, Span)>,
+    pub handle: Option<LocalId>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -105,7 +125,10 @@ impl FnCx {
             vars: vec![],
             closure_ids: 0,
             hidden: 0,
-            group_err: vec![],
+            task_scopes: vec![],
+            next_scope: 0,
+            par_frames: vec![],
+            locked: vec![],
             call_owner: None,
             loop_body_next: None,
             defer_depth: 0,
@@ -113,6 +136,36 @@ impl FnCx {
     }
     pub fn depth(&self) -> u32 {
         self.frames.len() as u32
+    }
+}
+
+/// The name of the lock in `with v = m.lock()`, for messages.
+fn lock_name(e: &Expr) -> String {
+    match &e.kind {
+        ExprKind::Call(f, _) => match &f.kind {
+            ExprKind::Field(b, _, _) => ast_text(b),
+            _ => "the lock".into(),
+        },
+        _ => "the lock".into(),
+    }
+}
+
+/// A short rendering of a path expression for messages (`jobs`, `s.out`).
+fn ast_text(e: &Expr) -> String {
+    match &e.kind {
+        ExprKind::Ident(n) => n.clone(),
+        ExprKind::Field(b, n, _) => format!("{}.{}", ast_text(b), n),
+        _ => "ch".into(),
+    }
+}
+
+/// A place written as a path: `x`, `x.f`, `x[i]`, `x.f[i].g`.
+fn ast_is_place(e: &Expr) -> bool {
+    match &e.kind {
+        ExprKind::Ident(_) => true,
+        ExprKind::Field(b, _, _) => ast_is_place(b),
+        ExprKind::Index(b, i) => i.len() == 1 && ast_is_place(b),
+        _ => false,
     }
 }
 
@@ -313,6 +366,16 @@ impl Checker {
         let _ = decl;
         let unit_result = matches!(&fd.ret, Ty::Result(t, _) if **t == Ty::Unit);
         let expect = if fd.yields.is_some() || fd.ret == Ty::Unit || fd.ret == Ty::Never || unit_result { Expect::NoValue } else { Expect::Ty(fd.ret.clone()) };
+        // `main` and test bodies are scopes: `go` works there directly
+        let is_main = fd.kind == FuncKind::Normal && fd.name == "main" && fd.pkg == self.prog.main_pkg && fd.recv.is_none() && fd.owner_ty.is_none();
+        let wrapped;
+        let body = if is_main || fd.kind == FuncKind::Test {
+            let sc = Expr { kind: ExprKind::Scope { name: None, body: body.clone(), implicit: true }, span: body.span };
+            wrapped = ast::Block { stmts: vec![Stmt { kind: StmtKind::Expr(sc), span: body.span }], span: body.span };
+            &wrapped
+        } else {
+            body
+        };
         let mut tb = self.block_in_scope(&mut cx, body, expect.clone(), false);
         self.finish_fn_body(&mut cx, &mut tb, &fd.ret, body.span, fd.yields.is_some());
         self.pop_scope(&mut cx);
@@ -380,7 +443,7 @@ impl Checker {
         }
         let _ = is_param;
         let id = cx.locals.len() as LocalId;
-        cx.locals.push(Local { name: name.to_string(), ty, kind, span, closure_depth: cx.depth(), match_arm: None, ref_root: None });
+        cx.locals.push(Local { name: name.to_string(), ty, kind, span, closure_depth: cx.depth(), block_level: cx.scopes.len() as u32, match_arm: None, ref_root: None });
         cx.used.push(name == "_");
         if let Some(sc) = cx.scopes.last_mut() {
             sc.push((name.to_string(), id));
@@ -392,7 +455,7 @@ impl Checker {
         cx.hidden += 1;
         let name = format!("__h{}", cx.hidden);
         let id = cx.locals.len() as LocalId;
-        cx.locals.push(Local { name: name.clone(), ty, kind, span, closure_depth: cx.depth(), match_arm: None, ref_root: None });
+        cx.locals.push(Local { name: name.clone(), ty, kind, span, closure_depth: cx.depth(), block_level: cx.scopes.len() as u32, match_arm: None, ref_root: None });
         cx.used.push(true);
         cx.scopes.last_mut().unwrap().push((name, id));
         id
@@ -492,7 +555,7 @@ impl Checker {
                 cx.vars[*x as usize] = Some(r);
                 true
             }
-            (Ty::Vec(x), Ty::Vec(y)) | (Ty::Slice(x), Ty::Slice(y)) | (Ty::Option(x), Ty::Option(y)) | (Ty::Box(x), Ty::Box(y)) | (Ty::Rc(x), Ty::Rc(y)) | (Ty::Arc(x), Ty::Arc(y)) | (Ty::Weak(x), Ty::Weak(y)) | (Ty::Cell(x), Ty::Cell(y)) | (Ty::Mutex(x), Ty::Mutex(y)) | (Ty::MutexRef(x), Ty::MutexRef(y)) | (Ty::Chan(x), Ty::Chan(y)) | (Ty::Ptr(x), Ty::Ptr(y)) => {
+            (Ty::Vec(x), Ty::Vec(y)) | (Ty::Slice(x), Ty::Slice(y)) | (Ty::Option(x), Ty::Option(y)) | (Ty::Box(x), Ty::Box(y)) | (Ty::Rc(x), Ty::Rc(y)) | (Ty::Arc(x), Ty::Arc(y)) | (Ty::Weak(x), Ty::Weak(y)) | (Ty::Cell(x), Ty::Cell(y)) | (Ty::Mutex(x), Ty::Mutex(y)) | (Ty::MutexRef(x), Ty::MutexRef(y)) | (Ty::Sender(x), Ty::Sender(y)) | (Ty::Receiver(x), Ty::Receiver(y)) | (Ty::Task(x), Ty::Task(y)) | (Ty::Iso(x), Ty::Iso(y)) | (Ty::Ptr(x), Ty::Ptr(y)) => {
                 let (x, y) = ((**x).clone(), (**y).clone());
                 self.unify(cx, &x, &y)
             }
@@ -821,6 +884,13 @@ impl Checker {
         if matches!(actual, Ty::Never | Ty::Error) || target.is_error() {
             return e;
         }
+        if let (Ty::Func(a), Ty::Func(t)) = (&actual, &target) {
+            if t.send && !a.send && !matches!(e.kind, TK::FuncRef(..)) {
+                let s = self.prog.show(&actual);
+                self.diags.push(Diag::new(sp, format!("expected a `send fn`, found `{}`", s)).note(None, "a `send fn` may run in many tasks at once: pass a function, or a closure that only reads `send` values it captures"));
+                return TExpr::error(sp);
+            }
+        }
         if let (TK::FuncRef(..), Ty::Func(_)) = (&e.kind, &target) {
             let t = actual.clone();
             if self.unify(cx, &t, &target) {
@@ -985,7 +1055,8 @@ impl Checker {
             let last = i + 1 == n;
             if last && !matches!(expect, Expect::NoValue) {
                 if let StmtKind::Expr(e) = &s.kind {
-                    let no_else = matches!(&e.kind, ExprKind::If { else_: None, .. } | ExprKind::IfLet { else_: None, .. });
+                    // `go f()` written as a statement starts a plain task, even last
+                    let no_else = matches!(&e.kind, ExprKind::If { else_: None, .. } | ExprKind::IfLet { else_: None, .. } | ExprKind::Go(_));
                     if no_else {
                         if let Some(ts) = self.stmt(cx, s) {
                             stmts.push(ts);
@@ -1085,6 +1156,10 @@ impl Checker {
                 }
             }
             StmtKind::Expr(e) => {
+                if let ExprKind::Go(inner) = &e.kind {
+                    let te = self.go_expr(cx, inner, false, e.span);
+                    return Some(TStmt::Expr(te));
+                }
                 let te = self.expr_novalue(cx, e);
                 self.check_must_use(cx, &te);
                 let te = self.borrow(cx, te);
@@ -1099,6 +1174,10 @@ impl Checker {
             StmtKind::Return(v) => {
                 if cx.defer_depth > 0 {
                     self.err(sp, "cannot `return` from a defer");
+                }
+                if cx.par_frames.last() == Some(&cx.depth()) {
+                    self.diags.push(Diag::new(sp, "`return` can't leave a `par for`: its iterations run at the same time").note(None, "`continue` ends this iteration; to find a value, collect results with `task.map`"));
+                    return None;
                 }
                 if cx.yields.is_some() && cx.frames.is_empty() {
                     if v.is_some() {
@@ -1187,6 +1266,14 @@ impl Checker {
                 let id = match label {
                     None => match cx.loops.last() {
                         Some((_, id)) => *id,
+                        None if cx.par_frames.last() == Some(&cx.depth()) => {
+                            if is_break {
+                                self.diags.push(Diag::new(sp, "`break` can't stop a `par for`: its iterations run at the same time").note(None, "`continue` ends this iteration"));
+                                return None;
+                            }
+                            // the body is a function per element
+                            return Some(TStmt::Return(None, sp));
+                        }
                         None => {
                             self.err(sp, format!("`{}` outside of a loop", word));
                             return None;
@@ -1242,20 +1329,12 @@ impl Checker {
                 cx.pending_label = label.as_ref().map(|l| l.0.clone());
                 return self.for_loop(cx, f, sp);
             }
-            StmtKind::Go(e) => return self.go_stmt(cx, e, sp),
             StmtKind::Send { chan, value } => {
+                self.no_wait_under_lock(cx, sp, "this send can wait");
                 let ch = self.expr(cx, chan, None);
                 let ch = self.borrow(cx, ch);
                 let cty = self.resolve(cx, &ch.ty);
-                let elem = match &cty {
-                    Ty::Chan(t) => (**t).clone(),
-                    Ty::Error => Ty::Error,
-                    _ => {
-                        let s = self.prog.show(&cty);
-                        self.err(chan.span, format!("cannot send on non-channel type `{}`", s));
-                        Ty::Error
-                    }
-                };
+                let elem = self.sender_elem(&cty, chan.span, &ast_text(chan));
                 let v = self.expr(cx, value, Some(&elem));
                 let v = self.coerce(cx, v, &elem, Use::Value);
                 TStmt::Send { chan: ch, value: v }
@@ -1277,11 +1356,57 @@ impl Checker {
                 self.push_scope(cx);
                 let id = self.declare(cx, name, ty, LocalKind::Ref { mutable }, *name_span, false);
                 cx.locals[id as usize].ref_root = root.map(|r| cx.locals[r as usize].ref_root.unwrap_or(r));
+                if lock {
+                    cx.locked.push((cx.depth(), lock_name(expr)));
+                }
                 let b = self.block_in_scope(cx, body, Expect::NoValue, false);
+                if lock {
+                    cx.locked.pop();
+                }
                 self.pop_scope(cx);
                 TStmt::With { local: id, place: te, lock, body: b }
             }
-            StmtKind::Select(arms) => return self.select_stmt(cx, arms, sp),
+            StmtKind::Select(arms) => {
+                self.no_wait_under_lock(cx, sp, "this `select` waits");
+                return self.select_stmt(cx, arms, sp);
+            }
+            StmtKind::WithLocks { names, mutexes, body } => {
+                if names.len() != mutexes.len() {
+                    self.err(sp, format!("`with` binds {} name(s) to {} lock(s)", names.len(), mutexes.len()));
+                    return None;
+                }
+                if mutexes.len() < 2 {
+                    self.err(sp, "`lock(...)` takes two or more mutexes; for one, write `with v = m.lock() { }`");
+                }
+                for (i, m) in mutexes.iter().enumerate() {
+                    if ast_is_place(m) && mutexes[..i].iter().any(|o| ast_is_place(o) && ast_text(o) == ast_text(m) && ast_text(m) != "ch") {
+                        self.err(m.span, format!("`lock(...)` is given `{}` twice: a task can't hold a lock twice", ast_text(m)));
+                    }
+                }
+                self.push_scope(cx);
+                let mut locals = vec![];
+                let mut places = vec![];
+                for ((n, nsp), m) in names.iter().zip(mutexes) {
+                    let call = Expr { kind: ExprKind::Call(Box::new(Expr { kind: ExprKind::Field(Box::new(m.clone()), "lock".into(), m.span), span: m.span }), vec![]), span: m.span };
+                    let te = self.expr(cx, &call, None);
+                    if !matches!(te.kind, TK::Error) && !is_lock_proj(&self.prog, &te) {
+                        self.err(m.span, "`lock(...)` takes mutexes (`Mutex[T]`, or `Mutex(&x)`)");
+                    }
+                    let ty = self.resolve(cx, &te.ty);
+                    let root = self.place_root(cx, &te);
+                    let te = self.borrow(cx, te);
+                    let id = self.declare(cx, n, ty, LocalKind::Ref { mutable: true }, *nsp, false);
+                    cx.locals[id as usize].ref_root = root.map(|r| cx.locals[r as usize].ref_root.unwrap_or(r));
+                    locals.push(id);
+                    places.push(te);
+                }
+                cx.locked.push((cx.depth(), names.iter().map(|n| n.0.clone()).collect::<Vec<_>>().join(", ")));
+                let b = self.block_in_scope(cx, body, Expect::NoValue, false);
+                cx.locked.pop();
+                self.pop_scope(cx);
+                TStmt::WithLocks { locals, places, body: b }
+            }
+            StmtKind::ParFor { first, second, iter, by_ref, body } => return self.par_for(cx, first, second.as_ref(), iter, *by_ref, body, sp),
         })
     }
 
@@ -1445,7 +1570,12 @@ impl Checker {
                 }
                 (IterKind::Str, Ty::Int(IntTy::I32), Some(Ty::int()), LocalKind::Let)
             }
-            Ty::Chan(t) => (IterKind::Chan, (**t).clone(), None, LocalKind::Let),
+            Ty::Receiver(t) => (IterKind::Chan, (**t).clone(), None, LocalKind::Let),
+            Ty::Adt(d, _) if Some(*d) == self.prog.prelude_type("Chan") => {
+                let w = ast_text(iter);
+                self.diags.push(Diag::new(iter.span, format!("iterate over the channel's receiving end: `for x in {}.rx`", w)).note(None, format!("the loop ends once every sender (`{}.tx` and its clones) is gone and the buffer is empty", w)));
+                return None;
+            }
             Ty::Error => return None,
             _ => return self.for_custom(cx, first, second, iter, it, &ity, by_ref, body, sp),
         };
@@ -1589,63 +1719,84 @@ impl Checker {
         None
     }
 
-    fn go_stmt(&mut self, cx: &mut FnCx, e: &Expr, sp: Span) -> Option<TStmt> {
-        match &e.kind {
-            ExprKind::Closure { .. } => {
-                let fty = Ty::Func(Rc::new(FuncTy { params: vec![], ret: Ty::Unit }));
-                let te = self.expr(cx, e, Some(&fty));
-                let te = self.value(cx, te);
-                if let TK::Closure(c) = &te.kind {
-                    for (l, _) in c.captures.clone() {
-                        let t = cx.locals[l as usize].ty.clone();
-                        let t = self.resolve(cx, &t);
-                        if !self.is_send(&t) {
-                            let s = self.prog.show(&t);
-                            self.err(sp, format!("`go` closure captures `{}` of type `{}`, which cannot be sent to another goroutine", cx.locals[l as usize].name, s));
-                        }
-                    }
-                }
-                Some(TStmt::Go { call: te, span: sp })
+    /// `par for x in &v { }`: the body becomes a `send fn` called for each
+    /// element, from several tasks at once.
+    fn par_for(&mut self, cx: &mut FnCx, first: &(String, Span), second: Option<&(String, Span)>, iter: &Expr, by_ref: bool, body: &ast::Block, sp: Span) -> Option<TStmt> {
+        let mut params = vec![];
+        let mut ptys = vec![];
+        let (kind, it, hi) = if let ExprKind::Range { lo, hi, inclusive } = &iter.kind {
+            if second.is_some() || by_ref {
+                self.err(iter.span, "a range yields one value per iteration: `par for i in 0..n { }`");
             }
-            ExprKind::Call(..) => {
-                let te = self.expr(cx, e, None);
-                let mut te = te;
-                if let TK::Call { args, .. } = &mut te.kind {
-                    let taken = std::mem::take(args);
-                    let mut new_args = vec![];
-                    for a in taken {
-                        let t = self.resolve(cx, &a.e.ty);
-                        if !self.is_send(&t) {
-                            let s = self.prog.show(&t);
-                            self.err(a.e.span, format!("argument of type `{}` cannot be sent to another goroutine", s));
-                        }
-                        match a.mode {
-                            ArgMode::Inout => {
-                                self.err(a.e.span, "`go` cannot pass an inout argument; the goroutine may outlive the caller");
-                                new_args.push(a);
-                            }
-                            ArgMode::Borrow => {
-                                // the goroutine takes ownership and lends it to the callee
-                                if a.e.ty.is_view() {
-                                    self.err(a.e.span, "`go` cannot pass a borrowed view; pass an owned value");
-                                }
-                                let v = self.value(cx, a.e);
-                                new_args.push(TArg { mode: ArgMode::Borrow, e: v });
-                            }
-                            ArgMode::Value => new_args.push(a),
-                        }
-                    }
-                    *args = new_args;
-                } else if !matches!(te.kind, TK::Error) {
-                    self.err(e.span, "`go` needs a function call or a closure");
-                }
-                Some(TStmt::Go { call: te, span: sp })
+            let l = self.expr(cx, lo, None);
+            let l = self.value(cx, l);
+            let lt = self.resolve(cx, &l.ty);
+            let t = if lt.is_int() { lt } else { Ty::int() };
+            let l = self.coerce(cx, l, &t, Use::Value);
+            let h = self.expr_value(cx, hi, Some(&t));
+            ptys.push((Mode::Borrow, t));
+            (IterKind::Range { inclusive: *inclusive }, l, Some(h))
+        } else {
+            let it = self.expr(cx, iter, None);
+            let ity = self.resolve(cx, &it.ty);
+            if by_ref {
+                self.require_mut(cx, &it, "mutably iterate over");
             }
-            _ => {
-                self.err(e.span, "`go` needs a function call or a closure");
-                None
+            let it = self.borrow(cx, it);
+            let (kind, et) = match &ity {
+                Ty::Vec(t) => (IterKind::Vec, (**t).clone()),
+                Ty::Slice(t) if !by_ref => (IterKind::Slice, (**t).clone()),
+                Ty::Array(t, _) | Ty::ArrayT(t, _) => (IterKind::Array, (**t).clone()),
+                Ty::Error => return None,
+                _ => {
+                    let s = self.prog.show(&ity);
+                    self.err(iter.span, format!("`par for` runs over a range, a `Vec`, a slice or an array, not `{}`", s));
+                    return None;
+                }
+            };
+            if !self.is_send(&et) {
+                let s = self.prog.show(&et);
+                self.err(iter.span, format!("`par for` hands elements of type `{}` to other tasks, but it isn't `send`", s));
+            }
+            if second.is_some() {
+                ptys.push((Mode::Borrow, Ty::int()));
+            }
+            ptys.push((if by_ref { Mode::Inout } else { Mode::Borrow }, et));
+            (kind, it, None)
+        };
+        for (n, nsp) in [Some(first), second].into_iter().flatten() {
+            params.push(ast::ClosureParam { name: n.clone(), mode: Mode::Borrow, ty: None, span: *nsp });
+        }
+        if params.len() != ptys.len() {
+            return None;
+        }
+        let clo = Expr { kind: ExprKind::Closure { params, ret: None, body: Box::new(Expr { kind: ExprKind::Block(body.clone()), span: body.span }) }, span: body.span };
+        let fty = Ty::Func(Rc::new(FuncTy { params: ptys, ret: Ty::Unit, send: true }));
+        cx.par_frames.push(cx.depth() + 1);
+        let b = self.expr(cx, &clo, Some(&fty));
+        cx.par_frames.pop();
+        let indexed = second.is_some();
+        Some(TStmt::ParFor { kind, iter: it, hi, mutable: by_ref, indexed, body: b, span: sp })
+    }
+
+    /// `time.after(d)`, `time.at(t)` and `cancelled` as `select` arms.
+    fn select_event(&mut self, cx: &mut FnCx, e: &Expr) -> Option<TSelectKind> {
+        if let ExprKind::Ident(n) = &e.kind {
+            if n == "cancelled" {
+                return Some(TSelectKind::Cancelled);
             }
         }
+        if let ExprKind::Call(f, args) = &e.kind {
+            if let ExprKind::Field(base, name, _) = &f.kind {
+                let is_time = matches!(self.resolve_path(cx, base), Some(PathRes::Pkg(p, _)) if p != u32::MAX && self.prog.packages[p as usize].name == "time" && self.prog.packages[p as usize].is_std);
+                if is_time && (name == "after" || name == "at") && args.len() == 1 {
+                    let at = self.expr_value(cx, &args[0], Some(&Ty::int()));
+                    return Some(TSelectKind::Timer { at, relative: name == "after" });
+                }
+            }
+        }
+        self.diags.push(Diag::new(e.span, "this is not a `select` arm").note(None, "arms are `let x = <-rx`, `<-rx`, `tx <- v`, `let r = <-task`, `time.after(d)`, `time.at(t)`, `cancelled` and `_`, each optionally followed by `if cond`"));
+        None
     }
 
     fn select_stmt(&mut self, cx: &mut FnCx, arms: &[ast::SelectArm], sp: Span) -> Option<TStmt> {
@@ -1653,35 +1804,39 @@ impl Checker {
         let mut defaults = 0;
         for a in arms {
             self.push_scope(cx);
+            // evaluated before waiting; a false guard leaves the arm out
+            let guard = a.guard.as_ref().map(|g| self.expr_value(cx, g, Some(&Ty::Bool)));
             let kind = match &a.kind {
                 ast::SelectKind::Recv { bind, chan } => {
                     let ch = self.expr(cx, chan, None);
-                    let ch = self.borrow(cx, ch);
                     let cty = self.resolve(cx, &ch.ty);
-                    let elem = match &cty {
-                        Ty::Chan(t) => (**t).clone(),
-                        _ => {
-                            let s = self.prog.show(&cty);
-                            self.err(chan.span, format!("cannot receive from non-channel type `{}`", s));
-                            Ty::Error
+                    if let Ty::Task(r) = &cty {
+                        // `let r = <-t`: the task has finished
+                        let r = (**r).clone();
+                        if !matches!(ch.kind, TK::Local(_)) {
+                            self.err(chan.span, "a `select` arm waits on a task handle held in a variable: `let r = <-t =>`");
                         }
-                    };
-                    let b = bind.as_ref().map(|(n, s)| self.declare(cx, n, Ty::opt(elem.clone()), LocalKind::Let, *s, false));
-                    TSelectKind::Recv { chan: ch, bind: b }
+                        let b = bind.as_ref().map(|(n, s)| self.declare(cx, n, r.clone(), LocalKind::Let, *s, false));
+                        TSelectKind::Task { task: ch, bind: b }
+                    } else {
+                        let ch = self.borrow(cx, ch);
+                        let elem = self.receiver_elem(&cty, chan.span, &ast_text(chan));
+                        let b = bind.as_ref().map(|(n, s)| self.declare(cx, n, Ty::opt(elem.clone()), LocalKind::Let, *s, false));
+                        TSelectKind::Recv { chan: ch, bind: b }
+                    }
                 }
+                ast::SelectKind::Event(e) => match self.select_event(cx, e) {
+                    Some(k) => k,
+                    None => {
+                        self.pop_scope(cx);
+                        continue;
+                    }
+                },
                 ast::SelectKind::Send { chan, value } => {
                     let ch = self.expr(cx, chan, None);
                     let ch = self.borrow(cx, ch);
                     let cty = self.resolve(cx, &ch.ty);
-                    let elem = match &cty {
-                        Ty::Chan(t) => (**t).clone(),
-                        Ty::Error => Ty::Error,
-                        _ => {
-                            let s = self.prog.show(&cty);
-                            self.err(chan.span, format!("cannot send on non-channel type `{}`", s));
-                            Ty::Error
-                        }
-                    };
+                    let elem = self.sender_elem(&cty, chan.span, &ast_text(chan));
                     let v = self.expr(cx, value, Some(&elem));
                     let v = self.coerce(cx, v, &elem, Use::Value);
                     TSelectKind::Send { chan: ch, value: v }
@@ -1693,10 +1848,13 @@ impl Checker {
             };
             let body = self.block_in_scope(cx, &a.body, Expect::NoValue, false);
             self.pop_scope(cx);
-            out.push(TSelectArm { kind, body });
+            out.push(TSelectArm { kind, guard, body });
         }
         if defaults > 1 {
             self.err(sp, "`select` has more than one `_` arm");
+        }
+        if out.iter().filter(|a| matches!(a.kind, TSelectKind::Cancelled)).count() > 1 {
+            self.err(sp, "`select` has more than one `cancelled` arm");
         }
         Some(TStmt::Select { arms: out, span: sp })
     }
@@ -1709,6 +1867,7 @@ impl Checker {
     fn expr_novalue(&mut self, cx: &mut FnCx, e: &Expr) -> TExpr {
         match &e.kind {
             ExprKind::If { .. } | ExprKind::IfLet { .. } | ExprKind::Match { .. } | ExprKind::Block(_) | ExprKind::Unsafe(_) => self.expr_x(cx, e, Expect::NoValue),
+            ExprKind::Scope { name, body, implicit } => self.scope_expr(cx, name.as_ref(), body, *implicit, Expect::NoValue, e.span),
             _ => self.expr(cx, e, None),
         }
     }
@@ -1849,6 +2008,9 @@ impl Checker {
                 let t = self.block_ty(&tb);
                 TExpr::new(TK::Block(tb), t, sp)
             }
+            ExprKind::Scope { name, body, implicit } => self.scope_expr(cx, name.as_ref(), body, *implicit, ex, sp),
+            ExprKind::Go(inner) => self.go_expr(cx, inner, true, sp),
+            ExprKind::Isolate(b) => self.isolate_expr(cx, b, sp),
             ExprKind::Unsafe(b) => {
                 cx.unsafe_depth += 1;
                 let tb = self.block(cx, b, ex);
@@ -1934,21 +2096,22 @@ impl Checker {
                 TExpr::error(sp)
             }
             ExprKind::Recv(ch) => {
+                self.no_wait_under_lock(cx, sp, "this receive waits");
                 let c = self.expr(cx, ch, None);
                 let c = self.borrow(cx, c);
                 let cty = self.resolve(cx, &c.ty);
-                match &cty {
-                    Ty::Chan(t) => {
-                        let t = Ty::opt((**t).clone());
-                        TExpr::new(TK::Recv(Box::new(c)), t, sp)
-                    }
-                    Ty::Error => TExpr::error(sp),
-                    _ => {
-                        let s = self.prog.show(&cty);
-                        self.err(sp, format!("cannot receive from non-channel type `{}`", s));
-                        TExpr::error(sp)
-                    }
+                if cty == Ty::Error {
+                    return TExpr::error(sp);
                 }
+                if let Ty::Task(_) = cty {
+                    self.diags.push(Diag::new(sp, "`<-t` on a task handle only works as a `select` arm").note(None, "wait for the task with `t.join()`"));
+                    return TExpr::error(sp);
+                }
+                let t = self.receiver_elem(&cty, ch.span, &ast_text(ch));
+                if t == Ty::Error {
+                    return TExpr::error(sp);
+                }
+                TExpr::new(TK::Recv(Box::new(c)), Ty::opt(t), sp)
             }
             ExprKind::DotVariant(name) => self.dot_variant(cx, name, &[], false, sp, expect.as_ref()),
             ExprKind::StructLit { ty, fields, positional, kv } => self.struct_lit(cx, ty, fields, positional, kv, sp, expect.as_ref()),
@@ -2081,7 +2244,7 @@ impl Checker {
             return TExpr::error(sp);
         }
         let s: HashMap<TParamId, Ty> = fd.tparams.iter().copied().zip(targs.iter().cloned()).collect();
-        let fty = Ty::Func(Rc::new(FuncTy { params: fd.params.iter().map(|p| (p.mode, p.ty.subst(&s))).collect(), ret: fd.ret.subst(&s) }));
+        let fty = Ty::Func(Rc::new(FuncTy { params: fd.params.iter().map(|p| (p.mode, p.ty.subst(&s))).collect(), ret: fd.ret.subst(&s), send: true }));
         if let Some(e) = expect {
             let e = e.clone();
             self.unify(cx, &fty, &e);
@@ -2591,6 +2754,10 @@ impl Checker {
     }
 
     fn try_expr(&mut self, cx: &mut FnCx, inner: &Expr, wrap: Option<&Expr>, sp: Span) -> TExpr {
+        if cx.par_frames.last() == Some(&cx.depth()) {
+            self.diags.push(Diag::new(sp, "`try` can't leave a `par for`: its iterations run at the same time").note(None, "handle the error in the body (`catch`), or use `task.tryMap`, which stops at the first error"));
+            return TExpr::error(sp);
+        }
         if cx.defer_depth > 0 {
             self.err(sp, "cannot use `try` in a defer: it would return from the function; handle the error with `catch` or `match`");
         }
@@ -3042,6 +3209,14 @@ impl Checker {
                 if matches!(self.resolve(cx, &ret_ty), Ty::Var(_)) {
                     self.unify(cx, &ret_ty, &Ty::Unit);
                 }
+                // a body that only uses `try` and runs off its end: `! E`
+                if tb.value.is_none() {
+                    if let Ty::Result(ok, _) = self.resolve(cx, &ret_ty) {
+                        if matches!(*ok, Ty::Var(_)) {
+                            self.unify(cx, &ok, &Ty::Unit);
+                        }
+                    }
+                }
                 let rt = ret_ty.clone();
                 self.finish_fn_body(cx, &mut tb, &rt, b.span, false);
                 tb
@@ -3079,7 +3254,35 @@ impl Checker {
         let ret_final = self.resolve(cx, &ret_ty);
         let id = cx.closure_ids;
         cx.closure_ids += 1;
-        let fty = Ty::Func(Rc::new(FuncTy { params: pty, ret: ret_final.clone() }));
+        // `send fn`: what it captures can be shared, read-only, by many tasks
+        let mut sendable = true;
+        for (l, u) in &fr.captures {
+            let t = cx.locals[*l as usize].ty.clone();
+            let t = self.resolve(cx, &t);
+            if *u != CapUse::Read || !self.is_send(&t) {
+                sendable = false;
+                if ef.as_ref().is_some_and(|f| f.send) {
+                    let n = cx.locals[*l as usize].name.clone();
+                    let lsp = cx.locals[*l as usize].span;
+                    if cx.par_frames.last() == Some(&depth) {
+                        let d = if *u != CapUse::Read {
+                            Diag::new(sp, format!("a `par for` body can't change `{}`: its iterations run at the same time", n)).note(Some(lsp), "declared here").note(None, "write results into the elements (`par for x in &v { x = ... }`), or share a `Mutex`")
+                        } else {
+                            Diag::new(sp, format!("a `par for` body uses `{}` of type `{}`, which can't be shared between tasks", n, self.prog.show(&t))).note(Some(lsp), "declared here")
+                        };
+                        self.diags.push(d);
+                    } else {
+                        let why = if *u != CapUse::Read { "changes it".to_string() } else { format!("its type `{}` is not `send`", self.prog.show(&t)) };
+                        self.diags.push(Diag::new(sp, format!("this closure must be a `send fn`, but it captures `{}`, and {}", n, why)).note(None, "a `send fn` may run in many tasks at once: it can only read what it captures, and only values that can cross tasks"));
+                    }
+                }
+            }
+        }
+        let send = match &ef {
+            Some(f) => f.send,
+            None => sendable,
+        };
+        let fty = Ty::Func(Rc::new(FuncTy { params: pty, ret: ret_final.clone(), send }));
         if let Some(e) = expect {
             let e = e.clone();
             self.unify(cx, &e, &fty);
@@ -3148,8 +3351,16 @@ impl Checker {
                             return r;
                         }
                     }
+                    if self.prog.packages[p as usize].name == "time" && name == "sleep" && self.prog.packages[p as usize].is_std {
+                        self.no_wait_under_lock(cx, sp, "this sleep waits");
+                    }
+                    if self.prog.packages[p as usize].name == "time" && (name == "after" || name == "at") && self.prog.packages[p as usize].is_std && !self.prog.packages[p as usize].items.contains_key(name.as_str()) {
+                        self.diags.push(Diag::new(sp, format!("`time.{}` is a `select` arm: `select {{ time.{}(d) => ... }}`", name, name)).note(None, "to wait, call `time.sleep(d)`"));
+                        return TExpr::error(sp);
+                    }
                     if self.prog.packages[p as usize].name == "task" && name == "group" {
-                        return self.task_group(cx, args, sp, expect);
+                        self.diags.push(Diag::new(sp, "`task.group` is gone: write `scope { go ... }`").note(None, "a `scope` block waits for the tasks started in it with `go`; `try scope { }` when they can fail"));
+                        return TExpr::error(sp);
                     }
                 }
                 Some(PathRes::TypeCon(..)) => {
@@ -3435,11 +3646,11 @@ impl Checker {
         }
         let t = self.generic_type_instance(cx, t, gd);
         match &t {
-            Ty::Chan(elem) => {
-                let elem = (**elem).clone();
+            Ty::Adt(d, targs) if Some(*d) == self.prog.prelude_type("Chan") => {
+                let elem = targs[0].clone();
                 if !self.is_send(&elem) {
                     let s = self.prog.show(&elem);
-                    self.err(sp, format!("channel element type `{}` cannot be sent between goroutines", s));
+                    self.err(sp, format!("channel element type `{}` cannot be sent between tasks", s));
                 }
                 let n = if args.is_empty() {
                     TExpr::new(TK::Int(0), Ty::int(), sp)
@@ -3759,12 +3970,11 @@ impl Checker {
             };
             return TExpr::new(TK::ProjUnwrap { proj: Box::new(b), msg }, inner, sp);
         }
-        if name == "go" {
-            if let Ty::Adt(d, _) = &bty {
-                if Some(*d) == self.find_std_type("task", "Group") {
-                    return self.group_go(cx, b, args, sp);
-                }
-            }
+        if name == "go" && bty == Ty::Scope {
+            return self.scope_value_go(cx, b, args, sp);
+        }
+        if name == "join" && matches!(bty, Ty::Task(_)) {
+            self.no_wait_under_lock(cx, sp, "this `join` waits for a task");
         }
         // clone: user method or structural
         if name == "clone" && args.is_empty() {
@@ -3967,6 +4177,10 @@ impl Checker {
         if name == "len" || name == "size" || name == "length" {
             d = d.note(None, "use `.len` or `.len()`");
         }
+        let is_chan = matches!(bty, Ty::Sender(_) | Ty::Receiver(_)) || matches!(&bty, Ty::Adt(dd, _) if Some(*dd) == self.prog.prelude_type("Chan"));
+        if is_chan && name == "close" {
+            d = d.note(None, "a channel closes when its last sender is dropped: `drop(ch.tx)` (and every clone of it); there is no `close`");
+        }
         if let Some(k) = TyKey::of(&bty) {
             if self.prog.assoc.contains_key(&(k, name.to_string())) {
                 d = d.note(None, format!("`{}` has no `self` parameter; call it on the type: `{}.{}(...)`", name, s, name));
@@ -3979,91 +4193,381 @@ impl Checker {
         TExpr::error(sp)
     }
 
-    /// `task.group((g) => { g.go(() => ...) })`: structured concurrency.
-    fn task_group(&mut self, cx: &mut FnCx, args: &[Expr], sp: Span, _expect: Option<&Ty>) -> TExpr {
-        if args.len() != 1 {
-            self.err(sp, "task.group takes one closure");
-            return TExpr::error(sp);
-        }
-        let gdef = match self.find_std_type("task", "Group") {
-            Some(d) => d,
-            None => return TExpr::error(sp),
-        };
-        let errt = {
-            let r = cx.ret.clone();
-            match self.resolve(cx, &r) {
-                Ty::Result(_, e) => (*e).clone(),
-                _ => self.fresh(cx),
+    /// `isolate { body }`: from outside, the body may only use values that
+    /// can cross tasks; nothing it creates can then be reached from outside
+    /// but through its value, which may be sent as a whole: `Iso[T]`.
+    fn isolate_expr(&mut self, cx: &mut FnCx, b: &ast::Block, sp: Span) -> TExpr {
+        let start = cx.locals.len() as LocalId;
+        let tb = self.block(cx, b, Expect::Infer);
+        let t = self.block_ty(&tb);
+        let t = self.resolve(cx, &t);
+        let mut outer: Vec<LocalId> = vec![];
+        visit_block(&tb, &mut |e| {
+            if let TK::Local(l) = e.kind {
+                if l < start && !outer.contains(&l) {
+                    outer.push(l);
+                }
             }
-        };
-        let gty = Ty::Adt(gdef, Rc::new(vec![]));
-        let body_ty = Ty::Func(Rc::new(FuncTy { params: vec![(Mode::Inout, gty.clone())], ret: Ty::Unit }));
-        let depth = cx.depth() + 1;
-        cx.group_err.push((errt.clone(), depth));
-        let body = self.expr(cx, &args[0], Some(&body_ty));
-        cx.group_err.pop();
-        let body = self.borrow(cx, body);
-        let mut errt = self.resolve(cx, &errt);
-        if errt.has_vars() {
-            // no task can fail
-            self.unify(cx, &errt, &Ty::Unit);
-            errt = Ty::Unit;
+            if let TK::Closure(c) = &e.kind {
+                for (l, _) in &c.captures {
+                    if *l < start && !outer.contains(l) {
+                        outer.push(*l);
+                    }
+                }
+            }
+        });
+        for l in outer {
+            let lt = cx.locals[l as usize].ty.clone();
+            let lt = self.resolve(cx, &lt);
+            if !self.is_send(&lt) {
+                let (n, lsp) = (cx.locals[l as usize].name.clone(), cx.locals[l as usize].span);
+                let s = self.prog.show(&lt);
+                self.diags.push(Diag::new(sp, format!("`isolate` uses `{}` of type `{}` from outside", n, s)).note(Some(lsp), "declared here").note(None, "an isolated value may only be built from values that can cross tasks: then nothing outside points into it. Pass a copy or a `send` value in"));
+            }
         }
-        TExpr::new(TK::Intrinsic { name: "task.group".into(), targs: vec![errt.clone()], args: vec![TArg { mode: ArgMode::Borrow, e: body }] }, Ty::result(Ty::Unit, errt), sp)
+        if t.contains_view() {
+            let s = self.prog.show(&t);
+            self.err(sp, format!("`isolate` can't give back the borrowed view `{}`", s));
+        }
+        TExpr::new(TK::Isolate(tb), Ty::Iso(Rc::new(t)), sp)
     }
 
-    /// `g.go(() => ...)`: a task that may borrow data living outside the group.
-    fn group_go(&mut self, cx: &mut FnCx, g: TExpr, args: &[Expr], sp: Span) -> TExpr {
-        let (errt, gdepth) = match cx.group_err.last() {
-            Some(x) => x.clone(),
-            None => {
-                self.err(sp, "`g.go` must be called directly inside the closure passed to `task.group`");
-                return TExpr::error(sp);
+    /// The element type of a channel end used to send.
+    fn sender_elem(&mut self, t: &Ty, sp: Span, what: &str) -> Ty {
+        match t {
+            Ty::Sender(e) => (**e).clone(),
+            Ty::Error => Ty::Error,
+            Ty::Adt(d, _) if Some(*d) == self.prog.prelude_type("Chan") => {
+                self.diags.push(Diag::new(sp, format!("send on the channel's sending end: `{}.tx <- v`", what)).note(None, "a `Chan[T]` has a `tx Sender[T]` and an `rx Receiver[T]`; pass each end where it's needed"));
+                Ty::Error
             }
+            Ty::Receiver(_) => {
+                self.err(sp, "cannot send on a `Receiver`: send on the channel's `Sender` (its `tx`)");
+                Ty::Error
+            }
+            _ => {
+                let s = self.prog.show(t);
+                self.err(sp, format!("cannot send on `{}`: it isn't a channel's `Sender`", s));
+                Ty::Error
+            }
+        }
+    }
+
+    /// The element type of a channel end used to receive.
+    fn receiver_elem(&mut self, t: &Ty, sp: Span, what: &str) -> Ty {
+        match t {
+            Ty::Receiver(e) => (**e).clone(),
+            Ty::Error => Ty::Error,
+            Ty::Adt(d, _) if Some(*d) == self.prog.prelude_type("Chan") => {
+                self.diags.push(Diag::new(sp, format!("receive from the channel's receiving end: `<-{}.rx`", what)).note(None, "a `Chan[T]` has a `tx Sender[T]` and an `rx Receiver[T]`; pass each end where it's needed"));
+                Ty::Error
+            }
+            Ty::Sender(_) => {
+                self.err(sp, "cannot receive from a `Sender`: receive from the channel's `Receiver` (its `rx`)");
+                Ty::Error
+            }
+            _ => {
+                let s = self.prog.show(t);
+                self.err(sp, format!("cannot receive from `{}`: it isn't a channel's `Receiver`", s));
+                Ty::Error
+            }
+        }
+    }
+
+    /// `scope { body }` / `scope s { body }`.
+    /// Waiting while a lock is held makes every task that wants the lock wait
+    /// too, and is the usual way to deadlock: an error where it can be seen.
+    fn no_wait_under_lock(&mut self, cx: &mut FnCx, sp: Span, what: &str) {
+        if let Some((d, name)) = cx.locked.last().cloned() {
+            if d == cx.depth() {
+                self.diags.push(Diag::new(sp, format!("{} while `{}` is locked", what, name)).note(None, "every task that wants the lock would wait too, and a task that this one waits for may need the lock: a deadlock. Release the lock first: do this after the `with` block"));
+            }
+        }
+    }
+
+    pub fn scope_expr(&mut self, cx: &mut FnCx, name: Option<&(String, Span)>, body: &ast::Block, implicit: bool, ex: Expect, sp: Span) -> TExpr {
+        if !implicit {
+            self.no_wait_under_lock(cx, sp, "this `scope` waits for its tasks");
+        }
+        let id = cx.next_scope;
+        cx.next_scope += 1;
+        self.push_scope(cx);
+        let handle = name.map(|(n, nsp)| self.declare(cx, n, Ty::Scope, LocalKind::Let, *nsp, false));
+        // `block` opens the body's own level
+        cx.task_scopes.push(TaskScopeCx { id, depth: cx.depth(), block: cx.scopes.len() as u32 + 1, errt: None, handle });
+        let tb = self.block(cx, body, ex);
+        let ts = cx.task_scopes.pop().unwrap();
+        self.pop_scope(cx);
+        let t = self.block_ty(&tb);
+        let errt = ts.errt.clone().map(|(e, _)| self.resolve(cx, &e));
+        let ty = match &errt {
+            Some(e) => Ty::result(if t == Ty::Never { Ty::Unit } else { t }, e.clone()),
+            None => t,
         };
-        if args.len() != 1 || !is_closure_expr(&args[0]) {
-            self.err(sp, "`g.go` takes a closure literal: `g.go(() => { ... })`");
+        let fail_sp = ts.errt.as_ref().map(|e| e.1);
+        let scope = TExpr::new(TK::Scope { id, handle, body: tb, errt: errt.clone() }, ty, sp);
+        match (implicit, errt) {
+            (true, Some(e1)) => {
+                // `main` and tests: a failing task fails the function
+                let fsp = fail_sp.unwrap_or(sp);
+                let rr = self.resolve(cx, &cx.ret.clone());
+                let w = match &rr {
+                    Ty::Result(_, e2) => {
+                        let e2 = (**e2).clone();
+                        if self.try_unify(cx, &e1, &e2) {
+                            Some(None)
+                        } else if matches!(&e2, Ty::Iface(d, _) if Some(*d) == self.iface_error) {
+                            Some(Some(TryWrap::ToError))
+                        } else {
+                            let (a, b) = (self.prog.show(&e1), self.prog.show(&e2));
+                            self.diags.push(Diag::new(fsp, format!("this task fails with `{}`, but the function returns errors of type `{}`", a, b)).note(None, "convert the error inside the task: `try f() else Wrap`"));
+                            None
+                        }
+                    }
+                    Ty::Error => None,
+                    _ => {
+                        self.diags.push(Diag::new(fsp, "this task can fail, but the function doesn't return errors").note(None, "make it return `! E`, or handle the error inside the task (`catch`)"));
+                        None
+                    }
+                };
+                match w {
+                    Some(w) => TExpr::new(TK::Try { e: Box::new(scope), wrap: w }, Ty::Unit, sp),
+                    None => TExpr::error(sp),
+                }
+            }
+            _ => scope,
+        }
+    }
+
+    /// `go call` / `go () => { ... }` in the innermost `scope` of this function.
+    pub fn go_expr(&mut self, cx: &mut FnCx, inner: &Expr, handle: bool, sp: Span) -> TExpr {
+        let Some(ts) = cx.task_scopes.last().cloned() else {
+            self.diags.push(Diag::new(sp, "`go` needs an enclosing `scope { }`").note(None, "start tasks inside `scope { go f() }`: the scope waits for them; `main` and test bodies are scopes already. A function that starts long-running tasks takes a `Scope` parameter and calls `s.go(() => ...)`"));
+            self.expr(cx, inner, None);
+            return TExpr::error(sp);
+        };
+        if ts.depth != cx.depth() {
+            self.diags.push(Diag::new(sp, "this `go` is inside a closure, but its `scope` is outside it").note(None, "start a `scope { }` inside the closure, or pass the scope in and call `s.go(() => ...)`"));
             return TExpr::error(sp);
         }
-        self.require_mut(cx, &g, "spawn tasks on");
-        let fty = Ty::Func(Rc::new(FuncTy { params: vec![], ret: Ty::result(Ty::Unit, errt.clone()) }));
-        let mut ce = self.expr(cx, &args[0], Some(&fty));
-        if let TK::Closure(c) = &mut ce.kind {
-            c.scoped = true;
-            for (l, u) in c.captures.clone() {
-                let local = cx.locals[l as usize].clone();
-                let t = self.resolve(cx, &local.ty);
-                if u != CapUse::Read {
-                    self.diags.push(Diag::new(c.span, format!("a task cannot {} the captured variable `{}`; tasks run in parallel", if u == CapUse::Move { "move" } else { "modify" }, local.name)).note(None, "share mutable state through a Mutex[T] or send results over a channel"));
-                }
-                if !self.is_send(&t) {
-                    let s = self.prog.show(&t);
-                    self.err(c.span, format!("a task captures `{}` of type `{}`, which is not safe to share between threads", local.name, s));
-                }
-                // locals created inside the group body die before the group waits
-                if local.closure_depth >= gdepth && !self.is_copy(&t) {
-                    let mut ok = false;
-                    if matches!(local.kind, LocalKind::Ref { .. }) {
-                        if let Some(root) = local.ref_root {
-                            ok = cx.locals[root as usize].closure_depth < gdepth;
+        let Some((pre, closure)) = self.task_closure_ast(cx, inner) else {
+            self.err(inner.span, "`go` needs a function call or a closure without parameters: `go f(x)`, `go () => { ... }`");
+            return TExpr::error(sp);
+        };
+        // arguments evaluated now, in this task, into locals of their own
+        // block: the task takes them
+        self.push_scope(cx);
+        let mut stmts = vec![];
+        for st in &pre {
+            if let Some(t) = self.stmt(cx, st) {
+                stmts.push(t);
+            }
+        }
+        let rv = self.fresh(cx);
+        let fty = Ty::Func(Rc::new(FuncTy { params: vec![], ret: rv.clone(), send: false }));
+        let mut ce = self.expr(cx, &closure, Some(&fty));
+        // a task that only ever fails (`return err(e)`) succeeds with nothing
+        if let Ty::Result(ok, _) = self.resolve(cx, &rv) {
+            if matches!(*ok, Ty::Var(_)) {
+                self.unify(cx, &ok, &Ty::Unit);
+            }
+        }
+        let ret = self.resolve(cx, &rv);
+        if handle && ret.contains_view() {
+            let r = self.prog.show(&ret);
+            self.diags.push(Diag::new(sp, format!("a task can't give back the borrowed view `{}`", r)).note(None, "its result is stored until `join`; return an owned value (`String(s)`, `.toVec()`)"));
+            self.pop_scope(cx);
+            return TExpr::error(sp);
+        }
+        self.task_captures(cx, &mut ce, &ts, false);
+        self.pop_scope(cx);
+        if !handle {
+            if let Ty::Result(_, e) = &ret {
+                let e = (**e).clone();
+                let cur = cx.task_scopes.last_mut().unwrap();
+                match cur.errt.clone() {
+                    None => cur.errt = Some((e, sp)),
+                    Some((prev, psp)) => {
+                        if !self.unify(cx, &prev, &e) {
+                            let (a, b) = (self.prog.show(&e), self.prog.show(&prev));
+                            self.diags.push(Diag::new(sp, format!("this task fails with `{}`, but another task in the scope fails with `{}`", a, b)).note(Some(psp), "the other task").note(None, "the tasks of one scope must fail with the same error type; convert it inside the task with `try f() else Wrap`"));
                         }
                     }
-                    if !ok {
-                        if matches!(local.kind, LocalKind::Ref { .. } | LocalKind::Param(Mode::Borrow | Mode::Inout)) {
-                            self.diags.push(Diag::new(c.span, format!("a task borrows `{}`, which does not outlive the task group", local.name)).note(Some(local.span), "declare it outside `task.group`, or `.clone()` it into a local so the task can take it"));
-                        } else {
-                            // declared inside the group body: the task takes it, like `go` does
-                            c.by_value.push(l);
-                        }
-                    }
-                }
-                if local.closure_depth >= gdepth && self.is_copy(&t) && !matches!(local.kind, LocalKind::Ref { .. }) {
-                    c.by_value.push(l);
                 }
             }
-            c.owned = false;
         }
-        TExpr::new(TK::Intrinsic { name: "task.go".into(), targs: vec![], args: vec![TArg { mode: ArgMode::Inout, e: g }, TArg { mode: ArgMode::Borrow, e: ce }] }, Ty::Unit, sp)
+        let ty = if handle { Ty::Task(Rc::new(ret)) } else { Ty::Unit };
+        let spawn = TExpr::new(TK::Spawn { target: SpawnTarget::Lexical(ts.id), task: Box::new(ce), handle }, ty.clone(), sp);
+        if stmts.is_empty() {
+            spawn
+        } else {
+            TExpr::new(TK::Block(TBlock { stmts, value: Some(Box::new(spawn)), span: sp }), ty, sp)
+        }
+    }
+
+    /// The task of `go inner` as a closure without parameters, and the
+    /// statements that evaluate its arguments first: `go f(a + 1, x, &y)`
+    /// becomes `let __goN = a + 1` then `() => f(__goN, x, &y)`. Arguments that
+    /// are places stay in the closure (the task borrows them), unless the
+    /// parameter is `sink` (then they move into the task now).
+    fn task_closure_ast(&mut self, cx: &mut FnCx, inner: &Expr) -> Option<(Vec<Stmt>, Expr)> {
+        match &inner.kind {
+            ExprKind::Closure { params, .. } if params.is_empty() => Some((vec![], inner.clone())),
+            ExprKind::Closure { .. } => None,
+            ExprKind::Call(f, args) => {
+                let modes = self.callee_modes(cx, f, args.len());
+                let mut pre = vec![];
+                let mut nargs = vec![];
+                for (i, a) in args.iter().enumerate() {
+                    let mode = modes.as_ref().and_then(|m| m.get(i).copied());
+                    let keep = match &a.kind {
+                        ExprKind::Ref(_) | ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Str(_) | ExprKind::Char(_) | ExprKind::Bool(_) | ExprKind::None | ExprKind::DotVariant(_) => true,
+                        _ => ast_is_place(a) && mode != Some(Mode::Sink),
+                    };
+                    if keep {
+                        nargs.push(a.clone());
+                        continue;
+                    }
+                    cx.hidden += 1;
+                    let name = format!("__go{}", cx.hidden);
+                    pre.push(Stmt { kind: StmtKind::Let { name: name.clone(), name_span: a.span, ty: None, init: Some(a.clone()), mutable: false }, span: a.span });
+                    nargs.push(Expr { kind: ExprKind::Ident(name), span: a.span });
+                }
+                let call = Expr { kind: ExprKind::Call(f.clone(), nargs), span: inner.span };
+                let clo = Expr { kind: ExprKind::Closure { params: vec![], ret: None, body: Box::new(call) }, span: inner.span };
+                Some((pre, clo))
+            }
+            _ => None,
+        }
+    }
+
+    /// The parameter modes of what `f` names, when that can be told without
+    /// checking the call.
+    fn callee_modes(&mut self, cx: &mut FnCx, f: &Expr, nargs: usize) -> Option<Vec<Mode>> {
+        let fid = match self.resolve_path(cx, f) {
+            Some(PathRes::Func(fid, _)) => Some(fid),
+            _ => None,
+        };
+        if let Some(fid) = fid {
+            let fd = self.prog.func(fid);
+            return Some(fd.params.iter().map(|p| p.mode).collect());
+        }
+        // a method: look at the receiver's type without reporting anything twice
+        if let ExprKind::Field(base, name, _) = &f.kind {
+            let n = self.diags.len();
+            let b = self.expr(cx, base, None);
+            self.diags.truncate(n);
+            let bt = self.resolve(cx, &b.ty);
+            let bt = match &bt {
+                Ty::Box(a) | Ty::Rc(a) | Ty::Arc(a) => (**a).clone(),
+                t => t.clone(),
+            };
+            if let Some(k) = TyKey::of(&bt) {
+                if let Some(&mid) = self.prog.methods.get(&(k, name.clone())).and_then(|v| v.first()) {
+                    let fd = self.prog.func(mid);
+                    if fd.params.len() == nargs {
+                        return Some(fd.params.iter().map(|p| p.mode).collect());
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Capture rules of a task closure started in scope `ts`. Data that lives
+    /// until the scope ends (declared outside it, or directly in its body) is
+    /// borrowed, for reading or, by one task only, for writing. Values declared
+    /// in blocks inside the body are moved (or copied) into the task. `owned`:
+    /// the task may outlive this function (`s.go` on a `Scope` value), so it
+    /// must own every capture.
+    fn task_captures(&mut self, cx: &mut FnCx, ce: &mut TExpr, ts: &TaskScopeCx, owned: bool) {
+        let TK::Closure(c) = &mut ce.kind else { return };
+        c.scoped = true;
+        let lives = |cx: &FnCx, l: LocalId| -> bool {
+            let loc = &cx.locals[l as usize];
+            loc.closure_depth < ts.depth || (loc.closure_depth == ts.depth && loc.block_level <= ts.block)
+        };
+        for (l, u) in c.captures.clone() {
+            let local = cx.locals[l as usize].clone();
+            let t = self.resolve(cx, &local.ty);
+            if !self.is_send(&t) {
+                let s = self.prog.show(&t);
+                self.diags.push(Diag::new(c.span, format!("a task captures `{}` of type `{}`, which is not safe to share between threads", local.name, s)).note(Some(local.span), "declared here").note(None, "`rc`, `Cell`, `weak`, raw pointers and function values can't cross tasks; use `arc`, `Mutex` or `send fn`"));
+            }
+            let is_ref = matches!(local.kind, LocalKind::Ref { .. });
+            let borrowed = if owned {
+                false
+            } else if is_ref {
+                // a reference bound inside the scope: fine if what it borrows lives on
+                let root = local.ref_root.map(|r| cx.locals[r as usize].ref_root.unwrap_or(r));
+                lives(cx, l) || root.map(|r| lives(cx, r)).unwrap_or(false)
+            } else {
+                lives(cx, l)
+            };
+            if borrowed {
+                if u == CapUse::Move {
+                    self.diags.push(Diag::new(c.span, format!("a task cannot move `{}`: it borrows it from outside", local.name)).note(Some(local.span), "declared here").note(None, "move it into the task by passing it to a `sink` parameter: `go f(x)`, or declare it inside the scope's inner blocks"));
+                }
+                continue;
+            }
+            if is_ref || matches!(local.kind, LocalKind::Param(Mode::Borrow | Mode::Inout)) || t.is_view() {
+                if owned {
+                    self.diags.push(Diag::new(c.span, format!("a task started through a `Scope` value borrows `{}`", local.name)).note(Some(local.span), "declared here").note(None, "it may outlive this function: give it owned values (`.clone()` them first)"));
+                } else {
+                    self.diags.push(Diag::new(c.span, format!("a task borrows `{}`, which does not live until the scope ends", local.name)).note(Some(local.span), "declared here").note(None, "declare it directly in the scope's body or outside the scope, or `.clone()` it into a local so the task can take it"));
+                }
+                continue;
+            }
+            if u == CapUse::Mutate {
+                self.diags.push(Diag::new(c.span, format!("a task cannot modify `{}`: it gets its own copy", local.name)).note(Some(local.span), "declared in a block inside the scope, so it is moved (or copied) into the task").note(None, "to share the result, declare it directly in the scope's body or outside the scope, so the task borrows it"));
+            }
+            c.by_value.push(l);
+        }
+        c.owned = false;
+    }
+
+    /// `s.go(() => ...)` on a `Scope` value.
+    fn scope_value_go(&mut self, cx: &mut FnCx, s: TExpr, args: &[Expr], sp: Span) -> TExpr {
+        if args.len() != 1 {
+            self.err(sp, "`s.go` takes a closure: `s.go(() => { ... })`");
+            return TExpr::error(sp);
+        }
+        let Some((pre, closure)) = self.task_closure_ast(cx, &args[0]) else {
+            self.err(args[0].span, "`s.go` needs a function call or a closure without parameters");
+            return TExpr::error(sp);
+        };
+        // the scope this function itself opened: the same rules as `go`
+        let lexical = match &s.kind {
+            TK::Local(l) => cx.task_scopes.iter().rev().find(|t| t.handle == Some(*l)).cloned(),
+            _ => None,
+        };
+        if let Some(ts) = lexical.filter(|t| t.depth == cx.depth()) {
+            // `go` uses the innermost scope; make sure that's this one
+            if cx.task_scopes.last().map(|t| t.id) == Some(ts.id) {
+                return self.go_expr(cx, &args[0], false, sp);
+            }
+            self.err(sp, "`s.go` names an outer scope; start the task with `go` in the innermost one");
+            return TExpr::error(sp);
+        }
+        self.push_scope(cx);
+        let mut stmts = vec![];
+        for st in &pre {
+            if let Some(t) = self.stmt(cx, st) {
+                stmts.push(t);
+            }
+        }
+        let fty = Ty::Func(Rc::new(FuncTy { params: vec![], ret: Ty::Unit, send: false }));
+        let mut ce = self.expr(cx, &closure, Some(&fty));
+        let ts = TaskScopeCx { id: u32::MAX, depth: cx.depth(), block: 0, errt: None, handle: None };
+        self.task_captures(cx, &mut ce, &ts, true);
+        self.pop_scope(cx);
+        let s = self.value(cx, s);
+        let spawn = TExpr::new(TK::Spawn { target: SpawnTarget::Value(Box::new(s)), task: Box::new(ce), handle: false }, Ty::Unit, sp);
+        if stmts.is_empty() {
+            spawn
+        } else {
+            TExpr::new(TK::Block(TBlock { stmts, value: Some(Box::new(spawn)), span: sp }), Ty::Unit, sp)
+        }
     }
 
     pub fn find_std_type(&self, pkg: &str, name: &str) -> Option<DefId> {
@@ -4233,7 +4737,20 @@ fn zonk_walk_stmt(s: &mut TStmt, f: &mut dyn FnMut(&mut Ty)) {
             }
             zonk_walk_block(body, f)
         }
-        TStmt::Go { call, .. } | TStmt::ForEach { call, .. } => zonk_walk_expr(call, f),
+        TStmt::ForEach { call, .. } => zonk_walk_expr(call, f),
+        TStmt::WithLocks { places, body, .. } => {
+            for p in places {
+                zonk_walk_expr(p, f)
+            }
+            zonk_walk_block(body, f)
+        }
+        TStmt::ParFor { iter, hi, body, .. } => {
+            zonk_walk_expr(iter, f);
+            if let Some(h) = hi {
+                zonk_walk_expr(h, f)
+            }
+            zonk_walk_expr(body, f)
+        }
         TStmt::Send { chan, value } => {
             zonk_walk_expr(chan, f);
             zonk_walk_expr(value, f)
@@ -4251,7 +4768,12 @@ fn zonk_walk_stmt(s: &mut TStmt, f: &mut dyn FnMut(&mut Ty)) {
                         zonk_walk_expr(chan, f);
                         zonk_walk_expr(value, f)
                     }
-                    TSelectKind::Default => {}
+                    TSelectKind::Task { task, .. } => zonk_walk_expr(task, f),
+                    TSelectKind::Timer { at, .. } => zonk_walk_expr(at, f),
+                    TSelectKind::Cancelled | TSelectKind::Default => {}
+                }
+                if let Some(g) = &mut a.guard {
+                    zonk_walk_expr(g, f)
                 }
                 zonk_walk_block(&mut a.body, f)
             }
@@ -4344,6 +4866,19 @@ pub fn zonk_walk_expr(e: &mut TExpr, f: &mut dyn FnMut(&mut Ty)) {
             }
         }
         TK::Block(b) | TK::Unsafe(b) => zonk_walk_block(b, f),
+        TK::Scope { body, errt, .. } => {
+            if let Some(e) = errt {
+                f(e)
+            }
+            zonk_walk_block(body, f)
+        }
+        TK::Isolate(body) => zonk_walk_block(body, f),
+        TK::Spawn { target, task, .. } => {
+            if let SpawnTarget::Value(v) = target {
+                zonk_walk_expr(v, f)
+            }
+            zonk_walk_expr(task, f)
+        }
         TK::Try { e: x, wrap } => {
             zonk_walk_expr(x, f);
             if let Some(TryWrap::Call(_, w)) = wrap {

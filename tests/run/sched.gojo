@@ -1,24 +1,27 @@
-// Goroutines are scheduled onto a few threads; blocking parks only the goroutine.
+// Tasks are scheduled onto a few threads; blocking parks only the task.
 use std/{fmt, time, task}
 
 fn pingPong(n int) int {
     let ping = chan[int]()
     let pong = chan[int]()
-    let p = ping.clone()
-    let q = pong.clone()
-    go () => {
-        for v in p {
-            q <- v + 1
+    let pings = ping.rx
+    let pongs = pong.tx
+    return scope {
+        // the task borrows one end of each channel
+        go () => {
+            for v in pings {
+                pongs <- v + 1
+            }
         }
-        q.close()
+        var last = 0
+        for i in 0..n {
+            ping.tx <- i
+            last = (<-pong.rx).unwrap()
+        }
+        // the last sender gone: the task's loop ends
+        drop(ping.tx)
+        last
     }
-    var last = 0
-    for i in 0..n {
-        ping <- i
-        last = (<-pong).unwrap()
-    }
-    ping.close()
-    return last
 }
 
 fn main() {
@@ -27,17 +30,17 @@ fn main() {
     let start = chan[bool]()
     let done = chan[int](n)
     for i in 0..n {
-        let s = start.clone()
-        let d = done.clone()
+        let s = start.rx.clone()
+        let d = done.tx.clone()
         go () => {
             _ = <-s
             d <- i
         }
     }
-    start.close()
+    drop(start.tx)
     var sum = 0
     for _ in 0..n {
-        sum += (<-done).unwrap()
+        sum += (<-done.rx).unwrap()
     }
     println("goroutines", n, "sum", sum)
 
@@ -49,7 +52,7 @@ fn main() {
     let fin = chan[bool](8)
     for _ in 0..8 {
         let c = counter.clone()
-        let f = fin.clone()
+        let f = fin.tx.clone()
         go () => {
             for _ in 0..10000 {
                 with v = c.lock() {
@@ -60,7 +63,7 @@ fn main() {
         }
     }
     for _ in 0..8 {
-        _ = <-fin
+        _ = <-fin.rx
     }
     with v = counter.lock() {
         println("counter", v)
@@ -71,7 +74,7 @@ fn main() {
     let order = chan[int](20)
     let base = time.now() + 20 * time.millisecond
     for i in 0..20 {
-        let o = order.clone()
+        let o = order.tx.clone()
         let at = base + (19 - i) * 10 * time.millisecond
         go () => {
             time.sleep(at - time.now())
@@ -83,7 +86,7 @@ fn main() {
     // late and both have expired by then.
     var got = Vec[int]{}
     for _ in 0..20 {
-        got.push((<-order).unwrap())
+        got.push((<-order.rx).unwrap())
     }
     var inversions = 0
     for i in 0..20 {
@@ -98,8 +101,8 @@ fn main() {
     // select waits on several channels without spinning
     let a = chan[int]()
     let b = chan[String]()
-    let ac = a.clone()
-    let bc = b.clone()
+    let ac = a.tx.clone()
+    let bc = b.tx.clone()
     go () => {
         time.sleep(time.millisecond)
         bc <- "late"
@@ -108,24 +111,24 @@ fn main() {
     }
     for _ in 0..2 {
         select {
-            let x = <-a => println("a", x)
-            let s = <-b => println("b", s)
+            let x = <-a.rx => println("a", x)
+            let s = <-b.rx => println("b", s)
         }
     }
 
     // a goroutine stuck in a long computation doesn't hold up the others
     let spin = chan[int](1)
-    let sc = spin.clone()
+    let sc = spin.tx.clone()
     go () => {
         var x = 0
         for i in 0..200000000 { x = x +% i }
         sc <- x
     }
     let quick = chan[bool](1)
-    let qc = quick.clone()
+    let qc = quick.tx.clone()
     go () => { qc <- true }
-    println("quick", (<-quick).unwrap())
-    _ = <-spin
+    println("quick", (<-quick.rx).unwrap())
+    _ = <-spin.rx
 
     // yieldNow lets others run
     task.yieldNow()

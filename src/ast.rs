@@ -148,6 +148,8 @@ pub struct IfaceDecl {
     pub embeds: Vec<TypeExpr>,
     /// Type-set elements: (approx `~`, type)
     pub type_set: Vec<(bool, TypeExpr)>,
+    /// `send interface`: only `send` types implement it, so its values are `send`.
+    pub is_send: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -158,7 +160,8 @@ pub enum TypeExprKind {
     Result(Box<TypeExpr>, Box<TypeExpr>),
     Slice(Box<TypeExpr>),
     Array(Box<Expr>, Box<TypeExpr>),
-    Func { params: Vec<(Mode, TypeExpr)>, ret: Option<Box<TypeExpr>> },
+    /// `fn(A) R`; `send fn(A) R` may be shared between tasks.
+    Func { params: Vec<(Mode, TypeExpr)>, ret: Option<Box<TypeExpr>>, send: bool },
     Ptr(Box<TypeExpr>),
     Chan(Box<TypeExpr>),
     Unit,
@@ -191,9 +194,12 @@ pub enum StmtKind {
     ErrDefer(Box<Stmt>),
     /// `label: for ...`
     For(ForLoop, Option<(String, Span)>),
-    Go(Expr),
+    /// `par for x in &v { }`: the iterations run in parallel.
+    ParFor { first: (String, Span), second: Option<(String, Span)>, iter: Expr, by_ref: bool, body: Block },
     Send { chan: Expr, value: Expr },
     With { name: String, name_span: Span, expr: Expr, body: Block },
+    /// `with a, b = lock(m1, m2) { }`: several locks, taken in one order.
+    WithLocks { names: Vec<(String, Span)>, mutexes: Vec<Expr>, body: Block },
     Discard(Expr),
     Yield(Option<Expr>),
     Select(Vec<SelectArm>),
@@ -201,8 +207,10 @@ pub enum StmtKind {
 
 #[derive(Clone, Debug)]
 pub struct SelectArm {
-    /// `case let x = <-ch`, `case <-ch`, `case ch <- v`, `default`
+    /// `let x = <-ch`, `<-ch`, `ch <- v`, `time.after(d)`, `cancelled`, `_`
     pub kind: SelectKind,
+    /// `... if cond =>`: the arm takes part only when `cond` holds.
+    pub guard: Option<Expr>,
     pub body: Block,
     pub span: Span,
 }
@@ -211,6 +219,8 @@ pub struct SelectArm {
 pub enum SelectKind {
     Recv { bind: Option<(String, Span)>, chan: Expr },
     Send { chan: Expr, value: Expr },
+    /// Anything else: `time.after(d)`, `time.at(t)`, `cancelled`.
+    Event(Expr),
     Default,
 }
 
@@ -304,6 +314,13 @@ pub enum ExprKind {
     DotVariant(String),
     StructLit { ty: Box<Expr>, fields: Vec<(String, Span, Expr)>, positional: Vec<Expr>, kv: Vec<(Expr, Expr)> },
     VecLit(Vec<Expr>),
+    /// `scope { }` / `scope s { }`: waits for the tasks started in it.
+    /// `implicit`: the body of `main` or a test.
+    Scope { name: Option<(String, Span)>, body: Block, implicit: bool },
+    /// `go f(x)` / `go () => { }`: starts a task in the enclosing scope.
+    Go(Box<Expr>),
+    /// `isolate { }`: a value built only from what can cross tasks; `Iso[T]`.
+    Isolate(Block),
     /// A type in expression position, e.g. `chan[int]`, `[]int`, `?int`.
     TypeExpr(TypeExpr),
 }

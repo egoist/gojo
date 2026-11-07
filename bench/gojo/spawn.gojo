@@ -4,11 +4,11 @@ fn main() {
     var total = 0
     for round in 0..1000 {
         for i in 0..1000 {
-            let d = done.clone()
+            let d = done.tx.clone()
             go () => { d <- round + i }
         }
         for _ in 0..1000 {
-            total += (<-done).unwrap()
+            total += (<-done.rx).unwrap()
         }
     }
     println(total)

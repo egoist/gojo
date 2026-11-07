@@ -1,14 +1,13 @@
-use std/task
 fn main() {
     let r = rc(1)
-    _ = task.group((g) => {
-        g.go(() => {
+    scope {
+        go () => {
             let r2 = r.clone()
             println(r2)
-        })
-        g.go(() => {
+        }
+        go () => {
             let r3 = r.clone()
             println(r3)
-        })
-    })
+        }
+    }
 }

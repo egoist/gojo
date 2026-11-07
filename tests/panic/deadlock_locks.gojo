@@ -1,0 +1,34 @@
+// Two tasks take two locks in opposite orders: the report names the cycle.
+// (Waiting directly inside a `with` block is a compile error; here the wait
+// is in a function it calls.)
+fn handshake(ready Sender[bool], start Receiver[bool]) {
+    ready <- true
+    _ = <-start
+}
+
+fn main() {
+    let a = Mutex(0)
+    let b = Mutex(0)
+    let ready = chan[bool](2)
+    let start = chan[bool]()
+    scope {
+        go () => {
+            with x = a.lock() {
+                handshake(ready.tx, start.rx)
+                with y = b.lock() { y += x }
+            }
+        }
+        go () => {
+            with y = b.lock() {
+                handshake(ready.tx, start.rx)
+                with x = a.lock() { x += y }
+            }
+        }
+        _ = <-ready.rx
+        _ = <-ready.rx
+        drop(start.tx)
+    }
+    // panic: all tasks are blocked: deadlock
+    // panic: held by task
+    // panic: the tasks above wait for each other's locks
+}

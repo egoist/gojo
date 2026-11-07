@@ -353,6 +353,12 @@ impl Parser {
             self.bump();
             is_copy = true;
         }
+        // `send interface Handler { ... }`
+        let mut send_iface = false;
+        if matches!(self.peek(), Tok::Ident(s) if s == "send") && matches!(self.peek_at(1), Tok::Kw(Kw::Interface)) {
+            self.bump();
+            send_iface = true;
+        }
         let kind = match self.peek().clone() {
             Tok::Kw(Kw::Func) => ItemKind::Func(self.func_decl(None)?),
             Tok::Kw(Kw::Struct) => {
@@ -375,7 +381,9 @@ impl Parser {
                 self.bump();
                 let (name, _) = self.ident()?;
                 let tparams = self.tparams_opt()?;
-                ItemKind::Interface(self.iface_body(name, tparams)?)
+                let mut d = self.iface_body(name, tparams)?;
+                d.is_send = send_iface;
+                ItemKind::Interface(d)
             }
             Tok::Kw(Kw::Type) => {
                 self.bump();
@@ -642,7 +650,7 @@ impl Parser {
             self.end_stmt()?;
         }
         self.bump();
-        Ok(IfaceDecl { name, tparams, methods, embeds, type_set })
+        Ok(IfaceDecl { name, tparams, methods, embeds, type_set, is_send: false })
     }
 
     fn func_decl(&mut self, owner: Option<&TypeExpr>) -> PResult<FuncDecl> {
@@ -819,6 +827,14 @@ impl Parser {
                     TypeExprKind::Array(Box::new(n), Box::new(self.ty_atom()?))
                 }
             }
+            Tok::Ident(ref s) if s == "send" && matches!(self.peek_at(1), Tok::Kw(Kw::Func)) => {
+                self.bump();
+                let t = self.ty_atom()?;
+                return Ok(match t.kind {
+                    TypeExprKind::Func { params, ret, .. } => TypeExpr { kind: TypeExprKind::Func { params, ret, send: true }, span: self.sp_from(lo) },
+                    k => TypeExpr { kind: k, span: t.span },
+                });
+            }
             Tok::Kw(Kw::Func) => {
                 self.bump();
                 self.expect_p("(")?;
@@ -840,7 +856,7 @@ impl Parser {
                 }
                 self.expect_p(")")?;
                 let ret = self.ret_type()?.map(Box::new);
-                TypeExprKind::Func { params, ret }
+                TypeExprKind::Func { params, ret, send: false }
             }
             Tok::Kw(Kw::Chan) => {
                 self.bump();
@@ -964,13 +980,33 @@ impl Parser {
                 self.bump();
                 StmtKind::ErrDefer(Box::new(self.stmt()?))
             }
-            Tok::Kw(Kw::Go) => {
-                self.bump();
-                StmtKind::Go(self.expr()?)
-            }
             Tok::Kw(Kw::With) => {
                 self.bump();
                 let (name, name_span) = self.ident()?;
+                if self.is_p(",") {
+                    let mut names = vec![(name, name_span)];
+                    while self.eat_p(",") {
+                        names.push(self.ident()?);
+                    }
+                    self.expect_p("=")?;
+                    match self.peek().clone() {
+                        Tok::Ident(l) if l == "lock" => {
+                            self.bump();
+                        }
+                        _ => return self.err("`with a, b = ...` takes several locks at once: `with a, b = lock(m1, m2) { }`"),
+                    }
+                    self.expect_p("(")?;
+                    let mut mutexes = vec![];
+                    while !self.is_p(")") {
+                        mutexes.push(self.expr()?);
+                        if !self.eat_p(",") {
+                            break;
+                        }
+                    }
+                    self.expect_p(")")?;
+                    let body = self.block()?;
+                    return Ok(Stmt { kind: StmtKind::WithLocks { names, mutexes, body }, span: self.sp_from(lo) });
+                }
                 self.expect_p("=")?;
                 let save = self.allow_struct;
                 self.allow_struct = false;
@@ -982,6 +1018,14 @@ impl Parser {
             Tok::Kw(Kw::For) => {
                 self.bump();
                 StmtKind::For(self.for_loop()?, None)
+            }
+            Tok::Ident(ref p) if p == "par" && matches!(self.peek_at(1), Tok::Kw(Kw::For)) => {
+                self.bump();
+                self.bump();
+                match self.for_loop()? {
+                    ForLoop::In { first, second, iter, by_ref, body } => StmtKind::ParFor { first, second, iter, by_ref, body },
+                    _ => return self.err("`par for` needs `in`: `par for x in &v { }`, `par for i in 0..n { }`"),
+                }
             }
             Tok::Kw(Kw::Select) => {
                 self.bump();
@@ -1038,12 +1082,25 @@ impl Parser {
                 SelectKind::Default
             } else {
                 let chan = self.unary()?;
-                if !self.is_p("<-") {
-                    return self.err(format!("expected a channel operation (`let x = <-ch`, `<-ch`, `ch <- v`) or `_`, found {}", self.describe()));
+                if self.is_p("<-") {
+                    self.bump();
+                    let value = self.expr()?;
+                    SelectKind::Send { chan, value }
+                } else if self.is_p("=>") || self.is_kw(Kw::If) {
+                    SelectKind::Event(chan)
+                } else {
+                    return self.err(format!("expected a `select` arm (`let x = <-rx`, `<-rx`, `tx <- v`, `time.after(d)`, `cancelled` or `_`), found {}", self.describe()));
                 }
+            };
+            let guard = if self.is_kw(Kw::If) {
                 self.bump();
-                let value = self.expr()?;
-                SelectKind::Send { chan, value }
+                let save = self.allow_struct;
+                self.allow_struct = false;
+                let g = self.expr()?;
+                self.allow_struct = save;
+                Some(g)
+            } else {
+                None
             };
             self.expect_p("=>")?;
             let body = self.expr_or_assign()?;
@@ -1052,7 +1109,7 @@ impl Parser {
                 ExprKind::Block(b) => b,
                 _ => Block { stmts: vec![Stmt { kind: StmtKind::Expr(body), span: bspan }], span: bspan },
             };
-            arms.push(SelectArm { kind, body: block, span: self.sp_from(lo) });
+            arms.push(SelectArm { kind, guard, body: block, span: self.sp_from(lo) });
             self.eat_p(",");
             self.skip_nl();
         }
@@ -1186,6 +1243,11 @@ impl Parser {
         let lo = self.span();
         let op = match self.peek() {
             Tok::P(p) if matches!(*p, "-" | "!" | "~" | "&" | "<-" | "*") => *p,
+            Tok::Kw(Kw::Go) => {
+                self.bump();
+                let e = self.unary()?;
+                return Ok(Expr { kind: ExprKind::Go(Box::new(e)), span: self.sp_from(lo) });
+            }
             Tok::Kw(Kw::Try) => {
                 self.bump();
                 let e = self.unary()?;
@@ -1502,6 +1564,21 @@ impl Parser {
             Tok::Kw(Kw::Unsafe) => {
                 self.bump();
                 ExprKind::Unsafe(self.block()?)
+            }
+            Tok::Kw(Kw::Isolate) => {
+                self.bump();
+                ExprKind::Isolate(self.block()?)
+            }
+            Tok::Kw(Kw::Scope) => {
+                self.bump();
+                let name = match self.peek().clone() {
+                    Tok::Ident(n) => {
+                        let sp = self.bump().span;
+                        Some((n, sp))
+                    }
+                    _ => None,
+                };
+                ExprKind::Scope { name, body: self.block()?, implicit: false }
             }
             Tok::P(".") => {
                 self.bump();

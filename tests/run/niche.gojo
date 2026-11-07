@@ -35,13 +35,13 @@ fn main() {
     println(old, gone, m.remove("a"))
 
     let ch = chan[?Box[int]](2)
-    ch <- Box(3)
-    ch <- none
-    ch.close()
-    for v in ch {
+    ch.tx <- Box(3)
+    ch.tx <- none
+    drop(ch.tx)
+    for v in ch.rx {
         println("got", v)
     }
-    let r = <-ch
+    let r = <-ch.rx
     println("closed", r)
 
     let shared = rc(10)

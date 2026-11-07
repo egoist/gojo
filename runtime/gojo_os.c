@@ -369,6 +369,8 @@ int64_t gojo_os___run(gojo_str prog, gojo_slice args, gojo_slice input, bool cap
 // ------------------------------------------------------------------ time (wall clock)
 
 int64_t gojo_time___unixNanos(void) {
+    // simulated: 2000-01-01 00:00:00 UTC plus the virtual clock
+    if (gojo_sim_on) return (int64_t)946684800 * 1000000000 + gojo_time_now();
     struct timespec ts;
     clock_gettime(CLOCK_REALTIME, &ts);
     return (int64_t)ts.tv_sec * 1000000000 + ts.tv_nsec;

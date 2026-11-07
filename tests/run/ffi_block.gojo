@@ -10,13 +10,13 @@ fn main() {
     _ = task.setMaxProcs(1)
     let ticks = Mutex(0)
     let worst = Mutex(0)
-    let r = task.group((g) => {
-        g.go(() => {
+    scope {
+        go () => {
             for _ in 0..3 {
                 _ = unsafe { usleep(100000) }
             }
-        })
-        g.go(() => {
+        }
+        go () => {
             let start = time.now()
             var prev = start
             for time.since(start) < 250 * time.millisecond {
@@ -26,11 +26,11 @@ fn main() {
                 prev = now
                 with t = ticks.lock() { t += 1 }
             }
-        })
-    })
+        }
+    }
     with t = ticks.lock() {
         // about 250 if the C calls hold nothing up (fewer where timers are coarse); a few if they did
-        println("ticks during the C calls:", t > 20, r.isOk())
+        println("ticks during the C calls:", t > 20)
     }
     with w = worst.lock() {
         // The C call gives up its CPU within a few milliseconds; without that the

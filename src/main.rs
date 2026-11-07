@@ -14,6 +14,10 @@ struct Options {
     cc: Option<String>,
     target: Option<String>,
     keep_c: bool,
+    /// The simulated scheduler's seed (`run`, `test`); tests runs; `--real`.
+    seed: Option<String>,
+    explore: Option<String>,
+    real: bool,
 }
 
 const USAGE: &str = "Gojo — a systems language with Go's simplicity, no GC and no nil.
@@ -40,6 +44,12 @@ options:
   --target <t>     cross-compile with `zig cc -target <t>` (Linux or macOS,
                    e.g. x86_64-linux-musl, aarch64-macos)
   -v               print timings
+  --seed <n>       run on the simulated scheduler with seed n: one thread,
+                   virtual time, the same interleaving every run (`run`,
+                   `test`; tests use a seed from their name by default)
+  --explore <n>    `test`: run each test under n seeds, stop at the first
+                   failure and print its seed
+  --real           `test`: use the real scheduler (threads, real time)
 
 Gojo compiles to C: it needs a C compiler (cc, clang, gcc, or zig) on the PATH.";
 
@@ -87,7 +97,7 @@ fn main() -> ExitCode {
         return usage();
     }
     let cmd = args[1].as_str();
-    let mut opts = Options { release: false, output: None, verbose: false, cc: std::env::var("GOJO_CC").ok(), target: None, keep_c: false };
+    let mut opts = Options { release: false, output: None, verbose: false, cc: std::env::var("GOJO_CC").ok(), target: None, keep_c: false, seed: None, explore: None, real: false };
     let mut input = None;
     let mut prog_args = vec![];
     let mut i = 2;
@@ -114,6 +124,20 @@ fn main() -> ExitCode {
                 i += 1;
                 opts.target = args.get(i).cloned();
             }
+            "--seed" | "--explore" => {
+                i += 1;
+                let v = args.get(i).cloned().unwrap_or_default();
+                if v.parse::<u64>().map(|n| n == 0).unwrap_or(true) {
+                    eprintln!("error: `{}` takes a positive number: `{} 42`", a, a);
+                    return ExitCode::from(2);
+                }
+                if a == "--seed" {
+                    opts.seed = Some(v);
+                } else {
+                    opts.explore = Some(v);
+                }
+            }
+            "--real" => opts.real = true,
             _ if a.starts_with('-') && a.len() > 1 => {
                 eprintln!("error: unknown option `{}` (see `gojo help`)", a);
                 return ExitCode::from(2);
@@ -775,7 +799,18 @@ fn finish(cmd: &str, bin: &Path, opts: &Options, prog_args: &[String], stem: &st
         return Ok(ExitCode::SUCCESS);
     }
     let out_path = bin.to_path_buf();
-    let status = Command::new(&out_path).args(prog_args).status();
+    let mut c = Command::new(&out_path);
+    c.args(prog_args);
+    if let Some(s) = &opts.seed {
+        c.env("GOJO_SEED", s);
+    }
+    if let Some(n) = &opts.explore {
+        c.env("GOJO_EXPLORE", n);
+    }
+    if opts.real {
+        c.env("GOJO_SCHED", "real");
+    }
+    let status = c.status();
     match status {
         Ok(s) => match s.code() {
             Some(c) => Ok(ExitCode::from(c as u8)),

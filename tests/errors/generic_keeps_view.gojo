@@ -7,10 +7,11 @@ fn later[T](x sink T) fn() int {
     return () => use1(x)
 }
 
-fn spawn[T send](x sink T) {
-    go () => {
+// a task started through a `Scope` value may outlive the call
+fn spawn[T send](s Scope, x sink T) {
+    s.go(() => {
         _ = use1(x)
-    }
+    })
 }
 
 fn indirect[U](x sink U) fn() int {
@@ -31,7 +32,9 @@ fn mk2() fn() int {
 
 fn main() {
     let s = "abc".toString()
-    spawn(s.asStr())
-    // error: `spawn` cannot be called with the borrowed view `str` for `T`
+    scope sc {
+        spawn(sc, s.asStr())
+        // error: `spawn` cannot be called with the borrowed view `str` for `T`
+    }
     println(mk()(), mk2()(), later(1)())
 }

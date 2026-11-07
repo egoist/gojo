@@ -1,9 +1,8 @@
-use std/task
 fn take(s sink String) {}
 fn main() {
     let s = "abcdefghijklmnopqrstuvwxyz0123456789".toString()
-    _ = task.group((g) => {
-        g.go(() => println(s))
+    scope {
+        go () => println(s)
         take(s)
-    })
+    }
 }

@@ -29,33 +29,32 @@ fn main() {
     let port = ln.port()
     println("listening", port > 0)
 
-    // the server accepts in a group of its own; cancelling the group stops it
+    // the server accepts in a scope of its own; cancelling the scope stops it
     let replies = Mutex(Vec[String]{})
-    let r = task.group((g) => {
-        g.go(() => {
-            let srv = task.group((s) => {
+    scope g {
+        go () => {
+            scope {
                 for {
                     let c = ln.accept() catch e {
                         println("accept stopped, cancelled:", e.isCancelled())
-                        return
+                        break
                     }
                     go serve(c)
                 }
-            })
-            _ = srv
-        })
-        let clients = task.group((cg) => {
+            }
+        }
+        let clients = scope {
             for id in 0..50 {
-                cg.go(() => {
+                go () => {
                     let reply = try client(port, id)
                     with l = replies.lock() { l.push(reply) }
-                })
+                }
             }
-        })
+        }
         println("clients ok", clients.isOk())
         g.cancel()
-    })
-    println("group ok", r.isOk())
+    }
+    println("scope done")
     with l = replies.lock() {
         l.sort()
         println(l.len, l[0], l[49])

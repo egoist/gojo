@@ -1,0 +1,62 @@
+// Why a task was cancelled, deadlines, shields, and drops that block in a
+// cancelled task.
+use std/{task, time}
+
+enum E { Bad }
+
+fn fails() ! E {
+    time.sleep(time.millisecond)
+    return err(.Bad)
+}
+
+struct Goodbye {
+    name String
+
+    fn drop(self inout) {
+        // blocks, in a cancelled task: still runs (shielded)
+        time.sleep(time.millisecond)
+        println("goodbye from", self.name, "cancelled inside drop:", task.cancelled())
+    }
+}
+
+fn main() {
+    // reasons
+    _ = scope {
+        go fails()
+        go () => {
+            time.sleep(time.second)
+            println("sibling:", task.reason())
+        }
+    }
+    scope s {
+        go () => {
+            time.sleep(time.second)
+            println("explicit:", task.reason(), task.check())
+        }
+        s.cancel()
+    }
+    _ = task.timeout(time.millisecond, () => {
+        println("deadline set:", task.deadline() != none)
+        time.sleep(time.second)
+        println("deadline:", task.reason())
+    })
+    println("no deadline here:", task.deadline())
+    // shields
+    scope s {
+        go () => {
+            s.cancel()
+            let r = task.shield(time.second, () => {
+                time.sleep(time.millisecond)
+                return task.cancelled()
+            })
+            println("shielded sleep finished; cancelled inside:", r, "after:", task.cancelled())
+        }
+    }
+    scope s {
+        go () => {
+            let _g = Goodbye{name: String("a")}
+            s.cancel()
+            println("dropping in a cancelled task")
+        }
+    }
+}

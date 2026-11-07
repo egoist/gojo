@@ -36,11 +36,11 @@ fn main() {
 
     let h = Handle{p: unsafe { calloc(1, 8) }, id: 7}
     let done = chan[int](1)
-    let tx = done.clone()
+    let tx = done.tx.clone()
     let p = h.p
     go () => {
         tx <- h.id
     }
-    println(<-done)
+    println(<-done.rx)
     unsafe { free(p) }
 }

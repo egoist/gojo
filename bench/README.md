@@ -96,10 +96,12 @@ gojo build --release gojo/goroutines.gojo -o /tmp/k && /usr/bin/time -l /tmp/k  
 | Test | Platform | Gojo | Go |
 | --- | --- | --- | --- |
 | 100,000 simultaneously suspended goroutines passing a value along a chain (`goroutines`) | Linux arm64 (container) | 0.38 s, 441 MB | 0.11 s, 284 MB |
-| Same as above | macOS (Apple M5) | 0.68 s, 1.67 GB | 0.39 s, 293 MB |
-| 1,000,000 short-lived goroutines, in batches of 1,000 (`spawn`) | macOS | 382 ms, 74 MB | 278 ms |
+| Same as above | macOS (Apple M5) | 0.63 s, 1.70 GB | 0.39 s, 293 MB |
+| 100,000 tasks parked for 3 s on a channel (an idle server) | macOS | 0.20 GB after hibernation (1.72 GB without) | |
+| 1,000,000 short-lived goroutines, in batches of 1,000 (`spawn`) | macOS | 0.50 s | 0.26 s |
 
-- **Memory**: Gojo goroutine stacks cannot move (a task can borrow data on another goroutine's stack), so they cannot start at 2 KB and grow by copying as in Go. Each stack is a range of virtual addresses whose pages are committed on demand. A suspended small goroutine uses one page: 4 KB on Linux, 16 KB on Apple Silicon. That is where the 1.67 GB on macOS comes from.
+- **Memory**: Gojo goroutine stacks cannot move (a task can borrow data on another goroutine's stack), so they cannot start at 2 KB and grow by copying as in Go. Each stack is a range of virtual addresses whose pages are committed on demand. A suspended small goroutine uses one page: 4 KB on Linux, 16 KB on Apple Silicon. That is where the 1.7 GB on macOS comes from. A task parked for more than 50 ms (among more than 256) is **hibernated**: the bytes it uses (465 on average in `goroutines`, 0.6 to 1.5 KB in the HTTP test) are copied out, its pages released, and both come back at the same address before it runs again (about 1.3 µs to put away, 0.8 µs to bring back). In `goroutines` the tasks don't stay parked long enough for it to matter; in the idle-server measurement above they do. `GOJO_HIBERNATE=0` turns it off.
+- **Spawning**: 0.38 s before tasks became structured. A task now joins its scope: one atomic counter per scope, shared by every task in it (a million here); the member list that cancellation walks is joined only by tasks that wait, and channel ends are counted with atomics. What is left of the difference is that shared counter.
 - **Mapping count**: since Linux 6.13, guard pages are set with `MADV_GUARD_INSTALL`, and adjacent stacks merge into one mapping. On older kernels each goroutine uses two mappings and is limited by `vm.max_map_count` (default 262144); at about 130,000 goroutines you get an error suggesting you raise this value.
 - **Stack reuse**: a finished goroutine leaves its stack on the worker thread's free list; extra stacks are handed to other threads. Memory is returned to the system only when the shared pool exceeds 4096 stacks. Originally every exit called `madvise`, and `spawn` took 1.16 s.
 

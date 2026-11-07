@@ -1,0 +1,62 @@
+// `select` arms on tasks, timers and cancellation, and guards.
+use std/{time, task}
+
+fn slow(ms int, v int) int {
+    time.sleep(ms * time.millisecond)
+    return v
+}
+
+fn main() {
+    // task arms: the first to finish wins; the other is cancelled
+    scope {
+        let a = go slow(50, 1)
+        let b = go slow(1, 2)
+        select {
+            let r = <-a => {
+                println("a", r)
+                b.cancel()
+            }
+            let r = <-b => {
+                println("b", r)
+                a.cancel()
+            }
+        }
+    }
+    // timers
+    let never = chan[int]()
+    select {
+        let v = <-never.rx => println("got", v)
+        time.after(2 * time.millisecond) => println("timed out")
+    }
+    // guards: the arm is left out
+    let ch = chan[int](1)
+    ch.tx <- 7
+    var allow = false
+    select {
+        let v = <-ch.rx if allow => println("guarded", v)
+        _ => println("guard false: default")
+    }
+    allow = true
+    select {
+        let v = <-ch.rx if allow => println("guarded", v)
+        _ => println("default")
+    }
+    // cancelled
+    scope s {
+        go () => {
+            select {
+                let v = <-never.rx => println("got", v)
+                cancelled => println("cancelled arm")
+            }
+        }
+        time.sleep(time.millisecond)
+        s.cancel()
+    }
+    // a deadline as an instant
+    let at = time.now() + time.millisecond
+    select {
+        let v = <-never.rx => println("got", v)
+        time.at(at) => println("at the deadline")
+    }
+    println(task.cancelled())
+}

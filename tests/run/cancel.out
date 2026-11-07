@@ -9,6 +9,6 @@ slow none fast true
 inner none fast true
 nested some(2)
 loop saw the cancel true
-cancelled group true
+cancelled scope ended
 checkpoint none
 main cancelled false

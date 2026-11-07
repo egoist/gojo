@@ -1,0 +1,43 @@
+// Tests run on the simulated scheduler: the interleaving comes from a seed,
+// so a failure can be rerun exactly.
+use std/time
+
+struct Account {
+    balance int
+}
+
+// A check-then-act race: both tasks may see the balance before either one
+// withdraws. Only some interleavings show it.
+fn withdraw(acct Mutex[Account], amount int) {
+    var ok = false
+    with a = acct.lock() {
+        ok = a.balance >= amount
+    }
+    if ok {
+        with a = acct.lock() {
+            a.balance -= amount
+        }
+    }
+}
+
+test "never overdrawn" {
+    let acct = Mutex(Account{balance: 100})
+    scope {
+        go withdraw(acct, 80)
+        go withdraw(acct, 80)
+    }
+    with a = acct.lock() {
+        assert(a.balance >= 0)
+    }
+}
+
+// Virtual time: an hour of sleeping takes no time at all.
+
+test "virtual time" {
+    let start = time.now()
+    scope {
+        go time.sleep(time.hour)
+        go time.sleep(30 * time.minute)
+    }
+    assert(time.since(start) >= time.hour)
+}

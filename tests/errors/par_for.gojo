@@ -1,0 +1,29 @@
+// The iterations of a `par for` run at the same time: the body can only read
+// what it captures, and can't leave the loop.
+fn f() int ! String {
+    return 1
+}
+
+fn g() ! String {
+    var xs = [1, 2, 3]
+    var total = 0
+    par for x in &xs {
+        total += x
+        // error: a `par for` body can't change `total`: its iterations run at the same time
+        if x > 1 { break }
+        // error: `break` can't stop a `par for`
+        if x > 2 { return }
+        // error: `return` can't leave a `par for`
+        _ = try f()
+        // error: `try` can't leave a `par for`
+    }
+    let r = rc(1)
+    par for x in xs {
+        println(x, r)
+        // error: a `par for` body uses `r` of type `rc[int]`, which can't be shared between tasks
+    }
+}
+
+fn main() {
+    _ = g()
+}

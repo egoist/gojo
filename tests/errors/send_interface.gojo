@@ -1,0 +1,18 @@
+// Only `send` types can be stored in a `send interface`.
+send interface Job {
+    fn run(self) int
+}
+
+struct Shared {
+    r rc[int]
+
+    fn run(self) int {
+        return 0
+    }
+}
+
+fn main() {
+    let j Job = Shared{r: rc(1)}
+    // error: `Shared` can't be a `Job`: it is a `send interface`
+    println(j.run())
+}

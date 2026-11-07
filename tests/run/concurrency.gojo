@@ -1,4 +1,4 @@
-use std/{fmt, time, task}
+use std/{fmt, time}
 
 struct Job {
     id int
@@ -10,32 +10,38 @@ struct Stats {
     names Vec[String]
 }
 
-fn worker(id int, jobs chan Job, results chan String) {
+fn worker(id int, jobs Receiver[Job], results Sender[String]) {
     for j in jobs {
         results <- fmt.sprint("worker", id, "did job", j.id, j.payload.len)
     }
 }
 
-fn producer(n int, out chan int) {
+fn square(x int) int {
+    time.sleep(time.millisecond)
+    return x * x
+}
+
+// `out` is the only sender: the channel closes when it is dropped, here
+fn producer(n int, out sink Sender[int]) {
     for i in 0..n {
         out <- i * i
     }
-    out.close()
 }
 
 fn main() {
     // channels move ownership
     let jobs = chan[Job](10)
     let results = chan[String](10)
-    go worker(1, jobs.clone(), results.clone())
+    go worker(1, jobs.rx.clone(), results.tx.clone())
     for i in 0..3 {
         let j = Job{id: i, payload: "x".repeat(i + 1)}
-        jobs <- j
+        jobs.tx <- j
     }
-    jobs.close()
+    // dropping the last sender closes the channel
+    drop(jobs.tx)
     var got = Vec[String]{}
     for _ in 0..3 {
-        if let r = <-results {
+        if let r = <-results.rx {
             got.push(r)
         }
     }
@@ -44,11 +50,11 @@ fn main() {
         println(g)
     }
 
-    // unbuffered channel + closing
+    // unbuffered channel; the producer takes the sender
     let sq = chan[int]()
-    go producer(5, sq.clone())
+    go producer(5, sq.tx)
     var sum = 0
-    for v in sq {
+    for v in sq.rx {
         sum += v
     }
     println("sum of squares", sum)
@@ -58,7 +64,7 @@ fn main() {
     let done = chan[bool](4)
     for i in 0..4 {
         let s = stats.clone()
-        let d = done.clone()
+        let d = done.tx.clone()
         go () => {
             for _ in 0..1000 {
                 with st = s.lock() {
@@ -72,7 +78,7 @@ fn main() {
         }
     }
     for _ in 0..4 {
-        _ = <-done
+        _ = <-done.rx
     }
     with st = stats.lock() {
         st.names.sort()
@@ -82,13 +88,13 @@ fn main() {
     // select with timeout-ish default
     let a = chan[int](1)
     let b = chan[String](1)
-    b <- "hello"
+    b.tx <- "hello"
     select {
-        let x = <-a => println("a", x)
-        let y = <-b => println("b", y)
+        let x = <-a.rx => println("a", x)
+        let y = <-b.rx => println("b", y)
     }
     select {
-        let x = <-a => println("a", x)
+        let x = <-a.rx => println("a", x)
         _ => println("nothing ready")
     }
 
@@ -100,32 +106,62 @@ fn main() {
     for sent < 3 {
         rounds += 1
         select {
-            out <- sent => sent += 1
-            <-quit => break
+            out.tx <- sent => sent += 1
+            <-quit.rx => break
             _ => {
                 // the buffer is full: take one value out
-                if let v = <-out {
+                if let v = <-out.rx {
                     println("drained", v)
                 }
             }
         }
     }
-    println("sent", sent, "buffered", out.len(), "rounds", rounds)
+    println("sent", sent, "buffered", out.rx.len(), "rounds", rounds)
 
-    // structured concurrency: tasks borrow data from outside the group
+    // structured concurrency: tasks borrow data from outside the scope
     let inputs = [1, 2, 3, 4, 5, 6, 7, 8]
     let total = Mutex(0)
-    let r = task.group((g) => {
+    scope {
         for x in inputs {
-            g.go(() => {
+            go () => {
                 time.sleep(time.millisecond)
                 with t = total.lock() {
                     t += x * 10
                 }
-            })
+            }
         }
-    })
-    with t = total.lock() {
-        println("group ok", r.isOk(), "total", t)
     }
+    with t = total.lock() {
+        println("scope total", t)
+    }
+
+    // results as values, in order
+    let squares = scope {
+        let t3 = go square(3)
+        let t4 = go square(4)
+        t3.join() + t4.join()
+    }
+    println("squares", squares)
+    ends()
+}
+
+fn ends() {
+    // the last receiver gone: sends fail instead of blocking forever
+    let ch = chan[String](1)
+    drop(ch.rx)
+    println("sent to nobody:", ch.tx.send("x"))
+    // several senders: the channel closes when the last one is dropped
+    let c2 = chan[int](4)
+    scope {
+        for i in 0..3 {
+            let tx = c2.tx.clone()
+            go () => { tx <- i }
+        }
+    }
+    drop(c2.tx)
+    var n = 0
+    for v in c2.rx {
+        n += v
+    }
+    println("from three senders:", n)
 }

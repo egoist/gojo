@@ -1,25 +1,29 @@
-use std/task
-
+// What a task borrows must live until its scope ends: data declared outside
+// the scope or directly in its body. Values declared in blocks inside the
+// body are moved (or copied) into the task.
 fn work(items []String) {
-    _ = task.group((g) => {
-        // fine: `r` points into `items`, which outlives the group
+    scope {
+        // fine: `r` points into `items`, which outlives the scope
         for s in items {
             let r = s
-            g.go(() => { println(r) })
+            go () => { println(r) }
         }
-        // not fine: `first` points into `inner`, which dies with the group body
-        let inner = ["b".toString()]
-        let first = inner[0]
-        g.go(() => { println(first) })
-        // error: a task borrows `first`, which does not outlive the task group
-    })
+        if items.len() > 0 {
+            let inner = ["b".toString()]
+            let first = inner[0]
+            go () => { println(first) }
+            // error: a task borrows `first`, which does not live until the scope ends
+        }
+    }
 }
 
 fn main() {
-    var total = 0
-    _ = task.group((g) => {
-        g.go(() => { total += 1 })
-        // error: a task cannot modify the captured variable `total`
-    })
+    scope {
+        for i in 0..2 {
+            var mine = i
+            go () => { mine += 1 }
+            // error: a task cannot modify `mine`: it gets its own copy
+        }
+    }
     work(["a"])
 }

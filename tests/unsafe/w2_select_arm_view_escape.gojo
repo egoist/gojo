@@ -1,9 +1,9 @@
 fn main() {
     let ch = chan[String](1)
-    ch <- "abc".toString()
+    ch.tx <- "abc".toString()
     var keep = ""
     select {
-        let x = <-ch => {
+        let x = <-ch.rx => {
             if let y = x {
                 keep = y.asStr()
             }

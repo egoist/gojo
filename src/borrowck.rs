@@ -97,7 +97,9 @@ fn yield_sources(prog: &Program, tfuncs: &[TFunc], diags: &mut Vec<Diag>) -> Has
 /// sit in variables (or, one level down, in an option or result).
 fn stores_view(t: &Ty) -> bool {
     match t {
-        Ty::Str | Ty::Slice(_) | Ty::MutexRef(_) | Ty::Func(_) | Ty::Iface(..) | Ty::Ptr(_) => false,
+        Ty::Str | Ty::Slice(_) | Ty::MutexRef(_) | Ty::Func(_) | Ty::Iface(..) | Ty::Ptr(_) | Ty::Scope => false,
+        // a task's result is stored in the task
+        Ty::Task(a) => a.contains_view(),
         Ty::Option(a) => stores_view(a),
         Ty::Result(a, b) => stores_view(a) || stores_view(b),
         _ => t.contains_view(),
@@ -169,12 +171,12 @@ fn kept_type_params(prog: &Program, tfuncs: &[TFunc], diags: &mut Vec<Diag>) {
             TK::Call { callee: Callee::Func(f, targs), .. } if !targs.is_empty() => calls.push((tf.func, *f, targs.clone(), e.span)),
             _ => {}
         });
-        // `go f(x)`: the arguments are kept by the goroutine
-        crate::tir::walk_block(&tf.body, &mut |n| {
-            if let crate::tir::Node::Stmt(TStmt::Go { call, .. }) = n {
-                if let TK::Call { args, .. } = &call.kind {
-                    for a in args {
-                        params_in(&a.e.ty, &mut k);
+        // `s.go(...)` on a `Scope` value: the task may outlive the call
+        visit_block(&tf.body, &mut |e| {
+            if let TK::Spawn { target: SpawnTarget::Value(_), task, .. } = &e.kind {
+                if let TK::Closure(c) = &task.kind {
+                    for (l, _) in &c.captures {
+                        params_in(&tf.locals[*l as usize].ty, &mut k);
                     }
                 }
             }
@@ -214,7 +216,7 @@ fn kept_type_params(prog: &Program, tfuncs: &[TFunc], diags: &mut Vec<Diag>) {
         for (tp, ta) in fd.tparams.iter().zip(targs) {
             if ks.contains(tp) && ta.contains_view() && seen.insert(*sp) {
                 let pn = prog.tparam(*tp).name.clone();
-                diags.push(Diag::new(*sp, format!("`{}` cannot be called with the borrowed view `{}` for `{}`: it keeps `{}` values after it returns", fd.name, prog.show(ta), pn, pn)).note(Some(fd.span), "in a closure or goroutine that can outlive the call").note(None, "pass an owned value (`.toString()` / `.toVec()`)"));
+                diags.push(Diag::new(*sp, format!("`{}` cannot be called with the borrowed view `{}` for `{}`: it keeps `{}` values after it returns", fd.name, prog.show(ta), pn, pn)).note(Some(fd.span), "in a closure or task that can outlive the call").note(None, "pass an owned value (`.toString()` / `.toVec()`)"));
             }
         }
     }
@@ -224,11 +226,13 @@ fn kept_type_params(prog: &Program, tfuncs: &[TFunc], diags: &mut Vec<Diag>) {
 struct St {
     moved: Vec<(Path, Span)>,
     reachable: bool,
+    /// Task handles moved (joined or cancelled) on every path so far.
+    joined: Vec<LocalId>,
 }
 
 impl St {
     fn new() -> St {
-        St { moved: vec![], reachable: true }
+        St { moved: vec![], reachable: true, joined: vec![] }
     }
     fn join(&mut self, o: &St) {
         if !o.reachable {
@@ -243,9 +247,10 @@ impl St {
                 self.moved.push(m.clone());
             }
         }
+        self.joined.retain(|l| o.joined.contains(l));
     }
     fn unreachable() -> St {
-        St { moved: vec![], reachable: false }
+        St { moved: vec![], reachable: false, joined: vec![] }
     }
 }
 
@@ -261,6 +266,8 @@ struct Loan {
     /// Taken in an earlier iteration of the loop being checked, by a view
     /// declared outside it.
     carried: bool,
+    /// Held by a task until its scope ends.
+    task: bool,
 }
 
 struct LoopCx {
@@ -299,6 +306,11 @@ struct Bc<'a> {
     /// The holders each holder was borrowed through (`with s = mu.lock()`: `s`
     /// through `mu`); re-borrowing through `s` doesn't conflict with `mu`.
     via_parents: HashMap<LocalId, Vec<LocalId>>,
+    /// `scope` blocks being checked: (id, depth of the body). What a task
+    /// borrows stays borrowed until its scope's body ends.
+    tscopes: Vec<(u32, usize)>,
+    /// While checking a task closure: the depth its borrows last until.
+    spawn_depth: Option<usize>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -335,7 +347,7 @@ fn place_path(e: &TExpr) -> Option<Path> {
 
 impl<'a> Bc<'a> {
     fn new(prog: &'a Program, tf: &'a TFunc, proj: &'a HashMap<FuncId, Vec<usize>>, view_ret: bool) -> Bc<'a> {
-        Bc { prog, tf, proj, diags: vec![], loans: vec![], holders: HashMap::new(), depth: 0, suppress: 0, loops: vec![], view_ret, defers: vec![vec![]], decl_depth: HashMap::new(), locked: vec![], in_closure: false, in_each_body: false, via_parents: HashMap::new() }
+        Bc { prog, tf, proj, diags: vec![], loans: vec![], holders: HashMap::new(), depth: 0, suppress: 0, loops: vec![], view_ret, defers: vec![vec![]], decl_depth: HashMap::new(), locked: vec![], in_closure: false, in_each_body: false, via_parents: HashMap::new(), tscopes: vec![], spawn_depth: None }
     }
 
     fn err(&mut self, d: Diag) {
@@ -446,6 +458,16 @@ impl<'a> Bc<'a> {
                 self.err(Diag::new(sp, format!("a `defer` cannot modify `{}`: the view being returned points into it", n)).note(Some(l.span), "returned here; the `defer` runs after this value is computed"));
                 return;
             }
+            if l.task {
+                let what = if l.mutable { "modifies" } else { "reads" };
+                let msg = if l.carried {
+                    format!("a task started in an earlier iteration of this loop {} `{}`, and may still be running", what, n)
+                } else {
+                    format!("cannot {} `{}`: a task {} it until its scope ends", if acc == Acc::Mut { "modify" } else { "use" }, n, what)
+                };
+                self.err(Diag::new(sp, msg).note(Some(l.span), "the task").note(None, "tasks keep what they borrow until their `scope` ends; give each task its own data, collect results with `let t = go f()` and `t.join()`, or share it through a `Mutex`"));
+                return;
+            }
             if l.carried {
                 let h = l.holder.map(|h| self.tf.locals[h as usize].name.clone()).unwrap_or_default();
                 self.err(Diag::new(sp, format!("cannot modify `{}` here: `{}` may still view it from the previous iteration of the loop", n, h)).note(Some(l.span), format!("`{}` is set here, and keeps the view into the next iteration", h)).note(None, format!("declare `{}` inside the loop if each iteration sets it before using it", h)));
@@ -499,6 +521,9 @@ impl<'a> Bc<'a> {
                 self.err(Diag::new(e.span, format!("cannot move `{}` while it is borrowed", n)).note(Some(l.span), "borrowed here"));
             }
             if st.reachable {
+                if p.1.is_empty() && matches!(self.tf.locals[p.0 as usize].ty, Ty::Task(_)) {
+                    st.joined.push(p.0);
+                }
                 st.moved.push((p, e.span));
             }
         }
@@ -535,6 +560,9 @@ impl<'a> Bc<'a> {
 
     fn reinit(&mut self, st: &mut St, p: &Path) {
         st.moved.retain(|(m, _)| !(m.0 == p.0 && m.1.starts_with(&p.1)));
+        if p.1.is_empty() {
+            st.joined.retain(|l| *l != p.0);
+        }
     }
 
     // ------------------------------------------------------------------
@@ -571,7 +599,7 @@ impl<'a> Bc<'a> {
             self.loans = saved;
         }
         for (t, _) in &targets {
-            self.loans.push(Loan { target: t.clone(), mutable, holder: Some(holder), span: sp, depth: self.depth, returned: false, carried: false });
+            self.loans.push(Loan { target: t.clone(), mutable, holder: Some(holder), span: sp, depth: self.depth, returned: false, carried: false, task: false });
         }
         self.holders.insert(holder, targets.into_iter().map(|(p, _)| (p, mutable)).collect());
     }
@@ -656,10 +684,12 @@ impl<'a> Bc<'a> {
             TK::Proj { call, .. } => self.view_sources(call),
             TK::ProjUnwrap { proj, .. } => self.view_sources(proj),
             TK::MutexRef(p) => Ok(self.targets(p).into_iter().map(|(t, _)| (t, true)).collect()),
-            TK::Block(b) | TK::Unsafe(b) => match &b.value {
+            TK::Block(b) | TK::Unsafe(b) | TK::Scope { body: b, .. } => match &b.value {
                 Some(v) => self.view_sources(v),
                 None => Ok(vec![]),
             },
+            // the task's own borrows last until its scope ends
+            TK::Spawn { .. } | TK::Isolate(_) => Ok(vec![]),
             TK::If { then, else_, .. } => {
                 let mut out = vec![];
                 for b in [Some(then), else_.as_ref()].into_iter().flatten() {
@@ -850,6 +880,17 @@ impl<'a> Bc<'a> {
         if let Some(v) = &b.value {
             self.expr(st, v);
         }
+        // a task handle must be joined or cancelled where the block ends
+        // normally (leaving early cancels the scope's tasks anyway)
+        if st.reachable {
+            for &l in &declared {
+                if matches!(self.tf.locals[l as usize].ty, Ty::Task(_)) && !st.joined.contains(&l) {
+                    let loc = &self.tf.locals[l as usize];
+                    let d = Diag::new(loc.span, format!("task `{}` is never joined", loc.name)).note(None, format!("use its result with `{}.join()`, stop it with `{}.cancel()`, or start it with a plain `go` statement if its result isn't needed", loc.name, loc.name));
+                    self.err(d);
+                }
+            }
+        }
         self.end_scope_defers(st);
         self.defers.pop();
         self.end_depth();
@@ -958,7 +999,7 @@ impl<'a> Bc<'a> {
                         // while the `defer`s run, after it was computed
                         if let Ok(srcs) = self.view_sources(e) {
                             for (t, _) in srcs {
-                                self.loans.push(Loan { target: t, mutable: false, holder: None, span: e.span, depth: 0, returned: true, carried: false });
+                                self.loans.push(Loan { target: t, mutable: false, holder: None, span: e.span, depth: 0, returned: true, carried: false, task: false });
                                 kept += 1;
                             }
                         }
@@ -1030,7 +1071,7 @@ impl<'a> Bc<'a> {
                         self.check_loans(t, if *mutable { Acc::Mut } else { Acc::Read }, iter.span, None);
                     }
                     for (t, _) in &targets {
-                        self.loans.push(Loan { target: t.clone(), mutable: *mutable, holder: Some(*elem), span: iter.span, depth: self.depth, returned: false, carried: false });
+                        self.loans.push(Loan { target: t.clone(), mutable: *mutable, holder: Some(*elem), span: iter.span, depth: self.depth, returned: false, carried: false, task: false });
                     }
                     self.holders.insert(*elem, targets.iter().map(|(p, _)| (p.clone(), *mutable)).collect());
                     if let Some(i) = index {
@@ -1050,10 +1091,52 @@ impl<'a> Bc<'a> {
                 self.end_depth();
                 self.depth -= 1;
             }
-            TStmt::Go { call, .. } | TStmt::ForEach { call, .. } => self.expr(st, call),
+            TStmt::ForEach { call, .. } => self.expr(st, call),
+            TStmt::ParFor { iter, hi, mutable, body, .. } => {
+                if iter.is_place() {
+                    if *mutable {
+                        self.write(st, iter);
+                    } else {
+                        self.read(st, iter);
+                    }
+                } else {
+                    self.expr(st, iter);
+                }
+                if let Some(h) = hi {
+                    self.expr(st, h);
+                }
+                // the iterated value stays borrowed while the body runs
+                let before = self.loans.len();
+                if iter.is_place() && hi.is_none() {
+                    for (t, _) in self.targets(iter) {
+                        self.loans.push(Loan { target: t, mutable: *mutable, holder: None, span: iter.span, depth: self.depth + 1, returned: false, carried: false, task: false });
+                    }
+                }
+                if let TK::Closure(c) = &body.kind {
+                    self.closure(st, c);
+                }
+                self.loans.truncate(before);
+            }
             TStmt::Send { chan, value } => {
                 self.expr(st, chan);
                 self.expr(st, value);
+            }
+            TStmt::WithLocks { locals, places, body } => {
+                for (l, place) in locals.iter().zip(places) {
+                    self.read(st, place);
+                    self.depth += 1;
+                    self.decl_depth.insert(*l, self.depth);
+                    let targets = self.targets(place);
+                    let n = place_path(place).map(|p| self.name(&p)).unwrap_or_else(|| "the lock".into());
+                    self.locked.push((self.depth, targets.iter().map(|t| t.0.clone()).collect(), place.span, n));
+                    self.add_loans(*l, targets, false, place.span, st, place);
+                }
+                self.block(st, body);
+                for _ in places {
+                    self.locked.pop();
+                    self.end_depth();
+                    self.depth -= 1;
+                }
             }
             TStmt::With { local, place, lock, body } => {
                 self.read(st, place);
@@ -1081,16 +1164,25 @@ impl<'a> Bc<'a> {
                             self.expr(st, chan);
                             self.expr(st, value);
                         }
+                        TSelectKind::Task { task, .. } => self.read(st, task),
+                        TSelectKind::Timer { at, .. } => self.expr(st, at),
                         _ => {}
+                    }
+                    if let Some(g) = &a.guard {
+                        self.expr(st, g);
                     }
                 }
                 let start = st.clone();
                 let mut out = St::unreachable();
                 for a in arms {
                     let mut s2 = start.clone();
-                    if let TSelectKind::Recv { bind: Some(b), .. } = &a.kind {
+                    if let TSelectKind::Recv { bind: Some(b), .. } | TSelectKind::Task { bind: Some(b), .. } = &a.kind {
                         self.reinit(&mut s2, &(*b, vec![]));
                         self.decl_depth.insert(*b, self.depth + 1);
+                    }
+                    // the arm that takes a task's result takes its handle
+                    if let TSelectKind::Task { task, .. } = &a.kind {
+                        self.do_move(&mut s2, task);
                     }
                     self.block(&mut s2, &a.body);
                     out.join(&s2);
@@ -1176,7 +1268,15 @@ impl<'a> Bc<'a> {
         // still point where they did when the next iteration starts
         let key = |l: &Loan| (l.target.clone(), l.holder, l.span);
         let before: std::collections::HashSet<_> = saved_loans.iter().map(key).collect();
-        let carried: Vec<Loan> = self.loans.iter().filter(|l| l.holder.is_some_and(|h| outside.contains(&h) && !overwritten_first(h, src.0, src.1)) && !before.contains(&key(l))).map(|l| Loan { carried: true, ..l.clone() }).collect();
+        // ... and what tasks started in it borrow: they run on while the next
+        // iteration starts (another task of the loop, or the loop itself)
+        let outer_depth = self.depth;
+        let carried: Vec<Loan> = self
+            .loans
+            .iter()
+            .filter(|l| (l.holder.is_some_and(|h| outside.contains(&h) && !overwritten_first(h, src.0, src.1)) || (l.holder.is_none() && !l.returned && l.depth <= outer_depth)) && !before.contains(&key(l)))
+            .map(|l| Loan { carried: true, ..l.clone() })
+            .collect();
         let carried_holders: Vec<(LocalId, Vec<(Path, bool)>)> = carried.iter().filter_map(|l| l.holder).filter_map(|h| self.holders.get(&h).map(|t| (h, t.clone()))).collect();
         self.loans = saved_loans;
         self.holders = saved_holders;
@@ -1313,7 +1413,7 @@ impl<'a> Bc<'a> {
                             };
                             let mutable = refs.iter().any(|b| matches!(self.tf.locals[*b as usize].kind, LocalKind::Ref { mutable: true }));
                             for (t, _) in &targets {
-                                self.loans.push(Loan { target: t.clone(), mutable, holder: Some(refs[0]), span: scrut.span, depth: self.depth, returned: false, carried: false });
+                                self.loans.push(Loan { target: t.clone(), mutable, holder: Some(refs[0]), span: scrut.span, depth: self.depth, returned: false, carried: false, task: false });
                             }
                             // Bindings into a temporary (`if let x = w.upgrade()`) point
                             // into something that lives only for this `match`: they own
@@ -1337,6 +1437,28 @@ impl<'a> Bc<'a> {
                 *st = out;
             }
             TK::Block(b) | TK::Unsafe(b) => self.block(st, b),
+            TK::Isolate(b) => self.block(st, b),
+            TK::Scope { id, body, .. } => {
+                self.tscopes.push((*id, self.depth + 1));
+                self.block(st, body);
+                self.tscopes.pop();
+            }
+            TK::Spawn { target, task, .. } => {
+                if let SpawnTarget::Value(v) = target {
+                    self.expr(st, v);
+                }
+                let d = match target {
+                    SpawnTarget::Lexical(id) => self.tscopes.iter().rev().find(|t| t.0 == *id).map(|t| t.1),
+                    SpawnTarget::Value(_) => None,
+                };
+                if let TK::Closure(c) = &task.kind {
+                    let saved = self.spawn_depth.replace(d.unwrap_or(self.depth));
+                    self.closure(st, c);
+                    self.spawn_depth = saved;
+                } else {
+                    self.expr(st, task);
+                }
+            }
             TK::Try { e: x, wrap } => {
                 self.expr(st, x);
                 if let Some(TryWrap::Call(_, w)) = wrap {
@@ -1368,22 +1490,41 @@ impl<'a> Bc<'a> {
             if taken && !self.is_copy(&t) {
                 self.do_move(st, &le);
                 continue;
-            } else if *u == CapUse::Mutate {
+            }
+            // a task borrows only the parts of a variable it uses: `ch.rx`
+            // leaves `ch.tx` free to move
+            if c.scoped && !taken && !self.is_holder(*l) {
+                if let Some(paths) = capture_paths(c, *l) {
+                    let d = self.spawn_depth.unwrap_or(1);
+                    let acc = if *u == CapUse::Mutate { Acc::Mut } else { Acc::Read };
+                    for p in paths {
+                        let path = (*l, p);
+                        self.check_moved(st, &path, c.span, if acc == Acc::Mut { "modification of" } else { "use of" });
+                        self.check_loans(&path, acc, c.span, None);
+                        self.loans.push(Loan { target: path, mutable: acc == Acc::Mut, holder: None, span: c.span, depth: d, returned: false, carried: false, task: true });
+                    }
+                    continue;
+                }
+            }
+            if *u == CapUse::Mutate {
                 self.write(st, &le);
             } else {
                 self.read(st, &le);
             }
-            if c.scoped && !c.by_value.contains(l) {
-                // tasks keep their borrows until the group finishes
-                if let Some(p) = place_path(&le) {
-                    if !self.is_holder(p.0) {
-                        self.loans.push(Loan { target: p, mutable: false, holder: None, span: c.span, depth: 1, returned: false, carried: false });
-                    }
+            if c.scoped && (!c.by_value.contains(l) || t.is_view()) {
+                // tasks keep their borrows (and copies of views keep theirs)
+                // until the scope ends
+                let d = self.spawn_depth.unwrap_or(1);
+                // (a view that may write, like `Mutex(&x)`, keeps writing)
+                let held: Vec<(Path, bool)> = place_path(&le).and_then(|p| self.holders.get(&p.0).cloned()).unwrap_or_default();
+                for (p, m) in self.arg_targets(&le) {
+                    let via_mut = m || held.iter().any(|(h, hm)| *hm && overlap(h, &p));
+                    self.loans.push(Loan { target: p, mutable: *u == CapUse::Mutate || via_mut, holder: None, span: c.span, depth: d, returned: false, carried: false, task: true });
                 }
             }
         }
         // the body is checked on its own
-        let mut inner = Bc { prog: self.prog, tf: self.tf, proj: self.proj, diags: vec![], loans: vec![], holders: self.holders.clone(), depth: 0, suppress: self.suppress, loops: vec![], view_ret: false, defers: vec![vec![]], decl_depth: c.params.iter().map(|p| (*p, 0)).collect(), locked: self.locked.iter().map(|(_, ps, sp, n)| (0, ps.clone(), *sp, n.clone())).collect(), in_closure: true, in_each_body: c.loop_body.is_some(), via_parents: self.via_parents.clone() };
+        let mut inner = Bc { prog: self.prog, tf: self.tf, proj: self.proj, diags: vec![], loans: vec![], holders: self.holders.clone(), depth: 0, suppress: self.suppress, loops: vec![], view_ret: false, defers: vec![vec![]], decl_depth: c.params.iter().map(|p| (*p, 0)).collect(), locked: self.locked.iter().map(|(_, ps, sp, n)| (0, ps.clone(), *sp, n.clone())).collect(), in_closure: true, in_each_body: c.loop_body.is_some(), via_parents: self.via_parents.clone(), tscopes: vec![], spawn_depth: None };
         let mut s = St::new();
         inner.block(&mut s, &c.body);
         inner.end_scope_defers(&mut s);
@@ -1486,6 +1627,51 @@ impl<'a> Bc<'a> {
             return self.holders.get(&p.0).cloned().unwrap_or_default();
         }
         vec![]
+    }
+}
+
+/// The parts of captured local `l` that closure `c` uses: field paths, or the
+/// whole variable (an empty path). None when the variable isn't used through
+/// a place at all (then the caller treats it as a whole).
+fn capture_paths(c: &TClosure, l: LocalId) -> Option<Vec<Vec<usize>>> {
+    use std::collections::HashSet;
+    // the child a place goes through: the inner node is part of the outer place
+    fn inner(e: &TExpr) -> Option<&TExpr> {
+        match &e.kind {
+            TK::Field { base, .. } | TK::Deref(base) | TK::Index { base, .. } | TK::MapIndex { base, .. } | TK::Copy(base) | TK::Move(base) => Some(base),
+            TK::Coerce(Coercion::VecToSlice | Coercion::ArrayToSlice | Coercion::StringToStr, x) => Some(x),
+            TK::ProjUnwrap { proj, .. } => Some(proj),
+            _ => None,
+        }
+    }
+    let mut found: Vec<(*const TExpr, Vec<usize>)> = vec![];
+    let mut nested: HashSet<*const TExpr> = HashSet::new();
+    visit_block(&c.body, &mut |e| {
+        if let Some((r, p)) = place_path(e) {
+            if r == l {
+                found.push((e as *const TExpr, p));
+                if let Some(i) = inner(e) {
+                    nested.insert(i as *const TExpr);
+                }
+            }
+        }
+    });
+    let mut out: Vec<Vec<usize>> = vec![];
+    for (ptr, p) in found {
+        if nested.contains(&ptr) {
+            continue;
+        }
+        if p.is_empty() {
+            return Some(vec![vec![]]);
+        }
+        if !out.contains(&p) {
+            out.push(p);
+        }
+    }
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
     }
 }
 

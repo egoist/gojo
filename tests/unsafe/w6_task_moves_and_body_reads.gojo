@@ -1,8 +1,11 @@
-use std/task
+// Declared in a block inside the scope: moved into the task, so the body
+// can't read it afterwards.
 fn main() {
-    _ = task.group((g) => {
-        let s = "abc".toString()
-        g.go(() => println(s))
-        println(s)
-    })
+    scope {
+        for _ in 0..1 {
+            let s = "abc".toString()
+            go () => println(s)
+            println(s)
+        }
+    }
 }

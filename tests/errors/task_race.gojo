@@ -1,13 +1,12 @@
-use std/task
 fn main() {
     var total = 0
     let xs = [1, 2, 3]
-    _ = task.group((g) => {
+    scope {
         for x in xs {
-            g.go(() => {
+            go () => {
                 total += x
-            })
+            }
         }
-    })
-    // error: a task cannot modify the captured variable `total`
+    }
+    // error: a task started in an earlier iteration of this loop modifies `total`, and may still be running
 }

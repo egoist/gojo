@@ -1,0 +1,166 @@
+// `scope` blocks: tasks started with `go` run until the scope ends; they may
+// borrow what outlives it, and give back results with `join`.
+use std/{fmt, time, task}
+
+enum Fail {
+    Bad(n int)
+}
+
+fn work(n int) ! Fail {
+    if n == 3 {
+        time.sleep(time.millisecond)
+        return err(.Bad(n))
+    }
+    // the others would sleep for a minute: the failure cancels them
+    time.sleep(60 * time.second)
+}
+
+fn square(x int) int {
+    time.sleep(time.millisecond)
+    return x * x
+}
+
+fn consume(s sink String) String {
+    return s + "!"
+}
+
+// a failing task cancels the scope; `try scope` passes the error on
+fn failing() ! Fail {
+    let start = time.now()
+    let r = scope {
+        for i in 0..5 {
+            go work(i)
+        }
+    }
+    println("failed:", r, "fast:", time.since(start) < time.second)
+    try scope {
+        go work(1)
+        go work(3)
+    }
+    println("not reached")
+}
+
+// leaving a scope early cancels its tasks, then waits for them
+fn early() int ! Fail {
+    scope {
+        let a = go work(3)
+        let b = go () => {
+            time.sleep(60 * time.second)
+            return task.cancelled()
+        }
+        try a.join()
+        println("not reached", b.join())
+    }
+    return 1
+}
+
+fn handles() {
+    let r = scope {
+        let slow = go () => {
+            time.sleep(60 * time.second)
+            return String("slow")
+        }
+        let a = go square(3)
+        let b = go square(4)
+        let sum = a.join() + b.join()
+        slow.cancel()
+        sum
+    }
+    println("handles:", r)
+}
+
+// tasks borrow data from outside, and from the scope's own body
+fn borrowing() {
+    let words = ["alpha", "beta", "gamma"]
+    var longest = 0
+    var count = 0
+    let long = Mutex(Vec[String]{})
+    scope {
+        let prefix = String("w:")
+        for w in words {
+            go () => {
+                if w.len() > 4 {
+                    with l = long.lock() { l.push(fmt.sprint(prefix, w)) }
+                }
+            }
+        }
+        // each variable is written by one task only
+        go () => {
+            for w in words {
+                longest = max(longest, w.len())
+            }
+        }
+        go () => { count = words.len() }
+    }
+    with l = long.lock() {
+        l.sort()
+        println(l, "longest", longest, "count", count)
+    }
+}
+
+// values declared in blocks inside the scope move into the task
+fn moving() {
+    let results = Mutex(Vec[String]{})
+    scope {
+        for i in 0..3 {
+            let s = fmt.sprint("v", i)
+            go () => {
+                let t = consume(s)
+                with r = results.lock() { r.push(t) }
+            }
+        }
+    }
+    with r = results.lock() {
+        r.sort()
+        println(r)
+    }
+}
+
+fn named() {
+    let start = time.now()
+    scope s {
+        go time.sleep(60 * time.second)
+        go () => {
+            time.sleep(time.millisecond)
+            s.cancel()
+        }
+    }
+    println("cancelled through the handle, fast:", time.since(start) < time.second)
+}
+
+// a function that starts long-running work takes the scope; the task may
+// outlive the function, so it owns what it uses
+fn background(s Scope, out sink arc[Mutex[int]]) {
+    s.go(() => {
+        time.sleep(time.millisecond)
+        with o = out.lock() { o += 1 }
+    })
+}
+
+fn passing() {
+    let n = arc(Mutex(0))
+    scope s {
+        for _ in 0..3 {
+            background(s, n.clone())
+        }
+    }
+    with v = n.lock() {
+        println("background tasks:", v)
+    }
+}
+
+fn main() ! Fail {
+    _ = failing()
+    let start = time.now()
+    println("early:", early(), "fast:", time.since(start) < time.second)
+    handles()
+    borrowing()
+    moving()
+    named()
+    passing()
+    // `main` is a scope too: this task is waited for before the program ends
+    go () => {
+        time.sleep(time.millisecond)
+        println("main waits for its tasks")
+    }
+}

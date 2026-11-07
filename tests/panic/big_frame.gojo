@@ -17,10 +17,10 @@ fn big(n int) int {
 fn main() {
     let n = os.args().len() * 50000000
     let ch = chan[int](1)
-    let c2 = ch.clone()
+    let c2 = ch.tx.clone()
     go () => {
         c2 <- big(n)
     }
-    println(<-ch ?? 0)
+    println(<-ch.rx ?? 0)
     // panic: stack overflow
 }

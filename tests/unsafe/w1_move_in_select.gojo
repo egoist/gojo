@@ -2,9 +2,9 @@ fn take(s sink String) {}
 fn main() {
     let ch = chan[int](1)
     let s = "abc".toString()
-    ch <- 1
+    ch.tx <- 1
     select {
-        let x = <-ch => {
+        let x = <-ch.rx => {
             take(s)
             println(x)
         }

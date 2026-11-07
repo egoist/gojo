@@ -1,5 +1,5 @@
 // http: request parsing, limits and the client, against a local server.
-use std/{fmt, http, io, net, task}
+use std/{fmt, http, io, net}
 
 struct Echo {
     fn serve(self, req http.Request) http.Response {
@@ -29,15 +29,8 @@ fn main() ! io.Error {
     let ln = try net.listen("127.0.0.1:0")
     let port = ln.port()
     let base = fmt.format("http://127.0.0.1:{}", port)
-    let stop = chan[bool]()
-    _ = task.group((g) => {
-        g.go(() => {
-            _ = task.group((sg) => {
-                sg.go(() => http.serve(ln, Echo{}, http.Options{maxBody: 1000}))
-                _ = <-stop
-                sg.cancel()
-            })
-        })
+    scope server {
+        go http.serve(ln, Echo{}, http.Options{maxBody: 1000})
         let r = http.get(base + "/a/b%20c?name=x+y&z") catch e { http.text(0, e.message()) }
         println(r.status, r.text(), r.header("x-segments") ?? "")
         let p = http.post(base + "/up", "application/octet-stream", "x".repeat(1000).bytes()) catch e { http.text(0, e.message()) }
@@ -62,8 +55,8 @@ fn main() ! io.Error {
         println(bm.text())
         let sp = http.get(base + "/a b") catch e { http.text(0, e.message()) }
         println(sp.text().contains("spaces and control characters must be percent-encoded"))
-        stop <- true
-    })
+        server.cancel()
+    }
     println(http.encode("a/b c&d=é"), http.decode("%E2%82%AC+%41") ?? "?", http.decode("%zz") ?? "malformed", http.decode("%4") ?? "malformed")
     return
 }

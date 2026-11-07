@@ -360,14 +360,14 @@ impl<'a> BorrowGen<'a> {
                 self.line("}");
             }
             24 if self.depth < 2 => {
-                // tasks read a view while the group body changes the owner
+                // tasks read a view while the scope's body changes the owner
                 if let (Some(w), Some(s)) = (self.pick(&svs), self.pick(&strs)) {
-                    self.line("_ = task.group((g) => {");
-                    self.line(&format!("    g.go(() => println({}.len()))", w));
+                    self.line("scope {");
+                    self.line(&format!("    go () => println({}.len())", w));
                     if self.rng.chance(1, 2) {
                         self.line(&format!("    {}.push(\"more\")", s));
                     }
-                    self.line("})");
+                    self.line("}");
                 }
             }
             _ => {
@@ -455,7 +455,7 @@ impl<'a> BorrowGen<'a> {
             self.line(&format!("println({}.len())", m));
         }
         // `task` must be used
-        self.line("_ = task.group((g) => { g.go(() => println(\"t\")) })");
+        self.line("_ = task.cancelled()");
         head.push_str(&self.out);
         head.push_str("    println(e0.len())\n}\n");
         head

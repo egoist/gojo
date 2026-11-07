@@ -7,4 +7,7 @@ b some("hello")
 nothing ready
 drained 0
 sent 3 buffered 2 rounds 4
-group ok true total 360
+scope total 360
+squares 25
+sent to nobody: false
+from three senders: 3

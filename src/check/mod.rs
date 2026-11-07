@@ -169,7 +169,8 @@ impl Checker {
                 let (name, kind, tps, is_copy, unsafe_send) = match &item.kind {
                     ast::ItemKind::Struct(s) => (s.name.clone(), TypeDefKind::Struct { fields: vec![] }, s.tparams.clone(), s.is_copy, s.unsafe_send),
                     ast::ItemKind::Enum(e) => (e.name.clone(), TypeDefKind::Enum { variants: vec![] }, e.tparams.clone(), e.is_copy, false),
-                    ast::ItemKind::Interface(i) => (i.name.clone(), TypeDefKind::Iface { methods: vec![], type_set: None }, i.tparams.clone(), false, false),
+                    // (for interfaces, `unsafe_send` records `send interface`)
+                    ast::ItemKind::Interface(i) => (i.name.clone(), TypeDefKind::Iface { methods: vec![], type_set: None }, i.tparams.clone(), false, i.is_send),
                     ast::ItemKind::TypeAlias { newtype: true, name, tparams, .. } => (name.clone(), TypeDefKind::Struct { fields: vec![] }, tparams.clone(), false, false),
                     ast::ItemKind::TypeAlias { .. } => {
                         alias_items.push((fi, ii));
@@ -836,12 +837,16 @@ impl Checker {
             TypeExprKind::Result(a, b) => Ty::result(self.resolve_type(a, env), self.resolve_type(b, env)),
             TypeExprKind::Slice(a) => Ty::Slice(Rc::new(self.resolve_type(a, env))),
             TypeExprKind::Ptr(a) => Ty::Ptr(Rc::new(self.resolve_type(a, env))),
+            // `chan T`: both ends, `Chan[T] { tx Sender[T], rx Receiver[T] }`
             TypeExprKind::Chan(a) => {
                 let t = self.resolve_type(a, env);
                 if t.contains_view() {
                     self.err(te.span, "channels cannot carry borrowed views; send owned values");
                 }
-                Ty::Chan(Rc::new(t))
+                match self.prog.prelude_type("Chan") {
+                    Some(d) => Ty::Adt(d, Rc::new(vec![t])),
+                    None => Ty::Error,
+                }
             }
             TypeExprKind::Array(n, a) => {
                 let elem = self.resolve_type(a, env);
@@ -875,10 +880,10 @@ impl Checker {
                     }
                 }
             }
-            TypeExprKind::Func { params, ret } => {
+            TypeExprKind::Func { params, ret, send } => {
                 let ps = params.iter().map(|(m, t)| (*m, self.resolve_type(t, env))).collect();
                 let r = ret.as_ref().map(|t| self.resolve_type(t, env)).unwrap_or(Ty::Unit);
-                Ty::Func(Rc::new(FuncTy { params: ps, ret: r }))
+                Ty::Func(Rc::new(FuncTy { params: ps, ret: r, send: *send }))
             }
             TypeExprKind::Named { path, args } => self.resolve_named(path, args, te.span, env),
         }
@@ -926,7 +931,7 @@ impl Checker {
                     names(a, out);
                     names(b, out);
                 }
-                TypeExprKind::Func { params, ret } => {
+                TypeExprKind::Func { params, ret, .. } => {
                     params.iter().for_each(|p| names(&p.1, out));
                     if let Some(r) = ret {
                         names(r, out);
@@ -1099,6 +1104,10 @@ impl Checker {
                     "Cell" => Ty::Cell(a),
                     "Mutex" => Ty::Mutex(a),
                     "MutexRef" => Ty::MutexRef(a),
+                    "Task" => Ty::Task(a),
+                    "Sender" => Ty::Sender(a),
+                    "Receiver" => Ty::Receiver(a),
+                    "Iso" => Ty::Iso(a),
                     _ => unreachable!(),
                 };
             }
@@ -1188,7 +1197,8 @@ impl Checker {
                         Cap::Any => true,
                     })
                 } else {
-                    false
+                    // a `send interface` bound makes the type parameter `send`
+                    cap == Cap::Send && self.prog.def(*d).unsafe_send
                 }
             }
         })
@@ -1196,7 +1206,7 @@ impl Checker {
 
     pub fn is_copy(&self, t: &Ty) -> bool {
         match t {
-            Ty::Unit | Ty::Never | Ty::Bool | Ty::Int(_) | Ty::F32 | Ty::F64 | Ty::Str | Ty::Slice(_) | Ty::Ptr(_) | Ty::Error | Ty::ConstInt(_) => true,
+            Ty::Unit | Ty::Never | Ty::Bool | Ty::Int(_) | Ty::F32 | Ty::F64 | Ty::Str | Ty::Slice(_) | Ty::Ptr(_) | Ty::Error | Ty::ConstInt(_) | Ty::Scope => true,
             Ty::Option(a) | Ty::Array(a, _) | Ty::ArrayT(a, _) => self.is_copy(a),
             Ty::Result(a, b) => self.is_copy(a) && self.is_copy(b),
             Ty::Adt(d, _) => self.prog.def(*d).is_copy,
@@ -1285,7 +1295,7 @@ impl Checker {
             return true;
         }
         match t {
-            Ty::String | Ty::Rc(_) | Ty::Arc(_) | Ty::Weak(_) | Ty::Chan(_) => true,
+            Ty::String | Ty::Rc(_) | Ty::Arc(_) | Ty::Weak(_) | Ty::Sender(_) | Ty::Receiver(_) => true,
             Ty::Vec(a) | Ty::Option(a) | Ty::Box(a) | Ty::Cell(a) => self.is_clone(a),
             Ty::Map(a, b) | Ty::Result(a, b) => self.is_clone(a) && self.is_clone(b),
             Ty::Adt(d, args) => {
@@ -1324,8 +1334,9 @@ impl Checker {
 
     pub fn is_send(&mut self, t: &Ty) -> bool {
         match t {
-            Ty::Rc(_) | Ty::Weak(_) | Ty::Cell(_) | Ty::Ptr(_) | Ty::Func(_) => false,
-            Ty::Vec(a) | Ty::Slice(a) | Ty::Array(a, _) | Ty::ArrayT(a, _) | Ty::Option(a) | Ty::Box(a) | Ty::Arc(a) | Ty::Mutex(a) | Ty::MutexRef(a) | Ty::Chan(a) => self.is_send(a),
+            Ty::Func(f) => f.send,
+            Ty::Rc(_) | Ty::Weak(_) | Ty::Cell(_) | Ty::Ptr(_) => false,
+            Ty::Vec(a) | Ty::Slice(a) | Ty::Array(a, _) | Ty::ArrayT(a, _) | Ty::Option(a) | Ty::Box(a) | Ty::Arc(a) | Ty::Mutex(a) | Ty::MutexRef(a) | Ty::Sender(a) | Ty::Receiver(a) | Ty::Task(a) => self.is_send(a),
             Ty::Map(a, b) | Ty::Result(a, b) => self.is_send(a) && self.is_send(b),
             Ty::Adt(d, args) => {
                 let d = *d;
@@ -1361,7 +1372,8 @@ impl Checker {
                 }
                 r
             }
-            Ty::Iface(..) => false,
+            Ty::Iface(d, _) => self.prog.def(*d).unsafe_send,
+            Ty::Iso(_) => true,
             Ty::Param(p) => self.has_bound(*p, Cap::Send),
             _ => true,
         }
@@ -1446,6 +1458,9 @@ impl Checker {
             _ => return Err("not an interface".into()),
         };
         let s = self.prog.def_subst(iface, iargs);
+        if def.unsafe_send && !self.is_send(t) {
+            return Err(format!("`{}` can't be a `{}`: it is a `send interface`, and `{}` can't be sent between tasks", self.prog.show(t), def.name, self.prog.show(t)));
+        }
         for m in &methods {
             let found = self.find_method_for_iface(t, &m.name);
             let fid = match found {
@@ -1532,7 +1547,7 @@ pub fn bind_params(pat: &Ty, t: &Ty, s: &mut HashMap<TParamId, Ty>) -> bool {
             s.insert(*p, t.clone());
             true
         }
-        (Ty::Vec(a), Ty::Vec(b)) | (Ty::Slice(a), Ty::Slice(b)) | (Ty::Option(a), Ty::Option(b)) | (Ty::Box(a), Ty::Box(b)) | (Ty::Rc(a), Ty::Rc(b)) | (Ty::Arc(a), Ty::Arc(b)) | (Ty::Weak(a), Ty::Weak(b)) | (Ty::Cell(a), Ty::Cell(b)) | (Ty::Mutex(a), Ty::Mutex(b)) | (Ty::MutexRef(a), Ty::MutexRef(b)) | (Ty::Chan(a), Ty::Chan(b)) | (Ty::Ptr(a), Ty::Ptr(b)) => bind_params(a, b, s),
+        (Ty::Vec(a), Ty::Vec(b)) | (Ty::Slice(a), Ty::Slice(b)) | (Ty::Option(a), Ty::Option(b)) | (Ty::Box(a), Ty::Box(b)) | (Ty::Rc(a), Ty::Rc(b)) | (Ty::Arc(a), Ty::Arc(b)) | (Ty::Weak(a), Ty::Weak(b)) | (Ty::Cell(a), Ty::Cell(b)) | (Ty::Mutex(a), Ty::Mutex(b)) | (Ty::MutexRef(a), Ty::MutexRef(b)) | (Ty::Sender(a), Ty::Sender(b)) | (Ty::Receiver(a), Ty::Receiver(b)) | (Ty::Task(a), Ty::Task(b)) | (Ty::Iso(a), Ty::Iso(b)) | (Ty::Ptr(a), Ty::Ptr(b)) => bind_params(a, b, s),
         (Ty::Array(a, n), Ty::Array(b, m)) => n == m && bind_params(a, b, s),
         (Ty::ArrayT(a, n), Ty::Array(b, m)) => bind_params(n, &Ty::ConstInt(*m), s) && bind_params(a, b, s),
         (Ty::ArrayT(a, n), Ty::ArrayT(b, m)) => bind_params(n, m, s) && bind_params(a, b, s),
@@ -1560,10 +1575,11 @@ pub fn builtin_type(name: &str) -> Option<Ty> {
         "str" => Ty::Str,
         "never" => Ty::Never,
         "void" => Ty::Unit,
+        "Scope" => Ty::Scope,
         _ => return None,
     })
 }
 
 pub fn is_generic_builtin(name: &str) -> bool {
-    matches!(name, "Vec" | "Map" | "Box" | "rc" | "arc" | "weak" | "Cell" | "Mutex" | "MutexRef")
+    matches!(name, "Vec" | "Map" | "Box" | "rc" | "arc" | "weak" | "Cell" | "Mutex" | "MutexRef" | "Task" | "Sender" | "Receiver" | "Iso")
 }

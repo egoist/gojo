@@ -44,6 +44,7 @@ typedef struct {
 typedef struct gojo_chan gojo_chan;
 typedef struct gojo_mutex gojo_mutex;
 typedef struct gojo_group gojo_group;
+typedef struct gojo_task gojo_task;
 
 // ---- panics
 _Noreturn void gojo_panic(const char *msg, const char *loc);
@@ -253,6 +254,7 @@ typedef struct gojo_sudog {
     void *elem;
     uint64_t token;
     bool ok, linked;
+    int idx;        // which select case
     struct gojo_sudog *next, *prev;
 } gojo_sudog;
 typedef struct {
@@ -260,7 +262,6 @@ typedef struct {
     void *elem;     // value to send, or where to receive into
     bool send;
     bool ok;
-    gojo_sudog s;
 } gojo_sel_case;
 _Noreturn void gojo_sched_main(void (*entry)(void));
 // Preemption: generated code polls this flag at loop heads and on entry to
@@ -287,31 +288,56 @@ void gojo_ffi_enter(void);
 void gojo_ffi_exit(void);
 void gojo_blocking_enter(void);
 void gojo_go(void (*fn)(void *), void *arg);
-gojo_chan *gojo_chan_new(size_t esize, int64_t cap);
-void gojo_chan_retain(gojo_chan *c);
-void gojo_chan_release(gojo_chan *c, void (*drop_elem)(void *));
+// A channel has one sender and one receiver when made; ends are counted
+// separately: the last sender closes it, the last receiver makes sends fail.
+gojo_chan *gojo_chan_new(size_t esize, int64_t cap, const char *loc);
+void gojo_chan_retain_tx(gojo_chan *c);
+void gojo_chan_retain_rx(gojo_chan *c);
+void gojo_chan_release_tx(gojo_chan *c, void (*drop_elem)(void *));
+void gojo_chan_release_rx(gojo_chan *c, void (*drop_elem)(void *));
 bool gojo_chan_send(gojo_chan *c, const void *elem, const char *loc);
 bool gojo_chan_recv(gojo_chan *c, void *out);
-void gojo_chan_close(gojo_chan *c, const char *loc);
 int64_t gojo_chan_len(gojo_chan *c);
-int gojo_select(gojo_sel_case *cases, int n, bool has_default, const char *loc);
-gojo_mutex *gojo_mutex_new(void);
+int gojo_select(gojo_sel_case *cases, int n, gojo_task **tasks, int nt, int64_t deadline, bool want_cancel, bool has_default, const char *loc);
+gojo_mutex *gojo_mutex_new(const char *loc);
 void gojo_mutex_free(gojo_mutex *m);
 void gojo_mutex_lock(gojo_mutex *m);
 void gojo_mutex_unlock(gojo_mutex *m);
-gojo_group *gojo_group_new(void);
-void gojo_group_go(gojo_group *g, void (*fn)(void *), void *arg);
+// `with a, b = lock(m1, m2)`: all of them, in address order.
+void gojo_mutex_lock_all(gojo_mutex **ms, int n, const char *loc);
+gojo_group *gojo_group_new(const char *loc);
+void gojo_group_go(gojo_group *g, void (*fn)(void *), void *arg, const char *loc);
 void gojo_group_wait(gojo_group *g);
 bool gojo_group_fail(gojo_group *g);
+void gojo_group_cancel(gojo_group *g);
+void gojo_group_cancel_failed(gojo_group *g);
+uint8_t *gojo_drop_shield(void);
+void gojo_drop_unshield(uint8_t *sh);
+// `let t = go f()`: a task with a handle and room for its result.
+gojo_task *gojo_task_new(size_t result_size);
+void *gojo_task_result(gojo_task *t);
+void gojo_group_go_task(gojo_group *g, gojo_task *t, void (*fn)(void *), void *arg, const char *loc);
+bool gojo_task_finish(gojo_task *t);
+void gojo_task_join(gojo_task *t);
+void gojo_task_cancel(gojo_task *t);
+bool gojo_task_abandon(gojo_task *t);
+void gojo_task_free(gojo_task *t);
+// `par for`: body(ctx, i) for i in [0, n), on up to one task per CPU.
+void gojo_par_for(int64_t n, void (*body)(void *, int64_t), void *ctx);
 bool gojo_time___sleep(int64_t ns);
 bool gojo_task___cancelled(void);
 uint8_t *gojo_task___scopeEnter(int64_t ns);
+uint8_t *gojo_task___shieldEnter(int64_t ns);
+void gojo_task___shieldExit(uint8_t *s);
+int64_t gojo_task___deadline(void);
+int64_t gojo_task___reason(void);
 bool gojo_task___scopeExit(uint8_t *s);
 void gojo_task___groupCancel(uint8_t *state);
 void gojo_task_yieldNow(void);
 int64_t gojo_task___numGoroutines(void);
 int64_t gojo_task___numThreads(void);
 int64_t gojo_task___maxProcs(void);
+int64_t gojo_task___numHibernated(void);
 int64_t gojo_task___setMaxProcs(int64_t n);
 int64_t gojo_net___listen(gojo_str addr);
 int64_t gojo_net___connect(gojo_str addr);
@@ -350,6 +376,13 @@ int64_t gojo_time___unixNanos(void);
 int64_t gojo_time___localOffset(int64_t secs);
 bool gojo_os___getenv(gojo_str name, gojo_string *out);
 int64_t gojo_time_now(void);
+extern int gojo_sim_on;
+extern int64_t gojo_sim_clock;
+extern int gojo_debug_checks;
+// A scheduling point for the simulated scheduler (atomics).
+void gojo_sim_point(void);
+// A task tree with what each task waits for (`task.dump()`, SIGQUIT).
+void gojo_task_dump(void);
 void *gojo_dlsym(const char *lib, const char *name);
 int gojo_run_test(void (*fn)(void), const char *name);
 

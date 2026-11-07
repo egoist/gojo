@@ -3,6 +3,6 @@ fn main() {
     let r = rc(1)
     go work(r)
     let c = chan[rc[int]](1)
-    // error: argument of type `rc[int]` cannot be sent to another goroutine
-    // error: channel element type `rc[int]` cannot be sent between goroutines
+    // error: a task captures `r` of type `rc[int]`, which is not safe to share between threads
+    // error: channel element type `rc[int]` cannot be sent between tasks
 }

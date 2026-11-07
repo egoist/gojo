@@ -3,8 +3,8 @@
 Gojo is a compiled systems language with Go's simplicity, no garbage
 collector and no nil. Memory is managed by ownership, like Rust, but there are
 no lifetime annotations: references can't be stored, only used, so the
-compiler checks them without help. Concurrency is Go's: goroutines and
-channels, plus structured task groups with cancellation.
+compiler checks them without help. Concurrency is Go's `go`, channels and
+`select`, made structured: every task belongs to a `scope` that waits for it.
 
 This tour shows the language by example. Every program here is compiled and
 run by the test suite, and the output shown is what it prints. The complete
@@ -526,11 +526,13 @@ square 4
 
 ## Concurrency
 
-`go` starts a goroutine; channels carry values between them (and move them:
-the sender can't touch what it sent).
+`go` starts a task. `chan[T](n)` makes a channel with room for `n` values,
+and two ends: `tx` sends and `rx` receives (each can be cloned). Sending moves
+the value: the sender can't touch it afterwards. When the last sender is
+dropped the channel closes, and a `for` over the receiver ends.
 
 ```zig
-fn worker(jobs chan int, results chan int) {
+fn worker(jobs Receiver[int], results Sender[int]) {
     for j in jobs {
         results <- j * j
     }
@@ -540,15 +542,15 @@ fn main() {
     let jobs = chan[int](10)
     let results = chan[int](10)
     for _ in 0..3 {
-        go worker(jobs.clone(), results.clone())
+        go worker(jobs.rx.clone(), results.tx.clone())
     }
     for i in 1..=5 {
-        jobs <- i
+        jobs.tx <- i
     }
-    jobs.close()
+    drop(jobs.tx)
     var sum = 0
     for _ in 0..5 {
-        sum += <-results ?? 0
+        sum += <-results.rx ?? 0
     }
     println(sum)
 }
@@ -558,37 +560,68 @@ fn main() {
 55
 ```
 
-A *task group* runs tasks that may borrow the caller's data, and waits for all
-of them; the first error cancels the rest and becomes the group's result.
-Shared mutable data goes in a `Mutex`, whose `lock` is a projection: the data
-can't escape the `with` block, so it can't be used without the lock.
+A `scope` block runs tasks and waits for all of them before it ends, so the
+tasks may borrow anything that outlives it. `let t = go f()` gives a handle
+whose `join` returns the task's result:
 
 ```zig
-use std/task
+use std/time
 
+fn lookup(id int) int {
+    time.sleep(time.millisecond)
+    return id * 10
+}
+
+fn main() {
+    let total = scope {
+        let a = go lookup(1)
+        let b = go lookup(2)
+        a.join() + b.join()
+    }
+    println(total)
+}
+```
+
+```text
+30
+```
+
+A task may also write to a variable that nothing else touches until the
+scope ends. Shared mutable data goes in a `Mutex`, whose `lock` is a
+projection: the data can't escape the `with` block, so it can't be used
+without the lock.
+
+```zig
 fn main() {
     let words = ["alpha", "beta", "gamma", "delta"]
     let total = Mutex(0)
-    let r = task.group((g) => {
+    var longest = 0
+    scope {
         for w in words {
-            g.go(() => {
+            go () => {
                 with t = total.lock() {
                     t += w.len()
                 }
-            })
+            }
         }
-    })
-    println(r.isOk())
+        go () => {
+            for w in words {
+                longest = max(longest, w.len())
+            }
+        }
+    }
     with t = total.lock() {
-        println(t)
+        println(t, longest)
     }
 }
 ```
 
 ```text
-true
-19
+19 5
 ```
+
+When a task fails (returns an error), the scope cancels the others, and
+`try scope { }` passes the error on.
 
 Cancellation flows down the tree of tasks. In a cancelled task, blocking
 operations return early: a receive gives none, `time.sleep` wakes up, and
@@ -612,10 +645,16 @@ fn main() {
 some(42) none
 ```
 
-Goroutines are scheduled M:N on a thread per CPU, and preempted, so a long
-computation doesn't starve the others. A data race is a compile error: a
-task can't change what it captured, and values with `rc` or raw pointers
-can't cross to another thread.
+Tasks are scheduled M:N on a thread per CPU, and preempted, so a long
+computation doesn't starve the others. A data race is a compile error: two
+tasks can't use a variable one of them changes, and values with `rc` or raw
+pointers can't cross to another thread. `par for x in &v { }` runs the
+iterations of a loop on every CPU, each owning its element.
+
+Tests run on a simulated scheduler: one thread, a virtual clock, and an
+interleaving chosen by a seed, so a test does the same thing every time.
+`gojo test --explore 1000` tries a thousand interleavings and, if one
+fails, prints the seed that replays it: `gojo test --seed 966961`.
 
 ## Packages and the standard library
 
@@ -729,5 +768,5 @@ fn main() {
 - HTTP is HTTP/1.1 without TLS, one request per connection; no UDP.
 - JSON doesn't convert to and from structs automatically.
 - Gojo functions can't yet be passed to C as callbacks.
-- Interface values and function values aren't `send` (closures given to `go`
-  are checked by what they capture).
+- Only `send interface`s and `send fn`s cross tasks among interface and
+  function values.

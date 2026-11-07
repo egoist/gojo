@@ -1,0 +1,40 @@
+// `isolate`: a tree of `rc` nodes, built from values that can cross tasks, is
+// sent to another task as a whole.
+struct Node {
+    value int
+    children Vec[rc[Node]]
+    parent ?weak[Node]
+}
+
+fn build(depth int, v int) rc[Node] {
+    var kids = Vec[rc[Node]]{}
+    if depth > 0 {
+        kids.push(build(depth - 1, v * 2))
+        kids.push(build(depth - 1, v * 2 + 1))
+    }
+    return rc(Node{value: v, children: kids, parent: none})
+}
+
+fn sum(n rc[Node]) int {
+    var t = n.value
+    for c in n.children {
+        t += sum(c.clone())
+    }
+    return t
+}
+
+fn total(t sink Iso[rc[Node]]) int {
+    return sum(t.take())
+}
+
+fn main() {
+    let depth = 4
+    let tree = isolate {
+        build(depth, 1)
+    }
+    let r = scope {
+        let t = go total(tree)
+        t.join()
+    }
+    println("sum", r)
+}

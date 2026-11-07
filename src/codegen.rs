@@ -25,7 +25,7 @@ const MAX_TYPE_DEPTH: usize = 400;
 fn ty_depth(t: &Ty) -> usize {
     let mut d = 0;
     match t {
-        Ty::Vec(a) | Ty::Slice(a) | Ty::Array(a, _) | Ty::ArrayT(a, _) | Ty::Option(a) | Ty::Box(a) | Ty::Rc(a) | Ty::Arc(a) | Ty::Weak(a) | Ty::Cell(a) | Ty::Mutex(a) | Ty::MutexRef(a) | Ty::Chan(a) | Ty::Ptr(a) => d = ty_depth(a),
+        Ty::Vec(a) | Ty::Slice(a) | Ty::Array(a, _) | Ty::ArrayT(a, _) | Ty::Option(a) | Ty::Box(a) | Ty::Rc(a) | Ty::Arc(a) | Ty::Weak(a) | Ty::Cell(a) | Ty::Mutex(a) | Ty::MutexRef(a) | Ty::Sender(a) | Ty::Receiver(a) | Ty::Ptr(a) => d = ty_depth(a),
         Ty::Map(a, b) | Ty::Result(a, b) => d = ty_depth(a).max(ty_depth(b)),
         Ty::Adt(_, args) | Ty::Iface(_, args) => d = args.iter().map(ty_depth).max().unwrap_or(0),
         Ty::Func(f) => d = f.params.iter().map(|p| ty_depth(&p.1)).chain(std::iter::once(ty_depth(&f.ret))).max().unwrap_or(0),
@@ -78,10 +78,12 @@ fn stmt_span(s: &TStmt) -> Option<Span> {
         TStmt::Return(_, sp) | TStmt::Break(_, sp) | TStmt::Continue(_, sp) | TStmt::Yield(_, sp) => *sp,
         TStmt::Defer(b) | TStmt::ErrDefer(b) => b.span,
         TStmt::While { cond, body, .. } => cond.as_ref().map_or(body.span, |c| c.span),
-        TStmt::For { span, .. } | TStmt::Go { span, .. } | TStmt::Select { span, .. } => *span,
+        TStmt::For { span, .. } | TStmt::Select { span, .. } => *span,
         TStmt::Send { chan, .. } => chan.span,
         TStmt::With { place, .. } => place.span,
         TStmt::ForEach { call, .. } => call.span,
+        TStmt::ParFor { span, .. } => *span,
+        TStmt::WithLocks { places, .. } => places.first().map(|p| p.span).unwrap_or_default(),
     })
 }
 
@@ -90,7 +92,7 @@ pub fn generate(prog: &Program, tfuncs: &[TFunc], sm: &SourceMap, tests: Option<
     let mut entry = String::new();
     match tests {
         Some(ts) => {
-            let _ = writeln!(entry, "int main(int argc, char **argv) {{\n    gojo_rt_init(argc, argv);\n    int failed = 0;");
+            let _ = writeln!(entry, "int main(int argc, char **argv) {{\n    gojo_rt_init(argc, argv);\n    gojo_debug_checks = {};\n    int failed = 0;", if release { 0 } else { 1 });
             for (name, f) in ts {
                 let n = g.instance(*f, vec![]);
                 let _ = writeln!(entry, "    failed += gojo_run_test({}, {});", n, c_string(name));
@@ -114,7 +116,7 @@ pub fn generate(prog: &Program, tfuncs: &[TFunc], sm: &SourceMap, tests: Option<
             } else {
                 let _ = writeln!(entry, "    {}();", n);
             }
-            let _ = writeln!(entry, "}}\n\nint main(int argc, char **argv) {{\n    gojo_rt_init(argc, argv);\n    gojo_sched_main(gojo_entry);\n}}");
+            let _ = writeln!(entry, "}}\n\nint main(int argc, char **argv) {{\n    gojo_rt_init(argc, argv);\n    gojo_debug_checks = {};\n    gojo_sched_main(gojo_entry);\n}}", if release { 0 } else { 1 });
         }
     }
     g.drain();
@@ -190,6 +192,10 @@ enum SK {
 struct Scope {
     kind: SK,
     items: Vec<Cl>,
+    /// The body of a `scope` block: the C name of its `gojo_group *`. Leaving
+    /// the block waits for its tasks (cancelling them first when leaving
+    /// early), before anything declared in the body is dropped.
+    wait: Option<String>,
 }
 
 struct Fs<'a> {
@@ -211,6 +217,8 @@ struct Fs<'a> {
     lb: Option<LoopBody>,
     /// The Gojo source line the last `#line` directive named: (file, line).
     line: (u32, u32),
+    /// `scope` blocks being generated: id -> C name of their state.
+    tscopes: HashMap<u32, String>,
 }
 
 /// The body of `for x in t` over a type with `each`, compiled as a closure.
@@ -348,8 +356,8 @@ impl<'a> Gen<'a> {
         }
         self.drop_memo.insert(t.clone(), false);
         let r = match t {
-            Ty::String | Ty::Vec(_) | Ty::Map(..) | Ty::Box(_) | Ty::Rc(_) | Ty::Arc(_) | Ty::Weak(_) | Ty::Chan(_) | Ty::Func(_) | Ty::Iface(..) | Ty::Mutex(_) | Ty::MutexRef(_) => true,
-            Ty::Option(a) | Ty::Array(a, _) | Ty::Cell(a) => self.needs_drop(a),
+            Ty::String | Ty::Vec(_) | Ty::Map(..) | Ty::Box(_) | Ty::Rc(_) | Ty::Arc(_) | Ty::Weak(_) | Ty::Sender(_) | Ty::Receiver(_) | Ty::Func(_) | Ty::Iface(..) | Ty::Mutex(_) | Ty::MutexRef(_) | Ty::Task(_) => true,
+            Ty::Option(a) | Ty::Array(a, _) | Ty::Cell(a) | Ty::Iso(a) => self.needs_drop(a),
             Ty::Result(a, b) => self.needs_drop(a) || self.needs_drop(b),
             Ty::Adt(d, args) => {
                 let def = self.prog.def(*d);
@@ -394,7 +402,11 @@ impl<'a> Gen<'a> {
             Ty::Cell(a) => format!("Cell_{}", self.mangle(a)),
             Ty::Mutex(a) => format!("Mtx_{}", self.mangle(a)),
             Ty::MutexRef(a) => format!("MtxRef_{}", self.mangle(a)),
-            Ty::Chan(a) => format!("Chan_{}", self.mangle(a)),
+            Ty::Sender(a) => format!("Tx_{}", self.mangle(a)),
+            Ty::Receiver(a) => format!("Rx_{}", self.mangle(a)),
+            Ty::Task(a) => format!("Task_{}", self.mangle(a)),
+            Ty::Iso(a) => format!("Iso_{}", self.mangle(a)),
+            Ty::Scope => "Scope".into(),
             Ty::Ptr(a) => format!("Ptr_{}", self.mangle(a)),
             Ty::Func(f) => {
                 let mut s = "Fn".to_string();
@@ -454,7 +466,11 @@ impl<'a> Gen<'a> {
             Ty::Vec(_) => "gojo_vec".into(),
             Ty::Slice(_) => "gojo_slice".into(),
             Ty::Map(..) => "gojo_map".into(),
-            Ty::Chan(_) => "gojo_chan*".into(),
+            Ty::Sender(_) | Ty::Receiver(_) => "gojo_chan*".into(),
+            Ty::Task(_) => "gojo_task*".into(),
+            // the same as the value; isolation only matters to the checker
+            Ty::Iso(a) => self.cname(a),
+            Ty::Scope => "gojo_group*".into(),
             Ty::Func(_) => "gojo_func".into(),
             Ty::Iface(..) => "gojo_iface".into(),
             Ty::Cell(a) => self.cname(a),
@@ -549,7 +565,7 @@ impl<'a> Gen<'a> {
                     name = self.prog.def(*d).name.clone();
                     break;
                 }
-                Ty::Vec(a) | Ty::Option(a) | Ty::Box(a) | Ty::Rc(a) | Ty::Arc(a) | Ty::Weak(a) | Ty::Cell(a) | Ty::Mutex(a) | Ty::Chan(a) | Ty::Array(a, _) => cur = a,
+                Ty::Vec(a) | Ty::Option(a) | Ty::Box(a) | Ty::Rc(a) | Ty::Arc(a) | Ty::Weak(a) | Ty::Cell(a) | Ty::Mutex(a) | Ty::Sender(a) | Ty::Receiver(a) | Ty::Array(a, _) => cur = a,
                 _ => break,
             }
         }
@@ -949,9 +965,9 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
         let (sig, ps) = self.fn_signature(f, &subst, &name);
         let _ = writeln!(self.protos, "{};", sig);
         let ret = if fd.yields.is_some() { fd.ret.subst(&subst) } else { fd.ret.subst(&subst) };
-        let mut fs = Fs { tf, subst, out: String::new(), ind: 1, scopes: vec![], repr: HashMap::new(), flagged: HashSet::new(), flags: HashMap::new(), ret, yields: fd.yields.is_some(), err_mode: None, loop_labels: vec![], lb: None, line: (u32::MAX, 0) };
+        let mut fs = Fs { tf, subst, out: String::new(), ind: 1, scopes: vec![], repr: HashMap::new(), flagged: HashSet::new(), flags: HashMap::new(), ret, yields: fd.yields.is_some(), err_mode: None, loop_labels: vec![], lb: None, line: (u32::MAX, 0), tscopes: HashMap::new() };
         collect_moves_block(&tf.body, &mut fs.flagged, tf);
-        fs.scopes.push(Scope { kind: SK::Func, items: vec![] });
+        fs.scopes.push(Scope { kind: SK::Func, items: vec![], wait: None });
         let mut lids = vec![];
         if let Some(r) = tf.recv {
             lids.push(r);
@@ -1070,16 +1086,27 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
     }
 
     fn push_scope(&mut self, fs: &mut Fs, kind: SK) {
-        fs.scopes.push(Scope { kind, items: vec![] });
+        fs.scopes.push(Scope { kind, items: vec![], wait: None });
     }
 
     fn pop_scope(&mut self, fs: &mut Fs) {
         let top = fs.scopes.len() - 1;
-        self.emit_scope_cleanups(fs, top);
+        self.emit_scope_cleanups_at(fs, top, false);
         fs.scopes.pop();
     }
 
     fn emit_scope_cleanups(&mut self, fs: &mut Fs, idx: usize) {
+        self.emit_scope_cleanups_at(fs, idx, false)
+    }
+
+    /// `early`: leaving by `return`, `break`, `continue` or `try`.
+    fn emit_scope_cleanups_at(&mut self, fs: &mut Fs, idx: usize, early: bool) {
+        if let Some(g) = fs.scopes[idx].wait.clone() {
+            if early {
+                self.emit(fs, &format!("gojo_group_cancel({});", g));
+            }
+            self.emit(fs, &format!("gojo_group_wait({});", g));
+        }
         let items: Vec<Cl> = fs.scopes[idx].items.iter().rev().cloned().collect();
         for it in items {
             self.emit_cleanup(fs, &it);
@@ -1090,7 +1117,7 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
     fn cleanup_to(&mut self, fs: &mut Fs, idx: usize) {
         let n = fs.scopes.len();
         for i in (idx..n).rev() {
-            self.emit_scope_cleanups(fs, i);
+            self.emit_scope_cleanups_at(fs, i, true);
         }
     }
 
@@ -1113,7 +1140,7 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
                 fs.ind += 1;
                 // the deferred code can't leave its own block, so it must not see the
                 // enclosing scopes: their cleanups include this very `defer`
-                let outer = std::mem::replace(&mut fs.scopes, vec![Scope { kind: SK::Func, items: vec![] }]);
+                let outer = std::mem::replace(&mut fs.scopes, vec![Scope { kind: SK::Func, items: vec![], wait: None }]);
                 self.push_scope(fs, SK::Block);
                 for s in &b.stmts {
                     self.stmt(fs, s);
@@ -1127,7 +1154,7 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
                 if let Some(cond) = fs.err_mode.clone() {
                     self.emit(fs, &format!("if ({}) {{", cond));
                     fs.ind += 1;
-                    let outer = std::mem::replace(&mut fs.scopes, vec![Scope { kind: SK::Func, items: vec![] }]);
+                    let outer = std::mem::replace(&mut fs.scopes, vec![Scope { kind: SK::Func, items: vec![], wait: None }]);
                     let saved_mode = fs.err_mode.take();
                     self.push_scope(fs, SK::Block);
                     for s in &b.stmts {
@@ -1474,12 +1501,11 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
                 fs.loop_labels.pop();
             }
             TStmt::For { id, kind, iter, hi, elem, index, mutable: _, body, span } => self.for_loop(fs, *id, *kind, iter, hi.as_ref(), *elem, *index, body, *span),
-            TStmt::Go { call, span } => self.go_stmt(fs, call, *span),
             TStmt::Send { chan, value } => {
                 self.push_scope(fs, SK::Stmt);
                 let ct = self.sub(fs, &chan.ty);
                 let et = match &ct {
-                    Ty::Chan(t) => (**t).clone(),
+                    Ty::Sender(t) => (**t).clone(),
                     _ => unreachable!(),
                 };
                 let v = self.expr(fs, value);
@@ -1514,8 +1540,40 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
                 fs.ind -= 1;
                 self.emit(fs, "}");
             }
+            TStmt::WithLocks { locals, places, body } => {
+                self.emit(fs, "{");
+                fs.ind += 1;
+                self.push_scope(fs, SK::Block);
+                let mut ms = vec![];
+                let mut vs = vec![];
+                for p in places {
+                    let (m, v) = self.lock_target(fs, p);
+                    ms.push(format!("{}->mu", m));
+                    vs.push(v);
+                }
+                let arr = self.tmp();
+                let l = self.loc(places[0].span);
+                self.emit(fs, &format!("gojo_mutex *{}[{}] = {{ {} }};", arr, ms.len(), ms.join(", ")));
+                // one order for everyone: by address
+                self.emit(fs, &format!("gojo_mutex_lock_all({}, {}, {});", arr, ms.len(), l));
+                for m in &ms {
+                    self.register(fs, Cl::Unlock(m.clone()));
+                }
+                for (local, v) in locals.iter().zip(vs) {
+                    let t = self.local_ty(fs, *local);
+                    let c = self.cty(&t);
+                    let n = self.local_cname(fs, *local);
+                    self.emit(fs, &format!("{} *{} = {};", c, n, v));
+                    fs.repr.insert(*local, Repr::Ptr(n));
+                }
+                self.block_stmts(fs, body);
+                self.pop_scope(fs);
+                fs.ind -= 1;
+                self.emit(fs, "}");
+            }
             TStmt::Select { arms, span } => self.select(fs, arms, *span),
             TStmt::ForEach { call, .. } => self.for_each(fs, call),
+            TStmt::ParFor { kind, iter, hi, mutable, indexed, body, .. } => self.par_for(fs, *kind, iter, hi.as_ref(), *mutable, *indexed, body),
         }
     }
 
@@ -2394,7 +2452,7 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
                 r.unwrap_or_else(|| "0".into())
             }
             TK::Match { scrut, owned, arms } => self.match_expr(fs, scrut, *owned, arms, &t, e.span),
-            TK::Block(b) | TK::Unsafe(b) => {
+            TK::Block(b) | TK::Unsafe(b) | TK::Isolate(b) => {
                 let has_val = !matches!(t, Ty::Unit | Ty::Never);
                 let r = if has_val {
                     let c = self.cty(&t);
@@ -2407,6 +2465,8 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
                 self.block_into(fs, b, r.as_deref());
                 r.unwrap_or_else(|| "0".into())
             }
+            TK::Scope { id, handle, body, errt } => self.scope_block(fs, *id, *handle, body, errt.as_ref(), &t, e.span),
+            TK::Spawn { target, task, handle } => self.spawn(fs, target, task, *handle, e.span),
             TK::Try { e: x, wrap } => self.try_expr(fs, x, wrap.as_ref(), &t, e.span),
             TK::Catch { e: x, bind, handler } => {
                 let xt = self.sub(fs, &x.ty);
@@ -2564,7 +2624,8 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
                     }
                     Ty::Mutex(_) => {
                         let c = self.cty(&t);
-                        format!("(({}){{ gojo_mutex_new(), {} }})", c, v)
+                        let l = self.loc(e.span);
+                        format!("(({}){{ gojo_mutex_new({}), {} }})", c, l, v)
                     }
                     _ => v,
                 }
@@ -2572,7 +2633,7 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
             TK::MakeChan(n) => {
                 let v = self.expr(fs, n);
                 let el = match &t {
-                    Ty::Chan(el) => (**el).clone(),
+                    Ty::Adt(_, args) => args[0].clone(),
                     _ => unreachable!(),
                 };
                 let ec = self.cty(&el);
@@ -2581,13 +2642,18 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
                 self.emit(fs, &format!("int64_t {} = {};", n, v));
                 self.emit(fs, &format!("if ({} < 0) gojo_panic(\"negative channel capacity\", {});", n, l));
                 self.emit(fs, &format!("if ({n} > (int64_t)(PTRDIFF_MAX / (sizeof({ec}) ? sizeof({ec}) : 1))) gojo_panic(\"channel capacity too large\", {l});"));
-                format!("gojo_chan_new(sizeof({}), {})", ec, n)
+                // `Chan[T] { tx, rx }`: both ends of the new channel
+                let c = self.tmp();
+                self.emit(fs, &format!("gojo_chan *{} = gojo_chan_new(sizeof({}), {}, {});", c, ec, n, l));
+                let st = self.cty(&t);
+                format!("(({}){{ {}, {} }})", st, c, c)
             }
             TK::DefaultOf => self.default_value(fs, &t),
             TK::MutexRef(x) => {
                 let p = self.lval(fs, x);
                 let c = self.cty(&t);
-                format!("(({}){{ gojo_mutex_new(), &{} }})", c, p)
+                let l = self.loc(e.span);
+                format!("(({}){{ gojo_mutex_new({}), &{} }})", c, l, p)
             }
             TK::Unbox(x) => {
                 let b = self.expr(fs, x);
@@ -2691,7 +2757,7 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
                 let inner = (**inner).clone();
                 let v = self.default_value(fs, &inner);
                 let c = self.cty(t);
-                format!("(({}){{ gojo_mutex_new(), {} }})", c, v)
+                format!("(({}){{ gojo_mutex_new(NULL), {} }})", c, v)
             }
             Ty::Cell(inner) => {
                 let inner = (**inner).clone();
@@ -3275,13 +3341,13 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
         let ret = fty.ret.clone();
         let rc = self.ret_cty(&ret);
         let mut ps = vec!["void *envp".to_string()];
-        let mut nfs = Fs { tf: fs.tf, subst: fs.subst.clone(), out: String::new(), ind: 1, scopes: vec![], repr: HashMap::new(), flagged: fs.flagged.clone(), flags: HashMap::new(), ret: ret.clone(), yields: false, err_mode: None, loop_labels: vec![], lb: None, line: (u32::MAX, 0) };
+        let mut nfs = Fs { tf: fs.tf, subst: fs.subst.clone(), out: String::new(), ind: 1, scopes: vec![], repr: HashMap::new(), flagged: fs.flagged.clone(), flags: HashMap::new(), ret: ret.clone(), yields: false, err_mode: None, loop_labels: vec![], lb: None, line: (u32::MAX, 0), tscopes: HashMap::new() };
         if let (Some(lid), Some(_)) = (c.loop_body, &lbp) {
             // `return` / `try` in the body act on the enclosing function
             nfs.ret = fs.ret.clone();
             nfs.lb = Some(LoopBody { id: lid, ctl: "(*env->kctl)".into(), ret: "(*env->kret)".into() });
         }
-        nfs.scopes.push(Scope { kind: SK::Func, items: vec![] });
+        nfs.scopes.push(Scope { kind: SK::Func, items: vec![], wait: None });
         for (i, p) in c.params.iter().enumerate() {
             let (m, pt) = fty.params[i].clone();
             let pc = self.param_cty(m, &pt);
@@ -3305,9 +3371,15 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
         } else {
             self.emit(&mut nfs, "(void)envp;");
         }
-        for (l, _, _) in &fields {
+        for (l, lt, _) in &fields {
             if byv(l) {
                 nfs.repr.insert(*l, Repr::Val(format!("env->c{}", l)));
+                // a task runs once and owns what was moved into it: those are
+                // its locals, dropped (unless moved on) when it ends
+                if c.scoped && c.by_value.contains(l) && self.needs_drop(lt) {
+                    self.declare_flags(&mut nfs, *l);
+                    nfs.scopes[0].items.push(Cl::DropLocal(*l));
+                }
             } else {
                 nfs.repr.insert(*l, Repr::Ptr(format!("env->c{}", l)));
             }
@@ -3386,15 +3458,12 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
             if c.scoped {
                 // tasks outlive the statement: the environment lives on the heap,
                 // and owns the values moved into the task
-                let mut drops = String::new();
+                // (the task drops what it owns itself)
+                let drops = String::new();
                 for (l, lt, _) in &fields {
                     if c.by_value.contains(l) && !self.is_copy(lt) {
                         if let Some(f) = fs.flags.get(&(*l, vec![])).cloned() {
                             self.emit(fs, &format!("{} = 0;", f));
-                        }
-                        if self.needs_drop(lt) {
-                            let d = self.drop_fn(lt);
-                            let _ = writeln!(drops, "    {}(&env->c{});", d, l);
                         }
                     }
                 }
@@ -3741,80 +3810,73 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
     // go / select
     // ------------------------------------------------------------------
 
-    fn go_stmt(&mut self, fs: &mut Fs, call: &TExpr, _sp: Span) {
-        self.push_scope(fs, SK::Stmt);
-        if let TK::Closure(_) = &call.kind {
-            let f = self.expr(fs, call);
-            let tn = format!("gothunk{}", self.ntmp + 1);
-            self.ntmp += 1;
-            if self.helpers.insert(tn.clone()) {
-                let _ = writeln!(self.protos, "static void {}(void *p);", tn);
-                let _ = writeln!(self.bodies, "static void {}(void *p) {{\n    gojo_func *f = p;\n    ((void (*)(void *))f->fn)(f->env);\n    if (f->drop) f->drop(f->env);\n    free(f);\n}}", tn);
-            }
-            let b = self.tmp();
-            self.emit(fs, &format!("gojo_func *{} = gojo_alloc(sizeof(gojo_func)); *{} = {};", b, b, f));
-            self.emit(fs, &format!("gojo_go({}, {});", tn, b));
-            self.pop_scope(fs);
-            return;
-        }
-        let (f, targs, args) = match &call.kind {
-            TK::Call { callee: Callee::Func(f, targs), args } => (*f, targs.iter().map(|t| self.sub(fs, t)).collect::<Vec<_>>(), args),
-            _ => {
-                self.pop_scope(fs);
-                return;
-            }
+    /// `par for`: the body closure is called once per element, from up to
+    /// one task per CPU, through a trampoline that finds the element.
+    fn par_for(&mut self, fs: &mut Fs, kind: IterKind, iter: &TExpr, hi: Option<&TExpr>, mutable: bool, indexed: bool, body: &TExpr) {
+        self.emit(fs, "{");
+        fs.ind += 1;
+        self.push_scope(fs, SK::Block);
+        let ft = self.sub(fs, &body.ty);
+        let pts: Vec<(Mode, Ty)> = match &ft {
+            Ty::Func(f) => f.params.clone(),
+            _ => vec![],
         };
-        let fd = self.prog.func(f).clone();
-        let s: HashMap<TParamId, Ty> = fd.tparams.iter().copied().zip(targs.iter().cloned()).collect();
-        let mut ptys = vec![];
-        if let Some(r) = &fd.recv {
-            ptys.push((r.mode, r.ty.subst(&s)));
-        }
-        for p in &fd.params {
-            ptys.push((p.mode, p.ty.subst(&s)));
-        }
+        let f = self.expr(fs, body);
         self.ntmp += 1;
         let id = self.ntmp;
-        let sn = format!("GoArgs{}", id);
-        let tn = format!("gothunk{}", id);
-        let mut st = format!("typedef struct {{");
-        for (i, (_, t)) in ptys.iter().enumerate() {
-            let c = self.cty(t);
-            let _ = write!(st, " {} a{};", c, i);
-        }
-        if ptys.is_empty() {
-            st.push_str(" int _unused;");
-        }
-        let _ = writeln!(st, " }} {};", sn);
-        self.tdefs.push_str(&st);
-        let fname = self.instance(f, targs.clone());
-        let mut call_args = vec![];
-        let mut drops = String::new();
-        for (i, (m, t)) in ptys.iter().enumerate() {
-            match m {
-                Mode::Borrow if !self.is_copy(t) => {
-                    call_args.push(format!("&a->a{}", i));
-                    if self.needs_drop(t) {
-                        let d = self.drop_fn(t);
-                        let _ = write!(drops, "    {}(&a->a{});\n", d, i);
-                    }
-                }
-                _ => call_args.push(format!("a->a{}", i)),
+        let cn = format!("ParCtx{}", id);
+        let tn = format!("parbody{}", id);
+        let (et, data, n, lo) = if let IterKind::Range { inclusive } = kind {
+            let it = self.sub(fs, &iter.ty);
+            let ic = self.cty(&it);
+            let l = self.expr(fs, iter);
+            let h = self.expr(fs, hi.expect("range end"));
+            let (lv, hv) = (self.tmp(), self.tmp());
+            self.emit(fs, &format!("{} {} = {}; {} {} = {};", ic, lv, l, ic, hv, h));
+            let n = if inclusive { format!("({} < {} ? 0 : (int64_t)({} - {}) + 1)", hv, lv, hv, lv) } else { format!("({} <= {} ? 0 : (int64_t)({} - {}))", hv, lv, hv, lv) };
+            (it, "NULL".to_string(), n, lv)
+        } else {
+            let et = pts.last().map(|p| p.1.clone()).unwrap_or(Ty::Unit);
+            let ec = self.cty(&et);
+            let b = self.lval_scoped(fs, iter);
+            let it = self.sub(fs, &iter.ty);
+            let (d, n) = match (kind, &it) {
+                (IterKind::Array, Ty::Array(_, len)) => (format!("(void *){}.a", b), len.to_string()),
+                _ => (format!("(void *)({} *){}.ptr", ec, b), format!("{}.len", b)),
+            };
+            (et, d, n, "0".to_string())
+        };
+        let ec = self.cty(&et);
+        let lc = if matches!(kind, IterKind::Range { .. }) { ec.clone() } else { "int64_t".to_string() };
+        let _ = writeln!(self.tdefs, "typedef struct {{ gojo_func f; void *data; {} lo; }} {};", lc, cn);
+        // arguments: (index,) element
+        let mut sig = vec!["void *".to_string()];
+        let mut args = vec!["c->f.env".to_string()];
+        if matches!(kind, IterKind::Range { .. }) {
+            sig.push(ec.clone());
+            args.push(format!("({})(c->lo + ({})i)", ec, ec));
+        } else {
+            if indexed {
+                sig.push("int64_t".into());
+                args.push("i".into());
+            }
+            let byptr = mutable || !self.is_copy(&et);
+            if byptr {
+                sig.push(format!("{} *", ec));
+                args.push(format!("&(({} *)c->data)[i]", ec));
+            } else {
+                sig.push(ec.clone());
+                args.push(format!("(({} *)c->data)[i]", ec));
             }
         }
-        let _ = writeln!(self.protos, "static void {}(void *p);", tn);
-        let _ = writeln!(self.bodies, "static void {}(void *p) {{\n    {} *a = p;\n    {}({});\n{}    free(a);\n}}", tn, sn, fname, call_args.join(", "), drops);
-        let mut vals = vec![];
-        for a in args.iter() {
-            vals.push(self.expr(fs, &a.e));
-        }
-        let b = self.tmp();
-        self.emit(fs, &format!("{} *{} = gojo_alloc(sizeof({}));", sn, b, sn));
-        for (i, v) in vals.iter().enumerate() {
-            self.emit(fs, &format!("{}->a{} = {};", b, i, v));
-        }
-        self.emit(fs, &format!("gojo_go({}, {});", tn, b));
+        let _ = writeln!(self.protos, "static void {}(void *p, int64_t i);", tn);
+        let _ = writeln!(self.bodies, "static void {}(void *p, int64_t i) {{\n    {} *c = p;\n    ((void (*)({}))c->f.fn)({});\n}}", tn, cn, sig.join(", "), args.join(", "));
+        let cv = self.tmp();
+        self.emit(fs, &format!("{} {} = {{ {}, {}, {} }};", cn, cv, f, data, lo));
+        self.emit(fs, &format!("gojo_par_for({}, {}, &{});", n, tn, cv));
         self.pop_scope(fs);
+        fs.ind -= 1;
+        self.emit(fs, "}");
     }
 
     /// A send in a cancelled task doesn't happen; the value is dropped instead.
@@ -3831,22 +3893,35 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
         self.emit(fs, "{");
         fs.ind += 1;
         self.push_scope(fs, SK::Block);
-        // evaluate channels and send values once
-        let mut chans = vec![];
+        // evaluate guards, channels, values, tasks and deadlines once, in order
+        let mut guards = vec![];
+        let mut chans: Vec<Option<String>> = vec![];
         let mut sendvals = vec![];
+        let mut tasks: Vec<Option<String>> = vec![];
+        let mut timers: Vec<Option<String>> = vec![];
         for a in arms {
+            let g = match &a.guard {
+                Some(g) => {
+                    let v = self.expr(fs, g);
+                    let n = self.tmp();
+                    self.emit(fs, &format!("bool {} = {};", n, v));
+                    n
+                }
+                None => "1".to_string(),
+            };
+            guards.push(g);
+            let (mut c, mut sv, mut tk, mut tm) = (None, None, None, None);
             match &a.kind {
                 TSelectKind::Recv { chan, .. } => {
-                    let c = self.expr(fs, chan);
+                    let x = self.expr(fs, chan);
                     let n = self.tmp();
-                    self.emit(fs, &format!("gojo_chan *{} = {};", n, c));
-                    chans.push(Some(n));
-                    sendvals.push(None);
+                    self.emit(fs, &format!("gojo_chan *{} = {};", n, x));
+                    c = Some(n);
                 }
                 TSelectKind::Send { chan, value } => {
-                    let c = self.expr(fs, chan);
+                    let x = self.expr(fs, chan);
                     let n = self.tmp();
-                    self.emit(fs, &format!("gojo_chan *{} = {};", n, c));
+                    self.emit(fs, &format!("gojo_chan *{} = {};", n, x));
                     let vt = self.sub(fs, &value.ty);
                     let v = self.expr(fs, value);
                     let vc = self.cty(&vt);
@@ -3856,41 +3931,55 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
                     if self.needs_drop(&vt) {
                         self.register(fs, Cl::DropFlag(vn.clone(), vt.clone(), fl.clone()));
                     }
-                    chans.push(Some(n));
-                    sendvals.push(Some((vn, fl)));
+                    c = Some(n);
+                    sv = Some((vn, fl));
                 }
-                TSelectKind::Default => {
-                    chans.push(None);
-                    sendvals.push(None);
+                TSelectKind::Task { task, .. } => {
+                    let p = self.lval(fs, task);
+                    tk = Some(p);
                 }
+                TSelectKind::Timer { at, relative } => {
+                    let v = self.expr(fs, at);
+                    let n = self.tmp();
+                    if *relative {
+                        self.emit(fs, &format!("int64_t {} = gojo_time_now() + ({} > 0 ? {} : 0);", n, v, v));
+                    } else {
+                        self.emit(fs, &format!("int64_t {} = {};", n, v));
+                    }
+                    tm = Some(n);
+                }
+                TSelectKind::Cancelled | TSelectKind::Default => {}
             }
+            chans.push(c);
+            sendvals.push(sv);
+            tasks.push(tk);
+            timers.push(tm);
         }
         let end = self.label();
         let l = self.loc(sp);
-        let default_arm = arms.iter().position(|a| matches!(a.kind, TSelectKind::Default));
         let nch = chans.iter().filter(|c| c.is_some()).count();
-        if nch == 0 {
-            if let Some(i) = default_arm {
-                self.block_stmts(fs, &arms[i].body);
-            }
-            self.emit(fs, &format!("{}:;", end));
-            self.pop_scope(fs);
-            fs.ind -= 1;
-            self.emit(fs, "}");
-            return;
-        }
-        // one case per channel arm; receive arms get a slot for the value
+        let ntk = tasks.iter().filter(|c| c.is_some()).count();
+        // the arms taking part, filled in at run time (guards)
         let cases = self.tmp();
-        self.emit(fs, &format!("gojo_sel_case {}[{}];", cases, nch));
-        let mut case_of = vec![None; arms.len()];
+        let carm = self.tmp();
+        let ncs = self.tmp();
+        let tks = self.tmp();
+        let tarm = self.tmp();
+        let nts = self.tmp();
+        let (dl, dlarm, wc, hd) = (self.tmp(), self.tmp(), self.tmp(), self.tmp());
+        self.emit(fs, &format!("gojo_sel_case {}[{}]; int {}[{}]; int {} = 0;", cases, nch.max(1), carm, nch.max(1), ncs));
+        self.emit(fs, &format!("gojo_task *{}[{}]; int {}[{}]; int {} = 0;", tks, ntk.max(1), tarm, ntk.max(1), nts));
+        self.emit(fs, &format!("int64_t {} = -1; int {} = -1; bool {} = 0; bool {} = 0;", dl, dlarm, wc, hd));
         let mut slots = vec![None; arms.len()];
-        let mut k = 0;
+        let mut cancel_arm = -1i64;
+        let mut default_arm = -1i64;
         for (i, a) in arms.iter().enumerate() {
+            let g = guards[i].clone();
             match &a.kind {
                 TSelectKind::Recv { chan, .. } => {
                     let ct = self.sub(fs, &chan.ty);
                     let et = match &ct {
-                        Ty::Chan(t) => (**t).clone(),
+                        Ty::Receiver(t) => (**t).clone(),
                         _ => unreachable!(),
                     };
                     let ot = Ty::opt(et.clone());
@@ -3898,32 +3987,45 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
                     let r = self.tmp();
                     self.emit(fs, &format!("{} {} = {{0}};", oc, r));
                     let slot = self.oval(&ot, &r);
-                    self.emit(fs, &format!("{}[{}] = (gojo_sel_case){{ .c = {}, .elem = &{}, .send = 0 }};", cases, k, chans[i].as_ref().unwrap(), slot));
+                    self.emit(fs, &format!("if ({}) {{ {}[{}] = (gojo_sel_case){{ .c = {}, .elem = &{}, .send = 0 }}; {}[{}++] = {}; }}", g, cases, ncs, chans[i].as_ref().unwrap(), slot, carm, ncs, i));
                     slots[i] = Some((r, ot));
                 }
                 TSelectKind::Send { .. } => {
                     let (vn, _) = sendvals[i].clone().unwrap();
-                    self.emit(fs, &format!("{}[{}] = (gojo_sel_case){{ .c = {}, .elem = &{}, .send = 1 }};", cases, k, chans[i].as_ref().unwrap(), vn));
+                    self.emit(fs, &format!("if ({}) {{ {}[{}] = (gojo_sel_case){{ .c = {}, .elem = &{}, .send = 1 }}; {}[{}++] = {}; }}", g, cases, ncs, chans[i].as_ref().unwrap(), vn, carm, ncs, i));
                 }
-                TSelectKind::Default => continue,
+                TSelectKind::Task { .. } => {
+                    self.emit(fs, &format!("if ({}) {{ {}[{}] = {}; {}[{}++] = {}; }}", g, tks, nts, tasks[i].as_ref().unwrap(), tarm, nts, i));
+                }
+                TSelectKind::Timer { .. } => {
+                    let t = timers[i].clone().unwrap();
+                    self.emit(fs, &format!("if ({} && ({} < 0 || {} < {})) {{ {} = {}; {} = {}; }}", g, dl, t, dl, dl, t, dlarm, i));
+                }
+                TSelectKind::Cancelled => {
+                    cancel_arm = i as i64;
+                    self.emit(fs, &format!("{} = {};", wc, g));
+                }
+                TSelectKind::Default => {
+                    default_arm = i as i64;
+                    self.emit(fs, &format!("{} = {};", hd, g));
+                }
             }
-            case_of[i] = Some(k);
-            k += 1;
         }
         let which = self.tmp();
-        self.emit(fs, &format!("int {} = gojo_select({}, {}, {}, {});", which, cases, nch, if default_arm.is_some() { 1 } else { 0 }, l));
+        let arm = self.tmp();
+        self.emit(fs, &format!("int {} = gojo_select({}, {}, {}, {}, {}, {}, {}, {});", which, cases, ncs, tks, nts, dl, wc, hd, l));
+        self.emit(fs, &format!("int {} = {} >= 0 ? ({} < {} ? {}[{}] : {}[{} - {}]) : {} == -1 ? {} : {} == -3 ? {} : {} == -4 ? {} : -1;", arm, which, which, ncs, carm, which, tarm, which, ncs, which, default_arm, which, dlarm, which, cancel_arm));
         for (i, a) in arms.iter().enumerate() {
-            let Some(ci) = case_of[i] else { continue };
-            self.emit(fs, &format!("if ({} == {}) {{", which, ci));
+            self.emit(fs, &format!("if ({} == {}) {{", arm, i));
             fs.ind += 1;
             self.push_scope(fs, SK::Block);
             match &a.kind {
                 TSelectKind::Recv { bind, .. } => {
                     let (r, ot) = slots[i].clone().unwrap();
                     if self.niche(&ot) {
-                        self.emit(fs, &format!("if (!{}[{}].ok) {} = NULL;", cases, ci, r));
+                        self.emit(fs, &format!("if (!{}[{}].ok) {} = NULL;", cases, which, r));
                     } else {
-                        self.emit(fs, &format!("{}.some = {}[{}].ok;", r, cases, ci));
+                        self.emit(fs, &format!("{}.some = {}[{}].ok;", r, cases, which));
                     }
                     match bind {
                         Some(b) => {
@@ -3947,20 +4049,50 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
                     let (_, fl) = sendvals[i].clone().unwrap();
                     self.emit(fs, &format!("{} = 0;", fl));
                 }
-                TSelectKind::Default => {}
+                TSelectKind::Task { task, bind } => {
+                    // the task is done: take its result, and the handle
+                    let tv = tasks[i].clone().unwrap();
+                    let tt = self.sub(fs, &task.ty);
+                    let rt = match &tt {
+                        Ty::Task(r) => (**r).clone(),
+                        _ => Ty::Unit,
+                    };
+                    if let Some(p) = local_path(task) {
+                        if let Some(f) = fs.flags.get(&p).cloned() {
+                            self.emit(fs, &format!("{} = 0;", f));
+                        }
+                    }
+                    let has = !matches!(rt, Ty::Unit | Ty::Never);
+                    match bind {
+                        Some(b) if has => {
+                            let rc = self.cty(&rt);
+                            let n = self.local_cname(fs, *b);
+                            self.emit(fs, &format!("{} {} = *({} *)gojo_task_result({});", rc, n, rc, tv));
+                            fs.repr.insert(*b, Repr::Val(n));
+                            self.declare_flags(fs, *b);
+                            if self.needs_drop(&rt) {
+                                self.register(fs, Cl::DropLocal(*b));
+                            }
+                        }
+                        Some(b) => {
+                            let n = self.local_cname(fs, *b);
+                            self.emit(fs, &format!("gojo_unit {} = 0; (void){};", n, n));
+                            fs.repr.insert(*b, Repr::Val(n));
+                        }
+                        None if has && self.needs_drop(&rt) => {
+                            let d = self.drop_fn(&rt);
+                            let rc = self.cty(&rt);
+                            self.emit(fs, &format!("{}(({} *)gojo_task_result({}));", d, rc, tv));
+                        }
+                        None => {}
+                    }
+                    self.emit(fs, &format!("gojo_task_free({});", tv));
+                }
+                TSelectKind::Timer { .. } | TSelectKind::Cancelled | TSelectKind::Default => {}
             }
             self.block_stmts(fs, &a.body);
             self.pop_scope(fs);
             self.emit(fs, &format!("goto {};", end));
-            fs.ind -= 1;
-            self.emit(fs, "}");
-        }
-        if let Some(i) = default_arm {
-            self.emit(fs, &format!("if ({} == -1) {{", which));
-            fs.ind += 1;
-            self.push_scope(fs, SK::Block);
-            self.block_stmts(fs, &arms[i].body);
-            self.pop_scope(fs);
             fs.ind -= 1;
             self.emit(fs, "}");
         }
@@ -4013,8 +4145,7 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
         self.args(fs, args, &modes, &tys)
     }
 
-    fn magic(&mut self, fs: &mut Fs, name: &str, targs: &[Ty], args: &[TArg], t: &Ty, sp: Span) -> String {
-        let l = self.loc(sp);
+    fn magic(&mut self, fs: &mut Fs, name: &str, _targs: &[Ty], args: &[TArg], _t: &Ty, _sp: Span) -> String {
         match name {
             "len" => {
                 let at = self.sub(fs, &args[0].e.ty);
@@ -4136,11 +4267,6 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
                     b
                 }
             }
-            "task.group" => self.task_group(fs, targs, args, t, sp),
-            "task.go" => {
-                let _ = l;
-                self.task_go(fs, args, sp)
-            }
             _ => panic!("unknown intrinsic {}", name),
         }
     }
@@ -4159,7 +4285,7 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
         // element type helpers
         let elem = |t: &Option<Ty>| -> Ty {
             match t {
-                Some(Ty::Vec(e)) | Some(Ty::Slice(e)) | Some(Ty::Option(e)) | Some(Ty::Rc(e)) | Some(Ty::Arc(e)) | Some(Ty::Weak(e)) | Some(Ty::Cell(e)) | Some(Ty::Mutex(e)) | Some(Ty::Chan(e)) => (**e).clone(),
+                Some(Ty::Vec(e)) | Some(Ty::Slice(e)) | Some(Ty::Option(e)) | Some(Ty::Rc(e)) | Some(Ty::Arc(e)) | Some(Ty::Weak(e)) | Some(Ty::Cell(e)) | Some(Ty::Mutex(e)) | Some(Ty::Sender(e)) | Some(Ty::Receiver(e)) => (**e).clone(),
                 _ => Ty::Unit,
             }
         };
@@ -4304,23 +4430,82 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
                 self.emit(fs, &format!("{} = {};", a, v));
                 "0".into()
             }
+            "Atomic.load" | "Atomic.store" | "Atomic.add" | "Atomic.sub" | "Atomic.swap" | "Atomic.compareSwap" => {
+                // tasks share an `Atomic` by borrowing it: every access is atomic
+                let a = self.lval(fs, &args[0].e);
+                let vals: Vec<String> = args[1..].iter().map(|x| self.expr(fs, &x.e)).collect();
+                self.emit(fs, "if (__builtin_expect(gojo_sim_on, 0)) gojo_sim_point();");
+                let p = format!("&({}).f_v", a);
+                match &qn[7..] {
+                    "load" => format!("__atomic_load_n({}, __ATOMIC_SEQ_CST)", p),
+                    "store" => {
+                        self.emit(fs, &format!("__atomic_store_n({}, {}, __ATOMIC_SEQ_CST);", p, vals[0]));
+                        "0".into()
+                    }
+                    "add" => format!("__atomic_add_fetch({}, {}, __ATOMIC_SEQ_CST)", p, vals[0]),
+                    "sub" => format!("__atomic_sub_fetch({}, {}, __ATOMIC_SEQ_CST)", p, vals[0]),
+                    "swap" => format!("__atomic_exchange_n({}, {}, __ATOMIC_SEQ_CST)", p, vals[0]),
+                    _ => {
+                        let et = match &recv_ty {
+                            Some(Ty::Adt(_, a)) => a[0].clone(),
+                            _ => Ty::int(),
+                        };
+                        let ec = self.cty(&et);
+                        let o = self.tmp();
+                        self.emit(fs, &format!("{} {} = {};", ec, o, vals[0]));
+                        format!("__atomic_compare_exchange_n({}, &{}, {}, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)", p, o, vals[1])
+                    }
+                }
+            }
+            "Task.join" => {
+                let r = match &recv_ty {
+                    Some(Ty::Task(r)) => (**r).clone(),
+                    _ => Ty::Unit,
+                };
+                let x = self.expr(fs, &args[0].e);
+                let tv = self.tmp();
+                self.emit(fs, &format!("gojo_task *{} = {}; gojo_task_join({});", tv, x, tv));
+                if matches!(r, Ty::Unit | Ty::Never) {
+                    self.emit(fs, &format!("gojo_task_free({});", tv));
+                    return "0".into();
+                }
+                let rc = self.cty(&r);
+                let v = self.tmp();
+                self.emit(fs, &format!("{} {} = *({} *)gojo_task_result({}); gojo_task_free({});", rc, v, rc, tv, tv));
+                v
+            }
+            "Iso.take" => self.expr(fs, &args[0].e),
+            "Task.cancel" => {
+                let tt = recv_ty.clone().unwrap_or(Ty::Unit);
+                let x = self.expr(fs, &args[0].e);
+                let d = self.drop_fn(&tt);
+                let tv = self.tmp();
+                self.emit(fs, &format!("gojo_task *{} = {}; {}(&{});", tv, x, d, tv));
+                "0".into()
+            }
+            "Scope.cancel" => {
+                let x = self.expr(fs, &args[0].e);
+                self.emit(fs, &format!("gojo_group_cancel({});", x));
+                "0".into()
+            }
             "Mutex.lock" | "MutexRef.lock" => {
                 let (m, v) = self.lock_target(fs, &args[0].e);
                 self.emit(fs, &format!("gojo_mutex_lock({}->mu);", m));
                 self.register_stmt(fs, Cl::Unlock(format!("{}->mu", m)));
                 format!("({})", v)
             }
-            "Chan.send" => {
+            "Sender.send" => {
                 let e = elem(&recv_ty);
                 let c = self.expr(fs, &args[0].e);
                 let v = self.expr(fs, &args[1].e);
                 let ec = self.cty(&e);
                 let t = self.tmp();
+                let ok = self.tmp();
                 let d = self.cancelled_send_drop(&e, &t);
-                self.emit(fs, &format!("{} {} = {}; if (!gojo_chan_send({}, &{}, {})) {{{}}}", ec, t, v, c, t, l, d));
-                "0".into()
+                self.emit(fs, &format!("{} {} = {}; bool {} = gojo_chan_send({}, &{}, {}); if (!{}) {{{}}}", ec, t, v, ok, c, t, l, ok, d));
+                ok
             }
-            "Chan.recv" => {
+            "Receiver.recv" => {
                 let c = self.expr(fs, &args[0].e);
                 let oc = self.cty(ret);
                 let r = self.tmp();
@@ -4331,12 +4516,7 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
                 }
                 r
             }
-            "Chan.close" => {
-                let c = self.expr(fs, &args[0].e);
-                self.emit(fs, &format!("gojo_chan_close({}, {});", c, l));
-                "0".into()
-            }
-            "Chan.len" => {
+            "Sender.len" | "Receiver.len" => {
                 let c = self.expr(fs, &args[0].e);
                 format!("gojo_chan_len({})", c)
             }
@@ -4573,80 +4753,198 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
     // task groups
     // ------------------------------------------------------------------
 
-    fn task_group(&mut self, fs: &mut Fs, targs: &[Ty], args: &[TArg], t: &Ty, sp: Span) -> String {
-        let errt = targs.first().map(|x| self.sub(fs, x)).unwrap_or(Ty::Unit);
-        let errt = if errt == Ty::Error { Ty::Unit } else { errt };
-        let rc = self.cty(t);
-        let ec = self.cty(&errt);
-        let _ = sp;
-        // group state: { gojo_group *g; bool failed; E err; }
-        let gs = format!("GroupSt_{}", self.mangle(&errt));
+    /// The C struct holding a scope's state: its group, and the first error
+    /// of a failing plain `go` task.
+    fn scope_state_ty(&mut self, errt: &Ty) -> String {
+        let ec = self.cty(errt);
+        let gs = format!("ScopeSt_{}", self.mangle(errt));
         if self.helpers.insert(gs.clone()) {
             let _ = writeln!(self.tdefs, "typedef struct {{ gojo_group *g; bool failed; {} err; }} {};", ec, gs);
         }
+        gs
+    }
+
+    fn scope_block(&mut self, fs: &mut Fs, id: u32, handle: Option<LocalId>, body: &TBlock, errt: Option<&Ty>, t: &Ty, sp: Span) -> String {
+        let errt = errt.map(|e| self.sub(fs, e));
+        let et = errt.clone().unwrap_or(Ty::Unit);
+        let gs = self.scope_state_ty(&et);
         let st = self.tmp();
-        self.emit(fs, &format!("{} {} = {{ gojo_group_new(), 0 }};", gs, st));
-        // the body closure takes `inout Group`; Group is { handle *u8 } -> pass pointer to state
-        let gdef = self.prog.packages.iter().find(|p| p.name == "task" && p.is_std).and_then(|p| p.items.get("Group")).cloned();
-        let gty = match gdef {
-            Some(Sym::Type(d)) => Ty::Adt(d, std::rc::Rc::new(vec![])),
-            _ => Ty::Unit,
+        let loc = self.loc(sp);
+        self.emit(fs, &format!("{} {} = {{ gojo_group_new({}), 0 }};", gs, st, loc));
+        fs.tscopes.insert(id, st.clone());
+        if let Some(h) = handle {
+            let n = self.local_cname(fs, h);
+            self.emit(fs, &format!("gojo_group *{} = {}.g;", n, st));
+            fs.repr.insert(h, Repr::Val(n));
+        }
+        // the body's value
+        let vt = match (&errt, t) {
+            (Some(_), Ty::Result(v, _)) => (**v).clone(),
+            _ => t.clone(),
         };
-        let gc = self.cty(&gty);
-        let gv = self.tmp();
-        self.emit(fs, &format!("{} {} = {{ (uint8_t *)&{} }};", gc, gv, st));
-        let f = self.addr(fs, &args[0].e);
-        let fp = self.tmp();
-        self.emit(fs, &format!("gojo_func *{} = {};", fp, f));
-        self.emit(fs, &format!("((void (*)(void *, {} *)){}->fn)({}->env, &{});", gc, fp, fp, gv));
-        self.emit(fs, &format!("gojo_group_wait({}.g);", st));
+        let has_val = !matches!(vt, Ty::Unit | Ty::Never);
+        let v = if has_val {
+            let c = self.cty(&vt);
+            let r = self.tmp();
+            self.emit(fs, &format!("{} {};", c, r));
+            Some(r)
+        } else {
+            None
+        };
+        self.emit(fs, "{");
+        fs.ind += 1;
+        self.push_scope(fs, SK::Block);
+        fs.scopes.last_mut().unwrap().wait = Some(format!("{}.g", st));
+        for s in &body.stmts {
+            self.stmt(fs, s);
+        }
+        if let Some(bv) = &body.value {
+            self.push_scope(fs, SK::Stmt);
+            let x = self.expr(fs, bv);
+            let xt = self.sub(fs, &bv.ty);
+            match &v {
+                Some(d) if bv.ty != Ty::Never && xt != Ty::Unit => self.emit(fs, &format!("{} = {};", d, x)),
+                _ => self.discard(fs, &x, &xt, bv.is_place()),
+            }
+            self.pop_scope(fs);
+        }
+        self.pop_scope(fs);
+        fs.ind -= 1;
+        self.emit(fs, "}");
+        fs.tscopes.remove(&id);
+        if errt.is_none() {
+            return v.unwrap_or_else(|| "0".into());
+        }
+        let rc = self.cty(t);
         let r = self.tmp();
-        self.emit(fs, &format!("{} {} = {{ .ok = !{}.failed }}; if ({}.failed) {}.u.err = {}.err;", rc, r, st, st, r, st));
+        self.emit(fs, &format!("{} {};", rc, r));
+        let okv = match &v {
+            Some(x) => format!(" {}.u.val = {};", r, x),
+            None => String::new(),
+        };
+        // a failed scope drops the body's value
+        let dropv = match &v {
+            Some(x) if self.needs_drop(&vt) => {
+                let d = self.drop_fn(&vt);
+                format!(" {}(&{});", d, x)
+            }
+            _ => String::new(),
+        };
+        self.emit(fs, &format!("if ({}.failed) {{ {}.ok = 0; {}.u.err = {}.err;{} }} else {{ {}.ok = 1;{} }}", st, r, r, st, dropv, r, okv));
         r
     }
 
-    fn task_go(&mut self, fs: &mut Fs, args: &[TArg], _sp: Span) -> String {
-        // args[0]: inout Group, args[1]: scoped closure returning ! E
-        let g = self.expr(fs, &args[0].e);
-        let ft = self.sub(fs, &args[1].e.ty);
+    /// `go ...`: the closure runs as a task of the target scope.
+    fn spawn(&mut self, fs: &mut Fs, target: &SpawnTarget, task: &TExpr, handle: bool, sp: Span) -> String {
+        let loc = self.loc(sp);
+        let (g, st, errt) = match target {
+            SpawnTarget::Lexical(id) => {
+                let st = fs.tscopes.get(id).cloned().expect("scope of a go");
+                (format!("{}.g", st), Some(format!("&{}", st)), None)
+            }
+            SpawnTarget::Value(v) => (self.expr(fs, v), None, Some(Ty::Unit)),
+        };
+        let ft = self.sub(fs, &task.ty);
         let ret = match &ft {
             Ty::Func(f) => f.ret.clone(),
             _ => Ty::Unit,
         };
-        let errt = match &ret {
-            Ty::Result(_, e) => (**e).clone(),
+        let f = self.expr(fs, task);
+        let rc = self.ret_cty(&ret);
+        let call = format!("(({} (*)(void *))a->f.fn)(a->f.env)", rc);
+        if handle {
+            let rt = if ret == Ty::Never { Ty::Unit } else { ret.clone() };
+            let rcty = self.cty(&rt);
+            let tn = format!("taskhthunk_{}", self.mangle(&rt));
+            if self.helpers.insert(tn.clone()) {
+                let _ = writeln!(self.protos, "static void {}(void *p);", tn);
+                let mut b = format!("static void {}(void *p) {{\n    struct {{ gojo_func f; gojo_group *g; gojo_task *t; }} *a = p;\n", tn);
+                if matches!(rt, Ty::Unit) {
+                    let _ = writeln!(b, "    {};", call);
+                } else {
+                    let _ = writeln!(b, "    {} r = {};", rcty, call);
+                    if matches!(rt, Ty::Result(..)) {
+                        // a failure cancels the scope; the error goes to `join`
+                        b.push_str("    if (!r.ok) gojo_group_cancel_failed(a->g);\n");
+                    }
+                    let _ = writeln!(b, "    *({} *)gojo_task_result(a->t) = r;", rcty);
+                }
+                b.push_str("    if (a->f.drop) a->f.drop(a->f.env);\n");
+                b.push_str("    if (gojo_task_finish(a->t)) {\n");
+                if self.needs_drop(&rt) {
+                    let d = self.drop_fn(&rt);
+                    let _ = writeln!(b, "        {}(({} *)gojo_task_result(a->t));", d, rcty);
+                }
+                b.push_str("        gojo_task_free(a->t);\n    }\n    free(a);\n}\n");
+                self.bodies.push_str(&b);
+            }
+            let a = self.tmp();
+            let tv = self.tmp();
+            self.emit(fs, &format!("gojo_task *{} = gojo_task_new(sizeof({}));", tv, rcty));
+            self.emit(fs, &format!("struct {{ gojo_func f; gojo_group *g; gojo_task *t; }} *{} = gojo_alloc(sizeof(gojo_func) + 2 * sizeof(void *));", a));
+            self.emit(fs, &format!("{}->f = {}; {}->g = {}; {}->t = {};", a, f, a, g, a, tv));
+            self.emit(fs, &format!("gojo_group_go_task({}, {}, {}, {}, {});", g, tv, tn, a, loc));
+            return tv;
+        }
+        // a plain task: its error (if any) is the scope's
+        let et = match (&errt, &ret) {
+            (Some(e), _) => e.clone(),
+            (None, Ty::Result(_, e)) => self.sub(fs, e),
             _ => Ty::Unit,
         };
-        let ec = self.cty(&errt);
-        let rc = self.ret_cty(&ret);
-        let gs = format!("GroupSt_{}", self.mangle(&errt));
-        if self.helpers.insert(gs.clone()) {
-            let _ = writeln!(self.tdefs, "typedef struct {{ gojo_group *g; bool failed; {} err; }} {};", ec, gs);
-        }
-        let tn = format!("taskthunk_{}", self.mangle(&errt));
+        let gs = self.scope_state_ty(&et);
+        let tn = format!("taskthunk_{}_{}", self.mangle(&ret), self.mangle(&et));
         if self.helpers.insert(tn.clone()) {
             let _ = writeln!(self.protos, "static void {}(void *p);", tn);
-            let mut b = format!("static void {}(void *p) {{\n    struct {{ gojo_func f; {} *st; }} *a = p;\n", tn, gs);
-            if matches!(ret, Ty::Result(..)) {
-                let _ = writeln!(b, "    {} r = (({} (*)(void *))a->f.fn)(a->f.env);", rc, rc);
-                let dropf = if self.needs_drop(&errt) {
-                    let d = self.drop_fn(&errt);
-                    format!(" else {}(&r.u.err);", d)
-                } else {
-                    String::new()
-                };
-                let _ = writeln!(b, "    if (!r.ok) {{ if (gojo_group_fail(a->st->g)) a->st->err = r.u.err;{} a->st->failed = 1; }}", dropf);
-            } else {
-                let _ = writeln!(b, "    ((void (*)(void *))a->f.fn)(a->f.env);");
+            let mut b = format!("static void {}(void *p) {{\n    struct {{ gojo_func f; {} *st; gojo_group *g; }} *a = p;\n", tn, gs);
+            match &ret {
+                Ty::Unit | Ty::Never => {
+                    let _ = writeln!(b, "    {};", call);
+                }
+                Ty::Result(_, _) => {
+                    let _ = writeln!(b, "    {} r = {};", rc, call);
+                    let dropf = if self.needs_drop(&et) {
+                        let d = self.drop_fn(&et);
+                        format!(" else {}(&r.u.err);", d)
+                    } else {
+                        String::new()
+                    };
+                    let dropok = if self.needs_drop(&ret) {
+                        // the success value of a plain task is not used
+                        let ok = match &ret {
+                            Ty::Result(v, _) => (**v).clone(),
+                            _ => Ty::Unit,
+                        };
+                        if self.needs_drop(&ok) {
+                            let d = self.drop_fn(&ok);
+                            format!(" else {}(&r.u.val);", d)
+                        } else {
+                            String::new()
+                        }
+                    } else {
+                        String::new()
+                    };
+                    let _ = writeln!(b, "    if (!r.ok) {{ if (a->st && gojo_group_fail(a->g)) a->st->err = r.u.err;{} if (a->st) a->st->failed = 1; }}{}", dropf, dropok);
+                }
+                _ => {
+                    let _ = writeln!(b, "    {} r = {};", rc, call);
+                    if self.needs_drop(&ret) {
+                        let d = self.drop_fn(&ret);
+                        let _ = writeln!(b, "    {}(&r);", d);
+                    }
+                }
             }
-            let _ = writeln!(b, "    if (a->f.drop) a->f.drop(a->f.env);\n    free(a);\n}}");
+            b.push_str("    if (a->f.drop) a->f.drop(a->f.env);\n    free(a);\n}\n");
             self.bodies.push_str(&b);
         }
-        let f = self.expr(fs, &args[1].e);
         let a = self.tmp();
-        self.emit(fs, &format!("struct {{ gojo_func f; {} *st; }} *{} = gojo_alloc(sizeof(gojo_func) + sizeof(void *));", gs, a));
-        self.emit(fs, &format!("{}->f = {}; {}->st = ({} *)({}).f_handle;", a, f, a, gs, g));
-        self.emit(fs, &format!("gojo_group_go({}->st->g, {}, {});", a, tn, a));
+        self.emit(fs, &format!("struct {{ gojo_func f; {} *st; gojo_group *g; }} *{} = gojo_alloc(sizeof(gojo_func) + 2 * sizeof(void *));", gs, a));
+        let stv = match &st {
+            Some(x) => format!("({} *){}", gs, x),
+            None => "NULL".into(),
+        };
+        self.emit(fs, &format!("{}->f = {}; {}->st = {}; {}->g = {};", a, f, a, stv, a, g));
+        self.emit(fs, &format!("gojo_group_go({}, {}, {}, {});", g, tn, a, loc));
         "0".into()
     }
 
@@ -4729,7 +5027,8 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
                 self.ensure_rcbox(&inner);
                 b.push_str("    if (*p && --(*p)->weak == 0 && (*p)->strong == 0) gojo_box_free(*p, sizeof(**p));\n");
             }
-            Ty::Chan(el) => {
+            Ty::Sender(el) | Ty::Receiver(el) => {
+                let tx = matches!(t, Ty::Sender(_));
                 let el = (**el).clone();
                 let df = if self.needs_drop(&el) {
                     let d = self.drop_fn(&el);
@@ -4743,9 +5042,28 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
                 } else {
                     "NULL".into()
                 };
-                let _ = writeln!(b, "    gojo_chan_release(*p, {});", df);
+                let _ = writeln!(b, "    gojo_chan_release_{}(*p, {});", if tx { "tx" } else { "rx" }, df);
             }
             Ty::Func(_) => b.push_str("    if (p->drop) p->drop(p->env);\n"),
+            Ty::Iso(inner) => {
+                let inner = (**inner).clone();
+                if self.needs_drop(&inner) {
+                    let d = self.drop_fn(&inner);
+                    let _ = writeln!(b, "    {}(p);", d);
+                }
+            }
+            Ty::Task(r) => {
+                // an unjoined handle: the task is cancelled; the last of the
+                // two drops the result
+                let r = (**r).clone();
+                let _ = writeln!(b, "    if (gojo_task_abandon(*p)) {{");
+                if self.needs_drop(&r) {
+                    let d = self.drop_fn(&r);
+                    let rc = self.cty(&r);
+                    let _ = writeln!(b, "        {}(({} *)gojo_task_result(*p));", d, rc);
+                }
+                b.push_str("        gojo_task_free(*p);\n    }\n");
+            }
             Ty::Iface(..) => b.push_str("    if (p->data) { const gojo_vt_base *vt = p->vt; vt->drop(p->data); gojo_box_free(p->data, vt->size); }\n"),
             Ty::Mutex(inner) => {
                 let inner = (**inner).clone();
@@ -4797,7 +5115,8 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
                     bind_params(&fd.recv.as_ref().unwrap().ty, t, &mut s);
                     let targs: Vec<Ty> = fd.tparams.iter().map(|p| s.get(p).cloned().unwrap_or(Ty::Unit)).collect();
                     let n = self.instance(f, targs);
-                    let _ = writeln!(b, "    {}(p);", n);
+                    // in a cancelled task, cleanup may still block (for a while)
+                    let _ = writeln!(b, "    uint8_t *sh = gojo_drop_shield();\n    {}(p);\n    gojo_drop_unshield(sh);", n);
                 }
                 match &def.kind {
                     TypeDefKind::Struct { .. } => {
@@ -4942,7 +5261,8 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
                 self.ensure_rcbox(&inner);
                 b.push_str("    __atomic_add_fetch(&(*p)->strong, 1, __ATOMIC_RELAXED);\n    return *p;\n");
             }
-            Ty::Chan(_) => b.push_str("    gojo_chan_retain(*p);\n    return *p;\n"),
+            Ty::Sender(_) => b.push_str("    gojo_chan_retain_tx(*p);\n    return *p;\n"),
+            Ty::Receiver(_) => b.push_str("    gojo_chan_retain_rx(*p);\n    return *p;\n"),
             Ty::Cell(inner) => {
                 let inner = (**inner).clone();
                 let cf = self.clone_fn(&inner);
@@ -5326,7 +5646,9 @@ static void intro_{m}({c} *a, int64_t n, int depth) {{\n    while (n > 24) {{\n 
                 let _ = writeln!(b, "    {}(b, p, nested);", ff);
             }
             Ty::Mutex(_) | Ty::MutexRef(_) => b.push_str("    gojo_fmt_cstr(b, \"Mutex{..}\");\n"),
-            Ty::Chan(_) => b.push_str("    gojo_fmt_cstr(b, \"chan\");\n"),
+            Ty::Sender(_) => b.push_str("    gojo_fmt_cstr(b, \"Sender\");\n"),
+            Ty::Iso(_) => b.push_str("    gojo_fmt_cstr(b, \"Iso\");\n"),
+            Ty::Receiver(_) => b.push_str("    gojo_fmt_cstr(b, \"Receiver\");\n"),
             Ty::Func(_) => b.push_str("    gojo_fmt_cstr(b, \"<fn>\");\n"),
             Ty::Ptr(_) => b.push_str("    gojo_fmt_ptr(b, *p);\n"),
             Ty::Iface(..) => b.push_str("    ((const gojo_vt_base *)p->vt)->fmt(b, p->data, nested);\n"),
@@ -5512,7 +5834,20 @@ fn collect_moves_stmt(s: &TStmt, out: &mut HashSet<(LocalId, Vec<usize>)>, tf: &
             }
             collect_moves_block(body, out, tf)
         }
-        TStmt::Go { call, .. } | TStmt::ForEach { call, .. } => collect_moves_expr(call, out, tf),
+        TStmt::ForEach { call, .. } => collect_moves_expr(call, out, tf),
+        TStmt::WithLocks { places, body, .. } => {
+            for p in places {
+                collect_moves_expr(p, out, tf);
+            }
+            collect_moves_block(body, out, tf);
+        }
+        TStmt::ParFor { iter, hi, body, .. } => {
+            collect_moves_expr(iter, out, tf);
+            if let Some(h) = hi {
+                collect_moves_expr(h, out, tf);
+            }
+            collect_moves_expr(body, out, tf);
+        }
         TStmt::Send { chan, value } => {
             collect_moves_expr(chan, out, tf);
             collect_moves_expr(value, out, tf)
@@ -5529,7 +5864,16 @@ fn collect_moves_stmt(s: &TStmt, out: &mut HashSet<(LocalId, Vec<usize>)>, tf: &
                         collect_moves_expr(chan, out, tf);
                         collect_moves_expr(value, out, tf)
                     }
+                    TSelectKind::Task { task, .. } => {
+                        if let Some(p) = local_path(task) {
+                            out.insert(p);
+                        }
+                    }
+                    TSelectKind::Timer { at, .. } => collect_moves_expr(at, out, tf),
                     _ => {}
+                }
+                if let Some(g) = &a.guard {
+                    collect_moves_expr(g, out, tf);
                 }
                 collect_moves_block(&a.body, out, tf)
             }
@@ -5620,6 +5964,13 @@ fn collect_moves_expr(e: &TExpr, out: &mut HashSet<(LocalId, Vec<usize>)>, tf: &
             }
         }
         TK::Block(b) | TK::Unsafe(b) => collect_moves_block(b, out, tf),
+        TK::Scope { body, .. } | TK::Isolate(body) => collect_moves_block(body, out, tf),
+        TK::Spawn { target, task, .. } => {
+            if let SpawnTarget::Value(v) = target {
+                f(v)
+            }
+            f(task)
+        }
         TK::Try { e: x, wrap } => {
             collect_moves_expr(x, out, tf);
             if let Some(TryWrap::Call(_, w)) = wrap {
@@ -5739,7 +6090,7 @@ fn body_facts(cond: Option<&TExpr>, body: &TBlock) -> BodyFacts {
     use crate::tir::Node;
     let mut f = BodyFacts { heavy: false, indirect: false, callees: vec![] };
     let mut check = |n: Node| match n {
-        Node::Stmt(TStmt::While { .. } | TStmt::For { .. } | TStmt::ForEach { .. } | TStmt::MapInsert { .. }) => f.heavy = true,
+        Node::Stmt(TStmt::While { .. } | TStmt::For { .. } | TStmt::ForEach { .. } | TStmt::ParFor { .. } | TStmt::MapInsert { .. }) => f.heavy = true,
         Node::Stmt(_) => {}
         Node::Expr(e) => match &e.kind {
             TK::Call { callee: Callee::Func(id, _), .. } => f.callees.push(*id),

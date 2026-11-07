@@ -93,6 +93,7 @@ static inline void spin_lock(gojo_spin *l) {
     }
 }
 static inline void spin_unlock(gojo_spin *l) { __atomic_store_n(l, 0, __ATOMIC_RELEASE); }
+static inline bool spin_trylock(gojo_spin *l) { return __atomic_exchange_n(l, 1, __ATOMIC_ACQUIRE) == 0; }
 
 // ------------------------------------------------------------------ context switch
 
@@ -328,11 +329,23 @@ static void xsave_setup(void) {
 // ------------------------------------------------------------------ core types
 
 enum { WAIT_NONE = 0, WAIT_CANCELLABLE = 1 };
-enum { WAKE_NONE, WAKE_CANCEL, WAKE_CHAN, WAKE_TIMER, WAKE_IO };
+enum { WAKE_NONE, WAKE_CANCEL, WAKE_CHAN, WAKE_TIMER, WAKE_IO, WAKE_TASK };
 enum { POST_NONE, POST_DEAD, POST_YIELD };
+enum { BLK_NONE, BLK_RECV, BLK_SEND, BLK_SELECT, BLK_LOCK, BLK_JOIN, BLK_SCOPE, BLK_SLEEP, BLK_IO };
 
 typedef struct gojo_scope gojo_scope;
 
+typedef struct gojo_timer {
+    int64_t when;
+    int idx;                // position in the heap, -1 when not in it
+    struct gojo_g *g;       // wake this goroutine...
+    uint64_t token;
+    gojo_scope *scope;      // ...or cancel this scope
+} gojo_timer;
+
+// Wait records live in the goroutine's descriptor (or on the heap), never on
+// its stack: a parked stack may be put away (see "hibernation"), and others
+// mustn't read it then.
 typedef struct gojo_g {
     void *sp;
     int on_cpu;             // the goroutine is still on its stack; don't resume it yet
@@ -345,12 +358,31 @@ typedef struct gojo_g {
     struct gojo_g *qnext;   // global queue, free lists, mutex waiters
     gojo_scope *scope;
     struct gojo_g *scope_prev, *scope_next;
+    bool scope_linked;      // in scope->members: joined when it first waits
     gojo_group *group;
     uint8_t *stack;         // lowest usable address
     size_t stack_size;
     uint8_t *mapping;       // start of the whole mapping, guard included
     size_t mapping_size;
     uint32_t idx;
+    // for task dumps and deadlock reports
+    bool alive;
+    const char *spawn_loc;  // where `go` started it
+    int blocked;            // BLK_*: what it is parked on
+    const void *blocked_on;
+    int64_t blocked_since;
+    // locks held, by where they were made (debug builds: lock-order checking)
+    const char *held[8];
+    int nheld;
+    bool slow_noted;        // debug builds: told that its scope waits long
+    gojo_sudog sud;         // a channel send or receive
+    gojo_timer timer;       // a sleep, or a select's deadline
+    // hibernation: the used part of the stack, copied out, pages released
+    gojo_spin hib_lock;
+    int hib;
+    uint8_t *hib_buf;
+    size_t hib_size;
+    struct gojo_group *open_groups; // scopes it opened: their tasks may borrow its stack
 #ifdef GOJO_ASAN
     void *fake_stack;
 #endif
@@ -402,9 +434,14 @@ typedef struct gojo_worker {
 #endif
 } gojo_worker;
 
+// why a scope was cancelled (std/task.gojo `Reason`, plus one)
+enum { CANCEL_FAILED = 1, CANCEL_DEADLINE, CANCEL_EXPLICIT, CANCEL_SHUTDOWN };
+
 struct gojo_scope {
     gojo_spin lock;
     int cancelled;
+    int reason;             // CANCEL_*, once cancelled
+    int64_t deadline;       // task.timeout's, 0 for none
     gojo_scope *parent;
     gojo_scope *first_child, *next_sib, *prev_sib;
     gojo_g *members;
@@ -446,6 +483,166 @@ __attribute__((noinline)) static gojo_worker *cur_worker(void) {
 
 static inline gojo_g *cur_g(void) { return cur_worker()->cur; }
 
+static _Noreturn void deadlock(void);
+static void on_quit(int sig);
+static void sim_push(gojo_g *g);
+static gojo_g *sim_find_work(gojo_worker *w);
+static uint64_t sim_rand(void);
+void gojo_sim_setup(uint64_t seed);
+
+static void scope_cancel_r(gojo_scope *s, int reason);
+
+// ------------------------------------------------------------------ hibernation
+//
+// Stacks can't move (tasks borrow from each other's stacks), but a stack can
+// be put away and brought back at the same address: the bytes in use are
+// copied to the heap and the pages released; when the goroutine is about to
+// run, or someone has to write into its stack (a channel handing it a value),
+// the pages come back and the bytes are copied back. The address doesn't
+// change, so every pointer into the stack stays valid. Only goroutines parked
+// for a while, among many, and that no task may be borrowing from (none of the
+// scopes they opened has a task running), are put away.
+
+static gojo_g *g_slot(uint32_t idx);
+static bool g_borrowed(gojo_g *g);
+static int64_t s_drop_grace = 1000000000;   // GOJO_DROP_GRACE (ms)
+static bool s_hib_on;
+static int64_t s_nhib;                      // stacks put away now
+static int64_t s_hib_after = 50000000;      // parked this long (ns)
+#define HIB_MIN_GOROUTINES 256              // only worth it with many
+
+static void stack_release(uint8_t *lo, uint8_t *hi) {
+    if (hi <= lo) return;
+#if defined(__APPLE__)
+    madvise(lo, (size_t)(hi - lo), MADV_FREE_REUSABLE);
+#else
+    madvise(lo, (size_t)(hi - lo), MADV_DONTNEED);
+#endif
+}
+
+// With g->hib_lock held.
+static void thaw_locked(gojo_g *g) {
+    if (!g->hib) return;
+    uint8_t *top = g->stack + g->stack_size;
+    uint8_t *sp = top - g->hib_size;
+#if defined(__APPLE__)
+    size_t ps = (size_t)getpagesize();
+    uint8_t *lo = (uint8_t *)((uintptr_t)sp & ~(uintptr_t)(ps - 1));
+    madvise(lo, (size_t)(top - lo), MADV_FREE_REUSE);
+#endif
+    memcpy(sp, g->hib_buf, g->hib_size);
+    free(g->hib_buf);
+    g->hib_buf = NULL;
+    GOJO_SC_STORE(&g->hib, 0);
+    GOJO_ADD(&s_nhib, -1);
+}
+
+// Before touching a parked goroutine's stack.
+static inline void g_touch(gojo_g *g) {
+    if (!s_hib_on) return;
+    spin_lock(&g->hib_lock);
+    thaw_locked(g);
+    spin_unlock(&g->hib_lock);
+}
+
+// Puts g's stack away if it is parked and nobody may be using it. Runs on the
+// monitor thread.
+static bool hibernate(gojo_g *g, int64_t now) {
+    if (g->hib || g->stack_size != s_stack_size || !GOJO_RELAXED(&g->alive)) return false;
+    int b = GOJO_RELAXED(&g->blocked);
+    if (b == BLK_NONE || b == BLK_SCOPE || now - GOJO_RELAXED(&g->blocked_since) < s_hib_after) return false;
+    if (!spin_trylock(&g->hib_lock)) return false;
+    bool done = false;
+    // still parked (a wait that was claimed means it is about to run)
+    bool waiting = b == BLK_LOCK || b == BLK_JOIN || (GOJO_SC_LOAD(&g->wait) & 3) == WAIT_CANCELLABLE;
+    if (!g->hib && waiting && GOJO_RELAXED(&g->blocked) == b) {
+        GOJO_SC_STORE(&g->hib, 1);
+        // now it can't run (a worker that picks it waits for this lock), so its
+        // open scopes stay as they are: do their tasks borrow from this stack?
+        bool borrowed = !GOJO_SC_LOAD(&g->on_cpu) && g_borrowed(g);
+        if (GOJO_SC_LOAD(&g->on_cpu) || borrowed) {
+            // a worker is about to run it, or its tasks may be reading its stack
+            GOJO_SC_STORE(&g->hib, 0);
+        } else {
+            uint8_t *top = g->stack + g->stack_size;
+            uint8_t *sp = (uint8_t *)g->sp;
+            size_t used = (size_t)(top - sp);
+            g->hib_buf = malloc(used);
+            if (!g->hib_buf) {
+                GOJO_SC_STORE(&g->hib, 0);
+            } else {
+                memcpy(g->hib_buf, sp, used);
+                g->hib_size = used;
+                stack_release(g->stack, top);
+                GOJO_ADD(&s_nhib, 1);
+                done = true;
+            }
+        }
+    }
+    spin_unlock(&g->hib_lock);
+    return done;
+}
+
+static void hibernate_parked(int64_t now) {
+    static int64_t last;
+    int64_t every = s_hib_after > 10000000 ? s_hib_after : 10000000;
+    if (!s_hib_on || now - last < every) return;
+    last = now;
+    if (GOJO_RELAXED(&s_ngoroutines) < HIB_MIN_GOROUTINES) return;
+    // at most 20 ms of this thread per round
+    uint32_t n = GOJO_LOAD(&s_g_count);
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    int64_t t0 = (int64_t)ts.tv_sec * 1000000000 + ts.tv_nsec;
+    static uint32_t next;
+    if (next >= n) next = 0;
+    int k = 0;
+    for (uint32_t c = 0; c < n; c++) {
+        uint32_t i = (next + c) % n;
+        if (hibernate(g_slot(i), now) && ++k % 256 == 0) {
+            clock_gettime(CLOCK_MONOTONIC, &ts);
+            if ((int64_t)ts.tv_sec * 1000000000 + ts.tv_nsec - t0 > 20000000) {
+                next = i + 1;
+                return;
+            }
+        }
+    }
+}
+
+// Ctrl-C / SIGTERM: cancel `main`'s scope; a second one ends the program.
+static gojo_scope *s_root_scope;
+static gojo_spin s_root_lock;
+static volatile sig_atomic_t s_shutdown;
+static void on_shutdown(int sig) {
+    signal(sig, SIG_DFL);
+    s_shutdown = 1;
+}
+static void check_shutdown(void) {
+    if (s_shutdown != 1) return;
+    spin_lock(&s_root_lock);
+    if (s_root_scope) {
+        s_shutdown = 2;
+        scope_cancel_r(s_root_scope, CANCEL_SHUTDOWN);
+    }
+    spin_unlock(&s_root_lock);
+}
+
+// simulation state (see "simulation")
+static uint64_t s_sim_rng;
+static gojo_g **s_simq;
+static int s_simq_len, s_simq_cap;
+static int s_sim_budget = 1;
+static bool s_sim_sleeping;
+
+// A scheduling point: maybe let another task run.
+static inline void sim_point(void) {
+    if (!gojo_sim_on) return;
+    gojo_worker *w = cur_worker();
+    if (!w || !w->cur) return;
+    if (sim_rand() % 4 == 0) gojo_task_yieldNow();
+}
+
+
 static void wake_one(void);
 static void ensure_poller(void);
 static void poller_wake(void);
@@ -454,6 +651,7 @@ static void worker_setup_signals(void);
 // ------------------------------------------------------------------ run queues
 
 static uint64_t next_rand(gojo_worker *w) {
+    if (gojo_sim_on) return sim_rand();
     uint64_t x = w->rng;
     x ^= x << 13;
     x ^= x >> 7;
@@ -471,6 +669,10 @@ static void global_put_locked(gojo_g *g) {
 
 // Goroutines woken by timers and the network go first: they have waited already.
 static void global_put_front(gojo_g *g) {
+    if (gojo_sim_on) {
+        sim_push(g);
+        return;
+    }
     pthread_mutex_lock(&s_lock);
     g->qnext = s_gq_head;
     s_gq_head = g;
@@ -480,6 +682,10 @@ static void global_put_front(gojo_g *g) {
 }
 
 static void global_put(gojo_g *g) {
+    if (gojo_sim_on) {
+        sim_push(g);
+        return;
+    }
     pthread_mutex_lock(&s_lock);
     global_put_locked(g);
     pthread_mutex_unlock(&s_lock);
@@ -499,6 +705,10 @@ static bool runq_put_slow(gojo_worker *w, gojo_g *g, uint32_t h, uint32_t t) {
 }
 
 static void runq_put(gojo_worker *w, gojo_g *g, bool next) {
+    if (gojo_sim_on) {
+        sim_push(g);
+        return;
+    }
     if (next) {
         gojo_g *old = __atomic_exchange_n(&w->runnext, g, __ATOMIC_ACQ_REL);
         if (!old) return;
@@ -615,6 +825,10 @@ static inline void maybe_wake(void) {
 
 // Makes a parked goroutine runnable. Whoever calls this owns the wake-up.
 static void g_ready(gojo_g *g) {
+    if (gojo_sim_on) {
+        sim_push(g);
+        return;
+    }
     gojo_worker *w = cur_worker();
     if (w) runq_put(w, g, true);
     else global_put_front(g);
@@ -730,7 +944,14 @@ static gojo_g *g_alloc(gojo_worker *w, size_t size) {
     }
     g->qnext = NULL;
     g->scope = NULL;
+    g->scope_linked = false;
     g->group = NULL;
+    GOJO_SET_RELAXED(&g->alive, true);
+    g->spawn_loc = NULL;
+    g->blocked = BLK_NONE;
+    g->nheld = 0;
+    g->open_groups = NULL;
+    g->hib = 0;
     g->wake = WAKE_NONE;
     g->wake_data = NULL;
     GOJO_SET_RELAXED(&g->on_cpu, 0);
@@ -744,6 +965,7 @@ static gojo_g *g_alloc(gojo_worker *w, size_t size) {
 
 // Runs on the scheduler stack, after the goroutine has switched away for good.
 static void g_recycle(gojo_worker *w, gojo_g *g) {
+    GOJO_SET_RELAXED(&g->alive, false);
 #ifdef GOJO_ASAN
     // the dead goroutine's frames are still poisoned; munmap lets ASan forget them
     munmap(g->mapping, g->mapping_size);
@@ -819,7 +1041,10 @@ static void g_park(void) {
 
 // ------------------------------------------------------------------ waits and cancellation
 
+static inline void scope_link(gojo_g *g);
+
 static inline uint64_t wait_begin(gojo_g *g) {
+    scope_link(g);
     g->epoch++;
     uint64_t t = ((uint64_t)g->epoch << 2) | WAIT_CANCELLABLE;
     g->wake = WAKE_NONE;
@@ -835,6 +1060,16 @@ static inline bool wait_claim(gojo_g *g, uint64_t token) {
 
 static inline bool scope_cancelled(gojo_scope *s) { return s && GOJO_SC_LOAD(&s->cancelled); }
 
+// What a parked goroutine waits for, for task dumps and deadlock reports.
+// (read by the monitor thread: relaxed atomics)
+static inline void blk(gojo_g *g, int kind, const void *on) {
+    GOJO_SET_RELAXED(&g->slow_noted, false);
+    GOJO_SET_RELAXED(&g->blocked_on, on);
+    GOJO_SET_RELAXED(&g->blocked_since, gojo_time_now());
+    GOJO_SC_STORE(&g->blocked, kind);
+}
+static inline void unblk(gojo_g *g) { GOJO_SC_STORE(&g->blocked, BLK_NONE); }
+
 // Parks unless the task is already cancelled. Afterwards g->wake says why it woke.
 static void wait_park(gojo_g *g, uint64_t token) {
     if (scope_cancelled(g->scope) && wait_claim(g, token)) {
@@ -844,12 +1079,15 @@ static void wait_park(gojo_g *g, uint64_t token) {
     g_park();
 }
 
-static void scope_cancel(gojo_scope *s) {
+static void scope_cancel(gojo_scope *s) { scope_cancel_r(s, CANCEL_EXPLICIT); }
+
+static void scope_cancel_r(gojo_scope *s, int reason) {
     spin_lock(&s->lock);
     if (GOJO_RELAXED(&s->cancelled)) {
         spin_unlock(&s->lock);
         return;
     }
+    s->reason = reason;
     GOJO_SC_STORE(&s->cancelled, 1);
     for (gojo_g *g = s->members; g; g = g->scope_next) {
         uint64_t w = GOJO_SC_LOAD(&g->wait);
@@ -858,25 +1096,36 @@ static void scope_cancel(gojo_scope *s) {
             g_ready(g);
         }
     }
-    for (gojo_scope *c = s->first_child; c; c = c->next_sib) scope_cancel(c);
+    for (gojo_scope *c = s->first_child; c; c = c->next_sib) scope_cancel_r(c, reason);
     spin_unlock(&s->lock);
 }
 
+// A goroutine belongs to a scope from the start, but is listed in its
+// members (which cancellation walks to wake waiters) only once it first waits:
+// most short tasks never wait, and then cost the scope's lock nothing.
 static void scope_join(gojo_scope *s, gojo_g *g) {
     g->scope = s;
-    if (!s) return;
+    g->scope_linked = false;
+}
+
+// Before a cancellable wait (from wait_begin): be findable by scope_cancel.
+static inline void scope_link(gojo_g *g) {
+    gojo_scope *s = g->scope;
+    if (g->scope_linked || !s) return;
     spin_lock(&s->lock);
     g->scope_prev = NULL;
     g->scope_next = s->members;
     if (s->members) s->members->scope_prev = g;
     s->members = g;
+    g->scope_linked = true;
     spin_unlock(&s->lock);
 }
 
 static void scope_leave(gojo_g *g) {
     gojo_scope *s = g->scope;
     g->scope = NULL;
-    if (!s) return;
+    if (!s || !g->scope_linked) return;
+    g->scope_linked = false;
     spin_lock(&s->lock);
     if (g->scope_prev) g->scope_prev->scope_next = g->scope_next;
     else s->members = g->scope_next;
@@ -892,6 +1141,7 @@ static void scope_enter(gojo_scope *s, gojo_g *g) {
     if (p) {
         spin_lock(&p->lock);
         s->cancelled = p->cancelled;
+        s->reason = p->reason;
         s->next_sib = p->first_child;
         if (p->first_child) p->first_child->prev_sib = s;
         p->first_child = s;
@@ -942,7 +1192,7 @@ static void worker_park(gojo_worker *w) {
     s_idle = w;
     GOJO_ADD(&s_nidle, 1);
     if (s_nidle == s_nstarted && s_gq_size == 0 && GOJO_SC_LOAD(&s_timers_pending) == 0 && GOJO_SC_LOAD(&s_io_waiters) == 0) {
-        gojo_panic("all goroutines are asleep: deadlock", "<runtime>");
+        deadlock();
     }
     while (!w->notified) pthread_cond_wait(&w->cv, &s_lock);
     w->notified = false;
@@ -951,6 +1201,7 @@ static void worker_park(gojo_worker *w) {
 
 // Wakes an idle worker, or starts a new one, as a spinning worker.
 static void wake_one(void) {
+    if (gojo_sim_on) return;
     pthread_mutex_lock(&s_lock);
     if (!can_wake() || GOJO_SC_LOAD(&s_nspinning) > 0) {
         pthread_mutex_unlock(&s_lock);
@@ -981,6 +1232,8 @@ static inline void stop_spinning(gojo_worker *w) {
 
 // The worker's goroutine is in C: let another worker have its CPU slot.
 static void worker_release(gojo_worker *w) {
+    // simulated: one thread, blocking calls block it
+    if (gojo_sim_on) return;
     int expected = 0;
     if (!__atomic_compare_exchange_n(&w->released, &expected, 1, false, __ATOMIC_SEQ_CST, __ATOMIC_RELAXED)) return;
     GOJO_ADD(&s_nreleased, 1);
@@ -1000,6 +1253,15 @@ static void cancel_preempt(gojo_worker *w) {
 
 // Generated code calls this when gojo_preempt_flag is set.
 void gojo_preempt_point(void) {
+    if (gojo_sim_on) {
+        // a random preemption every few thousand checkpoints
+        if (--s_sim_budget <= 0) {
+            s_sim_budget = 1 + (int)(sim_rand() % 4096);
+            gojo_worker *sw = cur_worker();
+            if (sw && sw->cur) gojo_task_yieldNow();
+        }
+        return;
+    }
     gojo_worker *w = cur_worker();
     if (!w || !__atomic_exchange_n(&w->preempt, 0, __ATOMIC_ACQ_REL)) return;
     GOJO_ADD(&gojo_preempt_flag, -1);
@@ -1034,6 +1296,7 @@ void gojo_blocking_enter(void) {
 }
 
 static gojo_g *find_work(gojo_worker *w) {
+    if (gojo_sim_on) return sim_find_work(w);
     for (;;) {
         // back in the scheduler: the worker takes its CPU slot again (or parks
         // below if all are taken)
@@ -1103,7 +1366,8 @@ static void schedule_loop(gojo_worker *w) {
         stop_spinning(w);
         // the waker may have been faster than the goroutine's switch away from its stack
         while (GOJO_LOAD(&g->on_cpu)) cpu_relax();
-        GOJO_SET_RELAXED(&g->on_cpu, 1);
+        GOJO_SC_STORE(&g->on_cpu, 1);
+        if (GOJO_SC_LOAD(&g->hib)) g_touch(g);
         GOJO_SET_RELAXED(&w->cur, g);
         GOJO_SET_RELAXED(&w->tick, w->tick + 1);
         switch_to_g(w, g);
@@ -1257,7 +1521,8 @@ static void main_thunk(void *p) {
     ((gojo_entry_fn)p)();
     fflush(stdout);
     fflush(stderr);
-    exit(0);
+    // stopped by Ctrl-C (and finished cleanly)
+    exit(s_shutdown ? 130 : 0);
 }
 
 _Noreturn void gojo_sched_main(void (*entry)(void)) {
@@ -1265,6 +1530,22 @@ _Noreturn void gojo_sched_main(void (*entry)(void)) {
     s_nprocs = n > 0 ? (int)n : 1;
     const char *env = getenv("GOJO_MAXPROCS");
     if (env && atoi(env) > 0) s_nprocs = atoi(env);
+    env = getenv("GOJO_SEED");
+    if (env && *env && !gojo_sim_on) gojo_sim_setup(strtoull(env, NULL, 10));
+    if (gojo_sim_on) s_nprocs = 1;
+    env = getenv("GOJO_DROP_GRACE");
+    if (env && *env) s_drop_grace = atoll(env) * 1000000;
+    // stack hibernation; not under sanitizers, which track stacks themselves
+#if !defined(GOJO_ASAN) && !defined(GOJO_TSAN)
+    env = getenv("GOJO_HIBERNATE");
+    s_hib_on = !gojo_sim_on && !(env && strcmp(env, "0") == 0);
+    if (env && atoll(env) > 1) s_hib_after = atoll(env) * 1000000;
+#endif
+    signal(SIGQUIT, on_quit);
+    if (!gojo_sim_on) {
+        signal(SIGINT, on_shutdown);
+        signal(SIGTERM, on_shutdown);
+    }
     env = getenv("GOJO_GOROUTINE_STACK");
     if (env && atoll(env) >= (64 << 10)) s_stack_size = (size_t)atoll(env);
     size_t ps = (size_t)sysconf(_SC_PAGESIZE);
@@ -1298,21 +1579,40 @@ void gojo_go(void (*fn)(void *), void *arg) {
     g_ready(g);
 }
 
+// ------------------------------------------------------------------ waits on timers and tasks
+
+static void timer_add(gojo_timer *t);
+static void timer_remove(gojo_timer *t);
+
+// A task started with a handle (see "task handles" below).
+struct gojo_task {
+    gojo_scope scope;
+    gojo_spin lock;
+    bool done, handle_gone;
+    gojo_g *waiter;         // `join`
+    gojo_g *sel_g;          // a `select` with an arm on this task
+    uint64_t sel_token;
+    const char *loc;        // where `go` started it
+};
+
 // ------------------------------------------------------------------ channels
 
 struct gojo_chan {
     gojo_spin lock;
-    bool closed;
+    bool closed;            // every sender is gone: receivers drain, then get none
+    bool deaf;              // every receiver is gone: sends fail
     uint8_t *buf;
     size_t esize;
     int64_t cap;
     int64_t head, len;
     gojo_sudog *recv_head, *recv_tail;
     gojo_sudog *send_head, *send_tail;
-    int64_t refs;
+    int64_t senders, receivers;  // atomic; the lock only for the last of either
+    int64_t ends;           // senders + receivers: freed at zero
+    const char *loc;        // where it was made
 };
 
-gojo_chan *gojo_chan_new(size_t esize, int64_t cap) {
+gojo_chan *gojo_chan_new(size_t esize, int64_t cap, const char *loc) {
     if (cap < 0) gojo_panic("negative channel capacity", "<runtime>");
     if (cap > (int64_t)(PTRDIFF_MAX / (esize ? esize : 1))) gojo_panic("channel capacity too large", "<runtime>");
     gojo_chan *c = gojo_alloc(sizeof *c);
@@ -1320,15 +1620,58 @@ gojo_chan *gojo_chan_new(size_t esize, int64_t cap) {
     c->esize = esize ? esize : 1;
     c->cap = cap;
     c->buf = cap ? gojo_alloc((size_t)cap * c->esize) : NULL;
-    c->refs = 1;
+    c->senders = 1;
+    c->receivers = 1;
+    c->ends = 2;
+    c->loc = loc;
     return c;
 }
 
-void gojo_chan_retain(gojo_chan *c) { __atomic_add_fetch(&c->refs, 1, __ATOMIC_RELAXED); }
+void gojo_chan_retain_tx(gojo_chan *c) {
+    GOJO_ADD(&c->ends, 1);
+    GOJO_ADD(&c->senders, 1);
+}
 
-void gojo_chan_release(gojo_chan *c, void (*drop_elem)(void *)) {
+void gojo_chan_retain_rx(gojo_chan *c) {
+    GOJO_ADD(&c->ends, 1);
+    GOJO_ADD(&c->receivers, 1);
+}
+
+static void chan_free(gojo_chan *c, void (*drop_elem)(void *));
+static void wake_list(gojo_g *wake);
+static gojo_g *chan_fail_waiters(gojo_sudog **head, gojo_sudog **tail, gojo_g *wake);
+
+// The last sender gone: the channel closes. Waiting receivers get none.
+void gojo_chan_release_tx(gojo_chan *c, void (*drop_elem)(void *)) {
     if (!c) return;
-    if (__atomic_sub_fetch(&c->refs, 1, __ATOMIC_ACQ_REL) != 0) return;
+    if (GOJO_ADD(&c->senders, -1) == 0) {
+        spin_lock(&c->lock);
+        c->closed = true;
+        gojo_g *wake = chan_fail_waiters(&c->recv_head, &c->recv_tail, NULL);
+        spin_unlock(&c->lock);
+        wake_list(wake);
+    }
+    if (GOJO_ADD(&c->ends, -1) == 0) chan_free(c, drop_elem);
+}
+
+// The last receiver gone: nothing can be received any more. Buffered values
+// are dropped; waiting senders fail, and drop their values themselves.
+void gojo_chan_release_rx(gojo_chan *c, void (*drop_elem)(void *)) {
+    if (!c) return;
+    if (GOJO_ADD(&c->receivers, -1) == 0) {
+        spin_lock(&c->lock);
+        c->deaf = true;
+        if (drop_elem)
+            for (int64_t i = 0; i < c->len; i++) drop_elem(c->buf + ((c->head + i) % c->cap) * c->esize);
+        c->len = 0;
+        gojo_g *wake = chan_fail_waiters(&c->send_head, &c->send_tail, NULL);
+        spin_unlock(&c->lock);
+        wake_list(wake);
+    }
+    if (GOJO_ADD(&c->ends, -1) == 0) chan_free(c, drop_elem);
+}
+
+static void chan_free(gojo_chan *c, void (*drop_elem)(void *)) {
     if (drop_elem)
         for (int64_t i = 0; i < c->len; i++) drop_elem(c->buf + ((c->head + i) % c->cap) * c->esize);
     free(c->buf);
@@ -1370,14 +1713,17 @@ static gojo_sudog *sq_pop(gojo_sudog **head, gojo_sudog **tail) {
 
 static inline void *chan_slot(gojo_chan *c, int64_t i) { return c->buf + ((c->head + i) % c->cap) * c->esize; }
 
-// Non-blocking attempts. c is locked; the lock is released only on success (1).
+// Non-blocking attempts. c is locked; the lock is released unless it would
+// block. 1: sent; 2: nobody can receive it (the caller keeps the value); 0: would block.
 static int chan_try_send_locked(gojo_chan *c, const void *elem, const char *loc) {
-    if (c->closed) {
+    (void)loc;
+    if (c->deaf) {
         spin_unlock(&c->lock);
-        gojo_panic("send on closed channel", loc);
+        return 2;
     }
     gojo_sudog *r = sq_pop(&c->recv_head, &c->recv_tail);
     if (r) {
+        g_touch(r->g);
         memcpy(r->elem, elem, c->esize);
         r->ok = true;
         spin_unlock(&c->lock);
@@ -1402,6 +1748,7 @@ static int chan_try_recv_locked(gojo_chan *c, void *out) {
         // a blocked sender can now use the free slot
         gojo_sudog *s = sq_pop(&c->send_head, &c->send_tail);
         if (s) {
+            g_touch(s->g);
             memcpy(chan_slot(c, c->len), s->elem, c->esize);
             c->len++;
             s->ok = true;
@@ -1414,6 +1761,7 @@ static int chan_try_recv_locked(gojo_chan *c, void *out) {
     }
     gojo_sudog *s = sq_pop(&c->send_head, &c->send_tail);
     if (s) {
+        g_touch(s->g);
         memcpy(out, s->elem, c->esize);
         s->ok = true;
         spin_unlock(&c->lock);
@@ -1427,74 +1775,73 @@ static int chan_try_recv_locked(gojo_chan *c, void *out) {
     return 0;
 }
 
-// False: the task was cancelled while blocked and the value was not sent.
+// False: the value was not sent (every receiver is gone, or the task was
+// cancelled while it waited); the caller drops it.
 bool gojo_chan_send(gojo_chan *c, const void *elem, const char *loc) {
+    sim_point();
     spin_lock(&c->lock);
-    if (chan_try_send_locked(c, elem, loc)) return true;
+    int r = chan_try_send_locked(c, elem, loc);
+    if (r) return r == 1;
     gojo_g *g = cur_g();
-    gojo_sudog s;
-    memset(&s, 0, sizeof s);
-    s.g = g;
-    s.c = c;
-    s.elem = (void *)elem;
-    s.token = wait_begin(g);
-    sq_push(&c->send_head, &c->send_tail, &s);
+    gojo_sudog *s = &g->sud;
+    memset(s, 0, sizeof *s);
+    s->g = g;
+    s->c = c;
+    s->elem = (void *)elem;
+    s->token = wait_begin(g);
+    sq_push(&c->send_head, &c->send_tail, s);
     spin_unlock(&c->lock);
-    wait_park(g, s.token);
+    blk(g, BLK_SEND, c);
+    wait_park(g, s->token);
+    unblk(g);
     if (g->wake == WAKE_CANCEL) {
         spin_lock(&c->lock);
-        sq_remove(&c->send_head, &c->send_tail, &s);
+        sq_remove(&c->send_head, &c->send_tail, s);
         spin_unlock(&c->lock);
         return false;
     }
-    if (!s.ok) gojo_panic("send on closed channel", loc);
-    return true;
+    return s->ok;
 }
 
 bool gojo_chan_recv(gojo_chan *c, void *out) {
+    sim_point();
     spin_lock(&c->lock);
     int r = chan_try_recv_locked(c, out);
     if (r) return r == 1;
     gojo_g *g = cur_g();
-    gojo_sudog s;
-    memset(&s, 0, sizeof s);
-    s.g = g;
-    s.c = c;
-    s.elem = out;
-    s.token = wait_begin(g);
-    sq_push(&c->recv_head, &c->recv_tail, &s);
+    gojo_sudog *s = &g->sud;
+    memset(s, 0, sizeof *s);
+    s->g = g;
+    s->c = c;
+    s->elem = out;
+    s->token = wait_begin(g);
+    sq_push(&c->recv_head, &c->recv_tail, s);
     spin_unlock(&c->lock);
-    wait_park(g, s.token);
+    blk(g, BLK_RECV, c);
+    wait_park(g, s->token);
+    unblk(g);
     if (g->wake == WAKE_CANCEL) {
         spin_lock(&c->lock);
-        sq_remove(&c->recv_head, &c->recv_tail, &s);
+        sq_remove(&c->recv_head, &c->recv_tail, s);
         spin_unlock(&c->lock);
         return false;
     }
-    return s.ok;
+    return s->ok;
 }
 
-void gojo_chan_close(gojo_chan *c, const char *loc) {
-    spin_lock(&c->lock);
-    if (c->closed) {
-        spin_unlock(&c->lock);
-        gojo_panic("close of closed channel", loc);
-    }
-    c->closed = true;
-    // collect first: the sudogs live on stacks that resume once readied
-    gojo_g *wake = NULL;
+// Takes every waiter off a queue, failed (ok = false), into a list to wake
+// once the lock is released: the sudogs live on stacks that resume when readied.
+static gojo_g *chan_fail_waiters(gojo_sudog **head, gojo_sudog **tail, gojo_g *wake) {
     gojo_sudog *s;
-    while ((s = sq_pop(&c->recv_head, &c->recv_tail))) {
+    while ((s = sq_pop(head, tail))) {
         s->ok = false;
         s->g->qnext = wake;
         wake = s->g;
     }
-    while ((s = sq_pop(&c->send_head, &c->send_tail))) {
-        s->ok = false;
-        s->g->qnext = wake;
-        wake = s->g;
-    }
-    spin_unlock(&c->lock);
+    return wake;
+}
+
+static void wake_list(gojo_g *wake) {
     while (wake) {
         gojo_g *n = wake->qnext;
         wake->qnext = NULL;
@@ -1510,12 +1857,24 @@ int64_t gojo_chan_len(gojo_chan *c) {
     return n;
 }
 
-// Returns the arm taken, or -1 for the default arm. cases[i].ok reports the outcome:
-// a received value, or a sent one. False on a receive means closed or cancelled;
-// false on a send means cancelled, and the value was not sent.
-int gojo_select(gojo_sel_case *cases, int n, bool has_default, const char *loc) {
+// Returns the channel case taken (0..n-1), a finished task (n + i), -1 for
+// the default arm, -3 when the deadline passed, -4 when the task was
+// cancelled (with `want_cancel`), or -2 for nothing. cases[i].ok reports the
+// outcome: a received value, or a sent one. False on a receive means closed or
+// cancelled; false on a send means cancelled, and the value was not sent.
+int gojo_select(gojo_sel_case *cases, int n, gojo_task **tasks, int nt, int64_t deadline, bool want_cancel, bool has_default, const char *loc) {
+    sim_point();
     gojo_g *g = cur_g();
-    int order[n], locks[n];
+    if (want_cancel && scope_cancelled(g->scope)) return -4;
+    // a finished task, or a deadline already passed, is ready now
+    for (int i = 0; i < nt; i++) {
+        spin_lock(&tasks[i]->lock);
+        bool done = tasks[i]->done;
+        spin_unlock(&tasks[i]->lock);
+        if (done) return n + i;
+    }
+    if (deadline >= 0 && gojo_time_now() >= deadline) return -3;
+    int order[n > 0 ? n : 1], locks[n > 0 ? n : 1];
     gojo_worker *w = cur_worker();
     for (int i = 0; i < n; i++) {
         int j = (int)(next_rand(w) % (uint64_t)(i + 1));
@@ -1539,12 +1898,11 @@ int gojo_select(gojo_sel_case *cases, int n, bool has_default, const char *loc) 
         gojo_sel_case *cs = &cases[order[i]];
         gojo_chan *c = cs->c;
         if (cs->send) {
-            if (c->closed) {
-                SEL_UNLOCK_ALL();
-                gojo_panic("send on closed channel", loc);
-            }
+            // nobody can receive: this arm is never taken
+            if (c->deaf) continue;
             gojo_sudog *r = sq_pop(&c->recv_head, &c->recv_tail);
             if (r) {
+                g_touch(r->g);
                 memcpy(r->elem, cs->elem, c->esize);
                 r->ok = true;
                 SEL_UNLOCK_ALL();
@@ -1567,6 +1925,7 @@ int gojo_select(gojo_sel_case *cases, int n, bool has_default, const char *loc) 
                 c->len--;
                 s = sq_pop(&c->send_head, &c->send_tail);
                 if (s) {
+                    g_touch(s->g);
                     memcpy(chan_slot(c, c->len), s->elem, c->esize);
                     c->len++;
                     s->ok = true;
@@ -1574,6 +1933,7 @@ int gojo_select(gojo_sel_case *cases, int n, bool has_default, const char *loc) 
             } else {
                 s = sq_pop(&c->send_head, &c->send_tail);
                 if (s) {
+                    g_touch(s->g);
                     memcpy(cs->elem, s->elem, c->esize);
                     s->ok = true;
                 } else if (c->closed) {
@@ -1594,34 +1954,81 @@ int gojo_select(gojo_sel_case *cases, int n, bool has_default, const char *loc) 
         SEL_UNLOCK_ALL();
         return -1;
     }
-    // nothing ready: wait on every channel
+    // nothing ready: wait on every channel, task and the deadline
     uint64_t token = wait_begin(g);
+    gojo_sudog *suds = n > 0 ? gojo_alloc((size_t)n * sizeof *suds) : NULL;
     for (int i = 0; i < n; i++) {
-        gojo_sudog *s = &cases[i].s;
+        gojo_sudog *s = &suds[i];
         memset(s, 0, sizeof *s);
         s->g = g;
         s->c = cases[i].c;
         s->elem = cases[i].elem;
         s->token = token;
+        s->idx = i;
         if (cases[i].send) sq_push(&s->c->send_head, &s->c->send_tail, s);
         else sq_push(&s->c->recv_head, &s->c->recv_tail, s);
     }
     SEL_UNLOCK_ALL();
-    wait_park(g, token);
+    gojo_task *ready = NULL;
+    for (int i = 0; i < nt; i++) {
+        spin_lock(&tasks[i]->lock);
+        if (tasks[i]->done) ready = tasks[i];
+        else {
+            tasks[i]->sel_g = g;
+            tasks[i]->sel_token = token;
+        }
+        spin_unlock(&tasks[i]->lock);
+    }
+    gojo_timer *tm = &g->timer;
+    memset(tm, 0, sizeof *tm);
+    tm->idx = -1;
+    if (deadline >= 0) {
+        tm->when = deadline;
+        tm->g = g;
+        tm->token = token;
+        timer_add(tm);
+    }
+    if (ready && wait_claim(g, token)) {
+        // finished between the first look and registering
+        g->wake = WAKE_TASK;
+        g->wake_data = ready;
+    } else {
+        blk(g, BLK_SELECT, n > 0 ? cases[0].c : NULL);
+        wait_park(g, token);
+        unblk(g);
+    }
     gojo_sudog *fired = g->wake == WAKE_CHAN ? g->wake_data : NULL;
     SEL_LOCK_ALL();
     for (int i = 0; i < n; i++) {
-        gojo_sudog *s = &cases[i].s;
+        gojo_sudog *s = &suds[i];
         if (cases[i].send) sq_remove(&s->c->send_head, &s->c->send_tail, s);
         else sq_remove(&s->c->recv_head, &s->c->recv_tail, s);
     }
     SEL_UNLOCK_ALL();
+    int fired_idx = fired ? fired->idx : -1;
+    bool fired_ok = fired ? fired->ok : false;
+    free(suds);
+    for (int i = 0; i < nt; i++) {
+        spin_lock(&tasks[i]->lock);
+        if (tasks[i]->sel_g == g && tasks[i]->sel_token == token) tasks[i]->sel_g = NULL;
+        spin_unlock(&tasks[i]->lock);
+    }
+    if (deadline >= 0 && g->wake != WAKE_TIMER) timer_remove(tm);
+    if (g->wake == WAKE_TASK) {
+        for (int i = 0; i < nt; i++)
+            if (tasks[i] == g->wake_data) return n + i;
+    }
+    if (g->wake == WAKE_TIMER) return -3;
+    if (g->wake == WAKE_CANCEL && want_cancel) return -4;
 #undef SEL_LOCK_ALL
 #undef SEL_UNLOCK_ALL
-    if (fired) {
-        int i = (int)((gojo_sel_case *)((char *)fired - offsetof(gojo_sel_case, s)) - cases);
-        if (cases[i].send && !fired->ok) gojo_panic("send on closed channel", loc);
-        cases[i].ok = fired->ok;
+    if (fired_idx >= 0) {
+        int i = fired_idx;
+        if (cases[i].send && !fired_ok) {
+            // the receivers went away while this send waited: wait on the rest
+            return gojo_select(cases, n, tasks, nt, deadline, want_cancel, has_default, loc);
+        }
+        cases[i].ok = fired_ok;
         return i;
     }
     // cancelled: behave as if a receive arm's channel was closed; with only send
@@ -1643,20 +2050,42 @@ struct gojo_mutex {
     int state;              // 0 free, 1 locked, 2 locked with waiters
     gojo_spin lock;
     gojo_g *head, *tail;
+    gojo_g *owner;          // for deadlock reports
+    const char *loc;        // where it was made: its class for lock-order checks
 };
 
-gojo_mutex *gojo_mutex_new(void) {
+gojo_mutex *gojo_mutex_new(const char *loc) {
     gojo_mutex *m = gojo_alloc(sizeof *m);
     memset(m, 0, sizeof *m);
+    m->loc = loc;
     return m;
 }
+
+static void lockdep_acquire(gojo_mutex *m);
+static void lockdep_release(gojo_mutex *m);
+static void mutex_lock_slow(gojo_mutex *m);
+
 
 void gojo_mutex_free(gojo_mutex *m) { free(m); }
 
 void gojo_mutex_lock(gojo_mutex *m) {
+    sim_point();
+    if (gojo_debug_checks) lockdep_acquire(m);
+    mutex_lock_slow(m);
+    gojo_g *g = cur_g();
+    if (g) {
+        m->owner = g;
+        if (gojo_debug_checks && m->loc) {
+            if (g->nheld < 8) g->held[g->nheld] = m->loc;
+            g->nheld++;
+        }
+    }
+}
+
+static void mutex_lock_slow(gojo_mutex *m) {
     int expected = 0;
     if (__atomic_compare_exchange_n(&m->state, &expected, 1, false, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) return;
-    for (int i = 0; i < 64; i++) {
+    for (int i = 0; i < 64 && !gojo_sim_on; i++) {
         cpu_relax();
         if (GOJO_RELAXED(&m->state) == 0) {
             expected = 0;
@@ -1678,11 +2107,56 @@ void gojo_mutex_lock(gojo_mutex *m) {
     else m->head = g;
     m->tail = g;
     spin_unlock(&m->lock);
+    blk(g, BLK_LOCK, m);
     g_park();
+    unblk(g);
     // the unlocker handed the lock over
 }
 
+static void mutex_unlock_slow(gojo_mutex *m);
+
+void gojo_mutex_lock_all(gojo_mutex **ms, int n, const char *loc) {
+    gojo_mutex *sorted[n > 0 ? n : 1];
+    for (int i = 0; i < n; i++) {
+        int k = i;
+        while (k > 0 && sorted[k - 1] > ms[i]) {
+            sorted[k] = sorted[k - 1];
+            k--;
+        }
+        sorted[k] = ms[i];
+    }
+    for (int i = 1; i < n; i++)
+        if (sorted[i] == sorted[i - 1]) gojo_panic("`lock(...)` was given the same mutex twice", loc);
+    gojo_g *g = cur_g();
+    int before = g ? g->nheld : 0;
+    for (int i = 0; i < n; i++) {
+        sim_point();
+        // order against the locks held before; not among these, whose order is fixed
+        if (gojo_debug_checks && g) {
+            int saved = g->nheld;
+            g->nheld = before;
+            lockdep_acquire(sorted[i]);
+            g->nheld = saved;
+        }
+        mutex_lock_slow(sorted[i]);
+        if (g) {
+            sorted[i]->owner = g;
+            if (gojo_debug_checks && sorted[i]->loc) {
+                if (g->nheld < 8) g->held[g->nheld] = sorted[i]->loc;
+                g->nheld++;
+            }
+        }
+    }
+}
+
 void gojo_mutex_unlock(gojo_mutex *m) {
+    m->owner = NULL;
+    if (gojo_debug_checks) lockdep_release(m);
+    mutex_unlock_slow(m);
+    sim_point();
+}
+
+static void mutex_unlock_slow(gojo_mutex *m) {
     int expected = 1;
     if (__atomic_compare_exchange_n(&m->state, &expected, 0, false, __ATOMIC_RELEASE, __ATOMIC_RELAXED)) return;
     spin_lock(&m->lock);
@@ -1710,33 +2184,62 @@ struct gojo_group {
     int64_t live;
     gojo_g *waiter;
     bool failed;
+    const char *loc;        // the `scope` block
+    gojo_g *owner;          // the goroutine that opened it: its tasks may borrow from its stack
+    struct gojo_group *next_open; // the owner's other open scopes
 };
 
-gojo_group *gojo_group_new(void) {
+// Whether tasks of scopes g opened are running: they may borrow from g's stack.
+static bool g_borrowed(gojo_g *g) {
+    for (gojo_group *grp = GOJO_LOAD(&g->open_groups); grp; grp = grp->next_open)
+        if (GOJO_SC_LOAD(&grp->live) > 0) return true;
+    return false;
+}
+
+gojo_group *gojo_group_new(const char *loc) {
     ensure_poller();
     gojo_group *g = gojo_alloc(sizeof *g);
     memset(g, 0, sizeof *g);
+    g->loc = loc;
     // the body runs in the group: a failing task cancels it too
-    scope_enter(&g->scope, cur_g());
+    gojo_g *cur = cur_g();
+    g->owner = cur;
+    g->next_open = cur->open_groups;
+    GOJO_STORE(&cur->open_groups, g);
+    bool root = cur->scope == NULL && cur->stack_size == s_main_stack_size;
+    scope_enter(&g->scope, cur);
+    // `main`'s own scope: a shutdown request (Ctrl-C) cancels it
+    if (root) {
+        spin_lock(&s_root_lock);
+        if (!s_root_scope) s_root_scope = &g->scope;
+        spin_unlock(&s_root_lock);
+    }
     return g;
 }
 
-void gojo_group_go(gojo_group *grp, void (*fn)(void *), void *arg) {
+void gojo_group_go(gojo_group *grp, void (*fn)(void *), void *arg, const char *loc) {
     gojo_g *g = g_alloc(cur_worker(), s_stack_size);
     g->fn = fn;
     g->arg = arg;
+    g->spawn_loc = loc;
     g->group = grp;
     GOJO_ADD(&s_ngoroutines, 1);
-    spin_lock(&grp->lock);
-    grp->live++;
-    spin_unlock(&grp->lock);
+    GOJO_ADD(&grp->live, 1);
     scope_join(&grp->scope, g);
     g_ready(g);
+    sim_point();
 }
 
 void gojo_group_task_done(gojo_group *grp) {
+    // not the last: no lock
+    int64_t n = GOJO_RELAXED(&grp->live);
+    while (n > 1) {
+        if (__atomic_compare_exchange_n(&grp->live, &n, n - 1, false, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED)) return;
+    }
+    // the last one decrements under the lock, so the body (which frees the
+    // scope once it sees none left, under the same lock) waits for it
     spin_lock(&grp->lock);
-    gojo_g *w = --grp->live == 0 ? grp->waiter : NULL;
+    gojo_g *w = GOJO_ADD(&grp->live, -1) == 0 ? grp->waiter : NULL;
     if (w) grp->waiter = NULL;
     spin_unlock(&grp->lock);
     if (w) g_ready(w);
@@ -1748,11 +2251,165 @@ bool gojo_group_fail(gojo_group *grp) {
     bool first = !grp->failed;
     grp->failed = true;
     spin_unlock(&grp->lock);
-    scope_cancel(&grp->scope);
+    scope_cancel_r(&grp->scope, CANCEL_FAILED);
     return first;
 }
 
 void gojo_group_cancel(gojo_group *grp) { scope_cancel(&grp->scope); }
+
+// A task with a handle failed: its scope is cancelled, the error goes to `join`.
+void gojo_group_cancel_failed(gojo_group *grp) { scope_cancel_r(&grp->scope, CANCEL_FAILED); }
+
+// ------------------------------------------------------------------ task handles
+//
+// `let t = go f()`. The task runs in a cancel scope of its own, under its
+// group's, so `t.cancel()` (or dropping `t`) stops just that task. The result
+// is stored after the header. Exactly one side frees the record: the joiner;
+// or, when the handle is dropped, whichever of the handle and the task is
+// last (the other one is gone, so the result has nobody to go to: the last one
+// drops it).
+
+
+#define TASK_HDR ((sizeof(gojo_task) + 15) & ~(size_t)15)
+
+gojo_task *gojo_task_new(size_t result_size) {
+    gojo_task *t = gojo_alloc(TASK_HDR + result_size);
+    memset(t, 0, sizeof *t);
+    return t;
+}
+
+void *gojo_task_result(gojo_task *t) { return (char *)t + TASK_HDR; }
+
+void gojo_group_go_task(gojo_group *grp, gojo_task *t, void (*fn)(void *), void *arg, const char *loc) {
+    gojo_g *g = g_alloc(cur_worker(), s_stack_size);
+    g->fn = fn;
+    g->arg = arg;
+    g->spawn_loc = loc;
+    t->loc = loc;
+    g->group = grp;
+    GOJO_ADD(&s_ngoroutines, 1);
+    GOJO_ADD(&grp->live, 1);
+    // the task's scope, a child of the group's
+    gojo_scope *s = &t->scope, *p = &grp->scope;
+    s->parent = p;
+    spin_lock(&p->lock);
+    s->cancelled = p->cancelled;
+    s->reason = p->reason;
+    s->next_sib = p->first_child;
+    if (p->first_child) p->first_child->prev_sib = s;
+    p->first_child = s;
+    spin_unlock(&p->lock);
+    scope_join(s, g);
+    g_ready(g);
+    sim_point();
+}
+
+// On the task, after it stored its result. True when the handle is gone: the
+// caller drops the result and frees the record.
+bool gojo_task_finish(gojo_task *t) {
+    gojo_g *g = cur_g();
+    // back into the group's scope: the record may be freed once `done` is set
+    scope_leave(g);
+    scope_join(t->scope.parent, g);
+    scope_unlink(&t->scope);
+    spin_lock(&t->lock);
+    t->done = true;
+    bool gone = t->handle_gone;
+    gojo_g *w = t->waiter;
+    t->waiter = NULL;
+    gojo_g *sg = t->sel_g;
+    uint64_t stok = t->sel_token;
+    t->sel_g = NULL;
+    spin_unlock(&t->lock);
+    if (w) g_ready(w);
+    if (sg && wait_claim(sg, stok)) {
+        sg->wake = WAKE_TASK;
+        sg->wake_data = t;
+        g_ready(sg);
+    }
+    return gone;
+}
+
+// Waits until the task has stored its result. Not a cancellation point: the
+// task belongs to a scope that is cancelled along with the waiter.
+void gojo_task_join(gojo_task *t) {
+    sim_point();
+    spin_lock(&t->lock);
+    if (!t->done) {
+        gojo_g *g = cur_g();
+        t->waiter = g;
+        spin_unlock(&t->lock);
+        blk(g, BLK_JOIN, t);
+        g_park();
+        unblk(g);
+    } else {
+        spin_unlock(&t->lock);
+    }
+    // the task may still be releasing the lock
+    spin_lock(&t->lock);
+    spin_unlock(&t->lock);
+}
+
+void gojo_task_cancel(gojo_task *t) {
+    spin_lock(&t->lock);
+    bool done = t->done;
+    spin_unlock(&t->lock);
+    if (!done) scope_cancel(&t->scope);
+}
+
+// The handle is dropped without a join: cancel the task. True when it already
+// finished: the caller drops the result and frees the record.
+bool gojo_task_abandon(gojo_task *t) {
+    gojo_task_cancel(t);
+    spin_lock(&t->lock);
+    t->handle_gone = true;
+    bool done = t->done;
+    spin_unlock(&t->lock);
+    return done;
+}
+
+void gojo_task_free(gojo_task *t) { free(t); }
+
+// ------------------------------------------------------------------ par for
+//
+// Indices are handed out in chunks from a shared counter, so tasks that get
+// cheap elements take more chunks. The calling task works too; the helpers
+// belong to a group of their own, so they are cancelled along with it.
+
+typedef struct {
+    void (*body)(void *, int64_t);
+    void *ctx;
+    int64_t n, grain, next;
+} par_job;
+
+static void par_run(par_job *j) {
+    for (;;) {
+        int64_t i = __atomic_fetch_add(&j->next, j->grain, __ATOMIC_RELAXED);
+        if (i >= j->n) return;
+        int64_t e = i + j->grain < j->n ? i + j->grain : j->n;
+        for (int64_t k = i; k < e; k++) j->body(j->ctx, k);
+    }
+}
+
+static void par_helper(void *p) { par_run(p); }
+
+void gojo_par_for(int64_t n, void (*body)(void *, int64_t), void *ctx) {
+    if (n <= 0) return;
+    int64_t procs = GOJO_RELAXED(&s_nprocs);
+    int64_t grain = n / (procs * 8);
+    if (grain < 1) grain = 1;
+    int64_t chunks = (n + grain - 1) / grain;
+    int64_t helpers = procs - 1 < chunks - 1 ? procs - 1 : chunks - 1;
+    if (helpers <= 0) {
+        for (int64_t i = 0; i < n; i++) body(ctx, i);
+        return;
+    }
+    par_job j = { body, ctx, n, grain, 0 };
+    gojo_group *grp = gojo_group_new("<par for>");
+    for (int64_t h = 0; h < helpers; h++) gojo_group_go(grp, par_helper, &j, "<par for helper>");
+    par_run(&j);
+    gojo_group_wait(grp);
+}
 
 // Always waits for every task, cancelled or not: tasks may borrow from this frame.
 void gojo_group_wait(gojo_group *grp) {
@@ -1760,10 +2417,12 @@ void gojo_group_wait(gojo_group *grp) {
     // the body is done; its tasks stay reachable by cancellation from above
     scope_step_out(&grp->scope, g);
     spin_lock(&grp->lock);
-    if (grp->live > 0) {
+    if (GOJO_SC_LOAD(&grp->live) > 0) {
         grp->waiter = g;
         spin_unlock(&grp->lock);
+        blk(g, BLK_SCOPE, grp);
         g_park();
+        unblk(g);
     } else {
         spin_unlock(&grp->lock);
     }
@@ -1771,18 +2430,16 @@ void gojo_group_wait(gojo_group *grp) {
     spin_lock(&grp->lock);
     spin_unlock(&grp->lock);
     scope_unlink(&grp->scope);
+    spin_lock(&s_root_lock);
+    if (s_root_scope == &grp->scope) s_root_scope = NULL;
+    spin_unlock(&s_root_lock);
+    // scopes close in the order they opened, innermost first
+    if (g->open_groups == grp) GOJO_STORE(&g->open_groups, grp->next_open);
     free(grp);
 }
 
 // ------------------------------------------------------------------ timers
 
-typedef struct gojo_timer {
-    int64_t when;
-    int idx;                // position in the heap, -1 when not in it
-    gojo_g *g;              // wake this goroutine...
-    uint64_t token;
-    gojo_scope *scope;      // ...or cancel this scope
-} gojo_timer;
 
 static pthread_mutex_t s_timer_lock = PTHREAD_MUTEX_INITIALIZER;
 static gojo_timer **s_heap;
@@ -1860,16 +2517,18 @@ bool gojo_time___sleep(int64_t ns) {
         gojo_task_yieldNow();
         return !scope_cancelled(cur_g()->scope);
     }
-    gojo_timer t;
-    memset(&t, 0, sizeof t);
-    t.when = gojo_time_now() + ns;
-    t.g = g;
-    t.token = wait_begin(g);
-    t.idx = -1;
-    timer_add(&t);
-    wait_park(g, t.token);
+    gojo_timer *t = &g->timer;
+    memset(t, 0, sizeof *t);
+    t->when = gojo_time_now() + ns;
+    t->g = g;
+    t->token = wait_begin(g);
+    t->idx = -1;
+    timer_add(t);
+    blk(g, BLK_SLEEP, NULL);
+    wait_park(g, t->token);
+    unblk(g);
     if (g->wake == WAKE_TIMER) return true;
-    timer_remove(&t);
+    timer_remove(t);
     return false;
 }
 
@@ -1882,12 +2541,77 @@ uint8_t *gojo_task___scopeEnter(int64_t ns) {
     sc->t.idx = -1;
     sc->t.scope = &sc->s;
     if (ns <= 0) {
-        scope_cancel(&sc->s);
+        scope_cancel_r(&sc->s, CANCEL_DEADLINE);
     } else {
         sc->t.when = gojo_time_now() + ns;
+        sc->s.deadline = sc->t.when;
         timer_add(&sc->t);
     }
     return (uint8_t *)sc;
+}
+
+// Why the current task was cancelled (CANCEL_*), or 0.
+int64_t gojo_task___reason(void) {
+    gojo_scope *s = cur_g()->scope;
+    if (!scope_cancelled(s)) return 0;
+    return s->reason ? s->reason : CANCEL_EXPLICIT;
+}
+
+// The nearest deadline of the current task, or -1.
+int64_t gojo_task___deadline(void) {
+    int64_t best = -1;
+    for (gojo_scope *s = cur_g()->scope; s; s = s->parent)
+        if (s->deadline && (best < 0 || s->deadline < best)) best = s->deadline;
+    return best;
+}
+
+// `task.shield(d, f)`: the task leaves its scope for a fresh one that only
+// its own deadline cancels, then comes back.
+typedef struct {
+    gojo_scope s;
+    gojo_timer t;
+    gojo_scope *saved;
+} gojo_shield;
+
+uint8_t *gojo_task___shieldEnter(int64_t ns) {
+    gojo_g *g = cur_g();
+    gojo_shield *sh = gojo_alloc(sizeof *sh);
+    memset(sh, 0, sizeof *sh);
+    sh->saved = g->scope;
+    sh->t.idx = -1;
+    sh->t.scope = &sh->s;
+    scope_leave(g);
+    scope_join(&sh->s, g);
+    if (ns <= 0) {
+        scope_cancel_r(&sh->s, CANCEL_DEADLINE);
+    } else {
+        sh->t.when = gojo_time_now() + ns;
+        sh->s.deadline = sh->t.when;
+        timer_add(&sh->t);
+    }
+    return (uint8_t *)sh;
+}
+
+void gojo_task___shieldExit(uint8_t *p) {
+    gojo_shield *sh = (gojo_shield *)p;
+    gojo_g *g = cur_g();
+    timer_remove(&sh->t);
+    scope_leave(g);
+    scope_join(sh->saved, g);
+    free(sh);
+}
+
+// Around a type's `drop` method: in a cancelled task, cleanup still gets to
+// block, for a grace period (GOJO_DROP_GRACE ms, default 1000). NULL: the
+// task isn't cancelled, nothing to do.
+uint8_t *gojo_drop_shield(void) {
+    gojo_worker *w = cur_worker();
+    if (!w || !w->cur || !scope_cancelled(w->cur->scope)) return NULL;
+    return gojo_task___shieldEnter(s_drop_grace);
+}
+
+void gojo_drop_unshield(uint8_t *sh) {
+    if (sh) gojo_task___shieldExit(sh);
 }
 
 // True: the scope was cancelled, by its deadline or from outside.
@@ -1925,8 +2649,34 @@ static void poller_wake(void) {
 #define UNRESPONSIVE (20 * 1000000)     // no answer to a request to yield: it's in C
 #define SYSCALL_AFTER (1 * 1000000)     // a C call this long gives up its slot
 
+static void dump_task(FILE *f, gojo_g *g, int64_t now);
+
+// Debug builds: a scope that has waited for its tasks for 10 s says what they
+// are waiting for (once per wait).
+static void note_slow_scopes(int64_t now) {
+    static int64_t last;
+    if (now - last < 1000000000) return;
+    last = now;
+    uint32_t n = GOJO_LOAD(&s_g_count);
+    for (uint32_t i = 0; i < n; i++) {
+        gojo_g *g = g_slot(i);
+        if (!GOJO_RELAXED(&g->alive) || GOJO_RELAXED(&g->blocked) != BLK_SCOPE || GOJO_RELAXED(&g->slow_noted)) continue;
+        int64_t since = GOJO_RELAXED(&g->blocked_since);
+        if (now - since < 10 * (int64_t)1000000000) continue;
+        GOJO_SET_RELAXED(&g->slow_noted, true);
+        gojo_group *grp = (gojo_group *)GOJO_RELAXED(&g->blocked_on);
+        fprintf(stderr, "note: the scope at %s has waited %.0f s for its tasks:\n", grp->loc ? grp->loc : "?", (double)(now - since) / 1e9);
+        for (uint32_t j = 0; j < n; j++) {
+            gojo_g *t = g_slot(j);
+            if (GOJO_RELAXED(&t->alive) && t->group == grp) dump_task(stderr, t, now);
+        }
+    }
+}
+
 static void monitor_tick(void) {
     int64_t now = gojo_time_now();
+    if (gojo_debug_checks) note_slow_scopes(now);
+    hibernate_parked(now);
     int started = GOJO_LOAD(&s_nstarted);
     bool queued = GOJO_RELAXED(&s_gq_size) > 0;
     for (int i = 0; i < started && !queued; i++) {
@@ -1979,6 +2729,28 @@ static void monitor_tick(void) {
     if (queued && can_wake() && GOJO_SC_LOAD(&s_nspinning) == 0) wake_one();
 }
 
+// Wakes the sleepers whose time has come, and cancels expired deadlines.
+static void timers_fire(int64_t now) {
+    pthread_mutex_lock(&s_timer_lock);
+    while (s_heap_len > 0 && s_heap[0]->when <= now) {
+        gojo_timer *t = s_heap[0];
+        if (t->scope) {
+            heap_remove(t);
+            scope_cancel_r(t->scope, CANCEL_DEADLINE);
+        } else {
+            // keep it counted until the goroutine is queued, for deadlock detection
+            GOJO_ADD(&s_timers_pending, 1);
+            heap_remove(t);
+            if (wait_claim(t->g, t->token)) {
+                t->g->wake = WAKE_TIMER;
+                g_ready(t->g);
+            }
+            GOJO_ADD(&s_timers_pending, -1);
+        }
+    }
+    pthread_mutex_unlock(&s_timer_lock);
+}
+
 static void deliver_token(uint64_t data) {
     uint32_t idx = (uint32_t)(data >> 34);
     uint64_t low = data & (((uint64_t)1 << 34) - 1);
@@ -1999,32 +2771,22 @@ static void *poller_main(void *arg) {
     sigfillset(&all);
     pthread_sigmask(SIG_BLOCK, &all, NULL);
     for (;;) {
-        int64_t now = gojo_time_now();
         int64_t next = -1;
-        pthread_mutex_lock(&s_timer_lock);
-        while (s_heap_len > 0 && s_heap[0]->when <= now) {
-            gojo_timer *t = s_heap[0];
-            if (t->scope) {
-                heap_remove(t);
-                scope_cancel(t->scope);
-            } else {
-                // keep it counted until the goroutine is queued, for deadlock detection
-                GOJO_ADD(&s_timers_pending, 1);
-                heap_remove(t);
-                if (wait_claim(t->g, t->token)) {
-                    t->g->wake = WAKE_TIMER;
-                    g_ready(t->g);
-                }
-                GOJO_ADD(&s_timers_pending, -1);
-            }
+        check_shutdown();
+        if (!gojo_sim_on) {
+            int64_t now = gojo_time_now();
+            timers_fire(now);
+            pthread_mutex_lock(&s_timer_lock);
+            if (s_heap_len > 0) next = s_heap[0]->when - now;
+            pthread_mutex_unlock(&s_timer_lock);
+            monitor_tick();
         }
-        if (s_heap_len > 0) next = s_heap[0]->when - now;
-        pthread_mutex_unlock(&s_timer_lock);
-        monitor_tick();
         // while anything runs, tick for the monitor; when all is idle, only events matter
         bool idle = GOJO_SC_LOAD(&s_nidle) == GOJO_SC_LOAD(&s_nstarted);
-        if (!idle && (next < 0 || next > 2000000)) next = 2000000;
-        if (next < 0 || next > 100000000) next = 100000000;
+        if (!gojo_sim_on) {
+            if (!idle && (next < 0 || next > 2000000)) next = 2000000;
+            if (next < 0 || next > 100000000) next = 100000000;
+        }
 #if defined(__APPLE__)
         struct kevent evs[64];
         struct timespec ts;
@@ -2121,7 +2883,9 @@ static bool wait_fd(int fd, bool for_write) {
         if (errno != ENOENT || epoll_ctl(s_poll_fd, EPOLL_CTL_ADD, fd, &ev) != 0) gojo_panic("cannot register a file descriptor with the poller", "<runtime>");
     }
 #endif
+    blk(g, BLK_IO, NULL);
     wait_park(g, token);
+    unblk(g);
     if (g->wake == WAKE_IO) return true;
     // cancelled: the registration is stale now, and a late event won't match the token
     GOJO_ADD(&s_io_waiters, -1);
@@ -2293,22 +3057,317 @@ int64_t gojo_net___port(int64_t fd) {
 }
 
 
+// ------------------------------------------------------------------ task dumps
+//
+// Every live goroutine with where it was started and what it waits for. The
+// reads race with running goroutines: this is for people (and agents)
+// reading a stuck program, not for the program itself.
+
+static const char *loc_or(const char *l, const char *d) { return l ? l : d; }
+
+static void dump_task(FILE *f, gojo_g *g, int64_t now) {
+    const char *who = g->spawn_loc ? g->spawn_loc : (g->stack_size == s_main_stack_size ? "main" : "<runtime>");
+    fprintf(f, "  task %s: ", who);
+    double secs = (double)(now - GOJO_RELAXED(&g->blocked_since)) / 1e9;
+    switch (GOJO_RELAXED(&g->blocked)) {
+    case BLK_RECV:
+        fprintf(f, "receiving from the channel made at %s", loc_or(((gojo_chan *)g->blocked_on)->loc, "?"));
+        break;
+    case BLK_SEND:
+        fprintf(f, "sending on the channel made at %s", loc_or(((gojo_chan *)g->blocked_on)->loc, "?"));
+        break;
+    case BLK_SELECT:
+        if (g->blocked_on) fprintf(f, "in a select (one channel made at %s)", loc_or(((gojo_chan *)g->blocked_on)->loc, "?"));
+        else fprintf(f, "in a select");
+        break;
+    case BLK_LOCK: {
+        gojo_mutex *m = (gojo_mutex *)g->blocked_on;
+        gojo_g *o = m->owner;
+        fprintf(f, "locking the mutex made at %s", loc_or(m->loc, "?"));
+        if (o) fprintf(f, ", held by task %s", o->spawn_loc ? o->spawn_loc : "main");
+        break;
+    }
+    case BLK_JOIN:
+        fprintf(f, "joining the task started at %s", loc_or(((gojo_task *)g->blocked_on)->loc, "?"));
+        break;
+    case BLK_SCOPE: {
+        gojo_group *grp = (gojo_group *)g->blocked_on;
+        fprintf(f, "waiting for %lld task(s) of the scope at %s", (long long)grp->live, loc_or(grp->loc, "?"));
+        break;
+    }
+    case BLK_SLEEP: fprintf(f, "sleeping"); break;
+    case BLK_IO: fprintf(f, "waiting for the network"); break;
+    default: fprintf(f, "running or ready"); secs = -1; break;
+    }
+    if (secs >= 0) fprintf(f, " (%.3f s)", secs);
+    if (g->nheld > 0) {
+        fprintf(f, "; holds the mutex made at %s", g->held[0]);
+        for (int i = 1; i < g->nheld && i < 8; i++) fprintf(f, ", %s", g->held[i]);
+    }
+    fprintf(f, "\n");
+}
+
+static void dump_tasks(FILE *f) {
+    int64_t now = gojo_time_now();
+    uint32_t n = GOJO_LOAD(&s_g_count);
+    for (uint32_t i = 0; i < n; i++) {
+        gojo_g *g = g_slot(i);
+        if (GOJO_RELAXED(&g->alive)) dump_task(f, g, now);
+    }
+}
+
+void gojo_task_dump(void) {
+    fflush(stdout);
+    fprintf(stderr, "tasks:\n");
+    dump_tasks(stderr);
+    fflush(stderr);
+}
+
+
+// Every goroutine is parked and nothing (timer, network) can wake one.
+static _Noreturn void deadlock(void) {
+    fflush(stdout);
+    fprintf(stderr, "panic: all tasks are blocked: deadlock\n");
+    dump_tasks(stderr);
+    // a cycle of tasks waiting for each other's locks
+    uint32_t n = GOJO_LOAD(&s_g_count);
+    for (uint32_t i = 0; i < n; i++) {
+        gojo_g *g = g_slot(i);
+        if (!g->alive || g->blocked != BLK_LOCK) continue;
+        gojo_g *cur = g;
+        for (uint32_t steps = 0; steps <= n && cur && cur->blocked == BLK_LOCK; steps++) {
+            cur = ((gojo_mutex *)cur->blocked_on)->owner;
+            if (cur == g) {
+                fprintf(stderr, "  the tasks above wait for each other's locks: take them in one order everywhere, or together with `lock(a, b)`\n");
+                i = n;
+                break;
+            }
+        }
+    }
+    fflush(stderr);
+    _exit(2);
+}
+
+static void on_quit(int sig) {
+    (void)sig;
+    gojo_task_dump();
+    _exit(2);
+}
+
+// ------------------------------------------------------------------ lock order (debug builds)
+//
+// Each mutex is classed by where it was made. Taking B while holding A
+// records A -> B; finding the reverse path means two tasks could deadlock,
+// even if this run didn't. Reported once per pair.
+
+typedef struct { const char *from, *to; } lock_edge;
+static lock_edge *s_edges;
+static int s_nedges, s_cap_edges;
+static gojo_spin s_edge_lock;
+
+static bool edge_path(const char *from, const char *to, int depth) {
+    if (from == to) return true;
+    if (depth > 32) return false;
+    for (int i = 0; i < s_nedges; i++)
+        if (s_edges[i].from == from && edge_path(s_edges[i].to, to, depth + 1)) return true;
+    return false;
+}
+
+static void lockdep_acquire(gojo_mutex *m) {
+    gojo_g *g = cur_g();
+    if (!g || !m->loc) return;
+    spin_lock(&s_edge_lock);
+    for (int h = 0; h < g->nheld && h < 8; h++) {
+        const char *a = g->held[h];
+        if (a == m->loc) continue;
+        bool known = false;
+        for (int i = 0; i < s_nedges && !known; i++) known = s_edges[i].from == a && s_edges[i].to == m->loc;
+        if (known) continue;
+        if (edge_path(m->loc, a, 0)) {
+            fprintf(stderr, "warning: possible deadlock: a task takes the mutex made at %s while holding the one made at %s, and somewhere they are taken the other way round\n  take them in one order everywhere, or together with `lock(a, b)`\n", m->loc, a);
+        }
+        if (s_nedges == s_cap_edges) {
+            s_cap_edges = s_cap_edges ? s_cap_edges * 2 : 64;
+            s_edges = gojo_realloc(s_edges, (size_t)s_cap_edges * sizeof *s_edges);
+        }
+        s_edges[s_nedges++] = (lock_edge){ a, m->loc };
+    }
+    spin_unlock(&s_edge_lock);
+}
+
+static void lockdep_release(gojo_mutex *m) {
+    gojo_g *g = cur_g();
+    if (!g || !m->loc || g->nheld == 0) return;
+    int n = g->nheld < 8 ? g->nheld : 8;
+    for (int i = n - 1; i >= 0; i--) {
+        if (g->held[i] == m->loc) {
+            for (int j = i; j + 1 < n; j++) g->held[j] = g->held[j + 1];
+            break;
+        }
+    }
+    g->nheld--;
+}
+
+// ------------------------------------------------------------------ simulation
+//
+// `gojo test` (and GOJO_SEED=n for any program) runs on one thread with a
+// seeded scheduler: which runnable task goes next, and whether a task gives
+// way at a channel operation, lock, spawn or join, comes from the seed. The
+// clock is virtual: when every task waits, it jumps to the next timer. Since
+// tasks only affect each other through these operations (no data races),
+// the seed decides everything that can vary -- except the network, which is
+// waited for in real time.
+
+
+static uint64_t sim_rand(void) {
+    s_sim_rng ^= s_sim_rng << 13;
+    s_sim_rng ^= s_sim_rng >> 7;
+    s_sim_rng ^= s_sim_rng << 17;
+    return s_sim_rng;
+}
+
+void gojo_sim_setup(uint64_t seed) {
+    gojo_sim_on = 1;
+    s_sim_rng = seed * 0x9E3779B97F4A7C15ULL + 0x632BE59BD9B4E019ULL;
+    if (!s_sim_rng) s_sim_rng = 1;
+    gojo_sim_clock = 0;
+    // every checkpoint counts down to a random preemption
+    __atomic_store_n(&gojo_preempt_flag, 1, __ATOMIC_RELAXED);
+}
+
+// Called with s_lock not held, from any thread (the poller delivers network events).
+static void sim_push(gojo_g *g) {
+    pthread_mutex_lock(&s_lock);
+    if (s_simq_len == s_simq_cap) {
+        s_simq_cap = s_simq_cap ? s_simq_cap * 2 : 256;
+        s_simq = gojo_realloc(s_simq, (size_t)s_simq_cap * sizeof *s_simq);
+    }
+    s_simq[s_simq_len++] = g;
+    if (s_sim_sleeping) pthread_cond_signal(&s_workers[0]->cv);
+    pthread_mutex_unlock(&s_lock);
+}
+
+
+static void timers_fire(int64_t now);
+
+// Nothing runnable: advance the clock to the next timer, or wait for the
+// network. False: nothing can ever wake anyone.
+static bool sim_idle(gojo_worker *w) {
+    pthread_mutex_lock(&s_timer_lock);
+    int64_t next = s_heap_len > 0 ? s_heap[0]->when : -1;
+    pthread_mutex_unlock(&s_timer_lock);
+    int64_t io = GOJO_SC_LOAD(&s_io_waiters);
+    if (next >= 0 && io == 0) {
+        if (next > gojo_sim_clock) __atomic_store_n(&gojo_sim_clock, next, __ATOMIC_RELAXED);
+        timers_fire(gojo_sim_clock);
+        return true;
+    }
+    if (io > 0) {
+        // the network runs in real time; so does the clock meanwhile
+        struct timespec t0, t1;
+        clock_gettime(CLOCK_MONOTONIC, &t0);
+        pthread_mutex_lock(&s_lock);
+        s_sim_sleeping = true;
+        while (s_simq_len == 0) {
+            if (next >= 0) {
+                int64_t wait = next - gojo_sim_clock;
+                if (wait <= 0) break;
+                struct timespec ts;
+                clock_gettime(CLOCK_REALTIME, &ts);
+                int64_t at = (int64_t)ts.tv_sec * 1000000000 + ts.tv_nsec + wait;
+                ts.tv_sec = (time_t)(at / 1000000000);
+                ts.tv_nsec = (long)(at % 1000000000);
+                if (pthread_cond_timedwait(&w->cv, &s_lock, &ts) == ETIMEDOUT) break;
+            } else {
+                pthread_cond_wait(&w->cv, &s_lock);
+            }
+        }
+        s_sim_sleeping = false;
+        pthread_mutex_unlock(&s_lock);
+        clock_gettime(CLOCK_MONOTONIC, &t1);
+        int64_t dt = ((int64_t)t1.tv_sec - t0.tv_sec) * 1000000000 + (t1.tv_nsec - t0.tv_nsec);
+        __atomic_store_n(&gojo_sim_clock, gojo_sim_clock + (dt > 0 ? dt : 0), __ATOMIC_RELAXED);
+        if (next >= 0 && gojo_sim_clock < next && s_simq_len == 0) __atomic_store_n(&gojo_sim_clock, next, __ATOMIC_RELAXED);
+        timers_fire(gojo_sim_clock);
+        return true;
+    }
+    return false;
+}
+
+void gojo_sim_point(void) { sim_point(); }
+
+static gojo_g *sim_find_work(gojo_worker *w) {
+    // time passes while tasks compute too: a microsecond per scheduling step,
+    // so a task that computes until a deadline gets there
+    __atomic_store_n(&gojo_sim_clock, gojo_sim_clock + 1000, __ATOMIC_RELAXED);
+    if (GOJO_RELAXED(&s_heap_len) > 0) timers_fire(gojo_sim_clock);
+    for (;;) {
+        pthread_mutex_lock(&s_lock);
+        if (s_simq_len > 0) {
+            int i = (int)(sim_rand() % (uint64_t)s_simq_len);
+            gojo_g *g = s_simq[i];
+            s_simq[i] = s_simq[--s_simq_len];
+            pthread_mutex_unlock(&s_lock);
+            return g;
+        }
+        pthread_mutex_unlock(&s_lock);
+        if (!sim_idle(w)) deadlock();
+    }
+}
+
 // ------------------------------------------------------------------ tests
 
-// Each test gets a process, and a scheduler, of its own.
-int gojo_run_test(void (*fn)(void), const char *name) {
+// One run of a test in a process of its own; seed 0: the real scheduler.
+static bool run_test_once(void (*fn)(void), uint64_t seed) {
     fflush(stdout);
     fflush(stderr);
-    int64_t t0 = gojo_time_now();
     pid_t pid = fork();
     if (pid == 0) {
+        if (seed) gojo_sim_setup(seed);
         gojo_sched_main(fn);
     }
     int status = 0;
     waitpid(pid, &status, 0);
-    double ms = (double)(gojo_time_now() - t0) / 1e6;
-    bool ok = WIFEXITED(status) && WEXITSTATUS(status) == 0;
-    fprintf(stderr, "%s %s (%.1f ms)\n", ok ? "  ok  " : "  FAIL", name, ms);
+    return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+
+// Each test gets a process, and a scheduler, of its own. The scheduler is
+// simulated (see "simulation") with a seed taken from the test's name, so a
+// test does the same thing every run; GOJO_SEED picks another seed,
+// GOJO_EXPLORE=n tries n seeds, GOJO_SCHED=real uses the real scheduler.
+int gojo_run_test(void (*fn)(void), const char *name) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    int64_t t0 = (int64_t)ts.tv_sec * 1000000000 + ts.tv_nsec;
+    const char *sched = getenv("GOJO_SCHED");
+    bool real = sched && strcmp(sched, "real") == 0;
+    uint64_t seed = 14695981039346656037ULL;
+    for (const char *p = name; *p; p++) seed = (seed ^ (uint8_t)*p) * 1099511628211ULL;
+    seed = seed % 1000000 + 1;
+    const char *env = getenv("GOJO_SEED");
+    if (env && *env) seed = strtoull(env, NULL, 10);
+    long runs = 1;
+    env = getenv("GOJO_EXPLORE");
+    if (env && atol(env) > 1) runs = atol(env);
+    bool ok = true;
+    uint64_t failed_seed = 0;
+    long done = 0;
+    for (long r = 0; r < runs && ok; r++) {
+        uint64_t s = real ? 0 : seed + (uint64_t)r;
+        ok = run_test_once(fn, s);
+        done++;
+        if (!ok) failed_seed = s;
+    }
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    double ms = (double)((int64_t)ts.tv_sec * 1000000000 + ts.tv_nsec - t0) / 1e6;
+    if (ok) {
+        if (runs > 1) fprintf(stderr, "  ok   %s (%ld schedules, %.1f ms)\n", name, done, ms);
+        else fprintf(stderr, "  ok   %s (%.1f ms)\n", name, ms);
+    } else if (failed_seed) {
+        fprintf(stderr, "  FAIL %s (seed %llu; rerun it with `gojo test --seed %llu`)\n", name, (unsigned long long)failed_seed, (unsigned long long)failed_seed);
+    } else {
+        fprintf(stderr, "  FAIL %s (%.1f ms)\n", name, ms);
+    }
     return ok ? 0 : 1;
 }
 
@@ -2317,6 +3376,7 @@ int gojo_run_test(void (*fn)(void), const char *name) {
 int64_t gojo_task___numGoroutines(void) { return GOJO_SC_LOAD(&s_ngoroutines) + 1; }
 int64_t gojo_task___numThreads(void) { return GOJO_SC_LOAD(&s_nstarted); }
 int64_t gojo_task___maxProcs(void) { return GOJO_RELAXED(&s_nprocs); }
+int64_t gojo_task___numHibernated(void) { return GOJO_RELAXED(&s_nhib); }
 
 int64_t gojo_task___setMaxProcs(int64_t n) {
     if (n < 1) n = 1;

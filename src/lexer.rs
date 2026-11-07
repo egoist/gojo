@@ -22,13 +22,13 @@ pub enum Tok {
 pub enum Kw {
     Use, Extend, Pub, Func, Struct, Enum, Interface, Type, Copy, Let, Var, If, Else, For,
     In, Match, Return, Break, Continue, Defer, ErrDefer, Go, Try, Catch, With, Yield, Unsafe, Extern,
-    None, True, False, Inout, Sink, Where, Test, Const, Chan, Select,
+    None, True, False, Inout, Sink, Where, Test, Const, Chan, Select, Scope, Isolate,
 }
 
 const KEYWORDS: &[&str] = &[
     "use", "extend", "pub", "fn", "struct", "enum", "interface", "type", "copy", "let", "var", "if", "else", "for", "in", "match", "return", "break",
     "continue", "defer", "errdefer", "go", "try", "catch", "with", "yield", "unsafe", "extern", "none", "true", "false", "inout", "sink", "where", "test",
-    "const", "chan", "select",
+    "const", "chan", "select", "scope", "isolate",
 ];
 
 impl Kw {
@@ -79,6 +79,8 @@ fn keyword(s: &str) -> Option<Kw> {
         "const" => Const,
         "chan" => Chan,
         "select" => Select,
+        "scope" => Scope,
+        "isolate" => Isolate,
         _ => return Option::None,
     })
 }

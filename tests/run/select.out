@@ -1,0 +1,7 @@
+b 2
+timed out
+guard false: default
+guarded some(7)
+cancelled arm
+at the deadline
+false

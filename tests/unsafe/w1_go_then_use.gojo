@@ -1,5 +1,6 @@
+// The task borrows `s` until main's scope ends: moving it away is a use after free.
 fn main() {
     let s = "abc".toString()
     go () => println(s)
-    println(s)
+    drop(s)
 }

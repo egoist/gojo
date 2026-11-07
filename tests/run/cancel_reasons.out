@@ -1,0 +1,8 @@
+sibling: some(Failed)
+explicit: some(Explicit) err(cancelled)
+deadline set: true
+deadline: some(Deadline)
+no deadline here: none
+shielded sleep finished; cancelled inside: false after: true
+dropping in a cancelled task
+goodbye from a cancelled inside drop: false

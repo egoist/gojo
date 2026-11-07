@@ -1,0 +1,25 @@
+// Ctrl-C (SIGINT) cancels `main`'s scope: tasks stop, drops run, exit code 130.
+use std/{task, time}
+
+struct Conn {
+    id int
+    fn drop(self inout) {
+        println("closing", self.id, task.reason())
+    }
+}
+
+fn main() {
+    let ready = chan[bool](4)
+    for id in 0..3 {
+        let tx = ready.tx.clone()
+        go () => {
+            let _c = Conn{id: id}
+            tx <- true
+            time.sleep(time.hour)
+        }
+    }
+    for _ in 0..3 {
+        _ = <-ready.rx
+    }
+    println("serving")
+}

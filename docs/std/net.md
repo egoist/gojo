@@ -1,13 +1,15 @@
 # net
 
-TCP networking. Calls block only the calling goroutine: while one waits for
-the network, others keep running on its thread.
+TCP networking. Calls block only the calling task: while one waits for the
+network, others keep running on its thread.
 
 ```zig
 let ln = try net.listen(":8080")
-for {
-    let c = try ln.accept()
-    go serve(c)
+scope {
+    for {
+        let c = try ln.accept()
+        go serve(c)
+    }
 }
 ```
 

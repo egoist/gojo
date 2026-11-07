@@ -1,6 +1,6 @@
 # http
 
-HTTP/1.1: a server built on goroutines, task groups and cancellation, and a
+HTTP/1.1: a server built on tasks, scopes and cancellation, and a
 small client. Plain HTTP only (no TLS).
 
 ```zig
@@ -15,7 +15,7 @@ fn main() ! io.Error {
 }
 ```
 
-Every connection is a task in the server's group, so cancelling the task
+Every connection is a task in the server's scope, so cancelling the task
 that runs `serve` cancels the requests in flight. Every request runs under a
 deadline (`Options.deadline`): a handler still running then is cancelled and
 the client gets 504. A client that hangs up cancels its request too: the

@@ -9,7 +9,7 @@
 // `gojo run examples/todo serve [FILE]` serves on :8080, saving to FILE (JSON)
 // after every change. `gojo run examples/todo` starts it on a free port and
 // checks it with a client.
-use std/{fmt, http, io, json, net, os, task, time}
+use std/{fmt, http, io, json, net, os, time}
 
 struct Todo {
     id int
@@ -233,15 +233,8 @@ fn selfTest() ! io.Error {
     let api = Api{store: Mutex(Store{file: path.clone()})}
     let ln = try net.listen("127.0.0.1:0")
     let base = fmt.format("http://127.0.0.1:{}", ln.port())
-    let stop = chan[bool]()
-    _ = task.group((g) => {
-        g.go(() => {
-            _ = task.group((sg) => {
-                sg.go(() => http.serve(ln, api, http.Options{}))
-                _ = <-stop
-                sg.cancel()
-            })
-        })
+    scope server {
+        go http.serve(ln, api, http.Options{})
         println(call(base, "GET", "/todos", ""))
         println(call(base, "POST", "/todos", `{"title": "  write the docs "}`))
         println(call(base, "POST", "/todos", `{"title": "ship the beta"}`))
@@ -258,8 +251,8 @@ fn selfTest() ! io.Error {
         println(call(base, "PUT", "/todos", ""))
         println(call(base, "GET", "/elsewhere", ""))
         println(call(base, "GET", "/todos", ""))
-        stop <- true
-    })
+        server.cancel()
+    }
     // what was saved can be loaded again
     var again = Store{file: path.clone()}
     try again.load()

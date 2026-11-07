@@ -226,7 +226,7 @@ const SNIPPETS: &[&str] = &[
     "==", "<", "|", "_", "self", "move", "clone()", ".clone()", "inout", "sink", "&mut", "let", "var", "fn", "return", "break", "continue",
     "defer", "errdefer", "go", "try", "catch", "with", "yield", "unsafe", "match", "if", "else", "for", "in", "select", "chan", "none", "some(",
     "ok(", "err(", "true", "false", "struct", "enum", "interface", "copy", "pub", "extend", "where", "const", "type", "Vec[int]", "String",
-    "str", "[]int", "?int", "int ! String", "Box[int]", "rc[int]", "Map[int, int]", "Mutex", "task.group", "drop(", "assert(", "println(",
+    "str", "[]int", "?int", "int ! String", "Box[int]", "rc[int]", "Map[int, int]", "Mutex", "scope", "drop(", "assert(", "println(",
     "0..10", "x", "v", "s", "i", "\"s\"", "'c'", "1.5", "[1, 2, 3]", "Vec[String]{}", "(x) => x", "() => {}", "fn() {}", "#",
 ];
 

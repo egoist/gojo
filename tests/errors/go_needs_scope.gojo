@@ -1,0 +1,15 @@
+fn helper() {
+    go println("detached")
+    // error: `go` needs an enclosing `scope { }`
+}
+
+fn main() {
+    scope {
+        let f = () => {
+            go println("inside a closure")
+        }
+        // error: this `go` is inside a closure, but its `scope` is outside it
+        f()
+    }
+    helper()
+}

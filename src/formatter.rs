@@ -93,7 +93,7 @@ const BINARY: &[&str] = &[
 
 /// Keywords whose statement's `{` opens a block or a declaration body.
 fn header_kw(k: Kw) -> bool {
-    matches!(k, Kw::If | Kw::For | Kw::Match | Kw::With | Kw::Select | Kw::Else | Kw::Struct | Kw::Enum | Kw::Interface | Kw::Extend | Kw::Func | Kw::Test | Kw::Unsafe | Kw::Extern | Kw::Catch | Kw::Defer | Kw::ErrDefer)
+    matches!(k, Kw::If | Kw::For | Kw::Match | Kw::With | Kw::Select | Kw::Else | Kw::Struct | Kw::Enum | Kw::Interface | Kw::Extend | Kw::Func | Kw::Test | Kw::Unsafe | Kw::Extern | Kw::Catch | Kw::Defer | Kw::ErrDefer | Kw::Scope | Kw::Isolate)
 }
 
 struct Open {

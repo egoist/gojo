@@ -43,10 +43,10 @@ fn main() {
 
     let ch = chan[Res](4)
     for n in ["x", "skip", "y"] {
-        ch <- Res{name: n.clone()}
+        ch.tx <- Res{name: n.clone()}
     }
-    ch.close()
-    for r in ch {
+    drop(ch.tx)
+    for r in ch.rx {
         if r.name == "skip" {
             continue
         }

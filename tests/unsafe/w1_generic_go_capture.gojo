@@ -1,12 +1,14 @@
 fn use1[T](x T) int {
     return 1
 }
-fn spawn[T send](x sink T) {
-    go () => {
+fn spawn[T send](s Scope, x sink T) {
+    s.go(() => {
         _ = use1(x)
-    }
+    })
 }
 fn main() {
     let s = "abc".toString()
-    spawn(s.asStr())
+    scope sc {
+        spawn(sc, s.asStr())
+    }
 }

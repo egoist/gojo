@@ -1,7 +1,9 @@
+// The task reads a view of `s` while main changes `s`.
 fn main() {
-    let s = "abc".toString()
+    var s = "abc".toString()
     let v = s.asStr()
     go () => {
         println(v)
     }
+    s.push("d")
 }

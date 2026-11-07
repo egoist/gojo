@@ -1,0 +1,19 @@
+// A `send fn` may run in many tasks at once: it only reads what it captures,
+// and only values that can cross tasks.
+fn apply(f send fn(int) int) int {
+    return f(1)
+}
+
+fn main() {
+    var counter = 0
+    _ = apply((x) => {
+        counter += x
+        return x
+    })
+    // error: this closure must be a `send fn`, but it captures `counter`, and changes it
+    let r = rc(1)
+    let g = (x int) => x + r.clone().count()
+    _ = apply(g)
+    // error: expected a `send fn`, found `fn(int) int`
+    println(counter)
+}

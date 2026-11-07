@@ -1,0 +1,22 @@
+use std/time
+
+fn work() int {
+    return 1
+}
+
+fn main() {
+    let rx = chan[int](1).rx
+    select {
+        let v = <-rx => println(v)
+        cancelled => {}
+        cancelled => {}
+    }
+    // error: `select` has more than one `cancelled` arm
+    select {
+        work() => {}
+        _ => {}
+    }
+    // error: this is not a `select` arm
+    time.after(time.second)
+    // error: `time.after` is a `select` arm
+}

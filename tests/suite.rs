@@ -248,6 +248,82 @@ fn test_blocks() {
     assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
 }
 
+/// The simulated scheduler: `--explore` finds an interleaving that breaks a
+/// test and prints its seed; `--seed` replays it exactly; the same seed gives
+/// the same run; time is virtual.
+#[test]
+fn simulated_scheduler() {
+    let f = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/testblocks/sched.gojo");
+    let out = Command::new(gojo()).arg("test").arg("--explore").arg("400").arg(&f).output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert_eq!(out.status.code(), Some(1), "{}", stderr);
+    assert!(stderr.contains("ok   virtual time (400 schedules"), "{}", stderr);
+    let seed = stderr.split("FAIL never overdrawn (seed ").nth(1).and_then(|r| r.split(';').next()).unwrap_or_else(|| panic!("no seed printed:\n{}", stderr)).to_string();
+    for _ in 0..3 {
+        let again = Command::new(gojo()).arg("test").arg("--seed").arg(&seed).arg(&f).output().unwrap();
+        let e = String::from_utf8_lossy(&again.stderr);
+        assert!(e.contains(&format!("FAIL never overdrawn (seed {};", seed)), "seed {} did not replay the failure:\n{}", seed, e);
+    }
+    // a program whose output depends on the interleaving
+    let dir = std::env::temp_dir().join(format!("gojo_sim_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let prog = dir.join("order.gojo");
+    std::fs::write(&prog, "fn main() {\n    let ch = chan[int](16)\n    scope {\n        for i in 0..8 {\n            let tx = ch.tx.clone()\n            go () => {\n                tx <- i\n            }\n        }\n    }\n    drop(ch.tx)\n    var s = Vec[int]{}\n    for v in ch.rx {\n        s.push(v)\n    }\n    println(s)\n}\n").unwrap();
+    let run = |seed: &str| String::from_utf8_lossy(&Command::new(gojo()).arg("run").arg("--seed").arg(seed).arg(&prog).output().unwrap().stdout).to_string();
+    let a = run("11");
+    assert_eq!(a, run("11"), "same seed, different runs");
+    let distinct: std::collections::HashSet<String> = (1..12).map(|s| run(&s.to_string())).collect();
+    assert!(distinct.len() > 1, "every seed gave {}", a);
+    // an hour of virtual sleeping
+    let t0 = std::time::Instant::now();
+    let ok = Command::new(gojo()).arg("test").arg("--seed").arg("3").arg(&f).output().unwrap();
+    assert!(String::from_utf8_lossy(&ok.stderr).contains("ok   virtual time"));
+    assert!(t0.elapsed() < std::time::Duration::from_secs(30));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Parked stacks are put away and brought back at the same address, also
+/// while channels write values into them.
+#[test]
+fn stack_hibernation() {
+    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/hibernate/stress.gojo");
+    let dir = std::env::temp_dir().join(format!("gojo_hib_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let bin = dir.join("stress");
+    let b = Command::new(gojo()).arg("build").arg("--release").arg(&src).arg("-o").arg(&bin).output().unwrap();
+    assert!(b.status.success(), "{}", String::from_utf8_lossy(&b.stderr));
+    for _ in 0..3 {
+        let out = Command::new(&bin).env("GOJO_HIBERNATE", "2").output().unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(out.status.success(), "{}{}", stdout, String::from_utf8_lossy(&out.stderr));
+        assert!(stdout.contains("hibernated before round 2: true"), "{}", stdout);
+        assert!(stdout.contains("ok 6000 bad 0 locks 6000"), "{}", stdout);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// SIGINT cancels the program's root scope: tasks wind down, their values are
+/// dropped, and the program exits with 130.
+#[test]
+fn shutdown_signal() {
+    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/signals/shutdown.gojo");
+    let dir = std::env::temp_dir().join(format!("gojo_sig_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let bin = dir.join("shutdown");
+    let b = Command::new(gojo()).arg("build").arg(&src).arg("-o").arg(&bin).output().unwrap();
+    assert!(b.status.success(), "{}", String::from_utf8_lossy(&b.stderr));
+    let child = Command::new(&bin).stdout(std::process::Stdio::piped()).spawn().unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    let _ = Command::new("kill").arg("-INT").arg(child.id().to_string()).status();
+    let out = child.wait_with_output().unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(130), "{}", stdout);
+    for id in 0..3 {
+        assert!(stdout.contains(&format!("closing {}", id)), "{}", stdout);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Programs nested in every way the grammar allows: moderately deep ones compile
 /// and run (no exponential passes, no stack overflow in the compiler or in the C
 /// compiler), and absurdly deep ones get an error instead of a crash.

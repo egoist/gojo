@@ -1,0 +1,87 @@
+// Data parallelism: `par for`, `task.map`, `task.each`, `task.race` and
+// `send fn`.
+use std/{fmt, math, task, time}
+
+struct P {
+    x f64
+    name String
+}
+
+fn slowSquare(x int) int {
+    time.sleep(time.millisecond)
+    return x * x
+}
+
+fn check(x int) int ! String {
+    if x == 5 {
+        return err(fmt.sprint("bad", x))
+    }
+    time.sleep(time.millisecond)
+    return x
+}
+
+fn fetch(name str, ms int, fail bool) String ! String {
+    time.sleep(ms * time.millisecond)
+    if fail {
+        return err(String(name) + " failed")
+    }
+    return String(name)
+}
+
+// any number of tasks may call a `send fn` at once
+fn twice(f send fn(int) int, xs []int) Vec[int] {
+    return task.map(xs, 0, (x) => f(f(x)))
+}
+
+fn main() {
+    // each iteration owns its element
+    var xs = Vec[int]{}
+    for i in 0..100000 {
+        xs.push(i)
+    }
+    let k = 3
+    par for x in &xs {
+        x = x * k + 1
+    }
+    var sum = 0
+    for x in xs {
+        sum += x
+    }
+    println("sum", sum)
+    let total = Mutex(0)
+    par for i in 0..1000 {
+        if i % 2 == 1 {
+            continue
+        }
+        with t = total.lock() { t += i }
+    }
+    with t = total.lock() { println("evens", t) }
+    var ps = [P{x: 1.0, name: String("a")}, P{x: 4.0, name: String("b")}, P{x: 9.0, name: String("c")}]
+    par for i, p in &ps {
+        p.x = math.sqrt(p.x) + f64(i)
+        p.name.push("!")
+    }
+    for p in ps {
+        println(p.x, p.name)
+    }
+
+    // results in order, a few at a time
+    let ys = [1, 2, 3, 4, 5, 6, 7, 8]
+    println(task.map(ys, 4, slowSquare))
+    let offset = 100
+    println(task.map(ys, 0, (x) => x + offset))
+    println(twice((x) => x + 1, ys))
+    // the first error stops the rest
+    println(task.tryMap(ys, 2, check))
+    println(task.tryMap([1, 2], 2, check))
+    let seen = Mutex(0)
+    task.each(ys, 3, (x) => {
+        with s = seen.lock() { s += x }
+    })
+    with s = seen.lock() { println("each", s) }
+
+    // the first success wins
+    println(task.race([() => fetch("a", 50, false), () => fetch("b", 1, false)]))
+    println(task.race([() => fetch("a", 1, true), () => fetch("b", 5, false)]))
+    println(task.race([() => fetch("a", 1, true), () => fetch("b", 30, true)]))
+}

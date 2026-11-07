@@ -1048,16 +1048,16 @@ impl<'a> Gen<'a> {
         };
         self.line(&format!("var {} = 0", tot));
         self.line(&format!("let {} = Mutex(&{})", mu, tot));
-        self.line("_ = task.group((g) => {");
+        self.line("scope {");
         self.line(&format!("    for {} in 0..{} {{", i, n));
-        self.line("        g.go(() => {");
+        self.line("        go () => {");
         self.line(&format!("            let {} = {}", v, work));
         self.line(&format!("            with {} = {}.lock() {{", t, mu));
         self.line(&format!("                {} +%= {}", t, v));
         self.line("            }");
-        self.line("        })");
+        self.line("        }");
         self.line("    }");
-        self.line("})");
+        self.line("}");
         self.line(&format!("println(\"parallel\", {})", tot));
     }
 
@@ -1099,9 +1099,6 @@ impl<'a> Gen<'a> {
         self.pop_scope();
         self.ind -= 1;
         self.line("}");
-        if self.out.contains("task.group") {
-            self.out = self.out.replacen("use std/fmt\n", "use std/{fmt, task}\n", 1);
-        }
         self.out
     }
 }

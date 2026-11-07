@@ -18,7 +18,7 @@ fn labeled(x int) int {
     // error: missing return value: function returns `int`
 }
 
-fn in_select(ch chan int) int {
+fn in_select(ch Receiver[int]) int {
     for {
         select {
             let v = <-ch => {
@@ -41,5 +41,5 @@ fn fine(x int) int {
 }
 
 fn main() {
-    println(nested_break(1), labeled(1), in_select(chan[int](1)), fine(2))
+    println(nested_break(1), labeled(1), in_select(chan[int](1).rx), fine(2))
 }

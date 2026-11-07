@@ -1,6 +1,6 @@
 fn main() {
     let ch = chan[String](1)
     let s = "abc".toString()
-    ch <- s
+    ch.tx <- s
     println(s)
 }

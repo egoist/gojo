@@ -1,9 +1,8 @@
-use std/task
 fn work(v inout Vec[int]) {
-    _ = task.group((g) => {
-        g.go(() => v.push(1))
-        g.go(() => v.push(2))
-    })
+    scope {
+        go () => v.push(1)
+        go () => v.push(2)
+    }
 }
 fn main() {
     var v = Vec[int]{}

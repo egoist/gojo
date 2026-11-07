@@ -1,13 +1,12 @@
-use std/task
 fn main() {
     var n = 0
     let mu = Mutex(&n)
-    _ = task.group((g) => {
-        g.go(() => {
+    scope {
+        go () => {
             with c = mu.lock() {
                 c += 1
             }
-        })
-        g.go(() => println(n))
-    })
+        }
+        go () => println(n)
+    }
 }

@@ -1,0 +1,18 @@
+// A `select` arm on a task takes its handle only when it is chosen: the
+// other handles must still be joined or cancelled.
+fn work() int {
+    return 1
+}
+
+fn main() {
+    scope {
+        let a = go work()
+        let b = go work()
+        select {
+            let r = <-a => println(r)
+            let r = <-b => println(r)
+        }
+        // error: task `a` is never joined
+        // error: task `b` is never joined
+    }
+}

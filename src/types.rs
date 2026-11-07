@@ -80,6 +80,9 @@ impl IntTy {
 pub struct FuncTy {
     pub params: Vec<(Mode, Ty)>,
     pub ret: Ty,
+    /// `send fn`: captures only `send` values, and only reads them, so any
+    /// number of tasks may call it at once. Function items are `send`.
+    pub send: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -110,7 +113,19 @@ pub enum Ty {
     /// `Mutex(&x)`: a lock guarding a borrowed place. A view: it cannot be
     /// stored, and while it exists `x` is reachable only through it.
     MutexRef(Rc<Ty>),
-    Chan(Rc<Ty>),
+    /// The sending end of a channel: when the last one is dropped, the
+    /// channel closes.
+    Sender(Rc<Ty>),
+    /// The receiving end: when the last one is dropped, sends fail.
+    Receiver(Rc<Ty>),
+    /// `let t = go f()`: a handle to a task started in a `scope`. A view: it
+    /// can't leave the scope, and must be joined or cancelled.
+    Task(Rc<Ty>),
+    /// `scope s { }`: a handle to a running scope. A view.
+    Scope,
+    /// `isolate { }`: nothing outside the value points into it, so it may be
+    /// sent even when `T` can't be.
+    Iso(Rc<Ty>),
     Func(Rc<FuncTy>),
     Adt(DefId, Rc<Vec<Ty>>),
     Iface(DefId, Rc<Vec<Ty>>),
@@ -152,7 +167,7 @@ impl Ty {
     /// Borrowed views: may not be stored in fields or collections.
     pub fn is_view(&self) -> bool {
         match self {
-            Ty::Str | Ty::Slice(_) | Ty::MutexRef(_) => true,
+            Ty::Str | Ty::Slice(_) | Ty::MutexRef(_) | Ty::Task(_) | Ty::Scope => true,
             Ty::Option(t) | Ty::Array(t, _) | Ty::ArrayT(t, _) => t.is_view(),
             Ty::Result(a, b) => a.is_view() || b.is_view(),
             _ => false,
@@ -161,10 +176,10 @@ impl Ty {
     /// A borrowed view anywhere inside the type.
     pub fn contains_view(&self) -> bool {
         match self {
-            Ty::Str | Ty::Slice(_) | Ty::MutexRef(_) => true,
+            Ty::Str | Ty::Slice(_) | Ty::MutexRef(_) | Ty::Task(_) | Ty::Scope => true,
             // function values borrow their parameters; captures are checked separately
             Ty::Func(_) => false,
-            Ty::Vec(a) | Ty::Array(a, _) | Ty::ArrayT(a, _) | Ty::Option(a) | Ty::Box(a) | Ty::Rc(a) | Ty::Arc(a) | Ty::Weak(a) | Ty::Cell(a) | Ty::Mutex(a) | Ty::Chan(a) | Ty::Ptr(a) => a.contains_view(),
+            Ty::Vec(a) | Ty::Array(a, _) | Ty::ArrayT(a, _) | Ty::Option(a) | Ty::Box(a) | Ty::Rc(a) | Ty::Arc(a) | Ty::Weak(a) | Ty::Cell(a) | Ty::Mutex(a) | Ty::Sender(a) | Ty::Receiver(a) | Ty::Iso(a) | Ty::Ptr(a) => a.contains_view(),
             Ty::Map(a, b) | Ty::Result(a, b) => a.contains_view() || b.contains_view(),
             Ty::Adt(_, args) | Ty::Iface(_, args) => args.iter().any(|a| a.contains_view()),
             _ => false,
@@ -173,7 +188,8 @@ impl Ty {
     /// A view stored inside a container (not just at the top / in an option).
     pub fn has_nested_view(&self) -> bool {
         match self {
-            Ty::Str | Ty::Slice(_) => false,
+            Ty::Str | Ty::Slice(_) | Ty::Scope => false,
+            Ty::Task(a) => a.contains_view(),
             Ty::Option(a) => a.has_nested_view(),
             Ty::Result(a, b) => a.has_nested_view() || b.has_nested_view(),
             t => t.contains_view(),
@@ -200,7 +216,7 @@ impl Ty {
     pub fn walk(&self, f: &mut dyn FnMut(&Ty)) {
         f(self);
         match self {
-            Ty::Vec(a) | Ty::Slice(a) | Ty::Array(a, _) | Ty::Option(a) | Ty::Box(a) | Ty::Rc(a) | Ty::Arc(a) | Ty::Weak(a) | Ty::Cell(a) | Ty::Mutex(a) | Ty::MutexRef(a) | Ty::Chan(a) | Ty::Ptr(a) => a.walk(f),
+            Ty::Vec(a) | Ty::Slice(a) | Ty::Array(a, _) | Ty::Option(a) | Ty::Box(a) | Ty::Rc(a) | Ty::Arc(a) | Ty::Weak(a) | Ty::Cell(a) | Ty::Mutex(a) | Ty::MutexRef(a) | Ty::Sender(a) | Ty::Receiver(a) | Ty::Task(a) | Ty::Iso(a) | Ty::Ptr(a) => a.walk(f),
             Ty::Map(a, b) | Ty::Result(a, b) | Ty::ArrayT(a, b) => {
                 a.walk(f);
                 b.walk(f)
@@ -244,11 +260,14 @@ impl Ty {
             Ty::Cell(a) => Ty::Cell(m(a, f)),
             Ty::Mutex(a) => Ty::Mutex(m(a, f)),
             Ty::MutexRef(a) => Ty::MutexRef(m(a, f)),
-            Ty::Chan(a) => Ty::Chan(m(a, f)),
+            Ty::Sender(a) => Ty::Sender(m(a, f)),
+            Ty::Receiver(a) => Ty::Receiver(m(a, f)),
+            Ty::Task(a) => Ty::Task(m(a, f)),
+            Ty::Iso(a) => Ty::Iso(m(a, f)),
             Ty::Ptr(a) => Ty::Ptr(m(a, f)),
             Ty::Map(a, b) => Ty::Map(m(a, f), m(b, f)),
             Ty::Result(a, b) => Ty::Result(m(a, f), m(b, f)),
-            Ty::Func(ft) => Ty::Func(Rc::new(FuncTy { params: ft.params.iter().map(|(md, p)| (*md, p.map(f))).collect(), ret: ft.ret.map(f) })),
+            Ty::Func(ft) => Ty::Func(Rc::new(FuncTy { params: ft.params.iter().map(|(md, p)| (*md, p.map(f))).collect(), ret: ft.ret.map(f), send: ft.send })),
             Ty::Adt(d, args) => Ty::Adt(*d, Rc::new(args.iter().map(|a| a.map(f)).collect())),
             Ty::Iface(d, args) => Ty::Iface(*d, Rc::new(args.iter().map(|a| a.map(f)).collect())),
             t => t.clone(),
@@ -448,7 +467,11 @@ pub enum TyKey {
     Cell,
     Mutex,
     MutexRef,
-    Chan,
+    Sender,
+    Receiver,
+    Task,
+    Scope,
+    Iso,
     Str,
     String,
     Int(IntTy),
@@ -476,7 +499,11 @@ impl TyKey {
             Ty::Cell(_) => TyKey::Cell,
             Ty::Mutex(_) => TyKey::Mutex,
             Ty::MutexRef(_) => TyKey::MutexRef,
-            Ty::Chan(_) => TyKey::Chan,
+            Ty::Sender(_) => TyKey::Sender,
+            Ty::Receiver(_) => TyKey::Receiver,
+            Ty::Task(_) => TyKey::Task,
+            Ty::Scope => TyKey::Scope,
+            Ty::Iso(_) => TyKey::Iso,
             Ty::Str => TyKey::Str,
             Ty::String => TyKey::String,
             Ty::Int(i) => TyKey::Int(*i),
@@ -591,7 +618,11 @@ impl Program {
             Ty::Cell(a) => format!("Cell[{}]", self.show(a)),
             Ty::Mutex(a) => format!("Mutex[{}]", self.show(a)),
             Ty::MutexRef(a) => format!("MutexRef[{}]", self.show(a)),
-            Ty::Chan(a) => format!("chan {}", self.show(a)),
+            Ty::Sender(a) => format!("Sender[{}]", self.show(a)),
+            Ty::Receiver(a) => format!("Receiver[{}]", self.show(a)),
+            Ty::Task(a) => format!("Task[{}]", self.show(a)),
+            Ty::Scope => "Scope".into(),
+            Ty::Iso(a) => format!("Iso[{}]", self.show(a)),
             Ty::Ptr(a) => format!("*{}", self.show(a)),
             Ty::Func(ft) => {
                 let ps: Vec<String> = ft
@@ -603,10 +634,11 @@ impl Program {
                         Mode::Sink => format!("sink {}", self.show(p)),
                     })
                     .collect();
+                let kw = if ft.send { "send fn" } else { "fn" };
                 if ft.ret == Ty::Unit {
-                    format!("fn({})", ps.join(", "))
+                    format!("{}({})", kw, ps.join(", "))
                 } else {
-                    format!("fn({}) {}", ps.join(", "), self.show(&ft.ret))
+                    format!("{}({}) {}", kw, ps.join(", "), self.show(&ft.ret))
                 }
             }
             Ty::Adt(d, args) | Ty::Iface(d, args) => {

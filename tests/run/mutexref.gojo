@@ -1,4 +1,4 @@
-use std/{task, time}
+use std/time
 
 struct Page {
     url String
@@ -22,16 +22,16 @@ fn fetch(url str) Page ! FetchError {
 fn fetchAll(urls []String) Vec[Page] ! FetchError {
     var pages = Vec[Page]{}
     let mu = Mutex(&pages)
-    try task.group((g) => {
+    try scope {
         for u in urls {
-            g.go(() => {
+            go () => {
                 let p = try fetch(u)
                 with list = mu.lock() {
                     list.push(p)
                 }
-            })
+            }
         }
-    })
+    }
     return pages
 }
 

@@ -1,0 +1,15 @@
+// One task may modify what it borrows; nobody else may touch it until the
+// scope ends.
+fn main() {
+    var count = 0
+    var other = 0
+    scope {
+        go () => { count += 1 }
+        go () => { count += 2 }
+        // error: cannot modify `count`: a task modifies it until its scope ends
+        go () => { other += 1 }
+        println(other)
+        // error: cannot use `other`: a task modifies it until its scope ends
+    }
+    println(count, other)
+}

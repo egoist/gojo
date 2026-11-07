@@ -1,0 +1,61 @@
+use std/{time, fmt, task}
+// Tasks keep values on their stacks while they wait: hibernation must bring
+// them back exactly, including when a channel writes into a parked stack.
+// Run with GOJO_HIBERNATE=2 (put stacks away after 2 ms) by the test suite.
+fn worker(id int, input Receiver[String], out Sender[String], m Mutex[int]) {
+    var local = [id, id * 2, id * 3]
+    let tag = fmt.format("w{}", id)
+    for msg in input {
+        time.sleep(time.millisecond * (id % 5))
+        with v = m.lock() { v += 1 }
+        local.push(msg.len())
+        out <- fmt.format("{}:{}:{}", tag, local[0] + local[1] + local[2], msg)
+    }
+}
+
+fn main() {
+    let n = 2000
+    let results = chan[String](n * 4)
+    let m = Mutex(0)
+    var senders = Vec[Sender[String]]{}
+    scope {
+        for id in 0..n {
+            let c = chan[String]()
+            senders.push(c.tx)
+            let out = results.tx.clone()
+            let rx = c.rx
+            go () => worker(id, rx, out, m)
+        }
+        for round in 0..3 {
+            time.sleep(60 * time.millisecond)
+            if round == 2 {
+                // a loaded machine may take longer to get round to it
+                var tries = 0
+                for task.stats().hibernated == 0 && tries < 200 {
+                    time.sleep(10 * time.millisecond)
+                    tries += 1
+                }
+                println("hibernated before round 2:", task.stats().hibernated > 0)
+            }
+            for i in 0..n {
+                senders[i] <- fmt.format("r{}", round)
+            }
+        }
+        senders.clear()
+    }
+    drop(results.tx)
+    var ok = 0
+    var bad = 0
+    for r in results.rx {
+        let parts = r.split(":")
+        let id = parts[0][1..].parseInt() ?? -1
+        if parts[1] == fmt.format("{}", id * 6) {
+            ok += 1
+        } else {
+            bad += 1
+        }
+    }
+    with v = m.lock() {
+        println("ok", ok, "bad", bad, "locks", v)
+    }
+}

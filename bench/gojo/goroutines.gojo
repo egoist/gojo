@@ -4,12 +4,12 @@ fn main() {
     let n = 100000
     let start = chan[bool]()
     var prev = chan[int]()
-    let first = prev.clone()
+    let first = prev.tx.clone()
     for _ in 0..n {
         let next = chan[int]()
-        let input = prev.clone()
-        let output = next.clone()
-        let s = start.clone()
+        let input = prev.rx.clone()
+        let output = next.tx.clone()
+        let s = start.rx.clone()
         go () => {
             _ = <-s
             let v = (<-input).unwrap()
@@ -17,7 +17,7 @@ fn main() {
         }
         prev = next
     }
-    start.close()
+    drop(start.tx)
     first <- 0
-    println((<-prev).unwrap())
+    println((<-prev.rx).unwrap())
 }

@@ -1,4 +1,4 @@
-// HTTP/1.1: a server built on goroutines, task groups and cancellation, and a
+// HTTP/1.1: a server built on tasks, scopes and cancellation, and a
 // small client. Plain HTTP only (no TLS).
 //
 //   struct Hello {
@@ -11,7 +11,7 @@
 //       http.serve(ln, Hello{}, http.Options{})
 //   }
 //
-// Every connection is a task in the server's group, so cancelling the task
+// Every connection is a task in the server's scope, so cancelling the task
 // that runs `serve` cancels the requests in flight. Every request runs under a
 // deadline (`Options.deadline`): a handler still running then is cancelled and
 // the client gets 504. A client that hangs up cancels its request too: the
@@ -382,38 +382,37 @@ fn handleConn[H Handler + send](c net.Conn, h H, opts Options) Outcome {
     if task.cancelled() {
         return .Stopped
     }
-    let result = Mutex(Response{status: 0})
-    let hungUp = Mutex(false)
-    _ = task.group((g) => {
+    // each task writes its own variable
+    var result = Response{status: 0}
+    var hungUp = false
+    scope s {
         // the watcher: a read that returns 0 means the client hung up
-        g.go(() => {
+        go () => {
             var probe = Vec[byte]{}
             let n = c.read(&probe, 1) catch _e { -1 }
             if n == 0 && !task.cancelled() {
-                with x = hungUp.lock() { x = true }
-                g.cancel()
+                hungUp = true
+                s.cancel()
             }
-        })
+        }
         // the handler, under the deadline; when done it stops the watcher
-        g.go(() => {
+        go () => {
             if let r = task.timeout(opts.deadline, () => h.serve(req)) {
-                with x = result.lock() { x = r }
+                result = r
             }
-            g.cancel()
-        })
-    })
-    with gone = hungUp.lock() {
-        if gone { return .HungUp }
+            s.cancel()
+        }
+    }
+    if hungUp {
+        return .HungUp
     }
     // the server is stopping: drop the request
     if task.cancelled() {
         return .Stopped
     }
-    with r = result.lock() {
-        if r.status != 0 {
-            writeResponse(c, r)
-            return .Served
-        }
+    if result.status != 0 {
+        writeResponse(c, result)
+        return .Served
     }
     writeResponse(c, text(504, "the request took too long\n"))
     return .TimedOut
@@ -428,13 +427,13 @@ pub fn serve[H Handler + send](ln net.Listener, h H, opts Options) {
 
 // Like `serve`, counting what happened to the requests in `stats`.
 pub fn serveCounting[H Handler + send](ln net.Listener, h H, opts Options, stats Mutex[Stats]) {
-    _ = task.group((g) => {
+    scope {
         for {
             let c = ln.accept() catch _e {
-                return
+                break
             }
             // `c` moves into the task; `h`, `opts` and `stats` are borrowed
-            g.go(() => {
+            go () => {
                 let o = handleConn(c, h, opts)
                 with s = stats.lock() {
                     match o {
@@ -445,9 +444,9 @@ pub fn serveCounting[H Handler + send](ln net.Listener, h H, opts Options, stats
                         .Rejected => s.rejected += 1
                     }
                 }
-            })
+            }
         }
-    })
+    }
 }
 
 // ---------------------------------------------------------------- the client

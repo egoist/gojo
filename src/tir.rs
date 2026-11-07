@@ -23,6 +23,8 @@ pub struct Local {
     pub kind: LocalKind,
     pub span: Span,
     pub closure_depth: u32,
+    /// Block nesting (in the checker's scope stack) where it was declared.
+    pub block_level: u32,
     /// Ref binding from a match on an owned place; may be upgraded to a move.
     pub match_arm: Option<u32>,
     /// For references: the local that owns the referenced data.
@@ -74,19 +76,25 @@ pub enum TStmt {
     ErrDefer(TBlock),
     While { id: u32, cond: Option<TExpr>, body: TBlock },
     For { id: u32, kind: IterKind, iter: TExpr, hi: Option<TExpr>, elem: LocalId, index: Option<LocalId>, mutable: bool, body: TBlock, span: Span },
-    Go { call: TExpr, span: Span },
     Send { chan: TExpr, value: TExpr },
     With { local: LocalId, place: TExpr, lock: bool, body: TBlock },
+    /// `with a, b = lock(m1, m2)`: `places` are lock projections, all taken
+    /// before the body (in address order), released after.
+    WithLocks { locals: Vec<LocalId>, places: Vec<TExpr>, body: TBlock },
     Yield(Option<TExpr>, Span),
     Select { arms: Vec<TSelectArm>, span: Span },
     /// `for` over a type with an `each` method: the call, whose last argument
     /// is the loop body closure.
     ForEach { id: u32, call: TExpr },
+    /// `par for`: `body` is a `send fn` closure taking (index,) element; for a
+    /// range, `iter` is the low end and `hi` the high one.
+    ParFor { kind: IterKind, iter: TExpr, hi: Option<TExpr>, mutable: bool, indexed: bool, body: TExpr, span: Span },
 }
 
 #[derive(Clone, Debug)]
 pub struct TSelectArm {
     pub kind: TSelectKind,
+    pub guard: Option<TExpr>,
     pub body: TBlock,
 }
 
@@ -94,6 +102,13 @@ pub struct TSelectArm {
 pub enum TSelectKind {
     Recv { chan: TExpr, bind: Option<LocalId> },
     Send { chan: TExpr, value: TExpr },
+    /// `let r = <-t`: the task behind handle `t` (a local) has finished; the
+    /// arm takes its result and the handle.
+    Task { task: TExpr, bind: Option<LocalId> },
+    /// `time.after(d)` (relative: true) or `time.at(t)`.
+    Timer { at: TExpr, relative: bool },
+    /// `cancelled`: the current task was cancelled.
+    Cancelled,
     Default,
 }
 
@@ -319,7 +334,25 @@ pub enum TK {
     MutexRef(Box<TExpr>),
     /// Default value of a type (`var x T`, struct defaults, `T.default()`).
     DefaultOf,
+    /// `scope { body }`: tasks started in `body` run until the scope ends.
+    /// `errt`: the error a plain `go` task can fail with; the scope's type is
+    /// then `T ! E`.
+    Scope { id: u32, handle: Option<LocalId>, body: TBlock, errt: Option<Ty> },
+    /// `go ...`: `task` is a closure literal with no parameters. `handle`:
+    /// gives a `Task[R]` (`let t = go f()`), else unit.
+    Spawn { target: SpawnTarget, task: Box<TExpr>, handle: bool },
+    /// `isolate { body }`: the body's value, as an `Iso[T]`.
+    Isolate(TBlock),
     Error,
+}
+
+/// The scope a `go` starts its task in.
+#[derive(Clone, Debug)]
+pub enum SpawnTarget {
+    /// The `scope` block with this id, in the same function.
+    Lexical(u32),
+    /// A `Scope` value (`s.go(...)`, a parameter or a captured scope).
+    Value(Box<TExpr>),
 }
 
 #[derive(Clone, Debug)]
@@ -411,7 +444,20 @@ pub fn walk_stmt(s: &TStmt, f: &mut dyn FnMut(Node)) {
             }
             walk_block(body, f)
         }
-        TStmt::Go { call, .. } | TStmt::ForEach { call, .. } => walk_expr(call, f),
+        TStmt::ForEach { call, .. } => walk_expr(call, f),
+        TStmt::WithLocks { places, body, .. } => {
+            for p in places {
+                walk_expr(p, f)
+            }
+            walk_block(body, f)
+        }
+        TStmt::ParFor { iter, hi, body, .. } => {
+            walk_expr(iter, f);
+            if let Some(h) = hi {
+                walk_expr(h, f)
+            }
+            walk_expr(body, f)
+        }
         TStmt::Send { chan, value } => {
             walk_expr(chan, f);
             walk_expr(value, f)
@@ -428,7 +474,12 @@ pub fn walk_stmt(s: &TStmt, f: &mut dyn FnMut(Node)) {
                         walk_expr(chan, f);
                         walk_expr(value, f)
                     }
-                    TSelectKind::Default => {}
+                    TSelectKind::Task { task, .. } => walk_expr(task, f),
+                    TSelectKind::Timer { at, .. } => walk_expr(at, f),
+                    TSelectKind::Cancelled | TSelectKind::Default => {}
+                }
+                if let Some(g) = &a.guard {
+                    walk_expr(g, f)
                 }
                 walk_block(&a.body, f)
             }
@@ -501,6 +552,13 @@ pub fn walk_expr(e: &TExpr, f: &mut dyn FnMut(Node)) {
             }
         }
         TK::Block(b) | TK::Unsafe(b) => walk_block(b, f),
+        TK::Scope { body, .. } | TK::Isolate(body) => walk_block(body, f),
+        TK::Spawn { target, task, .. } => {
+            if let SpawnTarget::Value(v) = target {
+                g(v)
+            }
+            g(task)
+        }
         TK::Try { e: x, wrap } => {
             walk_expr(x, f);
             if let Some(TryWrap::Call(_, w)) = wrap {

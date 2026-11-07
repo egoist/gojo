@@ -1,15 +1,14 @@
-use std/task
 fn bump(v inout Vec[int]) {
     v.push(1)
 }
 fn main() {
     var v = [1, 2, 3]
-    _ = task.group((g) => {
-        g.go(() => {
+    scope {
+        go () => {
             bump(&v)
-        })
-        g.go(() => {
+        }
+        go () => {
             println(v.len())
-        })
-    })
+        }
+    }
 }

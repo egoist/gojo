@@ -35,10 +35,10 @@ fn main() {
     // how long each busy goroutine ran, start to end
     let spans = Mutex(Vec[int]{})
     var worst = 0
-    let r = task.group((g) => {
+    scope {
         // eight busy goroutines on two CPUs
         for k in 0..8 {
-            g.go(() => {
+            go () => {
                 let start = time.now()
                 let v = match k % 3 {
                     0 => spin(40000000)
@@ -47,7 +47,7 @@ fn main() {
                 }
                 with l = results.lock() { l.push(v) }
                 with l = spans.lock() { l.push(time.since(start)) }
-            })
+            }
         }
         // and one that wants to run every millisecond
         var prev = time.now()
@@ -57,9 +57,9 @@ fn main() {
             if now - prev > worst { worst = now - prev }
             prev = now
         }
-    })
+    }
     with l = results.lock() {
-        println("busy goroutines done:", l.len, r.isOk())
+        println("busy goroutines done:", l.len)
     }
     // Without preemption the sleeper would wait for a busy goroutine to
     // finish. Compared with how long they ran rather than with a fixed time,

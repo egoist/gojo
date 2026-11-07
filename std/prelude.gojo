@@ -20,6 +20,48 @@ pub interface Number {
     ~int | ~i8 | ~i16 | ~i32 | ~u8 | ~u16 | ~u32 | ~u64 | ~f32 | ~f64
 }
 
+// Integer types, for `Atomic`.
+pub interface Integer {
+    ~int | ~i8 | ~i16 | ~i32 | ~u8 | ~u16 | ~u32 | ~u64
+}
+
+// An integer that tasks share and change without a lock: each operation is
+// atomic and sequentially consistent. Tasks borrow it and call its methods at
+// the same time:
+//
+//   let hits = Atomic.new(0)
+//   par for r in requests { if r.ok { _ = hits.add(1) } }
+pub unsafe send struct Atomic[T Integer] {
+    v T
+
+    pub fn new(x T) Atomic[T] {
+        return Atomic[T]{v: x}
+    }
+
+    // The value now.
+    pub fn load(self) T
+
+    // Replaces the value.
+    pub fn store(self, x T)
+
+    // Adds `d`, wrapping around on overflow, and gives the new value.
+    pub fn add(self, d T) T
+
+    // Subtracts `d`, wrapping around on overflow, and gives the new value.
+    pub fn sub(self, d T) T
+
+    // Replaces the value and gives the old one.
+    pub fn swap(self, x T) T
+
+    // Replaces the value with `new` if it is `old`; true if it did.
+    pub fn compareSwap(self, old T, new T) bool
+
+    // A new `Atomic` with the value now.
+    pub fn clone(self) Atomic[T] {
+        return Atomic.new(self.load())
+    }
+}
+
 // implemented by the compiler / runtime
 fn __panicErr[E any](msg str, e E) never
 fn __strFind(s str, sub str) int
@@ -625,21 +667,67 @@ extend Mutex[T] {
 
 // ---------------------------------------------------------------- channels
 
-extend chan T {
-    // Sends `x` (`ch <- x`): waits while the channel is full, or, unbuffered,
-    // until a receiver takes it. Panics when the channel is closed.
-    pub fn send(self, x sink T)
+// `chan[T](n)` makes a channel with room for `n` values (`chan[T]()`: none, so
+// a send waits for a receiver). Its two ends are handed out separately:
+//
+//   let ch = chan[Job](16)
+//   go produce(ch.tx)          // the channel closes when the last sender is dropped
+//   for job in ch.rx { run(job) }
+pub struct Chan[T] {
+    // The sending end; `.clone()` it for more senders.
+    pub tx Sender[T]
+    // The receiving end; `.clone()` it for more receivers.
+    pub rx Receiver[T]
+}
 
-    // Receives a value (`<-ch`), waiting for one; none once the channel is closed
-    // and empty.
-    pub fn recv(self) ?T
-
-    // Closes the channel: receivers get what is left, then none. Panics when it
-    // is already closed.
-    pub fn close(self)
+extend Sender[T] {
+    // Sends `x` (`tx <- x`): waits while the channel is full, or, unbuffered,
+    // until a receiver takes it. False, and `x` is dropped, when every
+    // receiver is gone or the task is cancelled.
+    pub fn send(self, x sink T) bool
 
     // The number of values waiting in the buffer.
     pub fn len(self) int
+}
+
+extend Receiver[T] {
+    // Receives a value (`<-rx`), waiting for one; none once every sender is
+    // gone and the buffer is empty (or the task is cancelled).
+    pub fn recv(self) ?T
+
+    // The number of values waiting in the buffer.
+    pub fn len(self) int
+}
+
+// ---------------------------------------------------------------- tasks
+
+// `let t = go f()` gives a handle to the task: it lives in its `scope`, and
+// must be joined or cancelled there.
+extend Task[T] {
+    // Waits for the task to finish and gives its result.
+    pub fn join(self sink) T
+
+    // Cancels the task; the scope still waits for it, and its result is
+    // dropped.
+    pub fn cancel(self sink)
+}
+
+// `isolate { ... }` builds a value from scratch, using only values from
+// outside that can cross tasks; so nothing outside points into it, and it may
+// be sent to another task as a whole even if it holds `rc` or `Cell`:
+//
+//   let tree = isolate { buildTree(src) }    // Iso[Tree]
+//   go index(tree)                           // index(t sink Iso[Tree]) { let tr = t.take() ... }
+extend Iso[T] {
+    // The value, to use in this task.
+    pub fn take(self sink) T
+}
+
+// `scope s { }` names the scope; a function that starts long-running tasks
+// takes a `Scope` parameter.
+extend Scope {
+    // Cancels the scope: every task in it, and its body.
+    pub fn cancel(self)
 }
 
 // ---------------------------------------------------------------- hashing

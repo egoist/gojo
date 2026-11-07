@@ -1,0 +1,28 @@
+enum A { X }
+enum B { Y }
+
+fn fa() ! A { return err(.X) }
+fn fb() ! B { return err(.Y) }
+
+fn view(s String) {
+    scope {
+        let t = go () => s.asStr()
+        // error: a task can't give back the borrowed view `str`
+        println(t.join())
+    }
+}
+
+fn both() ! A {
+    try scope {
+        go fa()
+        go fb()
+        // error: this task fails with `B`, but another task in the scope fails with `A`
+    }
+}
+
+fn main() {
+    go fa()
+    // error: this task can fail, but the function doesn't return errors
+    view(String("x"))
+    _ = both()
+}

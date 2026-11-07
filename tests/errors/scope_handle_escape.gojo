@@ -1,0 +1,8 @@
+// A scope handle is a view of the running scope: it can't outlive it.
+fn main() {
+    var keep = Vec[Scope]{}
+    // error: `keep` has type `Vec[Scope]`, which would store a borrowed view
+    scope s {
+        keep.push(s)
+    }
+}
