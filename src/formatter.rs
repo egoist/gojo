@@ -1,8 +1,8 @@
-// `kite fmt`: the one layout for Kite code.
+// `gojo fmt`: the one layout for Gojo code.
 //
 // Works on tokens, not on the syntax tree, so comments stay where they are and
 // even code that doesn't type-check (only lex) can be formatted. It keeps the
-// line structure of the source (in Kite a line break can end a statement), and
+// line structure of the source (in Gojo a line break can end a statement), and
 // normalizes everything else:
 //
 //  - indentation: four spaces per open bracket (once per line, however many

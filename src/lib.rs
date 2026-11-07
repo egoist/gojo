@@ -1,4 +1,4 @@
-// Kite compiler: library interface shared by the `kite` driver and the fuzzer.
+// Gojo compiler: library interface shared by the `gojo` driver and the fuzzer.
 
 pub mod ast;
 pub mod borrowck;
@@ -19,22 +19,22 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 pub const STD: &[(&str, &str)] = &[
-    ("prelude", include_str!("../std/prelude.kite")),
-    ("fmt", include_str!("../std/fmt.kite")),
-    ("os", include_str!("../std/os.kite")),
-    ("math", include_str!("../std/math.kite")),
-    ("time", include_str!("../std/time.kite")),
-    ("task", include_str!("../std/task.kite")),
-    ("net", include_str!("../std/net.kite")),
-    ("io", include_str!("../std/io.kite")),
-    ("bufio", include_str!("../std/bufio.kite")),
-    ("json", include_str!("../std/json.kite")),
-    ("http", include_str!("../std/http.kite")),
-    ("strings", include_str!("../std/strings.kite")),
+    ("prelude", include_str!("../std/prelude.gojo")),
+    ("fmt", include_str!("../std/fmt.gojo")),
+    ("os", include_str!("../std/os.gojo")),
+    ("math", include_str!("../std/math.gojo")),
+    ("time", include_str!("../std/time.gojo")),
+    ("task", include_str!("../std/task.gojo")),
+    ("net", include_str!("../std/net.gojo")),
+    ("io", include_str!("../std/io.gojo")),
+    ("bufio", include_str!("../std/bufio.gojo")),
+    ("json", include_str!("../std/json.gojo")),
+    ("http", include_str!("../std/http.gojo")),
+    ("strings", include_str!("../std/strings.gojo")),
 ];
 
-pub const RUNTIME_H: &str = include_str!("../runtime/kite_rt.h");
-pub const RUNTIME_C: &str = concat!(include_str!("../runtime/kite_rt.c"), include_str!("../runtime/kite_sched.c"), include_str!("../runtime/kite_os.c"));
+pub const RUNTIME_H: &str = include_str!("../runtime/gojo_rt.h");
+pub const RUNTIME_C: &str = concat!(include_str!("../runtime/gojo_rt.c"), include_str!("../runtime/gojo_sched.c"), include_str!("../runtime/gojo_os.c"));
 
 pub fn report(sm: &SourceMap, diags: &[Diag]) {
     use std::io::IsTerminal;
@@ -97,21 +97,21 @@ pub fn load(input: &str, source: Option<&str>) -> Result<Loaded, (SourceMap, Vec
     let mut diags = vec![];
     let in_path = PathBuf::from(input);
     let (root, main_files): (PathBuf, Vec<PathBuf>) = if source.is_none() && in_path.is_dir() {
-        let mut fs: Vec<PathBuf> = std::fs::read_dir(&in_path).map(|rd| rd.filter_map(|e| e.ok().map(|e| e.path())).filter(|p| p.extension().map(|e| e == "kite").unwrap_or(false)).collect()).unwrap_or_default();
+        let mut fs: Vec<PathBuf> = std::fs::read_dir(&in_path).map(|rd| rd.filter_map(|e| e.ok().map(|e| e.path())).filter(|p| p.extension().map(|e| e == "gojo").unwrap_or(false)).collect()).unwrap_or_default();
         fs.sort();
         (in_path.clone(), fs)
     } else {
         (in_path.parent().map(|p| p.to_path_buf()).unwrap_or_default(), vec![in_path.clone()])
     };
     if main_files.is_empty() {
-        eprintln!("error: no .kite files found in {}", input);
+        eprintln!("error: no .gojo files found in {}", input);
         std::process::exit(1);
     }
 
     // parse std
     let mut std_files: HashMap<&str, ast::File> = HashMap::new();
     for (name, src) in STD {
-        match parse_source(&mut sm, format!("<std>/{}.kite", name), src.to_string()) {
+        match parse_source(&mut sm, format!("<std>/{}.gojo", name), src.to_string()) {
             Ok(f) => {
                 std_files.insert(name, f);
             }
@@ -214,14 +214,14 @@ pub fn load(input: &str, source: Option<&str>) -> Result<Loaded, (SourceMap, Vec
                     };
                     if let Some(p) = pkg {
                         if !target.starts_with(p) {
-                            diags.push(Diag::new(imp.span, format!("`{}` is outside this package (the directory with its kite.toml, {}): make it a package and depend on it instead", imp.path, p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default())));
+                            diags.push(Diag::new(imp.span, format!("`{}` is outside this package (the directory with its gojo.toml, {}): make it a package and depend on it instead", imp.path, p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default())));
                             continue;
                         }
                     }
                     let tp = manifest::find_root(&target);
                     if tp.as_deref() != pkg && tp.is_some() {
                         let rel = tp.as_ref().and_then(|t| pathdiff(t, pkg.unwrap_or(dir))).unwrap_or_else(|| imp.path.clone());
-                        diags.push(Diag::new(imp.span, format!("`{}` is a separate package (it has its own kite.toml): add `{} = {{ path = \"{}\" }}` to [dependencies] and write `use {}`", imp.path, last, rel, last)));
+                        diags.push(Diag::new(imp.span, format!("`{}` is a separate package (it has its own gojo.toml): add `{} = {{ path = \"{}\" }}` to [dependencies] and write `use {}`", imp.path, last, rel, last)));
                         continue;
                     }
                     (target, pkg.map(|p| p.to_path_buf()))
@@ -231,14 +231,14 @@ pub fn load(input: &str, source: Option<&str>) -> Result<Loaded, (SourceMap, Vec
                     // (a standard module's name, when it isn't a dependency's)
                     let std_hint = std_module(&imp.path).then(|| format!("standard modules are written with `std/`: `use std/{}`", imp.path));
                     let Some(root) = pkg else {
-                        let msg = std_hint.clone().unwrap_or_else(|| format!("unknown package `{}`: a package in this project is written `use ./{}`, and dependencies are listed in a kite.toml (the standard library has {})", imp.path, imp.path, std_list()));
+                        let msg = std_hint.clone().unwrap_or_else(|| format!("unknown package `{}`: a package in this project is written `use ./{}`, and dependencies are listed in a gojo.toml (the standard library has {})", imp.path, imp.path, std_list()));
                         diags.push(Diag::new(imp.span, msg));
                         continue;
                     };
                     let Some(Some(m)) = manifest_of(root, sm, diags, manifests) else { continue };
                     let pname = m.package.as_ref().map(|p| p.name.clone()).unwrap_or_default();
                     let Some(dep) = m.dependency(name).cloned() else {
-                        let msg = std_hint.clone().unwrap_or_else(|| format!("`{}` is not a dependency of `{}`: add it to [dependencies] in its kite.toml", name, pname));
+                        let msg = std_hint.clone().unwrap_or_else(|| format!("`{}` is not a dependency of `{}`: add it to [dependencies] in its gojo.toml", name, pname));
                         diags.push(Diag::new(imp.span, msg));
                         continue;
                     };
@@ -261,7 +261,7 @@ pub fn load(input: &str, source: Option<&str>) -> Result<Loaded, (SourceMap, Vec
                     if !dpkg.exports.iter().any(|e| e == sub) {
                         let list = dpkg.exports.iter().map(|e| if e.is_empty() { format!("`{}`", name) } else { format!("`{}/{}`", name, e) }).collect::<Vec<_>>().join(", ");
                         let what = if sub.is_empty() { format!("`{}` doesn't export its root package", name) } else { format!("`{}` doesn't export `{}`", name, sub) };
-                        diags.push(Diag::new(imp.span, format!("{} (it exports {}; see `exports` in its kite.toml)", what, if list.is_empty() { "nothing".to_string() } else { list })));
+                        diags.push(Diag::new(imp.span, format!("{} (it exports {}; see `exports` in its gojo.toml)", what, if list.is_empty() { "nothing".to_string() } else { list })));
                         continue;
                     }
                     let target = match droot.join(sub).canonicalize() {
@@ -283,10 +283,10 @@ pub fn load(input: &str, source: Option<&str>) -> Result<Loaded, (SourceMap, Vec
                 if parsed.contains_key(&tkey) {
                     continue;
                 }
-                let mut fs: Vec<PathBuf> = std::fs::read_dir(&target).map(|rd| rd.filter_map(|e| e.ok().map(|e| e.path())).filter(|p| p.extension().map(|e| e == "kite").unwrap_or(false)).collect()).unwrap_or_default();
+                let mut fs: Vec<PathBuf> = std::fs::read_dir(&target).map(|rd| rd.filter_map(|e| e.ok().map(|e| e.path())).filter(|p| p.extension().map(|e| e == "gojo").unwrap_or(false)).collect()).unwrap_or_default();
                 fs.sort();
                 if fs.is_empty() {
-                    diags.push(Diag::new(imp.span, format!("package `{}` has no .kite files ({})", last, target.display())));
+                    diags.push(Diag::new(imp.span, format!("package `{}` has no .gojo files ({})", last, target.display())));
                     continue;
                 }
                 let mut pfs = vec![];
@@ -314,7 +314,7 @@ pub fn load(input: &str, source: Option<&str>) -> Result<Loaded, (SourceMap, Vec
         }
         visiting.remove(key);
     }
-    // the package the program belongs to: the nearest kite.toml above it
+    // the package the program belongs to: the nearest gojo.toml above it
     let mut manifests: HashMap<PathBuf, Option<manifest::Manifest>> = HashMap::new();
     let main_pkg = if source.is_none() { manifest::find_root(&root) } else { None };
     if let Some(r) = &main_pkg {
@@ -390,7 +390,7 @@ pub const COMPILER_STACK: usize = 1 << 30;
 
 /// Runs `f` on a thread with `COMPILER_STACK` bytes of stack.
 pub fn with_compiler_stack<R: Send + 'static>(f: impl FnOnce() -> R + Send + 'static) -> R {
-    match std::thread::Builder::new().name("kite".into()).stack_size(COMPILER_STACK).spawn(f) {
+    match std::thread::Builder::new().name("gojo".into()).stack_size(COMPILER_STACK).spawn(f) {
         Ok(h) => match h.join() {
             Ok(r) => r,
             Err(e) => std::panic::resume_unwind(e),

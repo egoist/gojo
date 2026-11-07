@@ -1,18 +1,18 @@
 #!/bin/sh
-# Installs Kite into ~/.kite (or $KITE_HOME): the compiler in ~/.kite/bin,
+# Installs Gojo into ~/.gojo (or $GOJO_HOME): the compiler in ~/.gojo/bin,
 # the docs and examples next to it.
 #
-#   curl -fsSL <releases>/install.sh | sh                  the latest release
+#   curl -fsSL https://github.com/egoist/gojo/releases/latest/download/install.sh | sh
 #   sh install.sh --version 0.1.0                          a given release
-#   sh install.sh --archive dist/kite-0.1.0-macos-arm64.tar.gz   a local archive
+#   sh install.sh --archive dist/gojo-0.1.0-macos-arm64.tar.gz   a local archive
 #
-# Downloads come from $KITE_RELEASES, the project's GitHub releases page
-# (https://github.com/OWNER/kite/releases), and are checked against the
-# release's SHA256SUMS.
+# Downloads come from the GitHub releases of egoist/gojo ($GOJO_RELEASES
+# overrides it, for a mirror), and are checked against the release's
+# SHA256SUMS.
 set -eu
 
-RELEASES=${KITE_RELEASES:-}
-home=${KITE_HOME:-$HOME/.kite}
+RELEASES=${GOJO_RELEASES:-https://github.com/egoist/gojo/releases}
+home=${GOJO_HOME:-$HOME/.gojo}
 version=
 archive=
 
@@ -30,7 +30,7 @@ case $(uname -s)-$(uname -m) in
     Darwin-x86_64) platform=macos-x86_64 ;;
     Linux-x86_64|Linux-amd64) platform=linux-x86_64 ;;
     Linux-aarch64|Linux-arm64) platform=linux-arm64 ;;
-    *) echo "install.sh: Kite runs on macOS and Linux (x86-64 and arm64), not on $(uname -s) $(uname -m)" >&2; exit 1 ;;
+    *) echo "install.sh: Gojo runs on macOS and Linux (x86-64 and arm64), not on $(uname -s) $(uname -m)" >&2; exit 1 ;;
 esac
 
 tmp=$(mktemp -d)
@@ -51,14 +51,14 @@ sha256() {
 
 if [ -z "$archive" ]; then
     if [ -z "$RELEASES" ]; then
-        echo "install.sh: set KITE_RELEASES to the releases page (https://github.com/OWNER/kite/releases), or pass --archive FILE" >&2
+        echo "install.sh: set GOJO_RELEASES to a releases page, or pass --archive FILE" >&2
         exit 1
     fi
     if [ -z "$version" ]; then
         fetch "$RELEASES/latest/download/VERSION" "$tmp/VERSION"
         version=$(tr -d ' \n' < "$tmp/VERSION")
     fi
-    name=kite-$version-$platform.tar.gz
+    name=gojo-$version-$platform.tar.gz
     echo "downloading $name"
     fetch "$RELEASES/download/v$version/$name" "$tmp/$name"
     fetch "$RELEASES/download/v$version/SHA256SUMS" "$tmp/SHA256SUMS"
@@ -71,9 +71,9 @@ if [ -z "$archive" ]; then
 fi
 
 tar -C "$tmp" -xzf "$archive"
-dir=$(find "$tmp" -maxdepth 1 -type d -name 'kite-*' | head -n 1)
-if [ -z "$dir" ] || [ ! -x "$dir/kite" ]; then
-    echo "install.sh: $archive is not a Kite release archive" >&2
+dir=$(find "$tmp" -maxdepth 1 -type d -name 'gojo-*' | head -n 1)
+if [ -z "$dir" ] || [ ! -x "$dir/gojo" ]; then
+    echo "install.sh: $archive is not a Gojo release archive" >&2
     exit 1
 fi
 case $dir in
@@ -83,24 +83,24 @@ esac
 
 mkdir -p "$home/bin"
 rm -rf "$home/docs" "$home/examples"
-cp "$dir/kite" "$home/bin/kite.new" && mv "$home/bin/kite.new" "$home/bin/kite"
+cp "$dir/gojo" "$home/bin/gojo.new" && mv "$home/bin/gojo.new" "$home/bin/gojo"
 cp -R "$dir/docs" "$dir/examples" "$home/"
 cp "$dir/README.md" "$home/"
 [ -f "$dir/LICENSE" ] && cp "$dir/LICENSE" "$home/"
-echo "installed $("$home/bin/kite" version) in $home"
+echo "installed $("$home/bin/gojo" version) in $home"
 
 case :$PATH: in
     *:"$home/bin":*) ;;
     *) echo "add it to your PATH:  export PATH=\"$home/bin:\$PATH\"" ;;
 esac
 
-# Kite compiles to C
+# Gojo compiles to C
 if ! command -v cc >/dev/null 2>&1 && ! command -v clang >/dev/null 2>&1 && ! command -v gcc >/dev/null 2>&1 && ! command -v zig >/dev/null 2>&1; then
     echo
-    echo "Kite needs a C compiler, and none was found:"
+    echo "Gojo needs a C compiler, and none was found:"
     case $platform in
         macos-*) echo "  xcode-select --install" ;;
         *) echo "  install gcc or clang (e.g. apt install gcc, dnf install gcc, apk add gcc musl-dev)" ;;
     esac
-    echo "  or install zig (https://ziglang.org) and set KITE_CC=\"zig cc\""
+    echo "  or install zig (https://ziglang.org) and set GOJO_CC=\"zig cc\""
 fi

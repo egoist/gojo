@@ -3,15 +3,15 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-fn kite() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_kite"))
+fn gojo() -> PathBuf {
+    PathBuf::from(env!("CARGO_BIN_EXE_gojo"))
 }
 
 fn files(dir: &str) -> Vec<PathBuf> {
     let mut v: Vec<PathBuf> = std::fs::read_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join(dir))
         .unwrap()
         .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| p.extension().map(|e| e == "kite").unwrap_or(false))
+        .filter(|p| p.extension().map(|e| e == "gojo").unwrap_or(false))
         .collect();
     v.sort();
     v
@@ -26,7 +26,7 @@ fn run_programs() {
             failures.push(format!("{}: no .out file", f.display()));
             continue;
         };
-        let out = Command::new(kite()).arg("run").arg(&f).output().unwrap();
+        let out = Command::new(gojo()).arg("run").arg(&f).output().unwrap();
         let stdout = String::from_utf8_lossy(&out.stdout);
         if stdout != expected {
             failures.push(format!("{}:\n--- expected\n{}\n--- got\n{}\n--- stderr\n{}", f.display(), expected, stdout, String::from_utf8_lossy(&out.stderr)));
@@ -43,7 +43,7 @@ fn compile_errors() {
     for f in files("tests/errors") {
         let src = std::fs::read_to_string(&f).unwrap();
         let wanted: Vec<String> = src.lines().filter_map(|l| l.trim().strip_prefix("// error: ").map(|s| s.to_string())).collect();
-        let out = Command::new(kite()).arg("check").arg(&f).output().unwrap();
+        let out = Command::new(gojo()).arg("check").arg(&f).output().unwrap();
         let stderr = String::from_utf8_lossy(&out.stderr);
         if out.status.success() {
             failures.push(format!("{}: expected a compile error", f.display()));
@@ -70,7 +70,7 @@ fn runtime_panics() {
     for f in files("tests/panic") {
         let src = std::fs::read_to_string(&f).unwrap();
         let wanted: Vec<String> = src.lines().filter_map(|l| l.trim().strip_prefix("// panic: ").map(|s| s.to_string())).collect();
-        let out = Command::new(kite()).arg("run").arg(&f).output().unwrap();
+        let out = Command::new(gojo()).arg("run").arg(&f).output().unwrap();
         let stderr = String::from_utf8_lossy(&out.stderr);
         if out.status.code() != Some(2) {
             failures.push(format!("{}: expected exit code 2, got {:?}\n{}", f.display(), out.status.code(), stderr));
@@ -103,13 +103,13 @@ fn runtime_panics() {
 #[ignore]
 fn address_sanitizer() {
     let mut failures = vec![];
-    let dir = std::env::temp_dir().join("kite_asan");
+    let dir = std::env::temp_dir().join("gojo_asan");
     let _ = std::fs::create_dir_all(&dir);
     // (not stack overflows: ASan catches those itself, before the guard page)
     let panics = files("tests/panic").into_iter().filter(|f| !std::fs::read_to_string(f).unwrap().contains("panic: stack overflow"));
     for f in files("tests/run").into_iter().chain(panics) {
         let bin = dir.join(f.file_stem().unwrap());
-        let out = Command::new(kite()).arg("build").arg("--cc").arg("cc -fsanitize=address,undefined -g").arg(&f).arg("-o").arg(&bin).output().unwrap();
+        let out = Command::new(gojo()).arg("build").arg("--cc").arg("cc -fsanitize=address,undefined -g").arg(&f).arg("-o").arg(&bin).output().unwrap();
         if !out.status.success() {
             failures.push(format!("{}: build failed\n{}", f.display(), String::from_utf8_lossy(&out.stderr)));
             continue;
@@ -130,7 +130,7 @@ fn address_sanitizer() {
 #[ignore]
 fn thread_sanitizer() {
     let mut failures = vec![];
-    let dir = std::env::temp_dir().join("kite_tsan");
+    let dir = std::env::temp_dir().join("gojo_tsan");
     let _ = std::fs::create_dir_all(&dir);
     for f in files("tests/run") {
         let src = std::fs::read_to_string(&f).unwrap();
@@ -138,7 +138,7 @@ fn thread_sanitizer() {
             continue;
         }
         let bin = dir.join(f.file_stem().unwrap());
-        let out = Command::new(kite()).arg("build").arg("--cc").arg("cc -fsanitize=thread -g -O1").arg(&f).arg("-o").arg(&bin).output().unwrap();
+        let out = Command::new(gojo()).arg("build").arg("--cc").arg("cc -fsanitize=thread -g -O1").arg(&f).arg("-o").arg(&bin).output().unwrap();
         if !out.status.success() {
             failures.push(format!("{}: build failed\n{}", f.display(), String::from_utf8_lossy(&out.stderr)));
             continue;
@@ -168,8 +168,8 @@ fn projects() {
         // a command-line tool: `runs.txt` lists argument lines; each runs in the
         // example's directory, and the transcript is compared
         if let Ok(runs) = std::fs::read_to_string(d.join("runs.txt")) {
-            let bin = std::env::temp_dir().join(format!("kite_tool_{}_{}", d.file_name().unwrap().to_string_lossy(), std::process::id()));
-            let b = Command::new(kite()).arg("build").arg(&d).arg("-o").arg(&bin).output().unwrap();
+            let bin = std::env::temp_dir().join(format!("gojo_tool_{}_{}", d.file_name().unwrap().to_string_lossy(), std::process::id()));
+            let b = Command::new(gojo()).arg("build").arg(&d).arg("-o").arg(&bin).output().unwrap();
             if !b.status.success() {
                 failures.push(format!("{}: build failed\n{}", d.display(), String::from_utf8_lossy(&b.stderr)));
                 continue;
@@ -189,7 +189,7 @@ fn projects() {
             }
             continue;
         }
-        let out = Command::new(kite()).arg("run").arg(&d).output().unwrap();
+        let out = Command::new(gojo()).arg("run").arg(&d).output().unwrap();
         let stdout = String::from_utf8_lossy(&out.stdout);
         let stderr = String::from_utf8_lossy(&out.stderr);
         if let Ok(expected) = std::fs::read_to_string(d.join("expected.out")) {
@@ -210,41 +210,41 @@ fn projects() {
     }
 }
 
-/// Parallel `kite` runs on an empty cache share the runtime and the binary being
+/// Parallel `gojo` runs on an empty cache share the runtime and the binary being
 /// built: each must work, whichever finishes first.
 #[test]
 fn cold_cache_parallel() {
-    let f = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/run/lastuse.kite");
+    let f = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/run/lastuse.gojo");
     let expected = std::fs::read_to_string(f.with_extension("out")).unwrap();
     for round in 0..3 {
-        let cache = std::env::temp_dir().join(format!("kite_cold_{}_{}", std::process::id(), round));
+        let cache = std::env::temp_dir().join(format!("gojo_cold_{}_{}", std::process::id(), round));
         let _ = std::fs::remove_dir_all(&cache);
-        let runs: Vec<_> = (0..8).map(|_| Command::new(kite()).arg("run").arg(&f).env("KITE_CACHE", &cache).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn().unwrap()).collect();
+        let runs: Vec<_> = (0..8).map(|_| Command::new(gojo()).arg("run").arg(&f).env("GOJO_CACHE", &cache).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn().unwrap()).collect();
         for r in runs {
             let out = r.wait_with_output().unwrap();
             let stderr = String::from_utf8_lossy(&out.stderr);
             assert!(out.status.success(), "{:?}: {}", out.status, stderr);
             assert_eq!(String::from_utf8_lossy(&out.stdout), expected, "{}", stderr);
         }
-        let leftovers: Vec<_> = std::fs::read_dir(&cache).unwrap().filter_map(|e| e.ok()).map(|e| e.file_name().to_string_lossy().to_string()).filter(|n| n.ends_with(".tmp") || (n.starts_with("kite_rt_") && n.ends_with(".c"))).collect();
+        let leftovers: Vec<_> = std::fs::read_dir(&cache).unwrap().filter_map(|e| e.ok()).map(|e| e.file_name().to_string_lossy().to_string()).filter(|n| n.ends_with(".tmp") || (n.starts_with("gojo_rt_") && n.ends_with(".c"))).collect();
         assert!(leftovers.is_empty(), "{:?}", leftovers);
         let _ = std::fs::remove_dir_all(&cache);
     }
 }
 
-/// `kite test`: each test runs in its own process, so a panic fails only that test.
+/// `gojo test`: each test runs in its own process, so a panic fails only that test.
 #[test]
 fn test_blocks() {
-    let f = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/testblocks/blocks.kite");
-    let out = Command::new(kite()).arg("test").arg(&f).output().unwrap();
+    let f = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/testblocks/blocks.gojo");
+    let out = Command::new(gojo()).arg("test").arg(&f).output().unwrap();
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert_eq!(out.status.code(), Some(1), "{}", stderr);
     assert!(stderr.contains("ok   adds"), "{}", stderr);
     assert!(stderr.contains("FAIL panics are isolated"), "{}", stderr);
     assert!(stderr.contains("ok   still runs after a failure"), "{}", stderr);
     assert!(stderr.contains("2 passed, 1 failed"), "{}", stderr);
-    // `kite run` ignores test blocks, including the one that panics
-    let run = Command::new(kite()).arg("run").arg(&f).output().unwrap();
+    // `gojo run` ignores test blocks, including the one that panics
+    let run = Command::new(gojo()).arg("run").arg(&f).output().unwrap();
     assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
 }
 
@@ -274,21 +274,21 @@ fn nesting_limits() {
             _ => unreachable!(),
         }
     }
-    let dir = std::env::temp_dir().join(format!("kite_nesting_{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("gojo_nesting_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let mut failures = vec![];
     for name in ["parens", "chain", "coalesce", "blocks", "elseif", "types", "methods", "unary", "calls", "loops", "closures", "match", "lists", "arrays", "patterns"] {
-        let f = dir.join(format!("{}.kite", name));
+        let f = dir.join(format!("{}.gojo", name));
         std::fs::write(&f, shape(name, 120)).unwrap();
         let start = std::time::Instant::now();
-        let out = Command::new(kite()).arg("run").arg(&f).output().unwrap();
+        let out = Command::new(gojo()).arg("run").arg(&f).output().unwrap();
         if !out.status.success() {
             failures.push(format!("{} at depth 120 failed:\n{}", name, String::from_utf8_lossy(&out.stderr).lines().take(10).collect::<Vec<_>>().join("\n")));
         } else if start.elapsed().as_secs() > 20 {
             failures.push(format!("{} at depth 120 took {:?}", name, start.elapsed()));
         }
         std::fs::write(&f, shape(name, 5000)).unwrap();
-        let out = Command::new(kite()).arg("check").arg(&f).output().unwrap();
+        let out = Command::new(gojo()).arg("check").arg(&f).output().unwrap();
         let stderr = String::from_utf8_lossy(&out.stderr);
         if out.status.code() != Some(1) || !stderr.contains("nested too deeply") {
             failures.push(format!("{} at depth 5000: expected a nesting error, got {:?}:\n{}", name, out.status, stderr.lines().take(10).collect::<Vec<_>>().join("\n")));
@@ -300,15 +300,15 @@ fn nesting_limits() {
     }
 }
 
-/// Inputs found by `kite-fuzz` that once crashed the compiler (reduced). Each
+/// Inputs found by `gojo-fuzz` that once crashed the compiler (reduced). Each
 /// must now be rejected with diagnostics, or compile.
 #[test]
 fn fuzz_regressions() {
     let mut failures = vec![];
-    let dir = std::env::temp_dir().join(format!("kite_fuzzreg_{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("gojo_fuzzreg_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     for f in files("tests/fuzz") {
-        let out = Command::new(kite()).arg("build").arg(&f).arg("-o").arg(dir.join("prog")).output().unwrap();
+        let out = Command::new(gojo()).arg("build").arg(&f).arg("-o").arg(dir.join("prog")).output().unwrap();
         let stderr = String::from_utf8_lossy(&out.stderr);
         let crashed = out.status.code().is_none_or(|c| c > 1) || ["panicked", "internal error", "overflowed"].iter().any(|w| stderr.contains(w));
         let reported = out.status.success() || stderr.contains("error");
@@ -330,7 +330,7 @@ fn fuzz_regressions() {
 fn unsafe_programs_rejected() {
     let mut failures = vec![];
     for f in files("tests/unsafe") {
-        let out = Command::new(kite()).arg("check").arg(&f).output().unwrap();
+        let out = Command::new(gojo()).arg("check").arg(&f).output().unwrap();
         let stderr = String::from_utf8_lossy(&out.stderr);
         if out.status.code() != Some(1) || stderr.contains("panicked") || stderr.contains("internal error") {
             failures.push(format!("{}: {:?}\n{}", f.display(), out.status, stderr.lines().take(8).collect::<Vec<_>>().join("\n")));
@@ -343,7 +343,7 @@ fn unsafe_programs_rejected() {
     }
 }
 
-/// Every well-formed Kite file in the repository is formatted, and formatting
+/// Every well-formed Gojo file in the repository is formatted, and formatting
 /// is stable. (The fuzz regressions keep the shape they were found in.)
 #[test]
 fn formatted() {
@@ -352,21 +352,21 @@ fn formatted() {
             let p = e.unwrap().path();
             if p.is_dir() {
                 walk(&p, out);
-            } else if p.extension().is_some_and(|x| x == "kite") {
+            } else if p.extension().is_some_and(|x| x == "gojo") {
                 out.push(p);
             }
         }
     }
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut paths = vec![];
-    for d in ["std", "examples", "bench/kite", "tests/run", "tests/errors", "tests/panic", "tests/projects", "tests/packages", "tests/testblocks", "tests/unsafe"] {
+    for d in ["std", "examples", "bench/gojo", "tests/run", "tests/errors", "tests/panic", "tests/projects", "tests/packages", "tests/testblocks", "tests/unsafe"] {
         walk(&root.join(d), &mut paths);
     }
     let mut bad = vec![];
     let mut formatted = 0;
     for p in &paths {
         let src = std::fs::read_to_string(p).unwrap();
-        let Ok(out) = kite::formatter::format(&src) else {
+        let Ok(out) = gojo::formatter::format(&src) else {
             // only the deliberately malformed error tests
             assert!(p.starts_with(root.join("tests/errors")), "{} does not parse", p.display());
             continue;
@@ -375,34 +375,34 @@ fn formatted() {
         if out != src {
             bad.push(p.display().to_string());
         }
-        assert_eq!(kite::formatter::format(&out).as_deref(), Ok(out.as_str()), "{}: formatting is not stable", p.display());
+        assert_eq!(gojo::formatter::format(&out).as_deref(), Ok(out.as_str()), "{}: formatting is not stable", p.display());
     }
     assert!(formatted > 100, "only {} files", formatted);
-    assert!(bad.is_empty(), "not formatted (run `kite fmt`):\n{}", bad.join("\n"));
+    assert!(bad.is_empty(), "not formatted (run `gojo fmt`):\n{}", bad.join("\n"));
 }
 
-/// docs/std is what `kite doc --out` generates from the standard library.
+/// docs/std is what `gojo doc --out` generates from the standard library.
 #[test]
 fn std_docs_current() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let out = std::env::temp_dir().join(format!("kite_std_docs_{}", std::process::id()));
+    let out = std::env::temp_dir().join(format!("gojo_std_docs_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&out);
-    let r = Command::new(kite()).arg("doc").arg("--out").arg(&out).output().unwrap();
+    let r = Command::new(gojo()).arg("doc").arg("--out").arg(&out).output().unwrap();
     assert!(r.status.success(), "{}", String::from_utf8_lossy(&r.stderr));
     let mut names: Vec<String> = std::fs::read_dir(&out).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
     names.sort();
     let mut have: Vec<String> = std::fs::read_dir(root.join("docs/std")).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
     have.sort();
-    assert_eq!(names, have, "run `kite doc --out docs/std`");
+    assert_eq!(names, have, "run `gojo doc --out docs/std`");
     for n in names {
         let want = std::fs::read_to_string(out.join(&n)).unwrap();
         let got = std::fs::read_to_string(root.join("docs/std").join(&n)).unwrap();
-        assert!(want == got, "docs/std/{} is out of date: run `kite doc --out docs/std`", n);
+        assert!(want == got, "docs/std/{} is out of date: run `gojo doc --out docs/std`", n);
     }
     let _ = std::fs::remove_dir_all(&out);
 }
 
-/// Every program in docs/tour.md (a ```kite block with `fn main`) runs and
+/// Every program in docs/tour.md (a ```gojo block with `fn main`) runs and
 /// prints the ```text block after it, and is formatted.
 #[test]
 fn tour_examples() {
@@ -424,22 +424,22 @@ fn tour_examples() {
             blocks.push((lang.to_string(), body));
         }
     }
-    let dir = std::env::temp_dir().join(format!("kite_tour_{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("gojo_tour_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let mut failures = vec![];
     let mut programs = 0;
     for (i, (lang, body)) in blocks.iter().enumerate() {
-        if lang != "kite" || !body.contains("fn main") {
+        if lang != "gojo" || !body.contains("fn main") {
             continue;
         }
         programs += 1;
         let first = body.lines().next().unwrap_or("");
-        if kite::formatter::format(body).as_deref() != Ok(body.as_str()) {
+        if gojo::formatter::format(body).as_deref() != Ok(body.as_str()) {
             failures.push(format!("program starting `{}` is not formatted", first));
         }
-        let f = dir.join(format!("p{}.kite", i));
+        let f = dir.join(format!("p{}.gojo", i));
         std::fs::write(&f, body).unwrap();
-        let out = Command::new(kite()).arg("run").arg(&f).output().unwrap();
+        let out = Command::new(gojo()).arg("run").arg(&f).output().unwrap();
         let stdout = String::from_utf8_lossy(&out.stdout);
         let want = match blocks.get(i + 1) {
             Some((l, b)) if l == "text" => b.clone(),
@@ -457,17 +457,17 @@ fn tour_examples() {
     assert!(failures.is_empty(), "{} tour program(s) failed:\n{}", failures.len(), failures.join("\n"));
 }
 
-/// Debug builds carry Kite source lines: a debugger (when there is one)
-/// resolves `file.kite:line`, also inside a loop that is many C lines long.
+/// Debug builds carry Gojo source lines: a debugger (when there is one)
+/// resolves `file.gojo:line`, also inside a loop that is many C lines long.
 /// `emit-c` shows the plain C.
 #[test]
 fn debug_info_lines() {
-    let dir = std::env::temp_dir().join(format!("kite_dbg_{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("gojo_dbg_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    let src = dir.join("dbgline.kite");
+    let src = dir.join("dbgline.gojo");
     std::fs::write(&src, "fn square(x int) int {\n    let y = x * x\n    return y\n}\n\nfn main() {\n    var total = 0\n    for i in 0..3 {\n        total += square(i)\n    }\n    println(total)\n}\n").unwrap();
     let bin = dir.join("dbgline");
-    let out = Command::new(kite()).arg("build").arg(&src).arg("-o").arg(&bin).output().unwrap();
+    let out = Command::new(gojo()).arg("build").arg(&src).arg("-o").arg(&bin).output().unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     // the source file is named in the debug info
     // (macOS: in the dSYM beside the binary, under the name it was built with)
@@ -477,25 +477,25 @@ fn debug_info_lines() {
         bin.clone()
     };
     let bytes = std::fs::read(&dwarf).unwrap_or_else(|e| panic!("{}: {}", dwarf.display(), e));
-    assert!(bytes.windows(12).any(|w| w == b"dbgline.kite"), "no Kite file in the debug info");
-    let c = Command::new(kite()).arg("emit-c").arg(&src).output().unwrap();
+    assert!(bytes.windows(12).any(|w| w == b"dbgline.gojo"), "no Gojo file in the debug info");
+    let c = Command::new(gojo()).arg("emit-c").arg(&src).output().unwrap();
     assert!(!String::from_utf8_lossy(&c.stdout).contains("#line"), "emit-c should show plain C");
     // stopped in `square`, the caller's frame is line 9: the call inside the
     // loop (a C line count drifting inside the loop would show another line)
     let probe = if cfg!(target_os = "macos") {
-        Command::new("lldb").arg("-b").arg("-o").arg("breakpoint set --file dbgline.kite --line 2").arg("-o").arg("run").arg("-o").arg("bt 2").arg(&bin).output()
+        Command::new("lldb").arg("-b").arg("-o").arg("breakpoint set --file dbgline.gojo --line 2").arg("-o").arg("run").arg("-o").arg("bt 2").arg(&bin).output()
     } else {
-        Command::new("gdb").arg("-batch").arg("-ex").arg("break dbgline.kite:2").arg("-ex").arg("run").arg("-ex").arg("bt 2").arg(&bin).output()
+        Command::new("gdb").arg("-batch").arg("-ex").arg("break dbgline.gojo:2").arg("-ex").arg("run").arg("-ex").arg("bt 2").arg(&bin).output()
     };
     if let Ok(p) = probe {
         let text = String::from_utf8_lossy(&p.stdout).to_string() + &String::from_utf8_lossy(&p.stderr);
         let caller = text.lines().find(|l| l.contains("frame #1") || l.starts_with("#1 "));
-        assert!(caller.is_some_and(|l| l.contains("dbgline.kite:9")), "the caller should be at dbgline.kite:9:\n{}", text);
+        assert!(caller.is_some_and(|l| l.contains("dbgline.gojo:9")), "the caller should be at dbgline.gojo:9:\n{}", text);
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Packages with kite.toml: each case in tests/packages runs `kite run
+/// Packages with gojo.toml: each case in tests/packages runs `gojo run
 /// <case>/app` and compares `expected.out`, or finds every line of
 /// `expected.err` in the errors.
 #[test]
@@ -505,7 +505,7 @@ fn packages() {
     let mut cases: Vec<PathBuf> = std::fs::read_dir(&base).unwrap().filter_map(|e| e.ok().map(|e| e.path())).filter(|p| p.is_dir()).collect();
     cases.sort();
     for c in &cases {
-        let out = Command::new(kite()).arg("run").arg(c.join("app")).current_dir(&base).output().unwrap();
+        let out = Command::new(gojo()).arg("run").arg(c.join("app")).current_dir(&base).output().unwrap();
         let (stdout, stderr) = (String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
         if let Ok(want) = std::fs::read_to_string(c.join("expected.out")) {
             if stdout != want || !out.status.success() {
@@ -529,22 +529,22 @@ fn packages() {
     }
     // a workspace: `check` and `test` cover every member, `run` asks for one
     let ws = base.join("workspace");
-    let check = Command::new(kite()).arg("check").arg(&ws).output().unwrap();
-    let test = Command::new(kite()).arg("test").arg(&ws).output().unwrap();
-    let run = Command::new(kite()).arg("run").arg(&ws).output().unwrap();
+    let check = Command::new(gojo()).arg("check").arg(&ws).output().unwrap();
+    let test = Command::new(gojo()).arg("test").arg(&ws).output().unwrap();
+    let run = Command::new(gojo()).arg("run").arg(&ws).output().unwrap();
     let test_err = String::from_utf8_lossy(&test.stderr);
     if !check.status.success() || !test.status.success() || !test_err.contains("1 passed, 0 failed") || run.status.success() || !String::from_utf8_lossy(&run.stderr).contains("is a workspace") {
         failures.push(format!("workspace:\ncheck {:?} {}\ntest {:?} {}\nrun {:?} {}", check.status, String::from_utf8_lossy(&check.stderr), test.status, test_err, run.status, String::from_utf8_lossy(&run.stderr)));
     }
-    // `kite init` writes a manifest that loads
-    let dir = std::env::temp_dir().join(format!("kite_init_{}", std::process::id())).join("my-tool");
+    // `gojo init` writes a manifest that loads
+    let dir = std::env::temp_dir().join(format!("gojo_init_{}", std::process::id())).join("my-tool");
     std::fs::create_dir_all(&dir).unwrap();
-    let init = Command::new(kite()).arg("init").current_dir(&dir).output().unwrap();
-    std::fs::write(dir.join("main.kite"), "fn main() {\n    println(\"hi\")\n}\n").unwrap();
-    let r = Command::new(kite()).arg("run").arg(&dir).output().unwrap();
-    let again = Command::new(kite()).arg("init").current_dir(&dir).output().unwrap();
-    if !init.status.success() || String::from_utf8_lossy(&r.stdout) != "hi\n" || again.status.success() || !std::fs::read_to_string(dir.join("kite.toml")).unwrap_or_default().contains("name = \"my-tool\"") {
-        failures.push(format!("kite init: {:?} / {:?} {} / second init {:?}", init.status, r.status, String::from_utf8_lossy(&r.stderr), again.status));
+    let init = Command::new(gojo()).arg("init").current_dir(&dir).output().unwrap();
+    std::fs::write(dir.join("main.gojo"), "fn main() {\n    println(\"hi\")\n}\n").unwrap();
+    let r = Command::new(gojo()).arg("run").arg(&dir).output().unwrap();
+    let again = Command::new(gojo()).arg("init").current_dir(&dir).output().unwrap();
+    if !init.status.success() || String::from_utf8_lossy(&r.stdout) != "hi\n" || again.status.success() || !std::fs::read_to_string(dir.join("gojo.toml")).unwrap_or_default().contains("name = \"my-tool\"") {
+        failures.push(format!("gojo init: {:?} / {:?} {} / second init {:?}", init.status, r.status, String::from_utf8_lossy(&r.stderr), again.status));
     }
     let _ = std::fs::remove_dir_all(dir.parent().unwrap());
     assert!(cases.len() >= 9, "only {} cases", cases.len());

@@ -4,7 +4,7 @@ The prelude is available everywhere; other modules are imported with `use std/na
 
 | module | |
 | --- | --- |
-| [`prelude`](prelude.md) | The prelude: available in every Kite file without an import. |
+| [`prelude`](prelude.md) | The prelude: available in every Gojo file without an import. |
 | [`fmt`](fmt.md) | Formatting and printing. |
 | [`os`](os.md) | Files, directories, the environment and processes. |
 | [`math`](math.md) | Floating-point math and integer limits. |

@@ -422,7 +422,7 @@ impl Parser {
                     }
                 }
                 if self.is_kw(Kw::Func) {
-                    // `extern "C" fn name(...) {...}`: a Kite function callable from C.
+                    // `extern "C" fn name(...) {...}`: a Gojo function callable from C.
                     let mut f = self.func_decl(None)?;
                     f.is_extern_c = true;
                     ItemKind::Func(f)

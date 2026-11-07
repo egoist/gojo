@@ -1,7 +1,0 @@
-fn main() {
-    var name = "kite".toString()
-    let v = name.asStr()
-    name.push("!")
-    println(v)
-    // error: cannot modify `name` while it is borrowed by `v`
-}

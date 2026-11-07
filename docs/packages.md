@@ -8,7 +8,7 @@ Status: proposal. Once agreed, the rules move into the language reference
 | System | What it got right | What went wrong, or what we skip |
 | --- | --- | --- |
 | Cargo (Rust) | A manifest that names dependencies; a lock file; semver ranges by default; workspaces; crates.io with docs.rs building docs automatically; editions | `build.rs` runs arbitrary code at build time; features multiply the build matrix; flat names invite squatting |
-| uv (Python), Dart pub, Gleam | The PubGrub solver: fast, and when resolution fails it explains why in a sentence. A cross-platform lock file. Speed as a feature | (Python's legacy, which Kite doesn't have) |
+| uv (Python), Dart pub, Gleam | The PubGrub solver: fast, and when resolution fails it explains why in a sentence. A cross-platform lock file. Speed as a feature | (Python's legacy, which Gojo doesn't have) |
 | Deno / JSR | Scoped names (`@scope/name`); versions can't change once published; an explicit `exports` list; docs and a quality score generated from source; publishing from CI with provenance and no tokens | URL imports in source were tried and abandoned: long URLs everywhere, no deduplication, no single place that says what the program depends on |
 | Zig, Roc, Nix | Content addressing: a dependency is identified by the hash of its contents, so mirrors and caches are free to be wrong; nothing can change under you | No version resolution: duplicate dependencies pile up |
 | Elm | The tool computes the API change and decides whether a release is major, minor or patch. Semver becomes a fact, not a promise | |
@@ -18,43 +18,43 @@ Status: proposal. Once agreed, the rules move into the language reference
 ## The design in one page
 
 ```toml
-# kite.toml
+# gojo.toml
 [package]
 name = "@ann/notes"
 version = "0.3.0"
 edition = "2026"
 
 [dependencies]
-yaml = "1.4"                                     # @kite/yaml from the registry, ^1.4
+yaml = "1.4"                                     # @gojo/yaml from the registry, ^1.4
 uuid = { package = "@carol/uuid", version = "0.3" }
 store = { path = "../store" }                    # a local package
-parse = { git = "https://github.com/bob/kite-parse", tag = "v2.0.1" }
+parse = { git = "https://github.com/bob/gojo-parse", tag = "v2.0.1" }
 ```
 
-```kite
+```gojo
 use std/{fmt, os}                  // the standard library
-use yaml, uuid                     // dependencies, by their names in kite.toml
+use yaml, uuid                     // dependencies, by their names in gojo.toml
 use yaml/schema                    // a subpackage the dependency exports
 use ./cli                          // a package inside this one
 ```
 
 ```sh
-kite add yaml                      # resolves, locks, downloads
-kite add @carol/uuid
-kite update                        # newest versions the ranges allow
-kite tree                          # what is in the build, and why
-kite publish                       # checks the semver bump against the API diff
+gojo add yaml                      # resolves, locks, downloads
+gojo add @carol/uuid
+gojo update                        # newest versions the ranges allow
+gojo tree                          # what is in the build, and why
+gojo publish                       # checks the semver bump against the API diff
 ```
 
 ## Packages and names
 
-- **A package is a directory with a `kite.toml`.** Inside it, directories are
+- **A package is a directory with a `gojo.toml`.** Inside it, directories are
   subpackages, imported as `./cli` (from within) or `name/cli` (from outside).
-  A directory without a manifest works as today: `kite run hello.kite` needs
-  no `kite.toml`.
+  A directory without a manifest works as today: `gojo run hello.gojo` needs
+  no `gojo.toml`.
 - **Registry names are scoped:** `@scope/name`, like JSR and npm's scoped
   packages. A scope belongs to a verified account or organisation, so nobody
-  can squat `yaml`. The standard project's scope is `@kite`, and `@kite/*`
+  can squat `yaml`. The standard project's scope is `@gojo`, and `@gojo/*`
   packages may be written without the scope (`yaml = "1.4"` above).
 - **In source, dependencies have short names**, the keys of
   `[dependencies]`. That is the lesson of Deno's URL imports: the manifest is
@@ -62,7 +62,7 @@ kite publish                       # checks the semver bump against the API diff
 - **The standard library is one name, `std`** (as in Rust, Zig and Gleam):
   `use std/os`, `use std/{fmt, os, time}`. Where an import comes from is
   visible on the line: `std/...` is the standard library, `./...` is this
-  package, and a bare name is a dependency from `kite.toml`. Only `std` is
+  package, and a bare name is a dependency from `gojo.toml`. Only `std` is
   reserved, so the standard library can add modules without colliding with
   anyone's dependency names. `use std/os` still binds `os`, and the prelude
   (`println`, `assert`...) still needs no import. This is already
@@ -86,13 +86,13 @@ kite publish                       # checks the semver bump against the API diff
   2.x` may both be in a build, and get different internal names. When values
   of the two meet, the type error names the versions ("`yaml.Doc` from yaml
   1.9.0 is not `yaml.Doc` from yaml 2.1.0").
-- **`kite.lock`** records every package with its exact version, source and
-  content hash. It is written by `kite add`, `update` and `remove`, and
+- **`gojo.lock`** records every package with its exact version, source and
+  content hash. It is written by `gojo add`, `update` and `remove`, and
   committed for applications and libraries alike (as Cargo now recommends).
   Builds use only the lock file; with `--locked` (for CI) a lock file that
   doesn't match the manifest is an error rather than being updated.
 - **Workspaces:** `[workspace] members = ["app", "lib/*"]` in a top-level
-  `kite.toml`. Members share one lock file and depend on each other by path.
+  `gojo.toml`. Members share one lock file and depend on each other by path.
 
 ## The registry
 
@@ -108,7 +108,7 @@ kite publish                       # checks the semver bump against the API diff
   other) identity, and CI can publish with an OIDC token instead of a stored
   secret, which also records where the release was built (provenance, as
   JSR and npm do).
-- **On publish the registry generates docs** with `kite doc`, and shows
+- **On publish the registry generates docs** with `gojo doc`, and shows
   them on the package page.
 - **Git and path sources** work without the registry, so they cover the beta
   until the registry runs, as well as private code. The registry is the
@@ -116,8 +116,8 @@ kite publish                       # checks the semver bump against the API diff
 
 ## Semver the compiler checks
 
-`kite publish` compares the public API of the new version with the last
-published one. The API is what `kite doc` extracts, made precise:
+`gojo publish` compares the public API of the new version with the last
+published one. The API is what `gojo doc` extracts, made precise:
 signatures, fields, variants, capabilities, and the parameter modes.
 
 - A removal, or any incompatible change, needs a major version.
@@ -129,13 +129,13 @@ broke. This is Elm's rule. It works here because the compiler knows exactly
 what is public and what a change can break: for example, adding a field
 without a default to a public struct breaks struct literals, and adding a
 method to a public interface breaks implementers. Agents can then trust that
-`kite update` within a range won't break the build.
+`gojo update` within a range won't break the build.
 
 ## No code runs when you install or build
 
 There are no build scripts, install hooks, or manifests written as code:
-- `kite.toml` is data;
-- the C compiler only sees C that Kite generated;
+- `gojo.toml` is data;
+- the C compiler only sees C that Gojo generated;
 - `extern "C" static "z"` link names must be plain names
   (`[A-Za-z0-9_.+-]`, not starting with `-`).
 
@@ -145,11 +145,11 @@ whatever else is decided.
 
 ## Building and caching
 
-- **The cache is content-addressed:** `~/.cache/kite/pkg/<sha256>/`, written
+- **The cache is content-addressed:** `~/.cache/gojo/pkg/<sha256>/`, written
   once and read-only. Two projects using the same version share it, and a
   hash mismatch is an error naming the package.
-- `KITE_OFFLINE=1`, or `--offline`, uses only the cache.
-- `kite vendor` copies every dependency into `vendor/` for air-gapped builds.
+- `GOJO_OFFLINE=1`, or `--offline`, uses only the cache.
+- `gojo vendor` copies every dependency into `vendor/` for air-gapped builds.
 - **The compiler stays whole-program:** dependencies compile from source
   with the program. Per-package compilation caching is separate work, and
   this design doesn't block it: the lock file plus content hashes are exactly
@@ -164,12 +164,12 @@ whatever else is decided.
 ## For coding agents
 
 - Every error says which command fixes it, for example `` `yaml` is not a
-  dependency: run `kite add yaml` ``.
-- `kite add`, `tree`, `update`, `publish --dry-run` and `doc` take `--json`.
-- `kite doc yaml` and `kite doc yaml/schema` work on any dependency.
+  dependency: run `gojo add yaml` ``.
+- `gojo add`, `tree`, `update`, `publish --dry-run` and `doc` take `--json`.
+- `gojo doc yaml` and `gojo doc yaml/schema` work on any dependency.
 - Resolution failures are explained (PubGrub), not just reported.
-- One command fixes the manifest after editing imports: `kite add` with no
-  arguments adds what is imported but missing, and `kite remove --unused`
+- One command fixes the manifest after editing imports: `gojo add` with no
+  arguments adds what is imported but missing, and `gojo remove --unused`
   removes the rest.
 
 ## What we deliberately don't take
@@ -183,7 +183,7 @@ whatever else is decided.
 
 ## Decisions to confirm
 
-1. **`kite.toml` + `kite.lock`, with short names in source** (Cargo/JSR).
+1. **`gojo.toml` + `gojo.lock`, with short names in source** (Cargo/JSR).
    Decided: the standard library is `std/...`, and permissions are not part
    of the design (Cargo manages without them, and they add friction to every
    package that does I/O).
@@ -198,18 +198,18 @@ whatever else is decided.
 
 ## Implementation plan
 
-1. **The fix and local packages.** Done: the link-name check, `kite.toml`
-   (with `kite-fuzz toml`), path dependencies, `exports`, workspaces,
-   `kite init`, `kite doc <dependency>`, and the `std/` imports.
+1. **The fix and local packages.** Done: the link-name check, `gojo.toml`
+   (with `gojo-fuzz toml`), path dependencies, `exports`, workspaces,
+   `gojo init`, `gojo doc <dependency>`, and the `std/` imports.
 2. **Resolution and git sources.**
    - Semver and ranges, the PubGrub solver with explained failures.
-   - `kite.lock`, the content-addressed cache with SHA-256 (in-tree).
+   - `gojo.lock`, the content-addressed cache with SHA-256 (in-tree).
    - Git sources, `--offline`, `--locked`.
-   - `kite add`, `remove`, `update`, `tree`, `vendor`, `--json`, editions.
+   - `gojo add`, `remove`, `update`, `tree`, `vendor`, `--json`, editions.
 3. **Publishing.**
-   - The API diff behind `kite publish --dry-run`.
+   - The API diff behind `gojo publish --dry-run`.
    - The index format and archive layout.
-   - The registry service and `kite publish`, once it is hosted.
+   - The registry service and `gojo publish`, once it is hosted.
 4. **Tests,** all offline:
    - local index and git fixtures;
    - solver cases (diamonds, conflicts with their explanations, coexisting
@@ -218,4 +218,4 @@ whatever else is decided.
    - export violations;
    - semver diffs for each kind of API change.
 
-   Plus a fuzzer for `kite.toml` and the solver.
+   Plus a fuzzer for `gojo.toml` and the solver.

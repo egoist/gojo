@@ -3,7 +3,7 @@
 Errors from the operating system, files, processes and the network, and the
 interfaces for streams of bytes.
 
-```kite
+```gojo
 fn copyFile(from str, to str) ! io.Error {
     var src = try os.open(from)
     var dst = try os.create(to)
@@ -19,7 +19,7 @@ fn copyFile(from str, to str) ! io.Error {
 
 ### enum ErrorKind
 
-```kite
+```gojo
 pub copy enum ErrorKind {
     Other
     NotFound
@@ -44,7 +44,7 @@ What went wrong, independent of the platform.
 
 ### struct Error
 
-```kite
+```gojo
 pub struct Error {
     pub kind ErrorKind
     pub msg String
@@ -59,7 +59,7 @@ that says what was being done (`open notes.txt: no such file or directory`).
 
 #### Error.message
 
-```kite
+```gojo
 pub fn message(self) String
 ```
 
@@ -67,7 +67,7 @@ The message, as `print` shows it.
 
 #### Error.isCancelled
 
-```kite
+```gojo
 pub fn isCancelled(self) bool
 ```
 
@@ -75,7 +75,7 @@ The call stopped because its task was cancelled.
 
 #### Error.isNotFound
 
-```kite
+```gojo
 pub fn isNotFound(self) bool
 ```
 
@@ -83,7 +83,7 @@ The file or directory does not exist.
 
 ### interface Reader
 
-```kite
+```gojo
 pub interface Reader {
     // Appends at most `max` bytes to `buf` and returns how many; 0 means the
     // end of the stream. Waits until at least one byte is there.
@@ -95,7 +95,7 @@ A source of bytes: files, connections, process output, `io.BytesReader`.
 
 ### interface Writer
 
-```kite
+```gojo
 pub interface Writer {
     // Writes all of `data`.
     fn write(self inout, data []byte) ! Error
@@ -106,7 +106,7 @@ A sink for bytes: files, connections, `io.Buffer`.
 
 ### struct BytesReader
 
-```kite
+```gojo
 pub struct BytesReader {
     // and private fields
 }
@@ -116,7 +116,7 @@ Reads from bytes in memory.
 
 #### BytesReader.read
 
-```kite
+```gojo
 pub fn read(self inout, buf inout Vec[byte], max int) int ! Error
 ```
 
@@ -124,7 +124,7 @@ Appends up to `max` of the remaining bytes to `buf`.
 
 ### struct Buffer
 
-```kite
+```gojo
 pub struct Buffer {
     pub data Vec[byte] = []
 }
@@ -134,7 +134,7 @@ Collects what is written to it.
 
 #### Buffer.write
 
-```kite
+```gojo
 pub fn write(self inout, data []byte) ! Error
 ```
 
@@ -142,7 +142,7 @@ Appends `data`; never fails.
 
 #### Buffer.text
 
-```kite
+```gojo
 pub fn text(self) String
 ```
 
@@ -152,7 +152,7 @@ What was written, as a string.
 
 ### fromCode
 
-```kite
+```gojo
 pub fn fromCode(what str, code int) Error
 ```
 
@@ -161,7 +161,7 @@ data.txt"). Used by `os`, `net` and code calling C directly.
 
 ### newError
 
-```kite
+```gojo
 pub fn newError(kind ErrorKind, msg str) Error
 ```
 
@@ -169,7 +169,7 @@ An error that doesn't come from the operating system.
 
 ### readAll
 
-```kite
+```gojo
 pub fn readAll(r inout Reader) Vec[byte] ! Error
 ```
 
@@ -177,7 +177,7 @@ Reads `r` to its end.
 
 ### readText
 
-```kite
+```gojo
 pub fn readText(r inout Reader) String ! Error
 ```
 
@@ -185,7 +185,7 @@ Reads `r` to its end as text.
 
 ### copy
 
-```kite
+```gojo
 pub fn copy(dst inout Writer, src inout Reader) int ! Error
 ```
 
@@ -193,7 +193,7 @@ Copies `src` into `dst` until `src` ends; returns the number of bytes.
 
 ### writeText
 
-```kite
+```gojo
 pub fn writeText(w inout Writer, s str) ! Error
 ```
 
@@ -201,7 +201,7 @@ Writes the bytes of `s` to `w`.
 
 ### bytesReader
 
-```kite
+```gojo
 pub fn bytesReader(data sink Vec[byte]) BytesReader
 ```
 
@@ -209,7 +209,7 @@ A reader of `data`.
 
 ### textReader
 
-```kite
+```gojo
 pub fn textReader(s str) BytesReader
 ```
 

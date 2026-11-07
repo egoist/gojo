@@ -22,4 +22,4 @@ jobs:
       - name: sanitizers (ASan, UBSan, TSan)
         if: runner.os == 'Linux'
         run: cargo test --locked -- --ignored
-      - run: ./target/debug/kite fmt --check std examples
+      - run: ./target/debug/gojo fmt --check std examples

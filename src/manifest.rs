@@ -1,4 +1,4 @@
-// `kite.toml`: the package manifest (see docs/packages.md).
+// `gojo.toml`: the package manifest (see docs/packages.md).
 //
 // The compiler has no dependencies, so this is a small TOML reader of its
 // own: tables (`[package]`, `[dependencies.yaml]`), bare and quoted keys,
@@ -9,7 +9,7 @@
 use crate::diag::{Diag, SourceMap, Span};
 use std::path::{Path, PathBuf};
 
-pub const FILE: &str = "kite.toml";
+pub const FILE: &str = "gojo.toml";
 pub const EDITIONS: &[&str] = &["2026"];
 pub const LATEST_EDITION: &str = "2026";
 
@@ -146,7 +146,7 @@ impl<'a> Reader<'a> {
     fn string(&mut self) -> R<String> {
         let q = self.peek().unwrap();
         if self.s[self.i..].starts_with(if q == b'"' { b"\"\"\"" } else { b"'''" }) {
-            return self.err("multi-line strings are not supported in kite.toml");
+            return self.err("multi-line strings are not supported in gojo.toml");
         }
         self.i += 1;
         let mut out = Vec::new();
@@ -261,8 +261,8 @@ impl<'a> Reader<'a> {
                 let t: String = String::from_utf8_lossy(&self.s[lo..self.i]).replace('_', "");
                 match t.parse::<i64>() {
                     Ok(n) if !matches!(self.peek(), Some(b'.' | b'e' | b'E' | b':')) => V::Int(n),
-                    _ if matches!(self.peek(), Some(b'.')) => return self.err("a fraction isn't supported in kite.toml (a version is a string: `version = \"1.0.0\"`)"),
-                    _ => return self.err("only strings, integers, booleans, arrays and tables are supported in kite.toml"),
+                    _ if matches!(self.peek(), Some(b'.')) => return self.err("a fraction isn't supported in gojo.toml (a version is a string: `version = \"1.0.0\"`)"),
+                    _ => return self.err("only strings, integers, booleans, arrays and tables are supported in gojo.toml"),
                 }
             }
             _ => return self.err("expected a value"),
@@ -305,7 +305,7 @@ pub fn parse_toml(file: u32, text: &str) -> R<Vec<(String, Span, Val)>> {
         let Some(c) = r.peek() else { break };
         if c == b'[' {
             if r.s.get(r.i + 1) == Some(&b'[') {
-                return r.err("arrays of tables (`[[...]]`) are not supported in kite.toml");
+                return r.err("arrays of tables (`[[...]]`) are not supported in gojo.toml");
             }
             r.i += 1;
             let ks = r.dotted_key()?;
@@ -386,7 +386,7 @@ pub struct Package {
 
 #[derive(Clone, Debug)]
 pub struct Manifest {
-    /// The directory holding `kite.toml`.
+    /// The directory holding `gojo.toml`.
     pub root: PathBuf,
     pub file: u32,
     pub package: Option<Package>,
@@ -427,7 +427,7 @@ pub fn valid_version(s: &str) -> bool {
         && pre.is_none_or(|p| !p.is_empty() && p.split('.').all(|x| !x.is_empty() && x.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')))
 }
 
-/// The nearest directory at or above `dir` that holds a `kite.toml`.
+/// The nearest directory at or above `dir` that holds a `gojo.toml`.
 pub fn find_root(dir: &Path) -> Option<PathBuf> {
     let mut d = dir.canonicalize().ok()?;
     loop {
@@ -440,7 +440,7 @@ pub fn find_root(dir: &Path) -> Option<PathBuf> {
     }
 }
 
-/// Reads and checks `<root>/kite.toml`.
+/// Reads and checks `<root>/gojo.toml`.
 pub fn read(sm: &mut SourceMap, root: &Path) -> Result<Manifest, Vec<Diag>> {
     let path = root.join(FILE);
     let text = match std::fs::read_to_string(&path) {
@@ -453,7 +453,7 @@ pub fn read(sm: &mut SourceMap, root: &Path) -> Result<Manifest, Vec<Diag>> {
     from_text(sm, root, path.display().to_string(), text)
 }
 
-/// Checks manifest text as if it were `<root>/kite.toml`.
+/// Checks manifest text as if it were `<root>/gojo.toml`.
 pub fn from_text(sm: &mut SourceMap, root: &Path, name: String, text: String) -> Result<Manifest, Vec<Diag>> {
     let file = sm.add(name, text.clone());
     let top = parse_toml(file, &text).map_err(|d| vec![d])?;
@@ -466,11 +466,11 @@ pub fn from_text(sm: &mut SourceMap, root: &Path, name: String, text: String) ->
             ("dependencies", V::Table(t)) => m.dependencies = check_dependencies(root, t, &mut diags),
             ("workspace", V::Table(t)) => m.members = check_workspace(root, t, &mut diags),
             ("package" | "dependencies" | "workspace", _) => diags.push(Diag::new(*ksp, format!("`{}` must be a table: `[{}]`", k, k))),
-            _ => diags.push(Diag::new(*ksp, format!("unknown section `{}` (kite.toml has [package], [dependencies] and [workspace])", k))),
+            _ => diags.push(Diag::new(*ksp, format!("unknown section `{}` (gojo.toml has [package], [dependencies] and [workspace])", k))),
         }
     }
     if m.package.is_none() && m.members.is_empty() && diags.is_empty() {
-        diags.push(Diag::new(whole, "kite.toml needs a [package] (or a [workspace] with members)"));
+        diags.push(Diag::new(whole, "gojo.toml needs a [package] (or a [workspace] with members)"));
     }
     if m.package.is_none() && !m.dependencies.is_empty() {
         diags.push(Diag::new(whole, "[dependencies] belong to a [package]"));
@@ -613,7 +613,7 @@ fn check_dependencies(root: &Path, t: &[(String, Span, Val)], diags: &mut Vec<Di
                         match dir.canonicalize() {
                             Ok(d) if d.join(FILE).is_file() => Some(Source::Path(d)),
                             Ok(_) => {
-                                diags.push(Diag::new(psp, format!("`{}` has no kite.toml: a dependency is a package with its own manifest", p)));
+                                diags.push(Diag::new(psp, format!("`{}` has no gojo.toml: a dependency is a package with its own manifest", p)));
                                 None
                             }
                             Err(_) => {
@@ -656,7 +656,7 @@ fn check_workspace(root: &Path, t: &[(String, Span, Val)], diags: &mut Vec<Diag>
         };
         for it in items {
             let Some(s) = string_of(it, "members", diags) else { continue };
-            // `dir`, or `dir/*`: every subdirectory with a kite.toml
+            // `dir`, or `dir/*`: every subdirectory with a gojo.toml
             let found: Vec<PathBuf> = match s.strip_suffix("/*") {
                 Some(parent) => {
                     let mut ds: Vec<PathBuf> = std::fs::read_dir(root.join(parent)).map(|rd| rd.filter_map(|e| e.ok().map(|e| e.path())).filter(|p| p.join(FILE).is_file()).collect()).unwrap_or_default();
@@ -679,7 +679,7 @@ fn check_workspace(root: &Path, t: &[(String, Span, Val)], diags: &mut Vec<Diag>
                             members.push(c);
                         }
                     }
-                    _ => diags.push(Diag::new(it.span, format!("`{}` is not a package (no kite.toml in {})", s, d.display()))),
+                    _ => diags.push(Diag::new(it.span, format!("`{}` is not a package (no gojo.toml in {})", s, d.display()))),
                 }
             }
         }
@@ -719,7 +719,7 @@ mod tests {
 
     #[test]
     fn names_and_versions() {
-        for ok in ["yaml", "@ann/notes", "kite-yaml", "a_b2"] {
+        for ok in ["yaml", "@ann/notes", "gojo-yaml", "a_b2"] {
             assert!(valid_package_name(ok), "{}", ok);
         }
         for bad in ["Yaml", "@ann", "@/x", "a/b", "-x", "", "@a/b/c"] {

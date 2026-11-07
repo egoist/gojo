@@ -1,4 +1,4 @@
-// Records the commit and host target for `kite version`.
+// Records the commit and host target for `gojo version`.
 use std::process::Command;
 
 fn main() {
@@ -9,8 +9,8 @@ fn main() {
         .filter(|o| o.status.success())
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .unwrap_or_else(|| "unknown commit".into());
-    println!("cargo:rustc-env=KITE_COMMIT={}", commit);
-    println!("cargo:rustc-env=KITE_HOST={}", std::env::var("TARGET").unwrap_or_default());
+    println!("cargo:rustc-env=GOJO_COMMIT={}", commit);
+    println!("cargo:rustc-env=GOJO_HOST={}", std::env::var("TARGET").unwrap_or_default());
     println!("cargo:rerun-if-changed=.git/HEAD");
     println!("cargo:rerun-if-changed=.git/refs/heads");
 }

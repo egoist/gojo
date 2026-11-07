@@ -1,0 +1,8 @@
+struct Node { next ?Box[Node] }
+fn main() {
+    let a = nil
+    let b int = none
+    // error: undefined: `nil`
+    // error: Gojo has no nil
+    // error: `none` is not a value of type `int`
+}

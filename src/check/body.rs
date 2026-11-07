@@ -372,7 +372,7 @@ impl Checker {
                 for (n, id) in sc {
                     if n == name {
                         let prev = cx.locals[*id as usize].span;
-                        self.diags.push(Diag::new(span, format!("`{}` shadows an existing variable; Kite does not allow shadowing inside a function", name)).note(Some(prev), "previously declared here"));
+                        self.diags.push(Diag::new(span, format!("`{}` shadows an existing variable; Gojo does not allow shadowing inside a function", name)).note(Some(prev), "previously declared here"));
                         break;
                     }
                 }
@@ -2055,7 +2055,7 @@ impl Checker {
             _ => {
                 let mut d = Diag::new(sp, format!("undefined: `{}`", name));
                 if name == "nil" || name == "null" {
-                    d = d.note(None, "Kite has no nil; optional values are written `?T` and the empty value is `none`");
+                    d = d.note(None, "Gojo has no nil; optional values are written `?T` and the empty value is `none`");
                 }
                 if name == "self" || name == "this" {
                     d = d.note(None, "only methods have `self`: declare it as the first parameter, `fn get(self) int`");

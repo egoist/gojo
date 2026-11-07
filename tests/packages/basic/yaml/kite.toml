@@ -1,4 +1,0 @@
-[package]
-name = "@kite/yaml"
-version = "1.4.2"
-exports = [".", "schema"]

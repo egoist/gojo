@@ -1,6 +1,6 @@
-# A tour of Kite
+# A tour of Gojo
 
-Kite is a compiled systems language with Go's simplicity, no garbage
+Gojo is a compiled systems language with Go's simplicity, no garbage
 collector and no nil. Memory is managed by ownership, like Rust, but there are
 no lifetime annotations: references can't be stored, only used, so the
 compiler checks them without help. Concurrency is Go's: goroutines and
@@ -13,23 +13,23 @@ library is documented in [docs/std](std/README.md).
 
 ## Getting started
 
-Kite runs on macOS and Linux (x86-64 and arm64). It compiles to C, so it needs
+Gojo runs on macOS and Linux (x86-64 and arm64). It compiles to C, so it needs
 a C compiler: `cc`, `clang`, `gcc` or `zig` on the PATH (on macOS,
 `xcode-select --install`). Windows is not supported.
 
 ```sh
 sh install.sh                     # from a release; or build with `cargo build --release`
-kite run hello.kite               # compile and run
-kite build hello.kite -o hello    # a native binary
-kite build --release --target x86_64-linux-musl hello.kite   # a static Linux binary (with zig)
-kite test .                       # run `test` blocks
-kite fmt .                        # format every .kite file below `.`
-kite doc os                       # the API of a standard module
+gojo run hello.gojo               # compile and run
+gojo build hello.gojo -o hello    # a native binary
+gojo build --release --target x86_64-linux-musl hello.gojo   # a static Linux binary (with zig)
+gojo test .                       # run `test` blocks
+gojo fmt .                        # format every .gojo file below `.`
+gojo doc os                       # the API of a standard module
 ```
 
 A program is a `main` function:
 
-```kite
+```gojo
 fn main() {
     println("hello, world")
 }
@@ -39,7 +39,7 @@ fn main() {
 hello, world
 ```
 
-A directory is a package; `kite run dir` runs the package in `dir`, whose
+A directory is a package; `gojo run dir` runs the package in `dir`, whose
 `main` is the entry point.
 
 ## Basics
@@ -48,9 +48,9 @@ A directory is a package; `kite run dir` runs the package in `dir`, whose
 the name. A local variable that is never used is an error, and a block can't
 declare a name that hides one from an outer block.
 
-```kite
+```gojo
 fn main() {
-    let name = "Kite"
+    let name = "Gojo"
     var count = 0
     count += 3
     let ratio f64 = 0.5
@@ -68,7 +68,7 @@ fn main() {
 ```
 
 ```text
-Kite 3 0.5 1099511627776
+Gojo 3 0.5 1099511627776
 1.5 15
 4
 ```
@@ -76,7 +76,7 @@ Kite 3 0.5 1099511627776
 Statements end at the end of a line (inside parentheses and brackets, lines
 continue). `if`, `match` and blocks are expressions:
 
-```kite
+```gojo
 fn classify(n int) str {
     return match n {
         0 => "zero"
@@ -115,7 +115,7 @@ fn main() {
 Methods are written inside the type. `self` borrows the value; `self inout`
 may change it.
 
-```kite
+```gojo
 struct Account {
     owner String
     balance int = 0
@@ -173,7 +173,7 @@ written `.Rect(...)`.
 
 There is no null pointer. A value that may be missing has type `?T`:
 
-```kite
+```gojo
 fn find(names []String, want str) ?int {
     for i, n in names {
         if n == want {
@@ -209,7 +209,7 @@ A function that can fail returns `T ! E`. `try` passes an error up to the
 caller; `catch` handles it where it happens. An error can't be ignored by
 accident: discarding one takes `_ = f()`.
 
-```kite
+```gojo
 enum ConfigError {
     Missing(key String)
     BadNumber(key String, text String)
@@ -281,7 +281,7 @@ and other `copy` types are copied instead; everything else is copied with
 Parameters borrow by default. `inout` borrows to change (the caller writes
 `&`), `sink` takes ownership:
 
-```kite
+```gojo
 struct Doc {
     title String
     words Vec[String] = []
@@ -336,7 +336,7 @@ Views can't be stored in structs or collections, or outlive what they borrow,
 and while one exists the owner can't change. That is the whole lifetime
 system: no annotations, and no dangling references.
 
-```kite
+```gojo
 fn firstWord(s str) str {
     let i = s.find(" ") ?? s.len()
     return s[0..i]
@@ -366,7 +366,7 @@ Containers lend their elements through *projections*: `m.get(k)` and
 `xs[i]` give a reference that lives in a block, and `with` binds one to change
 it in place:
 
-```kite
+```gojo
 fn main() {
     var counts = Map[String, int]{}
     for w in "the cat and the hat".fields() {
@@ -400,7 +400,7 @@ Maps keep their insertion order. To keep something you borrowed, clone it.
 `Vec[T]`, `Map[K, V]` and `Set[T]` are in the prelude, with the usual methods.
 Closures are written `(x) => expr` or `(x) => { ... }`:
 
-```kite
+```gojo
 fn main() {
     var xs = [4, 1, 3, 9, 2]
     xs.sort()
@@ -436,7 +436,7 @@ variables it uses and may change them. One that is kept (stored, or given to
 
 Type parameters go in brackets, with constraints:
 
-```kite
+```gojo
 fn largest[T copy + ordered](xs []T) ?T {
     if xs.len() == 0 {
         return none
@@ -480,7 +480,7 @@ Interfaces are satisfied implicitly: a type with the methods satisfies the
 interface. An interface parameter borrows; an interface value (in a variable
 or a collection) owns what it holds.
 
-```kite
+```gojo
 interface Shape {
     fn area(self) f64
     fn name(self) String
@@ -529,7 +529,7 @@ square 4
 `go` starts a goroutine; channels carry values between them (and move them:
 the sender can't touch what it sent).
 
-```kite
+```gojo
 fn worker(jobs chan int, results chan int) {
     for j in jobs {
         results <- j * j
@@ -563,7 +563,7 @@ of them; the first error cancels the rest and becomes the group's result.
 Shared mutable data goes in a `Mutex`, whose `lock` is a projection: the data
 can't escape the `with` block, so it can't be used without the lock.
 
-```kite
+```gojo
 use std/task
 
 fn main() {
@@ -595,7 +595,7 @@ operations return early: a receive gives none, `time.sleep` wakes up, and
 network calls fail with an error whose `isCancelled()` is true. `task.timeout`
 runs code under a deadline:
 
-```kite
+```gojo
 use std/{task, time}
 
 fn main() {
@@ -626,12 +626,12 @@ then used by its own name (`os.readText`). Only
 `pub` declarations are visible outside their package, and an unused import is
 an error.
 
-```kite
+```gojo
 use std/{fmt, json, os, time}
 
 fn main() {
     var doc = json.object()
-    doc.set("tool", json.string("kite"))
+    doc.set("tool", json.string("gojo"))
     doc.set("args", json.integer(os.args().len()))
     println(doc.encode())
 
@@ -642,13 +642,13 @@ fn main() {
 ```
 
 ```text
-{"tool":"kite","args":1}
+{"tool":"gojo","args":1}
 2026-11-06T09:30:00Z Friday
  right|left  |003.14
 ```
 
-A directory with a `kite.toml` is a package, and it can depend on other
-packages. `kite init` writes one; dependencies are named in it and imported by
+A directory with a `gojo.toml` is a package, and it can depend on other
+packages. `gojo init` writes one; dependencies are named in it and imported by
 that name:
 
 ```toml
@@ -659,20 +659,20 @@ name = "notes"
 yaml = { path = "../yaml" }
 ```
 
-`use yaml` then imports the package in `../yaml`, and `kite doc yaml` shows
+`use yaml` then imports the package in `../yaml`, and `gojo doc yaml` shows
 its API. For now dependencies are local directories; versions from git and a
 registry are coming (see [packages.md](packages.md)).
 
 The standard library has files and processes (`os`), streams (`io`, `bufio`),
 TCP (`net`), an HTTP/1.1 server and client (`http`), `json`, `time` and dates,
-and formatting (`fmt`). See [docs/std](std/README.md), or `kite doc <module>`.
+and formatting (`fmt`). See [docs/std](std/README.md), or `gojo doc <module>`.
 
 ## Tests
 
-`test` blocks live next to the code; `kite test` runs each one in a process of
+`test` blocks live next to the code; `gojo test` runs each one in a process of
 its own, so a panicking test fails alone:
 
-```kite
+```gojo
 fn double(x int) int {
     return x * 2
 }
@@ -694,9 +694,9 @@ fn main() {
 
 `extern "C"` declares C functions; calling them, and dereferencing raw
 pointers (`*T`), takes an `unsafe` block. No header files are needed: the
-compiler generates the calls from the Kite declarations.
+compiler generates the calls from the Gojo declarations.
 
-```kite
+```gojo
 extern "C" {
     fn abs(x i32) i32
 }
@@ -723,11 +723,11 @@ fn main() {
 
 - macOS and Linux only; no Windows.
 - No package manager yet: a program is the directories it uses.
-- No language server. Debuggers (lldb, gdb) know Kite source lines, so
+- No language server. Debuggers (lldb, gdb) know Gojo source lines, so
   breakpoints and backtraces work, but they show variables by their names in
   the generated C (`p_x` for a parameter `x`).
 - HTTP is HTTP/1.1 without TLS, one request per connection; no UDP.
 - JSON doesn't convert to and from structs automatically.
-- Kite functions can't yet be passed to C as callbacks.
+- Gojo functions can't yet be passed to C as callbacks.
 - Interface values and function values aren't `send` (closures given to `go`
   are checked by what they capture).

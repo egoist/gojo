@@ -1,41 +1,41 @@
-# 性能对比：Kite vs Go vs Zig
+# Performance comparison: Gojo vs Go vs Zig
 
-8 个常见基准（大部分来自 Benchmarks Game），每个都用三种语言写了算法和输入完全相同的实现。`run.sh` 先检查所有版本的输出逐字节一致，再用 hyperfine 测量。
+8 common benchmarks (most from the Benchmarks Game). Each one is written in all three languages with exactly the same algorithm and input. `run.sh` first checks that the output of every version is byte-for-byte identical, then measures with hyperfine.
 
 ```sh
-./run.sh            # RUNS=10，结果写入 results.md
+./run.sh            # RUNS=10, results are written to results.md
 ```
 
-## 环境
+## Environment
 
-Apple M5（10 核）、32 GB 内存、macOS。Kite 原型（C 后端，Apple clang 21，`--release` = `-O2`）、Go 1.27.3、Zig 0.17.0。程序本身都是单线程；Go 的 GC 会在其他核上并行运行。Zig 使用系统 `malloc`（`std.heap.c_allocator`）。
+Apple M5 (10 cores), 32 GB of memory, macOS. Gojo prototype (C back end, Apple clang 21, `--release` = `-O2`), Go 1.27.3, Zig 0.17.0. The programs themselves are all single-threaded; Go's GC runs in parallel on other cores. Zig uses the system `malloc` (`std.heap.c_allocator`).
 
-- **Kite `--release`**：整数溢出检查、下标越界检查都开着（Kite 的默认行为）。
-- **Go**：有下标越界检查，整数静默回绕。
-- **Zig ReleaseFast**：不做任何检查；**Zig ReleaseSafe**：溢出和越界检查都开着，安全级别和 Kite 最接近。
+- **Gojo `--release`**: integer overflow checks and index bounds checks are on (Gojo's default).
+- **Go**: index bounds checks; integers wrap silently.
+- **Zig ReleaseFast**: no checks at all. **Zig ReleaseSafe**: overflow and bounds checks are on; its safety level is the closest to Gojo.
 
-## 运行时间
+## Run time
 
-hyperfine 10 次运行的平均值，越小越好。
+Mean of 10 hyperfine runs. Lower is better.
 
-| 基准 | 考察点 | Kite | Go | Zig ReleaseFast | Zig ReleaseSafe |
+| Benchmark | What it tests | Gojo | Go | Zig ReleaseFast | Zig ReleaseSafe |
 | --- | --- | --- | --- | --- | --- |
-| fib(40) | 函数调用 | 247 ms | 237 ms | **152 ms** | 248 ms |
-| binary-trees(18) | 大量小对象分配 | **245 ms** | 669 ms | 957 ms | 963 ms |
-| nbody(5M 步) | 浮点、结构体 | 150 ms | 155 ms | **98 ms** | **98 ms** |
-| spectral-norm(2000) | 浮点、嵌套循环 | 106 ms | 134 ms | **101 ms** | 102 ms |
-| fannkuch-redux(10) | 整数数组 | 129 ms | 123 ms | 116 ms | **110 ms** |
-| mandelbrot(2000) | 纯浮点循环 | **102 ms** | 161 ms | 141 ms | 138 ms |
-| hashmap | 整数键 / 字符串键 | **80 ms** | 92 ms | 93 ms | 102 ms |
-| sort(5M 整数) | 排序 | **260 ms** | 309 ms | 380 ms | 429 ms |
+| fib(40) | Function calls | 247 ms | 237 ms | **152 ms** | 248 ms |
+| binary-trees(18) | Many small allocations | **245 ms** | 669 ms | 957 ms | 963 ms |
+| nbody(5M steps) | Floating point, structs | 150 ms | 155 ms | **98 ms** | **98 ms** |
+| spectral-norm(2000) | Floating point, nested loops | 106 ms | 134 ms | **101 ms** | 102 ms |
+| fannkuch-redux(10) | Integer arrays | 129 ms | 123 ms | 116 ms | **110 ms** |
+| mandelbrot(2000) | Pure floating-point loops | **102 ms** | 161 ms | 141 ms | 138 ms |
+| hashmap | Integer keys / string keys | **80 ms** | 92 ms | 93 ms | 102 ms |
+| sort(5M integers) | Sorting | **260 ms** | 309 ms | 380 ms | 429 ms |
 
-几何平均：Kite 的耗时是 Go 的 **0.78 倍**、Zig ReleaseSafe 的 **0.80 倍**、Zig ReleaseFast 的 **0.87 倍**。binary-trees 的差距主要来自分配器（见下文），不计它时分别是 0.87、0.94、1.03 倍。
+Geometric mean: Gojo takes **0.78×** the time of Go, **0.80×** of Zig ReleaseSafe and **0.87×** of Zig ReleaseFast. The binary-trees gap comes mainly from the allocator (see below); without it the figures are 0.87×, 0.94× and 1.03×.
 
-这些程序都是单线程的，但 Kite 程序已经运行在 M:N 调度器上（`main` 是第一个 goroutine）。
+These programs are all single-threaded, but Gojo programs already run on the M:N scheduler (`main` is the first goroutine).
 
-抢占检查点的开销，和没有检查点的提交 `d1f7d13` 对比（CPU 周期数，9 次取最小值；表格的墙钟时间是在那个提交上测的，后来机器有其他负载，所以这里用周期数）：
+Cost of the preemption checkpoints, compared with commit `d1f7d13`, which has no checkpoints (CPU cycle counts, minimum of 9 runs; the wall-clock times in the table were measured at that commit, and the machine had other load later, so cycle counts are used here):
 
-| 基准 | 周期变化 |
+| Benchmark | Change in cycles |
 | --- | --- |
 | fib | −11.6% |
 | binary-trees | −0.5% |
@@ -46,74 +46,74 @@ hyperfine 10 次运行的平均值，越小越好。
 | nbody | +3.6% |
 | fannkuch | +5.2% |
 
-几何平均 −0.2%。fib 变快不是检查点的功劳（它多了一次读和一次分支，指令数 +35%），应该是代码布局的影响，不要当成优化来读。
+Geometric mean −0.2%. fib getting faster is not due to the checkpoints (fib gains one load and one branch, and executes +35% instructions); it is most likely a code layout effect. Do not read it as an optimization.
 
-检查点放在哪里，是逐个实测定下来的：
+Where the checkpoints go was decided by measuring each case:
 
-- **可能递归的函数入口，以及含嵌套循环、函数值调用或运行时操作（Map、分配、格式化）的循环**：每次都检查。和循环体的工作比，一次读和一次分支可以忽略。
-- **纯计算的计数循环**：循环体生成两份，一份按 65536 次迭代分块、块之间检查，一份是普通循环处理剩下的部分。短循环只多一次比较。分块本身不要放在所有循环上：只有一份循环体时，C 编译器证明不了下标不越界，spectral-norm 慢 15%。
-- **纯计算的其他循环**（`for cond {}`）：不检查，由外层循环负责。万一它停不下来，调度器 20 ms 后把它当作 C 调用，让出 CPU 名额。
-- **慢路径是汇编跳板**：C 编译器看到的是一条不改变任何东西的 `asm`，不需要把值移出寄存器；跳板自己保存全部寄存器（arm64 含 v0–v31，x86-64 用 XSAVE）。这是合法的，因为抢占点不是同步点：Kite 代码只能通过锁和 channel 看到别的 goroutine 的写入，这些都是真正的函数调用。
+- **Entries of possibly recursive functions, and loops that contain nested loops, calls through function values, or runtime operations (Map, allocation, formatting)**: checked every time. Compared with the work in the loop body, one load and one branch are negligible.
+- **Pure computational counting loops**: the loop body is generated twice. One copy runs in chunks of 65536 iterations with a check between chunks; the other is a plain loop for the remainder. A short loop pays only one extra comparison. Chunking alone should not be applied to every loop: with only one copy of the body, the C compiler cannot prove that indexes are in bounds, and spectral-norm gets 15% slower.
+- **Other pure computational loops** (`for cond {}`): not checked; the enclosing loop takes care of it. If such a loop does not stop, the scheduler treats it as a C call after 20 ms and gives up its CPU slot.
+- **The slow path is an assembly trampoline**: the C compiler sees an `asm` statement that changes nothing, so it does not need to move values out of registers. The trampoline saves all registers itself (on arm64 including v0–v31; on x86-64 with XSAVE). This is valid because a preemption point is not a synchronization point: Gojo code can only see writes from other goroutines through locks and channels, and those are real function calls.
 
-`--cc "cc -DKITE_NO_POLL"` 可以去掉检查点做对比。
+`--cc "cc -DGOJO_NO_POLL"` removes the checkpoints for comparison.
 
-## 做过的优化
+## Optimizations done
 
-第一轮测量时 Kite 是 Go 的 1.10 倍、Zig ReleaseSafe 的 1.09 倍。对照实验（在生成的 C 里去掉检查、换写法再测）定位出下面这些原因，都已修复：
+In the first round of measurements, Gojo took 1.10× the time of Go and 1.09× of Zig ReleaseSafe. Controlled experiments (removing checks or rewriting code in the generated C and measuring again) found the causes below. All of them are fixed:
 
-| 优化 | 影响的基准 | 之前 | 之后 |
+| Optimization | Benchmark affected | Before | After |
 | --- | --- | --- | --- |
-| 小函数加 `inline` 提示 | spectral-norm | 152 ms | 100 ms |
-| 按元素类型生成排序 | sort | 415 ms | 259 ms |
-| 按键类型生成 Map 查找；更快的字符串哈希和整数格式化 | hashmap | 107 ms | 79 ms |
-| `?Box[T]` 等用空指针表示 none | binary-trees | 938 ms | 887 ms |
-| `Box`/`rc`/`arc`/接口盒子用分级空闲链表分配 | binary-trees | 887 ms | 268 ms |
-| 空闲链表直接读线程寄存器定位（不再经过 macOS 的线程局部变量函数） | binary-trees | 268 ms | 245 ms |
+| `inline` hint on small functions | spectral-norm | 152 ms | 100 ms |
+| Sorting generated per element type | sort | 415 ms | 259 ms |
+| Map lookup generated per key type; faster string hashing and integer formatting | hashmap | 107 ms | 79 ms |
+| none represented as a null pointer for `?Box[T]` etc. | binary-trees | 938 ms | 887 ms |
+| `Box`/`rc`/`arc`/interface boxes allocated from size-class free lists | binary-trees | 887 ms | 268 ms |
+| Free lists located by reading the thread register directly (no longer through the macOS thread-local variable function) | binary-trees | 268 ms | 245 ms |
 
-- **溢出检查不贵，没被内联才贵。** spectral-norm 的热点 `a(i, j)` 只有一行，但带着 5 个溢出检查的 panic 分支，clang 判断它太大，没有内联进内层循环。加上 `inline` 提示后，带全部检查的 Kite 和 Zig ReleaseSafe 一样快（100 vs 99 ms）。去掉检查只会再快 4 ms。现在编译器对类型化 IR 节点数不超过 60 的函数都加这个提示。
-- **fib 的差距是溢出检查本身。** 递归的 `fib(n-1) + fib(n-2)` 没法证明不溢出：Kite 247 ms 和 Zig ReleaseSafe 246 ms 一样，去掉检查后是 159 ms，接近 Zig ReleaseFast。这是"release 也默认检查溢出"的代价，可以考虑按包关闭检查，或者在后端消掉能证明不会溢出的检查。
-- **排序**：原来是通过函数指针比较、`memcpy` 搬元素的通用归并排序。现在按元素类型生成代码：整数、浮点、字符串用 introsort（比较直接内联；相等元素的先后顺序对这些类型不可观察）；其他类型用同样按类型生成的稳定归并排序，比较是直接调用。
-- **Map**：查找、插入、删除按键类型生成，哈希和相等比较内联，不再走函数指针；扩容和重建索引只依赖已存的哈希值，仍是运行时里的通用代码。整数键部分已经比 Go 快（53 vs 61 ms）；字符串哈希改成每次处理 8 字节，`fmt.sprint(int)` 去掉了 `snprintf`（单次 45 ns → 20 ns）。
-- **`?Box[T]`、`?rc[T]`、`?arc[T]`、`?weak[T]` 只占一个指针**，none 就是 NULL（设计文档的承诺）。二叉树节点从 32 字节降到 16 字节。
-- **小对象分配器**：Kite 的所有权规则让编译器在每个释放点都知道对象的确切大小，所以 `Box`、`rc`/`arc` 和接口值的堆盒子（≤ 256 字节）改用按 16 字节分级的线程本地空闲链表，从 64 KB 的块里切分，不再每次走 `malloc`/`free`。`Vec`/`String` 的缓冲区仍用 `malloc`/`realloc`。用 AddressSanitizer 构建时自动退回 `malloc`/`free`，内存安全测试仍然有效。
-- **线程局部变量与 goroutine 迁移**：goroutine 可能在另一个线程上恢复，而 C 编译器会把线程局部变量的地址在一个函数里缓存下来，跨过一次可能切换线程的调用继续用。所以生成的代码每次都用 volatile 内联汇编重新读线程寄存器（Linux 上加固定偏移，macOS 上读 pthread 键槽），和 Go 运行时的做法相同。这比原来 macOS 上经过 `tlv_get_addr` 的访问还快。
+- **Overflow checks are cheap; failing to inline is expensive.** The spectral-norm hot spot `a(i, j)` is a single line, but it carries 5 panic branches for overflow checks. clang judged it too large and did not inline it into the inner loop. With an `inline` hint, Gojo with all checks is as fast as Zig ReleaseSafe (100 vs 99 ms). Removing the checks saves only another 4 ms. The compiler now adds this hint to every function with at most 60 typed IR nodes.
+- **The fib gap is the overflow checks themselves.** The recursive `fib(n-1) + fib(n-2)` cannot be proven not to overflow: Gojo at 247 ms matches Zig ReleaseSafe at 246 ms, and without checks it is 159 ms, close to Zig ReleaseFast. This is the cost of "release builds check overflow by default". Options are turning checks off per package, or removing provably non-overflowing checks in the back end.
+- **Sorting**: this used to be a generic merge sort that compared through a function pointer and moved elements with `memcpy`. Code is now generated per element type: integers, floats and strings use introsort (comparisons are inlined; the order of equal elements is not observable for these types). Other types use a stable merge sort, also generated per type, with direct calls for comparison.
+- **Map**: lookup, insertion and deletion are generated per key type, with hashing and equality inlined instead of going through function pointers. Growing and reindexing depend only on the stored hashes and remain generic code in the runtime. The integer-key part is already faster than Go (53 vs 61 ms). String hashing now processes 8 bytes at a time, and `fmt.sprint(int)` no longer uses `snprintf` (45 ns → 20 ns per call).
+- **`?Box[T]`, `?rc[T]`, `?arc[T]` and `?weak[T]` take only one pointer**, and none is NULL (as the design notes promise). Binary tree nodes shrink from 32 bytes to 16 bytes.
+- **Small-object allocator**: Gojo's ownership rules let the compiler know the exact size of an object at every point where it is freed. So `Box`, `rc`/`arc` and the heap boxes of interface values (≤ 256 bytes) now use thread-local free lists in 16-byte size classes, carved from 64 KB blocks, instead of calling `malloc`/`free` every time. `Vec`/`String` buffers still use `malloc`/`realloc`. Builds with AddressSanitizer fall back to `malloc`/`free` automatically, so the memory safety tests remain valid.
+- **Thread-local variables and goroutine migration**: a goroutine may resume on another thread, but the C compiler caches the address of a thread-local variable within a function and keeps using it across a call that may switch threads. So the generated code re-reads the thread register every time with volatile inline assembly (plus a fixed offset on Linux; reading a pthread key slot on macOS), the same as the Go runtime does. This is faster than the old access through `tlv_get_addr` on macOS.
 
-## 还没解释的差距
+## Gaps not yet explained
 
-- **nbody**：Kite 和 Go 持平（151 vs 150 ms），Zig 是 98 ms。部分原因是 Zig 版本用了编译期定长数组，循环可以完全展开；把 Zig 改成运行时长度的切片后是 122 ms。剩下约 20% 试过以下改动都无效：去掉溢出 / 下标检查、换用 `zig cc` 编译同一份 C、`-O3`、去掉 `-fwrapv`、把 Vec 头读到局部变量、关闭 FMA 融合。
-- **binary-trees 的对比要看分配器**：Zig 换成内存池或 arena 分配器也能大幅提速。这一项说明的是 Kite 不用改程序就能拿到这种分配器，而不是语言本身更快。
-- **mandelbrot** 上 Kite 最快，只是 clang 对这段循环生成的代码恰好更好，不代表语言本身有优势。
+- **nbody**: Gojo is on par with Go (151 vs 150 ms); Zig takes 98 ms. Part of the reason is that the Zig version uses compile-time fixed-length arrays, so the loops can be fully unrolled; with Zig changed to run-time-length slices it takes 122 ms. For the remaining ~20%, none of these changes helped: removing overflow / index checks, compiling the same C with `zig cc`, `-O3`, removing `-fwrapv`, reading the Vec header into local variables, disabling FMA contraction.
+- **The binary-trees comparison is about the allocator**: Zig also speeds up a lot with a memory pool or arena allocator. What this benchmark shows is that Gojo gets such an allocator without changing the program, not that the language itself is faster.
+- On **mandelbrot** Gojo is fastest only because clang happens to generate better code for this loop. It does not show an advantage of the language itself.
 
 ## goroutine
 
-并发程序单独测量（Zig 没有对应物）：
+Concurrent programs are measured separately (Zig has no equivalent):
 
 ```sh
-kite build --release kite/goroutines.kite -o /tmp/k && /usr/bin/time -l /tmp/k   # Linux 上用 time -v
+gojo build --release gojo/goroutines.gojo -o /tmp/k && /usr/bin/time -l /tmp/k   # on Linux use time -v
 (cd go && go build -o /tmp/g ./goroutines) && /usr/bin/time -l /tmp/g
 ```
 
-| 测试 | 平台 | Kite | Go |
+| Test | Platform | Gojo | Go |
 | --- | --- | --- | --- |
-| 10 万个同时挂起的 goroutine 接力传值（`goroutines`） | Linux arm64（容器） | 0.38 s，441 MB | 0.11 s，284 MB |
-| 同上 | macOS（Apple M5） | 0.68 s，1.67 GB | 0.39 s，293 MB |
-| 100 万个短命 goroutine，每批 1000 个（`spawn`） | macOS | 382 ms，74 MB | 278 ms |
+| 100,000 simultaneously suspended goroutines passing a value along a chain (`goroutines`) | Linux arm64 (container) | 0.38 s, 441 MB | 0.11 s, 284 MB |
+| Same as above | macOS (Apple M5) | 0.68 s, 1.67 GB | 0.39 s, 293 MB |
+| 1,000,000 short-lived goroutines, in batches of 1,000 (`spawn`) | macOS | 382 ms, 74 MB | 278 ms |
 
-- **内存**：Kite 的 goroutine 栈不能移动（任务可以借用别的 goroutine 栈上的数据），所以不能像 Go 那样从 2 KB 起步再整体复制扩容。每个栈是一段按需占页的虚拟地址，一个挂起的小 goroutine 占一页：Linux 4 KB，Apple Silicon 16 KB。这就是 macOS 上 1.67 GB 的来源。
-- **映射数**：Linux 6.13 起用 `MADV_GUARD_INSTALL` 设保护页，相邻的栈合并成一个映射；更早的内核每个 goroutine 占两个映射，受 `vm.max_map_count`（默认 262144）限制，约 13 万个 goroutine 时报错并提示调大这个值。
-- **栈的复用**：结束的 goroutine 把栈留在工作线程的空闲列表里，多了就分给其他线程；共享池超过 4096 个时才把内存还给系统。最初每次都 `madvise`，`spawn` 要 1.16 s。
+- **Memory**: Gojo goroutine stacks cannot move (a task can borrow data on another goroutine's stack), so they cannot start at 2 KB and grow by copying as in Go. Each stack is a range of virtual addresses whose pages are committed on demand. A suspended small goroutine uses one page: 4 KB on Linux, 16 KB on Apple Silicon. That is where the 1.67 GB on macOS comes from.
+- **Mapping count**: since Linux 6.13, guard pages are set with `MADV_GUARD_INSTALL`, and adjacent stacks merge into one mapping. On older kernels each goroutine uses two mappings and is limited by `vm.max_map_count` (default 262144); at about 130,000 goroutines you get an error suggesting you raise this value.
+- **Stack reuse**: a finished goroutine leaves its stack on the worker thread's free list; extra stacks are handed to other threads. Memory is returned to the system only when the shared pool exceeds 4096 stacks. Originally every exit called `madvise`, and `spawn` took 1.16 s.
 
-## 编译时间
+## Compile time
 
-以 nbody 为例，每次测量前改动源文件，让编译缓存失效（Kite 清掉二进制缓存，保留已编译的运行时库）：
+Using nbody as the example. Before each measurement the source file is changed so the compile cache is invalidated (for Gojo the binary cache is cleared; the compiled runtime library is kept):
 
-| 命令 | 时间 |
+| Command | Time |
 | --- | --- |
-| `kite check`（解析、类型检查、借用检查） | 3 ms |
-| `kite build`（debug，生成 C + `cc -O0`） | 51 ms |
-| `kite build --release`（`cc -O2`） | 65 ms |
+| `gojo check` (parsing, type checking, borrow checking) | 3 ms |
+| `gojo build` (debug, C generation + `cc -O0`) | 51 ms |
+| `gojo build --release` (`cc -O2`) | 65 ms |
 | `go build` | 97 ms |
-| `zig build-exe`（Debug） | 924 ms |
+| `zig build-exe` (Debug) | 924 ms |
 | `zig build-exe -O ReleaseFast` | 3.8 s |
 
-Kite 前端只占约 3 ms，其余是 C 编译器的时间。源码没变时再次构建会直接用缓存的二进制。
+The Gojo front end takes only about 3 ms; the rest is the C compiler. When the source is unchanged, a rebuild uses the cached binary directly.

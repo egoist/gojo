@@ -1,0 +1,286 @@
+// A JSON API for a to-do list, in plain Gojo.
+//
+//   GET    /todos          the list
+//   POST   /todos          {"title": "..."} adds one
+//   GET    /todos/ID       one item
+//   PATCH  /todos/ID       {"title": "...", "done": true} changes it
+//   DELETE /todos/ID       removes it
+//
+// `gojo run examples/todo serve [FILE]` serves on :8080, saving to FILE (JSON)
+// after every change. `gojo run examples/todo` starts it on a free port and
+// checks it with a client.
+use std/{fmt, http, io, json, net, os, task, time}
+
+struct Todo {
+    id int
+    title String
+    done bool = false
+    created String
+
+    fn toJson(self) json.Value {
+        var v = json.object()
+        v.set("id", json.integer(self.id))
+        v.set("title", json.string(self.title))
+        v.set("done", json.boolean(self.done))
+        v.set("created", json.string(self.created))
+        return v
+    }
+}
+
+struct Store {
+    todos Vec[Todo] = []
+    next int = 1
+    // where to save, if anywhere
+    file String = ""
+
+    fn find(self, id int) int {
+        for i, t in self.todos {
+            if t.id == id {
+                return i
+            }
+        }
+        return -1
+    }
+
+    fn toJson(self) json.Value {
+        var items = json.array()
+        for t in self.todos {
+            items.push(t.toJson())
+        }
+        return items
+    }
+
+    fn save(self) {
+        if self.file.len() == 0 {
+            return
+        }
+        var doc = json.object()
+        doc.set("next", json.integer(self.next))
+        doc.set("todos", self.toJson())
+        let tmp = self.file + ".tmp"
+        // write the whole file, then move it into place
+        os.writeText(tmp, doc.pretty()) catch e {
+            eprintln("cannot save:", e.message())
+            return
+        }
+        os.rename(tmp, self.file) catch e {
+            eprintln("cannot save:", e.message())
+        }
+    }
+
+    fn load(self inout) ! io.Error {
+        if !os.exists(self.file) {
+            return
+        }
+        let text = try os.readText(self.file)
+        let doc = json.parse(text) catch e {
+            return err(io.newError(.InvalidInput, e.message()))
+        }
+        self.next = doc.get("next").unwrap().int() ?? 1
+        if let items = doc.get("todos") {
+            for i in 0..items.len() {
+                let t = items.at(i).unwrap()
+                self.todos.push(Todo{
+                    id: t.get("id").unwrap().int() ?? 0,
+                    title: (t.get("title").unwrap().str() ?? "").toString(),
+                    done: t.get("done").unwrap().boolean() ?? false,
+                    created: (t.get("created").unwrap().str() ?? "").toString(),
+                })
+            }
+        }
+    }
+}
+
+fn problem(status int, msg str) http.Response {
+    var v = json.object()
+    v.set("error", json.string(msg))
+    return http.json(status, v.encode())
+}
+
+// The request's body as a JSON object, or the response explaining why not.
+fn body(req http.Request) json.Value ! http.Response {
+    let v = json.parse(req.text()) catch e {
+        return err(problem(400, e.message()))
+    }
+    if !v.isObject() {
+        return err(problem(400, "expected a JSON object"))
+    }
+    return v
+}
+
+struct Api {
+    store Mutex[Store]
+
+    fn serve(self, req http.Request) http.Response {
+        let seg = req.segments()
+        if seg.len() == 0 || seg[0] != "todos" || seg.len() > 2 {
+            return problem(404, "no such resource")
+        }
+        if seg.len() == 1 {
+            return match req.method.asStr() {
+                "GET" => self.list()
+                "POST" => self.create(req)
+                _ => problem(405, "use GET or POST")
+            }
+        }
+        let id = seg[1].parseInt() ?? return problem(400, "the id must be a number")
+        return match req.method.asStr() {
+            "GET" => self.show(id)
+            "PATCH" => self.update(id, req)
+            "DELETE" => self.remove(id)
+            _ => problem(405, "use GET, PATCH or DELETE")
+        }
+    }
+
+    fn list(self) http.Response {
+        with s = self.store.lock() {
+            return http.json(200, s.toJson().encode())
+        }
+        return problem(500, "unreachable")
+    }
+
+    fn create(self, req http.Request) http.Response {
+        let v = body(req) catch r {
+            return r
+        }
+        var title = "".toString()
+        if let t = v.get("title") {
+            title = (t.str() ?? "").trim().toString()
+        } else {
+            return problem(422, "`title` is missing")
+        }
+        if title.len() == 0 {
+            return problem(422, "`title` must be a non-empty string")
+        }
+        with s = self.store.lock() {
+            let t = Todo{id: s.next, title: title, created: time.utc(time.unixNanos()).format("%Y-%m-%d")}
+            s.next += 1
+            let out = t.toJson().encode()
+            s.todos.push(t)
+            s.save()
+            var r = http.json(201, out)
+            r.setHeader("Location", fmt.format("/todos/{}", s.next - 1))
+            return r
+        }
+        return problem(500, "unreachable")
+    }
+
+    fn show(self, id int) http.Response {
+        with s = self.store.lock() {
+            let i = s.find(id)
+            if i < 0 {
+                return problem(404, fmt.format("no todo {}", id))
+            }
+            return http.json(200, s.todos[i].toJson().encode())
+        }
+        return problem(500, "unreachable")
+    }
+
+    fn update(self, id int, req http.Request) http.Response {
+        let v = body(req) catch r {
+            return r
+        }
+        with s = self.store.lock() {
+            let i = s.find(id)
+            if i < 0 {
+                return problem(404, fmt.format("no todo {}", id))
+            }
+            if let t = v.get("title") {
+                let title = t.str() ?? ""
+                if title.trim().len() == 0 {
+                    return problem(422, "`title` must be a non-empty string")
+                }
+                s.todos[i].title = title.trim().toString()
+            }
+            if let d = v.get("done") {
+                s.todos[i].done = d.boolean() ?? return problem(422, "`done` must be true or false")
+            }
+            s.save()
+            return http.json(200, s.todos[i].toJson().encode())
+        }
+        return problem(500, "unreachable")
+    }
+
+    fn remove(self, id int) http.Response {
+        with s = self.store.lock() {
+            let i = s.find(id)
+            if i < 0 {
+                return problem(404, fmt.format("no todo {}", id))
+            }
+            _ = s.todos.remove(i)
+            s.save()
+            return http.Response{status: 204}
+        }
+        return problem(500, "unreachable")
+    }
+}
+
+// ---------------------------------------------------------------- the self-test
+
+fn call(base str, method str, path str, data str) String {
+    let r = http.request(method, base + path, Vec[http.Header]{}, data.bytes()) catch e {
+        return "failed: " + e.message()
+    }
+    // the dates change every day: hide them
+    let text = r.text()
+    let shown = if let c = text.find("\"created\":\"") { text[0..c + 11] + "DATE" + text[c + 21..] } else { text }
+    return fmt.format("{} {} -> {} {}", method, path, r.status, shown)
+}
+
+fn selfTest() ! io.Error {
+    let path = os.joinPath(os.tempDir(), "gojo-todo-test.json")
+    _ = os.remove(path)
+    let api = Api{store: Mutex(Store{file: path.clone()})}
+    let ln = try net.listen("127.0.0.1:0")
+    let base = fmt.format("http://127.0.0.1:{}", ln.port())
+    let stop = chan[bool]()
+    _ = task.group((g) => {
+        g.go(() => {
+            _ = task.group((sg) => {
+                sg.go(() => http.serve(ln, api, http.Options{}))
+                _ = <-stop
+                sg.cancel()
+            })
+        })
+        println(call(base, "GET", "/todos", ""))
+        println(call(base, "POST", "/todos", `{"title": "  write the docs "}`))
+        println(call(base, "POST", "/todos", `{"title": "ship the beta"}`))
+        println(call(base, "POST", "/todos", `{"title": ""}`))
+        println(call(base, "POST", "/todos", `{"name": "x"}`))
+        println(call(base, "POST", "/todos", `{"title": "oops"`))
+        println(call(base, "POST", "/todos", `["not", "an", "object"]`))
+        println(call(base, "PATCH", "/todos/1", `{"done": true}`))
+        println(call(base, "PATCH", "/todos/2", `{"done": "yes"}`))
+        println(call(base, "GET", "/todos/1", ""))
+        println(call(base, "DELETE", "/todos/2", ""))
+        println(call(base, "DELETE", "/todos/2", ""))
+        println(call(base, "GET", "/todos/x", ""))
+        println(call(base, "PUT", "/todos", ""))
+        println(call(base, "GET", "/elsewhere", ""))
+        println(call(base, "GET", "/todos", ""))
+        stop <- true
+    })
+    // what was saved can be loaded again
+    var again = Store{file: path.clone()}
+    try again.load()
+    println("reloaded:", again.todos.len(), "next id", again.next, again.todos[0].title, again.todos[0].done)
+    _ = os.remove(path)
+    return
+}
+
+fn main() ! io.Error {
+    let args = os.args()
+    if args.len() > 1 && args[1] == "serve" {
+        var store = Store{}
+        if args.len() > 2 {
+            store.file = args[2].clone()
+            try store.load()
+        }
+        let api = Api{store: Mutex(store)}
+        let ln = try net.listen(":8080")
+        println("listening on :8080")
+        http.serve(ln, api, http.Options{})
+        return
+    }
+    return selfTest()
+}

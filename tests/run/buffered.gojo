@@ -1,0 +1,48 @@
+// bufio: lines, delimiters and buffered writes, over files and memory.
+use std/{bufio, fmt, io, os}
+
+fn lines(text str) ! io.Error {
+    var r = bufio.reader(io.textReader(text))
+    var n = 0
+    for {
+        let line = try r.readLine() ?? break
+        n += 1
+        println(n, "[" + line + "]")
+    }
+}
+
+fn main() {
+    lines("one\ntwo\r\nthree") catch e { println(e.message()) }
+    lines("") catch e { println(e.message()) }
+    lines("\n\n") catch e { println(e.message()) }
+
+    let path = os.joinPath(os.tempDir(), "gojo-buffered-test.txt")
+    {
+        var f = bufio.writer(os.create(path).unwrap())
+        for i in 0..3000 {
+            f.writeText("line " + fmt.sprint(i) + "\n") catch e { println(e.message()) }
+        }
+        // flushed when it goes out of scope
+    }
+    var r = bufio.reader(os.open(path).unwrap())
+    var count = 0
+    var last = "".toString()
+    for {
+        let line = r.readLine().unwrap() ?? break
+        count += 1
+        last = line
+    }
+    println(count, last)
+    _ = os.remove(path)
+
+    var w = bufio.writer(io.Buffer{})
+    w.writeText("a,b,c") catch e { println(e.message()) }
+    w.flush() catch e { println(e.message()) }
+
+    var csv = bufio.reader(io.textReader("a,bb,,ccc"))
+    for {
+        let field = csv.readUntil(44).unwrap() ?? break
+        print(field.len(), " ")
+    }
+    println()
+}

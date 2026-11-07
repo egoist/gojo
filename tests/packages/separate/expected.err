@@ -1,1 +1,1 @@
-`./lib` is a separate package (it has its own kite.toml): add `lib = { path = "lib" }` to [dependencies] and write `use lib`
+`./lib` is a separate package (it has its own gojo.toml): add `lib = { path = "lib" }` to [dependencies] and write `use lib`

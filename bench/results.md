@@ -1,4 +1,4 @@
-| benchmark | Kite (--release) | Go | Zig ReleaseFast | Zig ReleaseSafe |
+| benchmark | Gojo (--release) | Go | Zig ReleaseFast | Zig ReleaseSafe |
 | --- | --- | --- | --- | --- |
 | fib | 247 ms ± 2 | 237 ms ± 8 | 152 ms ± 2 | 248 ms ± 3 |
 | binarytrees | 245 ms ± 6 | 669 ms ± 29 | 957 ms ± 34 | 963 ms ± 46 |

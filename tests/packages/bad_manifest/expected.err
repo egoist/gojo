@@ -1,8 +1,8 @@
 `My App` is not a package name
 `1.0` is not a version
 unknown key `edtion` in [package]
-`kite-yaml` can't be imported with `use`
+`gojo-yaml` can't be imported with `use`
 `std` is the standard library
 there is no directory `../nowhere`
 give either `path` or `git`, not both
-kite.toml:4:1
+gojo.toml:4:1

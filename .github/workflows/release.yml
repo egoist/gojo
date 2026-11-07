@@ -1,6 +1,6 @@
 # Push a tag `vX.Y.Z` (matching Cargo.toml) to build the archives and publish
 # a release with them. install.sh then installs from this repository's
-# releases with KITE_RELEASES=https://github.com/OWNER/kite/releases.
+# releases (https://github.com/egoist/gojo/releases).
 name: release
 on:
   push:
@@ -30,4 +30,4 @@ jobs:
         run: |
           prerelease=
           case $GITHUB_REF_NAME in *-*) prerelease=--prerelease ;; esac
-          gh release create "$GITHUB_REF_NAME" $prerelease --title "Kite $GITHUB_REF_NAME" --generate-notes dist/*.tar.gz dist/SHA256SUMS dist/VERSION dist/install.sh
+          gh release create "$GITHUB_REF_NAME" $prerelease --title "Gojo $GITHUB_REF_NAME" --generate-notes dist/*.tar.gz dist/SHA256SUMS dist/VERSION dist/install.sh

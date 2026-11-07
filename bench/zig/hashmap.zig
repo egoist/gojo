@@ -29,7 +29,7 @@ pub fn main(init: std.process.Init) !void {
     var hits: i64 = 0;
     i = 0;
     while (i < k * 2) : (i += 1) {
-        // allocate the probe key, like the Go and Kite versions do
+        // allocate the probe key, like the Go and Gojo versions do
         const key = try std.fmt.allocPrint(gpa, "{d}", .{i});
         if (s.contains(key)) hits += 1;
         gpa.free(key);

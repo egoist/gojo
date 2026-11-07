@@ -1,5 +1,5 @@
-{"name":"kite","version":1,"pi":3.25,"tags":["fast","safe"],"nested":{"ok":true,"nothing":null},"big":12345678901234567168,"esc":"a\"b\\c\né😀"}
-kite 1 3.25
+{"name":"gojo","version":1,"pi":3.25,"tags":["fast","safe"],"nested":{"ok":true,"nothing":null},"big":12345678901234567168,"esc":"a\"b\\c\né😀"}
+gojo 1 3.25
 2 safe ["name", "version", "pi", "tags", "nested", "big", "esc"]
 true true true
 -1 12345678901234567168

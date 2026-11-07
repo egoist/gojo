@@ -1,7 +1,7 @@
-// Kite compiler driver.
+// Gojo compiler driver.
 
-use kite::diag::Diag;
-use kite::{codegen, report, RUNTIME_C, RUNTIME_H};
+use gojo::diag::Diag;
+use gojo::{codegen, report, RUNTIME_C, RUNTIME_H};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 use std::time::Instant;
@@ -16,32 +16,32 @@ struct Options {
     keep_c: bool,
 }
 
-const USAGE: &str = "Kite — a systems language with Go's simplicity, no GC and no nil.
+const USAGE: &str = "Gojo — a systems language with Go's simplicity, no GC and no nil.
 
 usage:
-  kite run   <file.kite|dir> [args...]   compile and run
-  kite build <file.kite|dir> [-o out]     compile to a native binary
-  kite check <file.kite|dir>              type and borrow check only
-  kite test  <file.kite|dir>              run `test \"...\" {}` blocks
-  kite emit-c <file.kite|dir>             print the generated C
-  kite fmt [--check] [file.kite|dir...]  format in place (default: .); --check lists
+  gojo run   <file.gojo|dir> [args...]   compile and run
+  gojo build <file.gojo|dir> [-o out]     compile to a native binary
+  gojo check <file.gojo|dir>              type and borrow check only
+  gojo test  <file.gojo|dir>              run `test \"...\" {}` blocks
+  gojo emit-c <file.gojo|dir>             print the generated C
+  gojo fmt [--check] [file.gojo|dir...]  format in place (default: .); --check lists
                                           files that aren't formatted and fails
-  kite doc [module|path] [--out dir]      API docs as Markdown: the standard library
+  gojo doc [module|path] [--out dir]      API docs as Markdown: the standard library
                                           index, one std module, or a package;
                                           --out writes every std module to dir
-  kite init [name]                        write a kite.toml here: a package named after
+  gojo init [name]                        write a gojo.toml here: a package named after
                                           the directory (or `name`)
-  kite version                            print the version
+  gojo version                            print the version
 
 options:
   --release        optimize (overflow checks stay on)
-  --cc <compiler>  C compiler for the backend (default: $KITE_CC, else the
+  --cc <compiler>  C compiler for the backend (default: $GOJO_CC, else the
                    first of cc, clang, gcc and `zig cc` on the PATH)
   --target <t>     cross-compile with `zig cc -target <t>` (Linux or macOS,
                    e.g. x86_64-linux-musl, aarch64-macos)
   -v               print timings
 
-Kite compiles to C: it needs a C compiler (cc, clang, gcc, or zig) on the PATH.";
+Gojo compiles to C: it needs a C compiler (cc, clang, gcc, or zig) on the PATH.";
 
 fn usage() -> ExitCode {
     eprintln!("{}", USAGE);
@@ -49,7 +49,7 @@ fn usage() -> ExitCode {
 }
 
 fn version() -> String {
-    format!("kite {} ({}, {})", env!("CARGO_PKG_VERSION"), env!("KITE_COMMIT"), env!("KITE_HOST"))
+    format!("gojo {} ({}, {})", env!("CARGO_PKG_VERSION"), env!("GOJO_COMMIT"), env!("GOJO_HOST"))
 }
 
 /// Why the C compiler could not be started, and what to do about it.
@@ -59,9 +59,9 @@ fn cc_missing(cc: &str, e: &std::io::Error) -> String {
         m.push_str(if cc == "zig" {
             "\n  --target cross-compiles with zig: install it from https://ziglang.org/download/"
         } else if cfg!(target_os = "macos") {
-            "\n  Kite compiles to C: install a C compiler with `xcode-select --install`,\n  or install zig (https://ziglang.org), which is used when no `cc` is found"
+            "\n  Gojo compiles to C: install a C compiler with `xcode-select --install`,\n  or install zig (https://ziglang.org), which is used when no `cc` is found"
         } else {
-            "\n  Kite compiles to C: install a C compiler (e.g. `apt install gcc` or `apk add gcc musl-dev`),\n  or install zig (https://ziglang.org), which is used when no `cc` is found"
+            "\n  Gojo compiles to C: install a C compiler (e.g. `apt install gcc` or `apk add gcc musl-dev`),\n  or install zig (https://ziglang.org), which is used when no `cc` is found"
         });
     }
     m
@@ -87,7 +87,7 @@ fn main() -> ExitCode {
         return usage();
     }
     let cmd = args[1].as_str();
-    let mut opts = Options { release: false, output: None, verbose: false, cc: std::env::var("KITE_CC").ok(), target: None, keep_c: false };
+    let mut opts = Options { release: false, output: None, verbose: false, cc: std::env::var("GOJO_CC").ok(), target: None, keep_c: false };
     let mut input = None;
     let mut prog_args = vec![];
     let mut i = 2;
@@ -115,11 +115,11 @@ fn main() -> ExitCode {
                 opts.target = args.get(i).cloned();
             }
             _ if a.starts_with('-') && a.len() > 1 => {
-                eprintln!("error: unknown option `{}` (see `kite help`)", a);
+                eprintln!("error: unknown option `{}` (see `gojo help`)", a);
                 return ExitCode::from(2);
             }
             _ if input.is_some() => {
-                eprintln!("error: unexpected argument `{}`: `kite {}` takes one file or directory", a, cmd);
+                eprintln!("error: unexpected argument `{}`: `gojo {}` takes one file or directory", a, cmd);
                 return ExitCode::from(2);
             }
             _ => input = Some(a.clone()),
@@ -139,11 +139,11 @@ fn main() -> ExitCode {
     }
     if let Some(t) = &opts.target {
         if t.contains("windows") || t.contains("mingw") {
-            eprintln!("error: Windows is not supported: Kite's runtime needs a POSIX system (Linux or macOS)");
+            eprintln!("error: Windows is not supported: Gojo's runtime needs a POSIX system (Linux or macOS)");
             return ExitCode::from(2);
         }
         if !(t.contains("linux") || t.contains("macos") || t.contains("darwin")) {
-            eprintln!("error: unsupported target `{}`: Kite targets Linux and macOS (e.g. x86_64-linux-musl, aarch64-linux-gnu, aarch64-macos)", t);
+            eprintln!("error: unsupported target `{}`: Gojo targets Linux and macOS (e.g. x86_64-linux-musl, aarch64-linux-gnu, aarch64-macos)", t);
             return ExitCode::from(2);
         }
     }
@@ -152,20 +152,20 @@ fn main() -> ExitCode {
     if let Some(members) = workspace_members(&input) {
         if !matches!(cmd, "check" | "test") {
             let names: Vec<String> = members.iter().map(|m| m.display().to_string()).collect();
-            eprintln!("error: {} is a workspace: `kite {}` one of its members:\n  {}", input, cmd, names.join("\n  "));
+            eprintln!("error: {} is a workspace: `gojo {}` one of its members:\n  {}", input, cmd, names.join("\n  "));
             return ExitCode::from(2);
         }
         let mut failed = false;
         for m in members {
             eprintln!("== {}", m.display());
             let (cmd, m, opts) = (cmd.to_string(), m.display().to_string(), opts.clone());
-            let r = kite::with_compiler_stack(move || drive(&cmd, &m, &opts, &[]));
+            let r = gojo::with_compiler_stack(move || drive(&cmd, &m, &opts, &[]));
             failed |= !matches!(r, Ok(c) if c == ExitCode::SUCCESS);
         }
         return if failed { ExitCode::from(1) } else { ExitCode::SUCCESS };
     }
     let cmd = cmd.to_string();
-    let r = kite::with_compiler_stack(move || drive(&cmd, &input, &opts, &prog_args));
+    let r = gojo::with_compiler_stack(move || drive(&cmd, &input, &opts, &prog_args));
     match r {
         Ok(code) => code,
         Err(()) => ExitCode::from(1),
@@ -179,25 +179,25 @@ fn dependency_dir(name: &str) -> Option<Result<PathBuf, String>> {
     if name.starts_with('.') || name.starts_with('/') || name.starts_with("std/") {
         return None;
     }
-    let root = kite::manifest::find_root(Path::new("."))?;
-    let mut sm = kite::diag::SourceMap::default();
-    let m = kite::manifest::read(&mut sm, &root).ok()?;
+    let root = gojo::manifest::find_root(Path::new("."))?;
+    let mut sm = gojo::diag::SourceMap::default();
+    let m = gojo::manifest::read(&mut sm, &root).ok()?;
     let (dep, sub) = name.split_once('/').unwrap_or((name, ""));
     let d = m.dependency(dep)?;
     Some(match &d.source {
-        kite::manifest::Source::Path(dir) => {
-            let exported = kite::manifest::read(&mut sm, dir).ok().and_then(|dm| dm.package).is_some_and(|p| p.exports.iter().any(|e| e == sub));
+        gojo::manifest::Source::Path(dir) => {
+            let exported = gojo::manifest::read(&mut sm, dir).ok().and_then(|dm| dm.package).is_some_and(|p| p.exports.iter().any(|e| e == sub));
             if exported { Ok(dir.join(sub)) } else { Err(format!("`{}` doesn't export `{}`", dep, if sub.is_empty() { "." } else { sub })) }
         }
         _ => Err(format!("`{}` isn't available locally yet (only path dependencies are)", dep)),
     })
 }
 
-/// `kite init`: a kite.toml for the current directory.
+/// `gojo init`: a gojo.toml for the current directory.
 fn init_command(args: &[String]) -> ExitCode {
-    let path = Path::new(kite::manifest::FILE);
+    let path = Path::new(gojo::manifest::FILE);
     if path.exists() {
-        eprintln!("error: there is already a kite.toml here");
+        eprintln!("error: there is already a gojo.toml here");
         return ExitCode::from(1);
     }
     let name = match args.first() {
@@ -208,34 +208,34 @@ fn init_command(args: &[String]) -> ExitCode {
             n.trim_matches('-').to_string()
         }
     };
-    if !kite::manifest::valid_package_name(&name) {
-        eprintln!("error: `{}` is not a package name: lower-case letters, digits, `-` and `_`, optionally scoped (`@scope/name`); give one: `kite init my-app`", name);
+    if !gojo::manifest::valid_package_name(&name) {
+        eprintln!("error: `{}` is not a package name: lower-case letters, digits, `-` and `_`, optionally scoped (`@scope/name`); give one: `gojo init my-app`", name);
         return ExitCode::from(1);
     }
-    let text = format!("[package]\nname = \"{}\"\nversion = \"0.1.0\"\nedition = \"{}\"\n\n[dependencies]\n", name, kite::manifest::LATEST_EDITION);
+    let text = format!("[package]\nname = \"{}\"\nversion = \"0.1.0\"\nedition = \"{}\"\n\n[dependencies]\n", name, gojo::manifest::LATEST_EDITION);
     if let Err(e) = std::fs::write(path, text) {
-        eprintln!("error: cannot write kite.toml: {}", e);
+        eprintln!("error: cannot write gojo.toml: {}", e);
         return ExitCode::from(1);
     }
-    println!("wrote kite.toml for package `{}`", name);
+    println!("wrote gojo.toml for package `{}`", name);
     ExitCode::SUCCESS
 }
 
-/// The members of the workspace at `dir`, when `dir`'s kite.toml is a
+/// The members of the workspace at `dir`, when `dir`'s gojo.toml is a
 /// workspace without a [package].
 fn workspace_members(dir: &str) -> Option<Vec<PathBuf>> {
     let d = Path::new(dir);
-    if !d.join(kite::manifest::FILE).is_file() {
+    if !d.join(gojo::manifest::FILE).is_file() {
         return None;
     }
-    let mut sm = kite::diag::SourceMap::default();
-    let m = kite::manifest::read(&mut sm, d).ok()?;
+    let mut sm = gojo::diag::SourceMap::default();
+    let m = gojo::manifest::read(&mut sm, d).ok()?;
     (m.package.is_none() && !m.members.is_empty()).then_some(m.members)
 }
 
-/// `kite doc`: API documentation, as Markdown.
+/// `gojo doc`: API documentation, as Markdown.
 fn doc_command(args: &[String]) -> ExitCode {
-    let std_files = |name: &str| -> Vec<(String, String)> { kite::STD.iter().filter(|(n, _)| *n == name).map(|(n, s)| (format!("{}.kite", n), s.to_string())).collect() };
+    let std_files = |name: &str| -> Vec<(String, String)> { gojo::STD.iter().filter(|(n, _)| *n == name).map(|(n, s)| (format!("{}.gojo", n), s.to_string())).collect() };
     let index = || {
         let mut s = String::from("# The standard library
 
@@ -244,9 +244,9 @@ The prelude is available everywhere; other modules are imported with `use std/na
 | module | |
 | --- | --- |
 ");
-        for (name, _) in kite::STD {
+        for (name, _) in gojo::STD {
             s.push_str(&format!("| [`{}`]({}.md) | {} |
-", name, name, kite::doc::summary(&std_files(name))));
+", name, name, gojo::doc::summary(&std_files(name))));
         }
         s
     };
@@ -263,8 +263,8 @@ The prelude is available everywhere; other modules are imported with `use std/na
             return fail(format!("cannot create {}: {}", dir.display(), e));
         }
         let mut pages = vec![("README".to_string(), index())];
-        for (name, _) in kite::STD {
-            match kite::doc::package(name, &std_files(name)) {
+        for (name, _) in gojo::STD {
+            match gojo::doc::package(name, &std_files(name)) {
                 Ok(d) => pages.push((name.to_string(), d)),
                 Err(e) => return fail(e),
             }
@@ -280,11 +280,11 @@ The prelude is available everywhere; other modules are imported with `use std/na
     let text = match args.first() {
         None => Ok(index()),
         // `std/os` (or just `os`, when it isn't a dependency)
-        Some(name) if name.strip_prefix("std/").is_some_and(|m| kite::STD.iter().any(|(n, _)| *n == m)) => {
+        Some(name) if name.strip_prefix("std/").is_some_and(|m| gojo::STD.iter().any(|(n, _)| *n == m)) => {
             let m = &name[4..];
-            kite::doc::package(m, &std_files(m))
+            gojo::doc::package(m, &std_files(m))
         }
-        Some(name) if dependency_dir(name).is_none() && kite::STD.iter().any(|(n, _)| n == name) => kite::doc::package(name, &std_files(name)),
+        Some(name) if dependency_dir(name).is_none() && gojo::STD.iter().any(|(n, _)| n == name) => gojo::doc::package(name, &std_files(name)),
         Some(path) => {
             // a dependency of the package here (`yaml`, `yaml/schema`), or a path
             let dep = dependency_dir(path);
@@ -294,11 +294,11 @@ The prelude is available everywhere; other modules are imported with `use std/na
             let resolved = dep.and_then(|d| d.ok());
             let p = resolved.as_deref().unwrap_or(Path::new(path));
             let mut files: Vec<PathBuf> = if p.is_dir() {
-                std::fs::read_dir(p).map(|rd| rd.filter_map(|e| e.ok().map(|e| e.path())).filter(|f| f.extension().is_some_and(|x| x == "kite")).collect()).unwrap_or_default()
+                std::fs::read_dir(p).map(|rd| rd.filter_map(|e| e.ok().map(|e| e.path())).filter(|f| f.extension().is_some_and(|x| x == "gojo")).collect()).unwrap_or_default()
             } else if p.is_file() {
                 vec![p.to_path_buf()]
             } else {
-                return fail(format!("`{}` is neither a standard module nor a file or directory (modules: {})", path, kite::STD.iter().map(|(n, _)| *n).collect::<Vec<_>>().join(", ")));
+                return fail(format!("`{}` is neither a standard module nor a file or directory (modules: {})", path, gojo::STD.iter().map(|(n, _)| *n).collect::<Vec<_>>().join(", ")));
             };
             files.sort();
             let mut srcs = vec![];
@@ -310,7 +310,7 @@ The prelude is available everywhere; other modules are imported with `use std/na
             }
             let canon = p.canonicalize().unwrap_or(p.to_path_buf());
             let name = if resolved.is_some() { path.to_string() } else { if p.is_dir() { canon.file_name() } else { canon.file_stem() }.map(|n| n.to_string_lossy().into_owned()).unwrap_or_default() };
-            kite::doc::package(&name, &srcs)
+            gojo::doc::package(&name, &srcs)
         }
     };
     match text {
@@ -322,7 +322,7 @@ The prelude is available everywhere; other modules are imported with `use std/na
     }
 }
 
-/// `kite fmt`: formats files (directories: every .kite file below them).
+/// `gojo fmt`: formats files (directories: every .gojo file below them).
 fn fmt_command(args: &[String]) -> ExitCode {
     let check = args.iter().any(|a| a == "--check");
     let mut paths: Vec<PathBuf> = args.iter().filter(|a| !a.starts_with("--")).map(PathBuf::from).collect();
@@ -335,7 +335,7 @@ fn fmt_command(args: &[String]) -> ExitCode {
             es.sort();
             for e in es {
                 let hidden = e.file_name().is_some_and(|n| n.to_string_lossy().starts_with('.'));
-                if !hidden && (e.is_dir() || e.extension().is_some_and(|x| x == "kite")) {
+                if !hidden && (e.is_dir() || e.extension().is_some_and(|x| x == "gojo")) {
                     collect(&e, out);
                 }
             }
@@ -357,7 +357,7 @@ fn fmt_command(args: &[String]) -> ExitCode {
                 continue;
             }
         };
-        match kite::formatter::format(&src) {
+        match gojo::formatter::format(&src) {
             Ok(out) if out == src => {}
             Ok(out) => {
                 bad += 1;
@@ -378,9 +378,9 @@ fn fmt_command(args: &[String]) -> ExitCode {
 }
 
 fn cache_dir() -> PathBuf {
-    let base = std::env::var("KITE_CACHE").map(PathBuf::from).unwrap_or_else(|_| {
+    let base = std::env::var("GOJO_CACHE").map(PathBuf::from).unwrap_or_else(|_| {
         let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-        PathBuf::from(home).join(".cache").join("kite")
+        PathBuf::from(home).join(".cache").join("gojo")
     });
     let _ = std::fs::create_dir_all(&base);
     base
@@ -426,10 +426,10 @@ fn is_executable(p: &Path) -> bool {
 /// compilers of different versions can share the cache.
 fn runtime_include_dir() -> Result<PathBuf, String> {
     let dir = cache_dir().join(format!("include_{:016x}", hash_str(RUNTIME_H)));
-    let h = dir.join("kite_rt.h");
+    let h = dir.join("gojo_rt.h");
     if !h.exists() {
         std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-        let tmp = dir.join(format!("kite_rt.h.{}", std::process::id()));
+        let tmp = dir.join(format!("gojo_rt.h.{}", std::process::id()));
         std::fs::write(&tmp, RUNTIME_H).map_err(|e| e.to_string())?;
         std::fs::rename(&tmp, &h).map_err(|e| e.to_string())?;
     } else {
@@ -451,7 +451,7 @@ fn targets_linux(opts: &Options) -> bool {
 }
 
 /// A C compiler command with room to recurse: generated C nests about as deeply
-/// as the Kite source (up to `parser::MAX_NEST` levels, a few C levels each), and
+/// as the Gojo source (up to `parser::MAX_NEST` levels, a few C levels each), and
 /// clang and gcc parse nested expressions recursively, so the 8 MB default stack
 /// isn't enough at the limit. The higher limit only affects the compiler process.
 fn cc_command(cc: &str, pre: &[String]) -> Command {
@@ -499,13 +499,13 @@ fn runtime_object(opts: &Options) -> Result<(PathBuf, bool), String> {
     let flags = if opts.release { "-O2" } else { "-O1" };
     let key = hash_str(&format!("{}{}{:?}{}{}", RUNTIME_C, RUNTIME_H, pre, cc, flags));
     let dir = cache_dir();
-    let obj = dir.join(format!("kite_rt_{:016x}.o", key));
-    let info = dir.join(format!("kite_rt_{:016x}.cc", key));
+    let obj = dir.join(format!("gojo_rt_{:016x}.o", key));
+    let info = dir.join(format!("gojo_rt_{:016x}.cc", key));
     let is_clang = match std::fs::read_to_string(&info) {
         Ok(s) => s == "clang",
         Err(_) => {
             let clang = cc_command(&cc, &pre).arg("--version").output().map(|o| String::from_utf8_lossy(&o.stdout).contains("clang")).unwrap_or(false);
-            let tmp = dir.join(format!("kite_rt_{:016x}.{}.cc", key, std::process::id()));
+            let tmp = dir.join(format!("gojo_rt_{:016x}.{}.cc", key, std::process::id()));
             std::fs::write(&tmp, if clang { "clang" } else { "other" }).map_err(|e| e.to_string())?;
             std::fs::rename(&tmp, &info).map_err(|e| e.to_string())?;
             clang
@@ -516,11 +516,11 @@ fn runtime_object(opts: &Options) -> Result<(PathBuf, bool), String> {
         touch(&info);
         return Ok((obj, is_clang));
     }
-    // per process: another `kite` may be compiling the same runtime right now
-    let c = dir.join(format!("kite_rt_{:016x}.{}.c", key, std::process::id()));
+    // per process: another `gojo` may be compiling the same runtime right now
+    let c = dir.join(format!("gojo_rt_{:016x}.{}.c", key, std::process::id()));
     let inc = runtime_include_dir()?;
     std::fs::write(&c, RUNTIME_C).map_err(|e| e.to_string())?;
-    let tmp = dir.join(format!("kite_rt_{:016x}.{}.o", key, std::process::id()));
+    let tmp = dir.join(format!("gojo_rt_{:016x}.{}.o", key, std::process::id()));
     let out = cc_command(&cc, &pre).arg("-c").arg(flags).arg("-w").arg("-I").arg(&inc).arg(&c).arg("-o").arg(&tmp).output().map_err(|e| cc_missing(&cc, &e))?;
     let _ = std::fs::remove_file(&c);
     if !out.status.success() {
@@ -532,7 +532,7 @@ fn runtime_object(opts: &Options) -> Result<(PathBuf, bool), String> {
 
 fn drive(cmd: &str, input: &str, opts: &Options, prog_args: &[String]) -> Result<ExitCode, ()> {
     let t0 = Instant::now();
-    let loaded = match kite::load(input, None) {
+    let loaded = match gojo::load(input, None) {
         Ok(l) => l,
         Err((sm, diags)) => {
             report(&sm, &diags);
@@ -541,7 +541,7 @@ fn drive(cmd: &str, input: &str, opts: &Options, prog_args: &[String]) -> Result
     };
     let sm = loaded.sm;
     let t_parse = t0.elapsed();
-    let (prog, tfuncs, tests) = match kite::check::check_program(loaded.units) {
+    let (prog, tfuncs, tests) = match gojo::check::check_program(loaded.units) {
         Ok(r) => r,
         Err(diags) => {
             report(&sm, &diags);
@@ -549,7 +549,7 @@ fn drive(cmd: &str, input: &str, opts: &Options, prog_args: &[String]) -> Result
         }
     };
     let t_check = t0.elapsed();
-    let bdiags: Vec<Diag> = kite::borrowck::check(&prog, &tfuncs);
+    let bdiags: Vec<Diag> = gojo::borrowck::check(&prog, &tfuncs);
     if !bdiags.is_empty() {
         report(&sm, &bdiags);
         return Err(());
@@ -594,7 +594,7 @@ fn drive(cmd: &str, input: &str, opts: &Options, prog_args: &[String]) -> Result
     let stem = Path::new(input).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "out".into());
     // identical C + identical toolchain = identical binary
     let (cc0, pre0) = compiler(opts);
-    // debug builds carry debug info, with Kite source lines (`#line`)
+    // debug builds carry debug info, with Gojo source lines (`#line`)
     let mut flags: Vec<&str> = if opts.release { vec!["-O2"] } else { vec!["-O0", "-g", "-gno-column-info"] };
     flags.extend(["-w", "-fwrapv"]);
     if is_clang {
@@ -620,7 +620,7 @@ fn drive(cmd: &str, input: &str, opts: &Options, prog_args: &[String]) -> Result
         return finish(cmd, &cached, opts, prog_args, &stem);
     }
     let c_path = dir.join(format!("{}_{}.c", stem, std::process::id()));
-    // --keep-c is for reading and debugging the C itself: C lines, not Kite's
+    // --keep-c is for reading and debugging the C itself: C lines, not Gojo's
     let final_c = if opts.keep_c { codegen::strip_lines(&c_src) } else { codegen::resolve_lines(&c_src, &c_path.display().to_string()) };
     std::fs::write(&c_path, &final_c).map_err(|e| eprintln!("error: {}", e))?;
     let out_path = dir.join(format!("bin_{:016x}.{}.tmp", key, std::process::id()));
@@ -633,7 +633,7 @@ fn drive(cmd: &str, input: &str, opts: &Options, prog_args: &[String]) -> Result
         c.arg("-ldl");
     }
     // libraries named by `extern "C" static "z"`
-    for l in c_src.lines().filter_map(|l| l.strip_prefix("// kite-link: ")) {
+    for l in c_src.lines().filter_map(|l| l.strip_prefix("// gojo-link: ")) {
         c.arg(l);
     }
     let out = match c.output() {
@@ -651,7 +651,7 @@ fn drive(cmd: &str, input: &str, opts: &Options, prog_args: &[String]) -> Result
         if opts.keep_c {
             eprintln!("C source kept at {}", c_path.display());
         } else {
-            eprintln!("(the locations above are Kite lines; rerun with --keep-c to keep the C and see C lines)");
+            eprintln!("(the locations above are Gojo lines; rerun with --keep-c to keep the C and see C lines)");
         }
         return Err(());
     }
@@ -671,7 +671,7 @@ fn drive(cmd: &str, input: &str, opts: &Options, prog_args: &[String]) -> Result
     finish(cmd, &cached, opts, prog_args, &stem)
 }
 
-/// Moves a finished binary into the cache. Another `kite` may have built the same
+/// Moves a finished binary into the cache. Another `gojo` may have built the same
 /// one, and may be starting it: the first one stays and is never replaced. (The
 /// binaries aren't byte-identical, since macOS code signatures name the output
 /// file, and swapping one out under a starting process gets that process killed.)
@@ -704,11 +704,11 @@ fn evict_old_binaries(dir: &Path) {
         // runtimes of other compiler versions, C compilers or flags: kept
         // while used in the last 30 days
         let unused = |p: &Path| std::fs::metadata(p).ok().and_then(|m| m.modified().ok()).and_then(|t| now.duration_since(t).ok()).is_some_and(|a| a.as_secs() > 30 * 86400);
-        if name.starts_with("kite_rt_") && unused(&e.path()) {
+        if name.starts_with("gojo_rt_") && unused(&e.path()) {
             let _ = std::fs::remove_file(e.path());
             continue;
         }
-        if name.starts_with("include_") && unused(&e.path().join("kite_rt.h")) {
+        if name.starts_with("include_") && unused(&e.path().join("gojo_rt.h")) {
             let _ = std::fs::remove_dir_all(e.path());
             continue;
         }

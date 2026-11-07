@@ -34,7 +34,7 @@ pub fn check(prog: &Program, tfuncs: &[TFunc]) -> Vec<Diag> {
     diags
 }
 
-/// For each projection function written in Kite, the arguments (receiver
+/// For each projection function written in Gojo, the arguments (receiver
 /// first) that its `yield`s can point into: the parameter that owns each
 /// yielded place, following references to what they borrow. A yield into the
 /// function's own local is an error (reported here): it would be gone once the
@@ -274,7 +274,7 @@ struct LoopCx {
 struct Bc<'a> {
     prog: &'a Program,
     tf: &'a TFunc,
-    /// For projection functions written in Kite: the arguments their `yield`s
+    /// For projection functions written in Gojo: the arguments their `yield`s
     /// can point into (see `yield_sources`).
     proj: &'a HashMap<FuncId, Vec<usize>>,
     diags: Vec<Diag>,
@@ -382,7 +382,7 @@ impl<'a> Bc<'a> {
         }
     }
 
-    /// What the reference from a call of a projection written in Kite points
+    /// What the reference from a call of a projection written in Gojo points
     /// into: the arguments its `yield`s come from, not just the receiver (a
     /// cursor's `next` may yield into the cursor).
     fn proj_targets(&self, e: &TExpr) -> Option<Vec<(Path, bool)>> {

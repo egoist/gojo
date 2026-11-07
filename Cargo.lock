@@ -3,5 +3,5 @@
 version = 4
 
 [[package]]
-name = "kite"
+name = "gojo"
 version = "0.1.0"

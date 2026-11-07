@@ -2,7 +2,7 @@
 
 Time: a monotonic clock for measuring, the wall clock and calendar dates.
 
-```kite
+```gojo
 let start = time.now()
 ...
 println("took", time.formatDuration(time.since(start)))
@@ -20,7 +20,7 @@ println(d.format("%Y-%m-%d %H:%M"))
 
 ### nanosecond, microsecond, millisecond, second, minute, hour
 
-```kite
+```gojo
 pub const nanosecond = 1
 pub const microsecond = 1000
 pub const millisecond = 1000000
@@ -35,7 +35,7 @@ Durations are integer nanoseconds.
 
 ### struct Date
 
-```kite
+```gojo
 pub copy struct Date {
     pub year int
     // 1 to 12
@@ -55,7 +55,7 @@ A calendar date and time of day, at some offset from UTC.
 
 #### Date.unixNanos
 
-```kite
+```gojo
 pub fn unixNanos(self) int
 ```
 
@@ -63,7 +63,7 @@ The moment this is, as nanoseconds since 1970 (see `unixNanos`).
 
 #### Date.weekday
 
-```kite
+```gojo
 pub fn weekday(self) int
 ```
 
@@ -71,7 +71,7 @@ pub fn weekday(self) int
 
 #### Date.yearDay
 
-```kite
+```gojo
 pub fn yearDay(self) int
 ```
 
@@ -79,7 +79,7 @@ pub fn yearDay(self) int
 
 #### Date.iso
 
-```kite
+```gojo
 pub fn iso(self) String
 ```
 
@@ -87,13 +87,13 @@ RFC 3339: "2026-11-06T14:41:31Z", "2026-11-06T14:41:31.592+08:00".
 
 #### Date.format
 
-```kite
+```gojo
 pub fn format(self, layout str) String
 ```
 
 Formats with `strftime`-style directives:
 
-```kite
+```gojo
 %Y year   %m month   %d day     %H hour   %M minute   %S second
 %L milliseconds   %f microseconds   %N nanoseconds
 %z +0800   %Z +08:00 (Z for UTC)   %a Mon   %A Monday   %b Jan   %B January
@@ -102,7 +102,7 @@ Formats with `strftime`-style directives:
 
 ### struct ParseError
 
-```kite
+```gojo
 pub struct ParseError {
     pub msg String
 }
@@ -112,7 +112,7 @@ Why `parseIso` could not read a date.
 
 #### ParseError.message
 
-```kite
+```gojo
 pub fn message(self) String
 ```
 
@@ -122,7 +122,7 @@ The message, which quotes the input.
 
 ### sleep
 
-```kite
+```gojo
 pub fn sleep(d int)
 ```
 
@@ -131,7 +131,7 @@ early when the task is cancelled (see task.cancelled).
 
 ### now
 
-```kite
+```gojo
 pub fn now() int
 ```
 
@@ -139,7 +139,7 @@ Monotonic clock in nanoseconds, for measuring; not related to the date.
 
 ### since
 
-```kite
+```gojo
 pub fn since(start int) int
 ```
 
@@ -147,7 +147,7 @@ Nanoseconds since `start`, a value of `now()`.
 
 ### unixNanos
 
-```kite
+```gojo
 pub fn unixNanos() int
 ```
 
@@ -155,7 +155,7 @@ The wall clock: nanoseconds since 1970-01-01 00:00 UTC.
 
 ### unix
 
-```kite
+```gojo
 pub fn unix() int
 ```
 
@@ -163,7 +163,7 @@ Seconds since 1970-01-01 00:00 UTC.
 
 ### formatDuration
 
-```kite
+```gojo
 pub fn formatDuration(d int) String
 ```
 
@@ -171,7 +171,7 @@ pub fn formatDuration(d int) String
 
 ### dayName
 
-```kite
+```gojo
 pub fn dayName(weekday int) str
 ```
 
@@ -179,7 +179,7 @@ pub fn dayName(weekday int) str
 
 ### monthName
 
-```kite
+```gojo
 pub fn monthName(month int) str
 ```
 
@@ -187,7 +187,7 @@ pub fn monthName(month int) str
 
 ### at
 
-```kite
+```gojo
 pub fn at(ns int, offset int) Date
 ```
 
@@ -195,7 +195,7 @@ The date `ns` nanoseconds after 1970 is, at `offset` seconds east of UTC.
 
 ### utc
 
-```kite
+```gojo
 pub fn utc(ns int) Date
 ```
 
@@ -203,7 +203,7 @@ The date in UTC.
 
 ### local
 
-```kite
+```gojo
 pub fn local(ns int) Date
 ```
 
@@ -211,7 +211,7 @@ The date in the local time zone.
 
 ### date
 
-```kite
+```gojo
 pub fn date(year int, month int, day int, hour int, minute int, sec int) Date
 ```
 
@@ -219,7 +219,7 @@ A date in UTC.
 
 ### parseIso
 
-```kite
+```gojo
 pub fn parseIso(s str) Date ! ParseError
 ```
 

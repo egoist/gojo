@@ -2,7 +2,7 @@
 
 Structured concurrency.
 
-```kite
+```gojo
 try task.group((g) => {
     g.go(() => { ... })      // tasks may borrow data from outside the group
 })                           // waits for all tasks; returns the first error
@@ -22,7 +22,7 @@ in a cancelled task return early: a receive gives none, a send is dropped,
 
 ### struct Group
 
-```kite
+```gojo
 pub unsafe send copy struct Group {
     // and private fields
 }
@@ -33,7 +33,7 @@ handle never outlives the group: `task.group` waits for every task).
 
 #### Group.cancel
 
-```kite
+```gojo
 pub fn cancel(self)
 ```
 
@@ -41,7 +41,7 @@ Cancel every task in the group, and the group body itself.
 
 ### struct Cancelled
 
-```kite
+```gojo
 pub copy struct Cancelled {}
 ```
 
@@ -49,7 +49,7 @@ The error of an operation that stopped because its task was cancelled.
 
 #### Cancelled.message
 
-```kite
+```gojo
 pub fn message(self) String
 ```
 
@@ -57,15 +57,15 @@ pub fn message(self) String
 
 ### struct Stats
 
-```kite
+```gojo
 pub struct Stats {
     // goroutines alive, `main` included
     pub goroutines int
     // threads started to run goroutines (more than maxProcs only while some
     // goroutines are in long C calls)
     pub threads int
-    // goroutines running Kite code at the same time; defaults to the number of
-    // CPUs, or KITE_MAXPROCS
+    // goroutines running Gojo code at the same time; defaults to the number of
+    // CPUs, or GOJO_MAXPROCS
     pub maxProcs int
 }
 ```
@@ -76,7 +76,7 @@ A snapshot of the scheduler, from `stats`.
 
 ### cancelled
 
-```kite
+```gojo
 pub fn cancelled() bool
 ```
 
@@ -84,7 +84,7 @@ Has the current task been cancelled?
 
 ### check
 
-```kite
+```gojo
 pub fn check() ! Cancelled
 ```
 
@@ -92,7 +92,7 @@ A checkpoint for long computations: `try task.check()`.
 
 ### yieldNow
 
-```kite
+```gojo
 pub fn yieldNow()
 ```
 
@@ -100,7 +100,7 @@ Let other goroutines run.
 
 ### stats
 
-```kite
+```gojo
 pub fn stats() Stats
 ```
 
@@ -108,15 +108,15 @@ How many goroutines and threads there are now.
 
 ### setMaxProcs
 
-```kite
+```gojo
 pub fn setMaxProcs(n int) int
 ```
 
-Changes how many goroutines run Kite code at the same time; returns the old value.
+Changes how many goroutines run Gojo code at the same time; returns the old value.
 
 ### timeout
 
-```kite
+```gojo
 pub fn timeout[T any](d int, body fn() T) ?T
 ```
 
