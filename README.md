@@ -1,16 +1,18 @@
 # Kite
 
+**English:** [A tour of Kite](docs/tour.md) · [Standard library reference](docs/std/README.md)
+
 Kite 是一门系统编程语言：保留 Go 的简单和编译速度，用 Rust 式的所有权去掉 GC 和 nil，并吸收 Zig 的错误联合、`errdefer`、显式回绕运算和零依赖交叉编译。
 
-这个仓库是按 [设计文档](docs/design.md) 实现的编译器原型：编译器用 Rust 编写（约 1.5 万行，无第三方依赖），C 运行时和 Kite 标准库约 1800 行。
+这个仓库是按 [设计文档](docs/design.md) 实现的编译器原型：编译器用 Rust 编写（约 1.9 万行，无第三方依赖），C 运行时约 4000 行，Kite 标准库约 3400 行。
 
 ```go
 use os
 
 struct Config {
-    name  String            // 必填
-    port  int = 8080        // 默认值
-    proxy ?String           // 可选，默认 none
+    name String // 必填
+    port int = 8080 // 默认值
+    proxy ?String // 可选，默认 none
 }
 
 fn load(path str) Config ! os.Error {
@@ -40,7 +42,7 @@ use ../shared/util as u        // 嵌套路径，as 重命名
 use ./geom.{Vec2, Shape}       // 把名字直接引入作用域，不再绑定 geom
 ```
 
-看路径开头就知道是标准库还是项目内的包，不会重名。`print`/`println`/`eprint`/`eprintln` 在 prelude 里，hello world 不需要任何导入；`fmt` 只剩 `fmt.sprint` 这类格式化函数。未使用的导入（包括 `.{...}` 里的名字）是编译错误。
+看路径开头就知道是标准库还是项目内的包，不会重名。`print`/`println`/`eprint`/`eprintln` 在 prelude 里，hello world 不需要任何导入；`fmt` 只剩 `fmt.sprint`、`fmt.format` 这类格式化函数。未使用的导入（包括 `.{...}` 里的名字）是编译错误。
 
 ## 方法
 
@@ -72,9 +74,20 @@ interface Bumper {
 }
 ```
 
-## 快速开始
+## 安装
 
-需要 Rust 工具链和一个 C 编译器（`cc`/clang/gcc；交叉编译用 `zig`）。
+支持 macOS 和 Linux（x86-64、arm64），**不支持 Windows**（运行时依赖 POSIX）。Kite 编译到 C，所以需要一个 C 编译器：`PATH` 上的 `cc`、`clang`、`gcc` 或 `zig`（按这个顺序查找；macOS 上 `xcode-select --install`；交叉编译用 `zig`）。
+
+发布包是一个静态链接的 `kite` 可执行文件（标准库和运行时都编译在里面），加上文档和示例：
+
+```sh
+curl -fsSL https://github.com/OWNER/kite/releases/latest/download/install.sh | KITE_RELEASES=https://github.com/OWNER/kite/releases sh
+sh scripts/install.sh --archive dist/kite-0.1.0-macos-arm64.tar.gz    # 或者装本地的包
+```
+
+装到 `~/.kite`（`KITE_HOME` 可改），`kite version` 显示版本。从源码构建只需要 Rust 工具链：`cargo build --release`。
+
+## 快速开始
 
 ```sh
 cargo build --release
@@ -90,13 +103,16 @@ cargo build --release
 | `kite build <文件或目录> [-o 输出]` | 生成原生二进制 |
 | `kite check <文件或目录>` | 只做类型检查和借用检查 |
 | `kite test <文件或目录>` | 运行 `test` 块，每个测试在独立进程中执行，panic 不影响其他测试 |
+| `kite fmt [--check] [文件或目录...]` | 就地格式化（默认当前目录）；`--check` 只列出没格式化的文件，有则退出码 1 |
+| `kite doc [模块或路径] [--out 目录]` | Markdown 格式的 API 文档：标准库索引、一个标准库模块或一个包；`--out` 把整个标准库写到目录里（即 [`docs/std`](docs/std/README.md)） |
 | `kite emit-c <文件或目录>` | 输出生成的 C 代码 |
+| `kite version` | 版本、提交和目标平台 |
 
 选项：`--release`（`-O2`，溢出检查仍然开启）、`--cc "<编译器 参数>"`、`--target <三元组>`（用 `zig cc` 交叉编译，例如 `--target x86_64-linux-musl` 直接得到静态 Linux 二进制）、`-v`（打印各阶段耗时）。
 
 ## 安全保证，以及它们怎样被保证
 
-所有检查都只看函数签名和单个函数体，没有跨函数推断，也没有生命周期标注。每一条都有对应的编译错误测试（`tests/errors/`，共 70 个）。
+所有检查都只看函数签名和单个函数体，没有跨函数推断，也没有生命周期标注。每一条都有对应的编译错误测试（`tests/errors/`，共 83 个）。
 
 | 保证 | 机制 | 典型报错 |
 | --- | --- | --- |
@@ -130,7 +146,7 @@ cargo build --release
 - **结构化并发与取消**：`task.group`（任务借用组外数据、拿走组体里的值，首个错误作为组的结果），取消沿任务树传播（`g.cancel()`、失败的子任务、`task.timeout(d, body)` 的期限），被取消任务里的阻塞操作立即返回，`try task.check()` 检查点。
 - **网络**：`net.listen`/`accept`/`dial`，`Conn` 的读写不阻塞线程、可被取消。[`examples/http`](examples/http) 是一个带请求超时、客户端断开即取消、停机时取消在途请求的 HTTP/1.1 服务器。
 - **unsafe 与 FFI**：`extern "C" lib "libz" { ... }` 运行时 `dlopen`，构建时不需要 C 头文件；不写 `lib` 时直接调用 libc；`extern "C" static` 静态链接（静态的 musl 二进制里也能用）；`extern "C" fn` 导出 Kite 函数；`unsafe send struct` 由作者担保跨线程安全。没有 C 表示的类型（`String`、函数值等）不能出现在 `extern` 签名里。
-- **标准库**：prelude（Option/Result/字符串/切片/Vec/Map 方法、`Arena[T]` + 带代数的 `Id[T]`、`Hasher`）、`fmt`、`os`、`math`、`time`、`task`、`net`、`strings`。内置类型的方法签名用 Kite 写在 `std/prelude.kite`，其中 `map`/`filter`/`fold`/`join`/`Arena` 等本身就是 Kite 代码。
+- **标准库**：prelude（Option/Result/字符串/切片/Vec/Map/`Set` 方法、`Arena[T]` + 带代数的 `Id[T]`、`Hasher`）、`fmt`（含编译时检查模板的 `fmt.format`）、`io`（统一的错误类型和 `Reader`/`Writer`）、`bufio`、`os`（文件、目录、环境变量、子进程）、`time`（单调时钟、日期、格式化和解析）、`json`、`net`、`http`（服务端和客户端）、`task`、`math`、`strings`。内置类型的方法签名用 Kite 写在 `std/prelude.kite`，其中 `map`/`filter`/`fold`/`join`/`Arena`/`Set` 以及 `bufio`、`json`、`http` 等模块本身就是 Kite 代码。各模块的接口见 [`docs/spec.md`](docs/spec.md) 第 12 节；[`examples/todo`](examples/todo)（JSON API 服务）和 [`examples/grep`](examples/grep)（命令行工具）只用标准库写成。
 
 `tests/run/` 下的程序覆盖了以上全部特性，可以当作语言示例阅读。精确的语言规则见 [`docs/spec.md`](docs/spec.md)，每一节都列出了覆盖它的测试。
 
@@ -192,12 +208,12 @@ std/              用 Kite 写的标准库（编译进二进制）
 
 ## 尚未实现
 
-- 网络只有 TCP；没有 UDP、Unix socket、TLS。
+- Windows；语言服务器（LSP）；包管理器（目前一个程序就是它用到的目录）。调试器能按 Kite 的行设断点、显示调用栈，但变量名是生成的 C 里的名字（`p_x`、`l0_total`）。
+- 网络只有 TCP 和明文 HTTP/1.1（每个连接一个请求）；没有 UDP、Unix socket、TLS。JSON 还不能和结构体自动互转。
 - Linux 6.13 之前的内核上，每个 goroutine 占两个内存映射，默认的 `vm.max_map_count`（262144）约支持 13 万个同时存在的 goroutine，超过时报错并提示调大。
 - `#specialize`、PGO。
-- 设计文档里的 `Set[T]`、`RwLock[T]`、`Atomic[T]`、`saturatingAdd`、`unsafe.cast`、`unsafe.forget`，以及把 Kite 函数作为回调传给 C（`extern "C" fn` 目前只能导出和直接调用）。
+- 设计文档里的 `RwLock[T]`、`Atomic[T]`、`saturatingAdd`、`unsafe.cast`、`unsafe.forget`，以及把 Kite 函数作为回调传给 C（`extern "C" fn` 目前只能导出和直接调用）。
 - 按包分开编译、导出数据缓存（目前每次整体编译，靠前端速度和二进制缓存弥补）。
-- `kite fmt` 格式化工具。
 - 接口值和函数值不满足 `send`（偏保守）；传给 `go` 的闭包按捕获内容单独检查。
 
 ## 测试
@@ -221,7 +237,12 @@ cargo build --profile fuzz              # 优化构建，保留调试断言和�
 target/fuzz/kite-fuzz --jobs 4          # 变异模糊测试：编译器崩溃、超时、生成的 C 编不过、ASan 报错
 target/fuzz/kite-fuzz diff --jobs 2     # 差分测试：随机生成的程序在 debug / release / sanitizer 下结果必须一致
 target/fuzz/kite-fuzz borrow --jobs 2   # 借用检查器：随机摆弄视图的程序，被接受的必须在 ASan 下干净
+target/fuzz/kite-fuzz fmt 6000         # 格式化器：保持词法单元不变、结果稳定、与原来的缩进无关
 target/fuzz/kite-fuzz reduce fuzz-out/findings/xxx.kite   # 化简复现
 ```
 
-结果在 `fuzz-out/findings/`。规则和限制见 [`docs/spec.md`](docs/spec.md) 第 14 节。
+结果在 `fuzz-out/findings/`。规则和限制见 [`docs/spec.md`](docs/spec.md) 第 15 节。
+
+## 发布
+
+`scripts/release.sh` 在 Mac 上构建四个发布包（`macos-arm64`、`macos-x86_64`、`linux-x86_64`、`linux-arm64`，Linux 版用 `cargo zigbuild` 静态链接 musl）、`SHA256SUMS`、`VERSION` 和 `install.sh`，放在 `dist/`。推送 `vX.Y.Z` 标签时 `.github/workflows/release.yml` 做同样的事并创建 GitHub release（带 `-` 的版本号标为 prerelease）；`ci.yml` 在 Linux（x86-64、arm64）和 macOS 上运行测试，Linux 上还跑 sanitizer。

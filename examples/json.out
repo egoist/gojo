@@ -1,0 +1,32 @@
+values: 16 keys: ["name", "version", "tags", "nested"]
+name: kite
+  tag 0 "fast"
+  tag 1 "safe"
+  tag 2 null
+  tag 3 true
+has license: false
+{
+  "name": "kite",
+  "version": 0.2,
+  "tags": [
+    "fast",
+    "safe",
+    null,
+    true
+  ],
+  "nested": {
+    "a": [
+      1,
+      2,
+      {
+        "b": "q\"uote"
+      }
+    ],
+    "empty": {},
+    "none": []
+  },
+  "authors": [
+    "you"
+  ]
+}
+error: json: unexpected character at line 1, column 7

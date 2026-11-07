@@ -1753,6 +1753,8 @@ impl Checker {
             ExprKind::Bool(b) => TExpr::new(TK::Bool(*b), Ty::Bool, sp),
             ExprKind::None => match &expect {
                 Some(t @ Ty::Option(_)) => TExpr::new(TK::NoneLit, t.clone(), sp),
+                // `?T ! E`: the success value `none` (wrapped in `ok` like any other)
+                Some(Ty::Result(ok, _)) if matches!(**ok, Ty::Option(_)) => TExpr::new(TK::NoneLit, (**ok).clone(), sp),
                 Some(Ty::Var(_)) | None => {
                     let v = self.fresh(cx);
                     let t = Ty::opt(v);
@@ -1893,7 +1895,21 @@ impl Checker {
             }
             ExprKind::Coalesce(l, r) => {
                 let lt = self.expr(cx, l, expect.as_ref().map(|t| Ty::opt(t.clone())).as_ref());
+                let before = self.diags.len();
                 let lt = self.value(cx, lt);
+                // `x ?? d` on a borrowed `x` (a field of `self`, an element):
+                // say how to write it instead
+                if self.diags.len() == before + 1 && self.diags[before].msg.starts_with("cannot move out of") {
+                    let d = &mut self.diags[before];
+                    let clone = d.notes.iter().any(|(_, n)| n.contains(".clone()"));
+                    d.notes.clear();
+                    d.notes.push((None, "`??` takes the value out of its left side, and this one is only borrowed".into()));
+                    if clone {
+                        d.notes.push((None, "copy it first: `x.clone() ?? default`, or borrow it: `if let v = x { ... } else { ... }`".into()));
+                    } else {
+                        d.notes.push((None, "borrow it instead: `if let v = x { ... } else { ... }`".into()));
+                    }
+                }
                 let lty = self.resolve(cx, &lt.ty);
                 let inner = match &lty {
                     Ty::Option(t) => (**t).clone(),
@@ -2466,7 +2482,7 @@ impl Checker {
             let b = self.expr_value(cx, r, Some(&Ty::Bool));
             return TExpr::new(TK::Binary { op: bop, l: Box::new(a), r: Box::new(b) }, Ty::Bool, sp);
         }
-        let is_lit = |e: &Expr| matches!(e.kind, ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Char(_)) || matches!(&e.kind, ExprKind::Unary("-", x) if matches!(x.kind, ExprKind::Int(_) | ExprKind::Float(_)));
+        let is_lit = literal_like;
         let arith_expect = if bop.is_cmp() { None } else { expect.filter(|t| t.is_numeric()).cloned() };
         // check the non-literal side first so literals adopt its type
         let (a, b) = if is_lit(l) && !is_lit(r) {
@@ -2868,8 +2884,15 @@ impl Checker {
     }
 
     fn dot_variant(&mut self, cx: &mut FnCx, name: &str, args: &[Expr], called: bool, sp: Span, expect: Option<&Ty>) -> TExpr {
+        // the enum, or the one an optional or a result (`E ! Err`, success
+        // first) holds
         let ty = match expect.map(|t| self.resolve(cx, t)) {
             Some(Ty::Option(inner)) if matches!(&*inner, Ty::Adt(..)) => (*inner).clone(),
+            Some(Ty::Result(ok, _)) if matches!(&*ok, Ty::Adt(..)) => (*ok).clone(),
+            Some(Ty::Result(ok, _)) if matches!(&*ok, Ty::Option(i) if matches!(&**i, Ty::Adt(..))) => match &*ok {
+                Ty::Option(i) => (**i).clone(),
+                _ => unreachable!(),
+            },
             Some(t @ Ty::Adt(..)) => t,
             _ => {
                 self.err(sp, format!("cannot infer the enum type of `.{}`; write `Type.{}`", name, name));
@@ -3285,10 +3308,13 @@ impl Checker {
 
     fn fmt_call(&mut self, cx: &mut FnCx, name: &str, args: &[Expr], sp: Span) -> Option<TExpr> {
         let ret = match name {
-            "print" | "println" | "eprint" | "eprintln" => Ty::Unit,
-            "sprint" | "sprintln" => Ty::String,
+            "print" | "println" | "eprint" | "eprintln" | "printf" => Ty::Unit,
+            "sprint" | "sprintln" | "format" => Ty::String,
             _ => return None,
         };
+        if name == "format" || name == "printf" {
+            return Some(self.format_call(cx, name, args, ret, sp));
+        }
         let mut targs = vec![];
         for a in args {
             let e = self.expr(cx, a, None);
@@ -3300,6 +3326,58 @@ impl Checker {
             targs.push(TArg { mode: ArgMode::Borrow, e });
         }
         Some(TExpr::new(TK::Intrinsic { name: format!("fmt.{}", name), targs: vec![], args: targs }, ret, sp))
+    }
+
+    /// `fmt.format("x = {:>4}", x)`: the template is checked here, against the
+    /// arguments (see fmtspec.rs).
+    fn format_call(&mut self, cx: &mut FnCx, name: &str, args: &[Expr], ret: Ty, sp: Span) -> TExpr {
+        let Some(first) = args.first() else {
+            self.err(sp, format!("`fmt.{}` needs a template: `fmt.{}(\"x = {{}}\", x)`", name, name));
+            return TExpr::error(sp);
+        };
+        let parsed = match &first.kind {
+            ExprKind::Str(t) => crate::fmtspec::parse(t).map(|p| (t.clone(), p)),
+            _ => Err("the template must be a string literal, so that the compiler can check it".to_string()),
+        };
+        let (t, pieces) = match parsed {
+            Ok(x) => x,
+            Err(m) => {
+                self.err(first.span, m);
+                // still check the arguments (and count their variables as used)
+                for a in args {
+                    let _ = self.expr(cx, a, None);
+                }
+                return TExpr::error(sp);
+            }
+        };
+        let t = &t;
+        let specs: Vec<crate::fmtspec::Spec> = pieces.iter().filter_map(|p| if let crate::fmtspec::Piece::Arg(s) = p { Some(s.clone()) } else { None }).collect();
+        if specs.len() != args.len() - 1 {
+            self.err(sp, format!("the template has {} placeholder{}, but {} value{} {} given", specs.len(), if specs.len() == 1 { "" } else { "s" }, args.len() - 1, if args.len() == 2 { "" } else { "s" }, if args.len() == 2 { "is" } else { "are" }));
+        }
+        let mut targs = vec![TArg { mode: ArgMode::Borrow, e: TExpr::new(TK::Str(t.clone()), Ty::Str, first.span) }];
+        for (i, a) in args[1..].iter().enumerate() {
+            let e = self.expr(cx, a, None);
+            let e = self.borrow(cx, e);
+            let ty = self.resolve(cx, &e.ty);
+            if matches!(ty, Ty::Func(_)) {
+                self.err(a.span, "functions cannot be printed");
+            }
+            if let Some(s) = specs.get(i) {
+                let shown = self.prog.show(&ty);
+                if s.radix.is_some() && !ty.is_int() && !ty.is_error() {
+                    self.err(a.span, format!("`{{:{}}}` formats integers, not `{}`", s.radix.unwrap_or('x'), shown));
+                }
+                if s.precision.is_some() && !matches!(ty, Ty::F32 | Ty::F64 | Ty::Error) {
+                    self.err(a.span, format!("a precision (`{{:.N}}`) is for floats, not `{}`", shown));
+                }
+                if s.zero && !ty.is_numeric() && !ty.is_error() {
+                    self.err(a.span, format!("zero padding (`{{:0N}}`) is for numbers, not `{}`", shown));
+                }
+            }
+            targs.push(TArg { mode: ArgMode::Borrow, e });
+        }
+        TExpr::new(TK::Intrinsic { name: format!("fmt.{}", name), targs: vec![], args: targs }, ret, sp)
     }
 
     /// `T(x)`: conversions and wrapper constructors.
@@ -4287,5 +4365,24 @@ fn zonk_walk_pat(p: &mut TPat, f: &mut dyn FnMut(&mut Ty)) {
         TPat::TypeIs { ty, .. } => f(ty),
         TPat::Or(xs) => xs.iter_mut().for_each(|x| zonk_walk_pat(x, f)),
         _ => {}
+    }
+}
+
+/// An expression whose value can only be an untyped number literal: `5`,
+/// `-1.5`, `'a'`, `(if c { 5 } else { 7 })`, `match k { 0 => 1, _ => 2 }`,
+/// `{ 3 }`, `(1 + 2)`. Its type comes from the context, so in `x op y` the
+/// other side is checked first and lends it its type.
+fn literal_like(e: &Expr) -> bool {
+    fn block(b: &crate::ast::Block) -> bool {
+        matches!(b.stmts.as_slice(), [crate::ast::Stmt { kind: crate::ast::StmtKind::Expr(v), .. }] if literal_like(v))
+    }
+    match &e.kind {
+        ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Char(_) => true,
+        ExprKind::Unary("-", x) => literal_like(x),
+        ExprKind::Binary(op, l, r) => matches!(*op, "+" | "-" | "*" | "/" | "%" | "+%" | "-%" | "*%") && literal_like(l) && literal_like(r),
+        ExprKind::If { then, else_: Some(els), .. } => block(then) && literal_like(els),
+        ExprKind::Match { arms, .. } => !arms.is_empty() && arms.iter().all(|a| literal_like(&a.body)),
+        ExprKind::Block(b) => block(b),
+        _ => false,
     }
 }

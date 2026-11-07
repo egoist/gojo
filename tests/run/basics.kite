@@ -1,8 +1,8 @@
 use math
 
 struct Config {
-    name  String
-    port  int = 8080
+    name String
+    port int = 8080
     proxy ?String
 }
 

@@ -145,10 +145,11 @@ void *kite_box_refill(size_t cls) {
 
 // ------------------------------------------------------------------ strings
 
+static int64_t grow_cap(int64_t len, int64_t cap, int64_t extra, size_t esize, int64_t first);
+
 static void string_reserve(kite_string *s, int64_t extra) {
-    if (s->len + extra <= s->cap) return;
-    int64_t nc = s->cap ? s->cap * 2 : 16;
-    while (nc < s->len + extra) nc *= 2;
+    if (extra <= s->cap - s->len) return;
+    int64_t nc = grow_cap(s->len, s->cap, extra, 1, 16);
     s->ptr = kite_realloc(s->ptr, (size_t)nc);
     s->cap = nc;
 }
@@ -373,6 +374,10 @@ kite_string kite_str_toString(kite_str s) { return kite_string_from(s); }
 
 kite_string kite_str_repeat(kite_str s, int64_t n) {
     kite_string r = { NULL, 0, 0 };
+    if (n <= 0 || s.len == 0) return r;
+    // the whole size first: `"ab".repeat(maxInt)` is a panic, not a long loop
+    if (n > PTRDIFF_MAX / s.len) kite_panic("capacity overflow", "<runtime>");
+    string_reserve(&r, s.len * n);
     for (int64_t i = 0; i < n; i++) kite_string_push(&r, s);
     return r;
 }
@@ -408,6 +413,7 @@ kite_vec kite_str_runes(kite_str s) {
 bool kite_prelude___parseInt(kite_str s, int64_t *out) {
     char buf[64];
     if (s.len == 0 || s.len >= (int64_t)sizeof buf) return false;
+    if (memchr(s.ptr, 0, (size_t)s.len)) return false; // "12\0x" is not a number
     memcpy(buf, s.ptr, (size_t)s.len);
     buf[s.len] = 0;
     char *end;
@@ -421,6 +427,7 @@ bool kite_prelude___parseInt(kite_str s, int64_t *out) {
 bool kite_prelude___parseFloat(kite_str s, double *out) {
     char buf[128];
     if (s.len == 0 || s.len >= (int64_t)sizeof buf) return false;
+    if (memchr(s.ptr, 0, (size_t)s.len)) return false; // "12\0x" is not a number
     memcpy(buf, s.ptr, (size_t)s.len);
     buf[s.len] = 0;
     char *end;
@@ -481,6 +488,78 @@ void kite_fmt_f64(kite_string *b, double v) {
 
 void kite_fmt_bool(kite_string *b, bool v) { kite_fmt_cstr(b, v ? "true" : "false"); }
 
+// ---- fmt.format placeholders
+
+void kite_fmt_radix(kite_string *b, int64_t v, bool is_signed, int64_t radix, bool upper) {
+    uint64_t u = (uint64_t)v;
+    if (is_signed && v < 0) {
+        kite_string_push_byte(b, '-');
+        u = (uint64_t)(-(v + 1)) + 1;
+    }
+    char buf[72];
+    int n = 0;
+    const char *digits = upper ? "0123456789ABCDEF" : "0123456789abcdef";
+    do {
+        buf[n++] = digits[u % (uint64_t)radix];
+        u /= (uint64_t)radix;
+    } while (u);
+    while (n) kite_string_push_byte(b, (uint8_t)buf[--n]);
+}
+
+void kite_fmt_fixed(kite_string *b, double v, int64_t prec) {
+    if (isnan(v)) { kite_fmt_cstr(b, "NaN"); return; }
+    if (isinf(v)) { kite_fmt_cstr(b, v > 0 ? "+Inf" : "-Inf"); return; }
+    int n = snprintf(NULL, 0, "%.*f", (int)prec, v);
+    char *buf = kite_alloc((size_t)n + 1);
+    snprintf(buf, (size_t)n + 1, "%.*f", (int)prec, v);
+    kite_fmt_cstr(b, buf);
+    free(buf);
+}
+
+static void push_rune(kite_string *b, uint32_t r) {
+    if (r < 0x80) {
+        kite_string_push_byte(b, (uint8_t)r);
+    } else if (r < 0x800) {
+        kite_string_push_byte(b, (uint8_t)(0xC0 | (r >> 6)));
+        kite_string_push_byte(b, (uint8_t)(0x80 | (r & 0x3F)));
+    } else if (r < 0x10000) {
+        kite_string_push_byte(b, (uint8_t)(0xE0 | (r >> 12)));
+        kite_string_push_byte(b, (uint8_t)(0x80 | ((r >> 6) & 0x3F)));
+        kite_string_push_byte(b, (uint8_t)(0x80 | (r & 0x3F)));
+    } else {
+        kite_string_push_byte(b, (uint8_t)(0xF0 | (r >> 18)));
+        kite_string_push_byte(b, (uint8_t)(0x80 | ((r >> 12) & 0x3F)));
+        kite_string_push_byte(b, (uint8_t)(0x80 | ((r >> 6) & 0x3F)));
+        kite_string_push_byte(b, (uint8_t)(0x80 | (r & 0x3F)));
+    }
+}
+
+// Appends `t` (then frees it) padded to `width` characters. `align` is '<',
+// '>', '^' or 0 (numbers right, the rest left); `zero` pads numbers with zeros
+// after the sign.
+void kite_fmt_pad(kite_string *b, kite_string *t, int64_t width, int64_t align, uint32_t fill, bool zero, bool numeric) {
+    int64_t chars = 0;
+    for (int64_t i = 0; i < t->len; i++) chars += (t->ptr[i] & 0xC0) != 0x80;
+    int64_t pad = width - chars;
+    kite_str whole = { t->ptr, t->len };
+    if (pad <= 0) {
+        kite_string_push(b, whole);
+    } else if (zero && numeric && !align) {
+        int64_t at = t->len > 0 && (t->ptr[0] == '-' || t->ptr[0] == '+') ? 1 : 0;
+        kite_str sign = { t->ptr, at }, rest = { t->ptr + at, t->len - at };
+        kite_string_push(b, sign);
+        for (int64_t i = 0; i < pad; i++) kite_string_push_byte(b, '0');
+        kite_string_push(b, rest);
+    } else {
+        int64_t a = align ? align : (numeric ? '>' : '<');
+        int64_t before = a == '>' ? pad : a == '^' ? pad / 2 : 0;
+        for (int64_t i = 0; i < before; i++) push_rune(b, fill);
+        kite_string_push(b, whole);
+        for (int64_t i = 0; i < pad - before; i++) push_rune(b, fill);
+    }
+    free(t->ptr);
+}
+
 void kite_fmt_str(kite_string *b, kite_str s, int nested) {
     if (!nested) { kite_string_push(b, s); return; }
     kite_string_push_byte(b, '"');
@@ -526,9 +605,20 @@ void kite_write(int fd, kite_string *b) {
 
 // ------------------------------------------------------------------ vectors
 
-void kite_vec_grow(kite_vec *v, int64_t need, size_t esize) {
-    int64_t nc = v->cap ? v->cap * 2 : 4;
-    while (nc < need) nc *= 2;
+// The capacity for `len + extra` elements: at least double the old one, and
+// never more than fits in memory (a larger request is a panic, not a short
+// buffer).
+static int64_t grow_cap(int64_t len, int64_t cap, int64_t extra, size_t esize, int64_t first) {
+    int64_t max = (int64_t)(PTRDIFF_MAX / (esize ? esize : 1));
+    if (extra < 0 || extra > max - len) kite_panic("capacity overflow", "<runtime>");
+    int64_t need = len + extra;
+    int64_t nc = cap ? cap : first;
+    while (nc < need) nc = nc > max / 2 ? max : nc * 2;
+    return nc;
+}
+
+void kite_vec_grow(kite_vec *v, int64_t extra, size_t esize) {
+    int64_t nc = grow_cap(v->len, v->cap, extra, esize, 4);
     v->ptr = kite_realloc(v->ptr, (size_t)nc * esize);
     v->cap = nc;
 }
@@ -725,6 +815,11 @@ _Noreturn void kite_os_exit(int64_t code) {
     exit((int)code);
 }
 
+// A path, name or argument can't contain a NUL byte: C would see only what
+// comes before it (`"a.txt\0/x"` would open `a.txt`), so such calls fail with
+// EINVAL instead.
+static bool has_nul(kite_str s) { return s.len && memchr(s.ptr, 0, (size_t)s.len); }
+
 static char *cpath(kite_str p) {
     char *s = kite_alloc((size_t)p.len + 1);
     memcpy(s, p.ptr, (size_t)p.len);
@@ -733,6 +828,7 @@ static char *cpath(kite_str p) {
 }
 
 static int64_t os_readFile_impl(kite_str path, kite_vec *out) {
+    if (has_nul(path)) return EINVAL;
     char *p = cpath(path);
     FILE *f = fopen(p, "rb");
     free(p);
@@ -750,6 +846,7 @@ static int64_t os_readFile_impl(kite_str path, kite_vec *out) {
 }
 
 static int64_t os_writeFile_impl(kite_str path, kite_slice data) {
+    if (has_nul(path)) return EINVAL;
     char *p = cpath(path);
     FILE *f = fopen(p, "wb");
     free(p);
@@ -760,15 +857,9 @@ static int64_t os_writeFile_impl(kite_str path, kite_slice data) {
     return bad ? EIO : 0;
 }
 
-kite_string kite_os___errMsg(kite_str path, int64_t code) {
-    kite_string s = { NULL, 0, 0 };
-    kite_string_push(&s, path);
-    kite_fmt_cstr(&s, ": ");
-    kite_fmt_cstr(&s, strerror((int)code));
-    return s;
-}
 
 bool kite_os___getenv(kite_str name, kite_string *out) {
+    if (has_nul(name)) return false;
     char *n = cpath(name);
     const char *v = getenv(n);
     free(n);

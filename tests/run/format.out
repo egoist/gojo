@@ -1,0 +1,10 @@
+hello, kite! 1 + 2 = 3
+[    42] [42    ] [    ab] [  ab  ] [***é***]
+[00000042] [-0000042] [++++7]
+3.14 2   -1.500 -0002.25
+ff FF 10 101 -ff 00000101
+{literal} P{x: 1, y: 2} {[1, 2]}
+none|some(3)|a\nb
+18446744073709551615 ffffffffffffffff
+no newline: true
+no placeholders

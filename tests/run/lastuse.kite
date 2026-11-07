@@ -2,7 +2,7 @@ fn main() {
     var name = "kite".toString()
     let v = name.asStr()
     println(v.len)
-    name.push("!")          // fine: `v` is no longer used
+    name.push("!") // fine: `v` is no longer used
     var items = [1, 2, 3]
     let first = items[0]
     let r = items.get(1)

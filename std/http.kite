@@ -1,0 +1,574 @@
+// HTTP/1.1: a server built on goroutines, task groups and cancellation, and a
+// small client. Plain HTTP only (no TLS).
+//
+//   struct Hello {
+//       fn serve(self, req http.Request) http.Response {
+//           return http.text(200, "hello " + (req.param("name") ?? "world".toString()))
+//       }
+//   }
+//   fn main() ! io.Error {
+//       let ln = try net.listen(":8080")
+//       http.serve(ln, Hello{}, http.Options{})
+//   }
+//
+// Every connection is a task in the server's group, so cancelling the task
+// that runs `serve` cancels the requests in flight. Every request runs under a
+// deadline (`Options.deadline`): a handler still running then is cancelled and
+// the client gets 504. A client that hangs up cancels its request too: the
+// handler's blocking calls return early.
+use fmt, io, net, task, time
+
+// A header line. Names are matched without regard to case.
+pub struct Header {
+    pub name String
+    pub value String
+}
+
+// The value of header `name` (any case) in `hs`.
+pub fn findHeader(hs []Header, name str) ?String {
+    let want = name.toLower()
+    for h in hs {
+        if h.name.toLower() == want {
+            return some(h.value.clone())
+        }
+    }
+    return none
+}
+
+// A request, as a handler gets it: the whole body has been read (up to
+// `Options.maxBody`).
+pub struct Request {
+    pub method String
+    // the path, without the query
+    pub path String
+    // what follows `?` in the target, still percent-encoded
+    pub rawQuery String = ""
+    pub headers Vec[Header] = []
+    pub body Vec[byte] = []
+
+    // The value of header `name` (any case).
+    pub fn header(self, name str) ?String {
+        return findHeader(self.headers, name)
+    }
+
+    // A query parameter, decoded: "/search?q=a+b" has param("q") == "a b".
+    pub fn param(self, name str) ?String {
+        for part in self.rawQuery.split("&") {
+            let kv = part.split("=")
+            if kv.len() > 0 && (decode(kv[0]) ?? "".toString()) == name {
+                if kv.len() == 1 {
+                    return some("".toString())
+                }
+                return decode(part[kv[0].len() + 1..])
+            }
+        }
+        return none
+    }
+
+    // The path's parts: "/todos/7" -> ["todos", "7"].
+    pub fn segments(self) Vec[String] {
+        var out = Vec[String]{}
+        for s in self.path.split("/") {
+            if s.len() > 0 {
+                out.push(decode(s) ?? s.clone())
+            }
+        }
+        return out
+    }
+
+    // The body, as a string.
+    pub fn text(self) String {
+        return String(self.body.clone())
+    }
+}
+
+// What a handler answers, and what the client gets back. Content-Length and
+// Connection are set by the server; line breaks in header names and values
+// become spaces.
+pub struct Response {
+    pub status int = 200
+    pub headers Vec[Header] = []
+    pub body Vec[byte] = []
+
+    // The value of header `name` (any case).
+    pub fn header(self, name str) ?String {
+        return findHeader(self.headers, name)
+    }
+
+    // Adds a header.
+    pub fn setHeader(self inout, name str, value str) {
+        self.headers.push(Header{name: name.toString(), value: value.toString()})
+    }
+
+    // The body, as a string.
+    pub fn text(self) String {
+        return String(self.body.clone())
+    }
+}
+
+// A plain-text response.
+pub fn text(status int, body str) Response {
+    var r = Response{status: status, body: body.bytes().toVec()}
+    r.setHeader("Content-Type", "text/plain; charset=utf-8")
+    return r
+}
+
+// A JSON response; `body` is JSON text (see json.Value.encode).
+pub fn json(status int, body str) Response {
+    var r = Response{status: status, body: body.bytes().toVec()}
+    r.setHeader("Content-Type", "application/json")
+    return r
+}
+
+// The reason phrase for a status code: 404 -> "Not Found".
+pub fn statusText(status int) str {
+    return match status {
+        200 => "OK"
+        201 => "Created"
+        204 => "No Content"
+        301 => "Moved Permanently"
+        302 => "Found"
+        304 => "Not Modified"
+        400 => "Bad Request"
+        401 => "Unauthorized"
+        403 => "Forbidden"
+        404 => "Not Found"
+        405 => "Method Not Allowed"
+        409 => "Conflict"
+        411 => "Length Required"
+        413 => "Content Too Large"
+        422 => "Unprocessable Content"
+        431 => "Request Header Fields Too Large"
+        500 => "Internal Server Error"
+        501 => "Not Implemented"
+        503 => "Service Unavailable"
+        504 => "Gateway Timeout"
+        _ => "Unknown"
+    }
+}
+
+// Answers requests. `serve` runs in a goroutine of its own for each
+// connection, under the deadline of `Options.deadline`; it is cancelled when
+// the deadline passes, the client hangs up or the server stops.
+pub interface Handler {
+    fn serve(self, req Request) Response
+}
+
+// How the server treats requests.
+pub struct Options {
+    // how long a handler may run
+    pub deadline int = 30 * time.second
+    // the largest request body accepted
+    pub maxBody int = 8 * 1024 * 1024
+}
+
+// What happened to the requests a server has handled (see `serveCounting`):
+// answered, stopped at the deadline (answered 504), abandoned by the client,
+// cancelled when the server stopped, or rejected as malformed or too large.
+pub struct Stats {
+    pub served int = 0
+    pub timedOut int = 0
+    pub hungUp int = 0
+    pub stopped int = 0
+    pub rejected int = 0
+}
+
+enum Outcome { Served, TimedOut, HungUp, Stopped, Rejected }
+
+// ---------------------------------------------------------------- reading messages
+
+fn findBytes(b []byte, pat str, from int) int {
+    let p = pat.bytes()
+    var i = from
+    for i + p.len() <= b.len() {
+        var ok = true
+        for j in 0..p.len() {
+            if b[i + j] != p[j] {
+                ok = false
+                break
+            }
+        }
+        if ok {
+            return i
+        }
+        i += 1
+    }
+    return -1
+}
+
+fn hexValue(s str) int {
+    var v = 0
+    if s.len() == 0 || s.len() > 15 {
+        return -1
+    }
+    for r in s.runes() {
+        let d = if r >= '0' && r <= '9' { int(r) - 48 } else if r >= 'a' && r <= 'f' { int(r) - 87 } else if r >= 'A' && r <= 'F' { int(r) - 55 } else { -1 }
+        if d < 0 {
+            return -1
+        }
+        v = v * 16 + d
+    }
+    return v
+}
+
+// Reads from `c` into `buf` until it holds `n` bytes; false if the peer closed first.
+fn fillTo(c net.Conn, buf inout Vec[byte], n int) bool {
+    for buf.len() < n {
+        let got = c.read(&buf, 65536) catch _e { 0 }
+        if got == 0 {
+            return false
+        }
+    }
+    return true
+}
+
+// The head ("METHOD /path HTTP/1.1" or "HTTP/1.1 200 OK", then headers) up to
+// the blank line, and where the body starts. -1: closed; -2: too big.
+fn readHead(c net.Conn, buf inout Vec[byte]) int {
+    var from = 0
+    for {
+        let at = findBytes(buf, "\r\n\r\n", from)
+        if at > 65536 {
+            return -2
+        }
+        if at >= 0 {
+            return at + 4
+        }
+        if buf.len() > 65536 {
+            return -2
+        }
+        from = if buf.len() > 3 { buf.len() - 3 } else { 0 }
+        let got = c.read(&buf, 65536) catch _e { 0 }
+        if got == 0 {
+            return -1
+        }
+    }
+}
+
+fn parseHeaders(lines []String) Vec[Header] {
+    var hs = Vec[Header]{}
+    for l in lines {
+        if let colon = l.find(":") {
+            hs.push(Header{name: l[0..colon].trim().toString(), value: l[colon + 1..].trim().toString()})
+        }
+    }
+    return hs
+}
+
+// The body after the head at `start`. Err: the status to answer with.
+fn readBody(c net.Conn, buf inout Vec[byte], start int, hs []Header, max int) Vec[byte] ! int {
+    if let te = findHeader(hs, "Transfer-Encoding") {
+        if te.toLower() != "chunked" {
+            return err(501)
+        }
+        var out = Vec[byte]{}
+        var pos = start
+        for {
+            var eol = findBytes(buf, "\r\n", pos)
+            for eol < 0 {
+                if buf.len() - pos > 1024 || !fillTo(c, &buf, buf.len() + 1) {
+                    return err(400)
+                }
+                eol = findBytes(buf, "\r\n", pos)
+            }
+            let sizeLine = String(buf[pos..eol].toVec())
+            let size = hexValue((sizeLine.split(";")[0]).trim())
+            if size < 0 {
+                return err(400)
+            }
+            if out.len() + size > max {
+                return err(413)
+            }
+            pos = eol + 2
+            if size == 0 {
+                return out
+            }
+            if !fillTo(c, &buf, pos + size + 2) {
+                return err(400)
+            }
+            for i in pos..pos + size {
+                out.push(buf[i])
+            }
+            pos += size + 2
+        }
+    }
+    let len = (findHeader(hs, "Content-Length") ?? "0".toString()).parseInt() ?? -1
+    if len < 0 {
+        return err(400)
+    }
+    if len > max {
+        return err(413)
+    }
+    if !fillTo(c, &buf, start + len) {
+        return err(400)
+    }
+    return buf[start..start + len].toVec()
+}
+
+// Err: the status to answer with, or 0 when the client went away.
+fn readRequest(c net.Conn, max int) Request ! int {
+    var buf = Vec[byte]{}
+    let start = readHead(c, &buf)
+    if start == -1 {
+        return err(0)
+    }
+    if start == -2 {
+        return err(431)
+    }
+    let head = String(buf[0..start - 4].toVec())
+    let lines = head.split("\r\n")
+    let parts = lines[0].split(" ")
+    if parts.len() != 3 || !parts[2].startsWith("HTTP/1.") {
+        return err(400)
+    }
+    let hs = parseHeaders(lines[1..])
+    let body = try readBody(c, &buf, start, hs, max)
+    let target = parts[1].clone()
+    var path = target.clone()
+    var q = "".toString()
+    if let i = target.find("?") {
+        path = target[0..i].toString()
+        q = target[i + 1..].toString()
+    }
+    return Request{method: parts[0].clone(), path: path, rawQuery: q, headers: hs, body: body}
+}
+
+// `s` with line breaks made spaces: a header set from user input can't end
+// the header early and add others ("response splitting").
+fn oneLine(s str) String {
+    if !s.contains("\r") && !s.contains("\n") {
+        return s.toString()
+    }
+    return s.replace("\r", " ").replace("\n", " ")
+}
+
+// Whether `s` can be part of a request line or header as it is.
+fn safeInHead(s str) bool {
+    for b in s.bytes() {
+        if b == 13 || b == 10 || b == 0 {
+            return false
+        }
+    }
+    return true
+}
+
+fn writeResponse(c net.Conn, r Response) {
+    var head = fmt.format("HTTP/1.1 {} {}\r\n", r.status, statusText(r.status))
+    for h in r.headers {
+        if h.name.toLower() != "content-length" && h.name.toLower() != "connection" {
+            head.push(fmt.format("{}: {}\r\n", oneLine(h.name), oneLine(h.value)))
+        }
+    }
+    head.push(fmt.format("Content-Length: {}\r\nConnection: close\r\n\r\n", r.body.len()))
+    c.writeText(head) catch _e {
+        return
+    }
+    c.write(r.body) catch _e {}
+}
+
+// ---------------------------------------------------------------- serving
+
+fn handleConn[H Handler + send](c net.Conn, h H, opts Options) Outcome {
+    let req = readRequest(c, opts.maxBody) catch status {
+        if task.cancelled() {
+            return .Stopped
+        }
+        if status == 0 {
+            return .HungUp
+        }
+        writeResponse(c, text(status, statusText(status)))
+        return .Rejected
+    }
+    if task.cancelled() {
+        return .Stopped
+    }
+    let result = Mutex(Response{status: 0})
+    let hungUp = Mutex(false)
+    _ = task.group((g) => {
+        // the watcher: a read that returns 0 means the client hung up
+        g.go(() => {
+            var probe = Vec[byte]{}
+            let n = c.read(&probe, 1) catch _e { -1 }
+            if n == 0 && !task.cancelled() {
+                with x = hungUp.lock() { x = true }
+                g.cancel()
+            }
+        })
+        // the handler, under the deadline; when done it stops the watcher
+        g.go(() => {
+            if let r = task.timeout(opts.deadline, () => h.serve(req)) {
+                with x = result.lock() { x = r }
+            }
+            g.cancel()
+        })
+    })
+    with gone = hungUp.lock() {
+        if gone { return .HungUp }
+    }
+    // the server is stopping: drop the request
+    if task.cancelled() {
+        return .Stopped
+    }
+    with r = result.lock() {
+        if r.status != 0 {
+            writeResponse(c, r)
+            return .Served
+        }
+    }
+    writeResponse(c, text(504, "the request took too long\n"))
+    return .TimedOut
+}
+
+// Serves until the calling task is cancelled; then cancels the requests in
+// flight and waits for them.
+pub fn serve[H Handler + send](ln net.Listener, h H, opts Options) {
+    let stats = Mutex(Stats{})
+    serveCounting(ln, h, opts, stats)
+}
+
+// Like `serve`, counting what happened to the requests in `stats`.
+pub fn serveCounting[H Handler + send](ln net.Listener, h H, opts Options, stats Mutex[Stats]) {
+    _ = task.group((g) => {
+        for {
+            let c = ln.accept() catch _e {
+                return
+            }
+            // `c` moves into the task; `h`, `opts` and `stats` are borrowed
+            g.go(() => {
+                let o = handleConn(c, h, opts)
+                with s = stats.lock() {
+                    match o {
+                        .Served => s.served += 1
+                        .TimedOut => s.timedOut += 1
+                        .HungUp => s.hungUp += 1
+                        .Stopped => s.stopped += 1
+                        .Rejected => s.rejected += 1
+                    }
+                }
+            })
+        }
+    })
+}
+
+// ---------------------------------------------------------------- the client
+
+fn badUrl(url str, why str) io.Error {
+    return io.newError(.InvalidInput, fmt.format("bad URL `{}`: {}", url, why))
+}
+
+// Sends a request and reads the whole response. `url` is
+// "http://host[:port]/path?query".
+pub fn request(method str, url str, headers []Header, body []byte) Response ! io.Error {
+    if url.startsWith("https://") {
+        return err(badUrl(url, "https is not supported (there is no TLS yet)"))
+    }
+    if !url.startsWith("http://") {
+        return err(badUrl(url, "expected http://"))
+    }
+    let rest = url[7..]
+    let slash = rest.find("/") ?? rest.len()
+    let hostPort = rest[0..slash]
+    let target = if slash < rest.len() { rest[slash..].toString() } else { "/".toString() }
+    if hostPort.len() == 0 {
+        return err(badUrl(url, "no host"))
+    }
+    if !safeInHead(url) || target.contains(" ") {
+        return err(badUrl(url, "spaces and control characters must be percent-encoded"))
+    }
+    if method.len() == 0 || method.contains(" ") || !safeInHead(method) {
+        return err(io.newError(.InvalidInput, fmt.format("bad HTTP method `{}`: it is one word", oneLine(method))))
+    }
+    for h in headers {
+        if h.name.len() == 0 || h.name.contains(":") || h.name.contains(" ") || !safeInHead(h.name) || !safeInHead(h.value) {
+            return err(io.newError(.InvalidInput, fmt.format("bad header `{}`: a name is one word without `:`, and neither names nor values may hold line breaks", oneLine(h.name))))
+        }
+    }
+    let addr = if hostPort.contains(":") { hostPort.toString() } else { hostPort + ":80" }
+    let c = try net.dial(addr)
+    var head = fmt.format("{} {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\nContent-Length: {}\r\n", method, target, hostPort, body.len())
+    for h in headers {
+        head.push(fmt.format("{}: {}\r\n", h.name, h.value))
+    }
+    head.push("\r\n")
+    try c.writeText(head)
+    try c.write(body)
+    var buf = Vec[byte]{}
+    let start = readHead(c, &buf)
+    if start < 0 {
+        return err(io.newError(.UnexpectedEof, "the server closed the connection without answering"))
+    }
+    let lines = String(buf[0..start - 4].toVec()).split("\r\n")
+    let parts = lines[0].split(" ")
+    let status = if parts.len() >= 2 { parts[1].parseInt() ?? 0 } else { 0 }
+    if status == 0 {
+        return err(io.newError(.InvalidInput, "not an HTTP response: " + lines[0]))
+    }
+    let hs = parseHeaders(lines[1..])
+    var b = Vec[byte]{}
+    if findHeader(hs, "Content-Length") != none || findHeader(hs, "Transfer-Encoding") != none {
+        b = readBody(c, &buf, start, hs, 1 << 40) catch _status {
+            return err(io.newError(.UnexpectedEof, "the response body ended early"))
+        }
+    } else {
+        // until the server closes the connection
+        for {
+            let n = try c.read(&buf, 65536)
+            if n == 0 {
+                break
+            }
+        }
+        b = buf[start..].toVec()
+    }
+    return Response{status: status, headers: hs, body: b}
+}
+
+// A GET request.
+pub fn get(url str) Response ! io.Error {
+    return request("GET", url, Vec[Header]{}, "".bytes())
+}
+
+// A POST request with a body of the given type.
+pub fn post(url str, contentType str, body []byte) Response ! io.Error {
+    return request("POST", url, [Header{name: "Content-Type".toString(), value: contentType.toString()}], body)
+}
+
+// ---------------------------------------------------------------- URL encoding
+
+// Percent-decoding (and `+` as a space, as in query strings); none if malformed.
+pub fn decode(s str) ?String {
+    let b = s.bytes()
+    var out = Vec[byte]{}
+    var i = 0
+    for i < b.len() {
+        let c = b[i]
+        if c == 37 {
+            if i + 2 >= b.len() {
+                return none
+            }
+            let v = hexValue(String(b[i + 1..i + 3].toVec()).asStr())
+            if v < 0 {
+                return none
+            }
+            out.push(u8(v))
+            i += 3
+        } else {
+            out.push(if c == 43 { 32 } else { c })
+            i += 1
+        }
+    }
+    return some(String(out))
+}
+
+// Percent-encoding of everything but letters, digits and `-._~`.
+pub fn encode(s str) String {
+    var out = "".toString()
+    for c in s.bytes() {
+        let plain = (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c == 45 || c == 46 || c == 95 || c == 126
+        if plain {
+            out.pushRune(rune(c))
+        } else {
+            out.push(fmt.format("%{:02X}", c))
+        }
+    }
+    return out
+}

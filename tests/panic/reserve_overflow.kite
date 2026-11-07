@@ -1,0 +1,9 @@
+// a capacity whose size in bytes doesn't fit used to wrap around to a tiny
+// buffer that pushes then overran
+fn main() {
+    var v = [1, 2, 3]
+    v.reserve(1 << 61)
+    v.push(4)
+    println(v.len())
+    // panic: capacity overflow
+}

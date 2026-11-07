@@ -1,0 +1,41 @@
+// Calendar dates, formatting and parsing.
+use time
+
+fn main() {
+    let epoch = time.utc(0)
+    println(epoch.iso(), epoch.weekday(), time.dayName(epoch.weekday()))
+    let d = time.date(2026, 11, 6, 14, 41, 31)
+    println(d.iso(), d.weekday(), d.yearDay())
+    println(d.format("%A %e %B %Y, %H:%M:%S (%a %b %j) %z %Z %%"))
+    let ns = d.unixNanos()
+    println(ns, time.utc(ns).iso() == d.iso())
+    let east = time.at(ns + 123000000, 8 * 3600)
+    println(east.iso(), east.format("%Y-%m-%d %H:%M:%S.%L %z"))
+    // leap years and the far past
+    println(time.date(2024, 2, 29, 0, 0, 0).yearDay(), time.date(2000, 12, 31, 0, 0, 0).yearDay(), time.date(1900, 3, 1, 0, 0, 0).weekday())
+    println(time.utc(-1).iso(), time.utc(0 - 86400 * time.second * 365).iso())
+    // every week for 540 years (about what nanoseconds in an int can hold) round-trips
+    var ok = true
+    var day = -98000
+    for day < 98000 {
+        let t = day * 86400 * time.second + 3723 * time.second
+        let x = time.utc(t)
+        if x.unixNanos() != t || x.hour != 1 || x.minute != 2 || x.second != 3 {
+            ok = false
+        }
+        day += 7
+    }
+    println("round trips", ok)
+    for s in ["2026-11-06T14:41:31Z", "2026-11-06 14:41:31.5+08:00", "1999-12-31T23:59:60.123456789-05:30", "2026-11-06", "2026-13-06T00:00:00Z", "2026-11-06T14:41:31+08"] {
+        let r = time.parseIso(s)
+        match r {
+            ok(v) => println("ok", v.iso(), v.unixNanos())
+            err(e) => println("err", e.message())
+        }
+    }
+    for dur in [0, 999, 1500, 2500000, 1500000000, 61 * time.second, 3 * time.hour + 5 * time.minute, -250 * time.millisecond] {
+        print(time.formatDuration(dur), " ")
+    }
+    println()
+    println(time.unix() > 1700000000, time.local(time.unixNanos()).year >= 2025)
+}

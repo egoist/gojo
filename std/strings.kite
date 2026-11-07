@@ -1,21 +1,27 @@
-// A growable string buffer.
+// Building strings piece by piece.
+
+// A growable string buffer: `write` pieces, then `finish` to take the
+// `String`.
 pub struct Builder {
     buf String = ""
 
+    // Appends `s`.
     pub fn write(self inout, s str) {
         self.buf.push(s)
     }
 
+    // Appends the UTF-8 encoding of `r`.
     pub fn writeRune(self inout, r rune) {
         self.buf.pushRune(r)
     }
 
+    // The length so far, in bytes.
     pub fn len(self) int {
         return self.buf.len()
     }
 
+    // The string built (the builder is used up).
     pub fn finish(self sink) String {
         return self.buf
     }
 }
-

@@ -1,0 +1,163 @@
+// Buffered reading and writing on top of io.Reader / io.Writer.
+//
+//   var input = bufio.reader(os.stdin())
+//   for {
+//       let line = try input.readLine() ?? break
+//       ...
+//   }
+//   var out = bufio.writer(os.stdout())
+//   try out.writeText("many small writes, one system call\n")
+//   try out.flush()
+use io
+
+// Reads from `R` in large chunks, and line by line.
+pub struct Reader[R io.Reader] {
+    src R
+    buf Vec[byte] = []
+    pos int = 0
+    done bool = false
+
+    // Gets more input into the buffer; false at the end of the stream.
+    fn fill(self inout) bool ! io.Error {
+        if self.done {
+            return false
+        }
+        if self.pos > 0 {
+            // drop what was consumed
+            var rest = Vec[byte]{}
+            for i in self.pos..self.buf.len() {
+                rest.push(self.buf[i])
+            }
+            self.buf = rest
+            self.pos = 0
+        }
+        let n = try self.src.read(&self.buf, 65536)
+        if n == 0 {
+            self.done = true
+        }
+        return n > 0
+    }
+
+    // The next byte, or none at the end.
+    pub fn readByte(self inout) ?byte ! io.Error {
+        if self.pos >= self.buf.len() {
+            if !try self.fill() {
+                return none
+            }
+        }
+        let b = self.buf[self.pos]
+        self.pos += 1
+        return some(b)
+    }
+
+    // Everything up to and including `delim` (or to the end), or none when
+    // nothing is left.
+    pub fn readUntil(self inout, delim byte) ?Vec[byte] ! io.Error {
+        var out = Vec[byte]{}
+        for {
+            for self.pos < self.buf.len() {
+                let b = self.buf[self.pos]
+                self.pos += 1
+                out.push(b)
+                if b == delim {
+                    return some(out)
+                }
+            }
+            if !try self.fill() {
+                if out.len() == 0 {
+                    return none
+                }
+                return some(out)
+            }
+        }
+    }
+
+    // The next line without its "\n" (or "\r\n"), or none at the end.
+    pub fn readLine(self inout) ?String ! io.Error {
+        var b = try self.readUntil(10) ?? return none
+        if b.len() > 0 && b[b.len() - 1] == 10 {
+            _ = b.pop()
+            if b.len() > 0 && b[b.len() - 1] == 13 {
+                _ = b.pop()
+            }
+        }
+        return some(String(b))
+    }
+
+    // As an io.Reader: what is buffered first.
+    pub fn read(self inout, buf inout Vec[byte], max int) int ! io.Error {
+        if self.pos >= self.buf.len() {
+            if !try self.fill() {
+                return 0
+            }
+        }
+        var n = 0
+        for n < max && self.pos < self.buf.len() {
+            buf.push(self.buf[self.pos])
+            self.pos += 1
+            n += 1
+        }
+        return n
+    }
+
+    // Everything that is left.
+    pub fn readAll(self inout) Vec[byte] ! io.Error {
+        var out = Vec[byte]{}
+        for {
+            let n = try self.read(&out, 65536)
+            if n == 0 {
+                return out
+            }
+        }
+    }
+}
+
+// A buffered reader on `src` (which it owns).
+pub fn reader[R io.Reader](src sink R) Reader[R] {
+    return Reader[R]{src: src}
+}
+
+// Collects small writes and passes them to `W` in large ones (64 KB). What is
+// still buffered is written when the writer is dropped, but call `flush` to
+// see errors.
+pub struct Writer[W io.Writer] {
+    dst W
+    buf Vec[byte] = []
+    size int = 65536
+
+    // Buffers `data` (large writes go straight through).
+    pub fn write(self inout, data []byte) ! io.Error {
+        if self.buf.len() + data.len() > self.size {
+            try self.flush()
+        }
+        if data.len() >= self.size {
+            return self.dst.write(data)
+        }
+        for b in data {
+            self.buf.push(b)
+        }
+    }
+
+    // Buffers the bytes of `s`.
+    pub fn writeText(self inout, s str) ! io.Error {
+        return self.write(s.bytes())
+    }
+
+    // Writes out everything buffered.
+    pub fn flush(self inout) ! io.Error {
+        if self.buf.len() > 0 {
+            let pending = take(&self.buf)
+            try self.dst.write(pending)
+        }
+    }
+
+    // Flushes; an error here is lost, so call `flush` when it matters.
+    fn drop(self inout) {
+        _ = self.flush()
+    }
+}
+
+// A buffered writer on `dst` (which it owns).
+pub fn writer[W io.Writer](dst sink W) Writer[W] {
+    return Writer[W]{dst: dst}
+}

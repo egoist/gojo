@@ -1,0 +1,17 @@
+GET /todos -> 200 []
+POST /todos -> 201 {"id":1,"title":"write the docs","done":false,"created":"DATE"}
+POST /todos -> 201 {"id":2,"title":"ship the beta","done":false,"created":"DATE"}
+POST /todos -> 422 {"error":"`title` must be a non-empty string"}
+POST /todos -> 422 {"error":"`title` is missing"}
+POST /todos -> 400 {"error":"json: expected `,` or `}` at line 1, column 17"}
+POST /todos -> 400 {"error":"expected a JSON object"}
+PATCH /todos/1 -> 200 {"id":1,"title":"write the docs","done":true,"created":"DATE"}
+PATCH /todos/2 -> 422 {"error":"`done` must be true or false"}
+GET /todos/1 -> 200 {"id":1,"title":"write the docs","done":true,"created":"DATE"}
+DELETE /todos/2 -> 204 
+DELETE /todos/2 -> 404 {"error":"no todo 2"}
+GET /todos/x -> 400 {"error":"the id must be a number"}
+PUT /todos -> 405 {"error":"use GET or POST"}
+GET /elsewhere -> 404 {"error":"no such resource"}
+GET /todos -> 200 [{"id":1,"title":"write the docs","done":true,"created":"DATE"}]
+reloaded: 1 next id 3 write the docs true

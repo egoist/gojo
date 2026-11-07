@@ -1,0 +1,15 @@
+200 GET /a/b%20c q=name=x+y&z name=x y body=0 agent=- ["a", "b c"]
+200 POST /up q= name=- body=1000 agent=-
+413
+HTTP/1.1 200 OK
+HTTP/1.1 501 Not Implemented
+HTTP/1.1 400 Bad Request
+HTTP/1.1 431 Request Header Fields Too Large
+HTTP/1.1 400 Bad Request
+bad URL `https://example.com/`: https is not supported (there is no TLS yet)
+200 GET / q= name=- body=0 agent=-
+200 a  X-Evil: 1 no x-evil
+bad header `X-A`: a name is one word without `:`, and neither names nor values may hold line breaks
+bad HTTP method `GET /x HTTP/1.1  `: it is one word
+true
+a%2Fb%20c%26d%3D%C3%A9 € A malformed malformed

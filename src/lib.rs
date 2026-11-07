@@ -5,6 +5,9 @@ pub mod borrowck;
 pub mod check;
 pub mod codegen;
 pub mod diag;
+pub mod fmtspec;
+pub mod formatter;
+pub mod doc;
 pub mod lexer;
 pub mod parser;
 pub mod tir;
@@ -22,11 +25,15 @@ pub const STD: &[(&str, &str)] = &[
     ("time", include_str!("../std/time.kite")),
     ("task", include_str!("../std/task.kite")),
     ("net", include_str!("../std/net.kite")),
+    ("io", include_str!("../std/io.kite")),
+    ("bufio", include_str!("../std/bufio.kite")),
+    ("json", include_str!("../std/json.kite")),
+    ("http", include_str!("../std/http.kite")),
     ("strings", include_str!("../std/strings.kite")),
 ];
 
 pub const RUNTIME_H: &str = include_str!("../runtime/kite_rt.h");
-pub const RUNTIME_C: &str = concat!(include_str!("../runtime/kite_rt.c"), include_str!("../runtime/kite_sched.c"));
+pub const RUNTIME_C: &str = concat!(include_str!("../runtime/kite_rt.c"), include_str!("../runtime/kite_sched.c"), include_str!("../runtime/kite_os.c"));
 
 pub fn report(sm: &SourceMap, diags: &[Diag]) {
     use std::io::IsTerminal;
@@ -228,10 +235,26 @@ pub fn load(input: &str, source: Option<&str>) -> Result<Loaded, (SourceMap, Vec
         }
     };
     add_std("prelude", &mut units, &mut std_files);
-    for s in ["fmt", "os", "math", "time", "task", "strings", "net"] {
-        if s == "fmt" || s == "os" || std_needed.iter().any(|n| n == s) {
-            add_std(s, &mut units, &mut std_files);
+    // the modules used, after the std modules they import
+    fn visit_std(name: &str, std_files: &mut HashMap<&str, ast::File>, units: &mut Vec<check::Unit>, add: &dyn Fn(&str, &mut Vec<check::Unit>, &mut HashMap<&str, ast::File>)) {
+        let deps: Vec<String> = match std_files.get(name) {
+            Some(f) => f.imports.iter().map(|i| i.path.clone()).collect(),
+            None => return,
+        };
+        // taken out first: an import cycle in std must not loop
+        let f = std_files.remove(name);
+        for d in deps {
+            visit_std(&d, std_files, units, add);
         }
+        if let Some(f) = f {
+            std_files.insert(STD.iter().find(|(n, _)| *n == name).map(|(n, _)| *n).unwrap_or("?"), f);
+            add(name, units, std_files);
+        }
+    }
+    let mut wanted: Vec<String> = vec!["fmt".into(), "os".into()];
+    wanted.extend(std_needed.iter().cloned());
+    for s in &wanted {
+        visit_std(s, &mut std_files, &mut units, &add_std);
     }
     for (key, name, files) in user {
         units.push(check::Unit { name, path: key, is_std: false, files });

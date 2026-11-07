@@ -1,0 +1,31 @@
+$ kite data/poem.txt
+kites fly high
+$ -i kite data/poem.txt
+Kite is fast
+kites fly high
+$ -n -i KITE data/poem.txt
+3:Kite is fast
+4:kites fly high
+$ -c todo data/notes/todo.txt
+2
+$ -v todo data/notes/todo.txt
+done: fuzz the compiler
+$ -r todo data
+data/notes/todo.txt:todo: write docs
+data/notes/todo.txt:todo: ship the beta
+$ -l -r the data
+data/notes/todo.txt
+data/poem.txt
+$ -rc o data
+data/notes/empty.txt:1
+data/notes/todo.txt:3
+data/poem.txt:2
+$ zebra data/poem.txt
+[exit Some(1)]
+$ nope data/missing.txt
+grep: data/missing.txt: No such file or directory
+[exit Some(2)]
+$ -x data
+grep: unknown option -x
+usage: grep [-i] [-n] [-c] [-v] [-r] [-l] PATTERN [PATH...]
+[exit Some(2)]

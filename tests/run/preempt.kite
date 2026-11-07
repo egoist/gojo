@@ -32,17 +32,21 @@ fn fib(n int) int {
 fn main() {
     _ = task.setMaxProcs(2)
     let results = Mutex(Vec[int]{})
+    // how long each busy goroutine ran, start to end
+    let spans = Mutex(Vec[int]{})
     var worst = 0
     let r = task.group((g) => {
         // eight busy goroutines on two CPUs
         for k in 0..8 {
             g.go(() => {
+                let start = time.now()
                 let v = match k % 3 {
                     0 => spin(40000000)
                     1 => collatz(400000)
-                    _ => fib(30)
+                    _ => fib(36)
                 }
                 with l = results.lock() { l.push(v) }
+                with l = spans.lock() { l.push(time.since(start)) }
             })
         }
         // and one that wants to run every millisecond
@@ -57,8 +61,17 @@ fn main() {
     with l = results.lock() {
         println("busy goroutines done:", l.len, r.isOk())
     }
-    // without preemption the sleeper would wait for a busy goroutine to finish
-    println("sleeper never waited 60 ms:", worst < 60 * time.millisecond)
+    // Without preemption the sleeper would wait for a busy goroutine to
+    // finish. Compared with how long they ran rather than with a fixed time,
+    // so that a loaded machine (which slows both) doesn't fail the test.
+    var shortest = 0
+    with l = spans.lock() {
+        shortest = l.min() ?? 0
+    }
+    if worst * 4 >= shortest || shortest == 0 {
+        println("worst wait", time.formatDuration(worst), "shortest busy goroutine", time.formatDuration(shortest))
+    }
+    println("sleeper never waited long:", worst * 4 < shortest)
     let s = task.stats()
     println("no extra threads:", s.threads <= s.maxProcs + 1, "maxProcs", s.maxProcs)
     println("goroutines left:", s.goroutines)

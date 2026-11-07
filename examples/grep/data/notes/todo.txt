@@ -1,0 +1,3 @@
+todo: write docs
+done: fuzz the compiler
+todo: ship the beta

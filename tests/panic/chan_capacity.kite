@@ -1,0 +1,5 @@
+fn main() {
+    let c = chan[int](1 << 61)
+    c <- 1
+    // panic: channel capacity too large
+}

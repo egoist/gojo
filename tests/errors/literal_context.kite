@@ -1,0 +1,6 @@
+// The literal must still fit the type it takes from the other side.
+fn main() {
+    let v u8 = 1
+    println((if v > 0 { 5 } else { 300 }) + v)
+    // error: integer literal 300 does not fit in `u8`
+}

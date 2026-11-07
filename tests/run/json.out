@@ -1,0 +1,32 @@
+{"name":"kite","version":1,"pi":3.25,"tags":["fast","safe"],"nested":{"ok":true,"nothing":null},"big":12345678901234567168,"esc":"a\"b\\c\né😀"}
+kite 1 3.25
+2 safe ["name", "version", "pi", "tags", "nested", "big", "esc"]
+true true true
+-1 12345678901234567168
+a"b\c
+é😀
+{"id":7,"title":"buy \"milk\"","tags":["home",1.5],"done":false,"note":null,"empty":{}}
+{
+  "id": 7,
+  "title": "buy \"milk\"",
+  "tags": [
+    "home",
+    1.5
+  ],
+  "done": false,
+  "note": null,
+  "empty": {}
+}
+"tab\there"
+[1,2,3]
+"just a string"
+-0.0005
+error: json: expected a string key at line 1, column 9
+error: json: expected `,` or `]` at line 1, column 4
+error: json: unexpected character at line 2, column 8
+error: json: unterminated string at line 1, column 14
+error: json: numbers can't have leading zeros at line 1, column 3
+error: json: lone surrogate in \u escape at line 1, column 8
+error: json: unexpected text after the value at line 1, column 5
+error: json: unexpected end of input at line 1, column 1
+error: json: nested too deeply at line 1, column 502

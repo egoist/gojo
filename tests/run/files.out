@@ -1,0 +1,25 @@
+one
+two
+
+copied 14 bytes: one
+two
+three
+
+size 14 file true dir false recent true
+["a.txt", "c.txt", "x"]
+false true
+missing: true true
+0
+not empty: true
+["a.txt", "c.txt"]
+hello, reader
+false
+a/b . / c.txt b
+42
+unset
+hi there
+true 0
+3 out err
+3
+cat round trip true
+not found: true

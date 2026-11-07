@@ -1,0 +1,17 @@
+// Set[T]
+fn main() {
+    var s = Set[String].new()
+    println(s.insert("b".toString()), s.insert("a".toString()), s.insert("b".toString()), s.len())
+    println(s.contains("a".toString()), s.contains("z".toString()), s.toVec())
+    var count = 0
+    for x in s {
+        count += x.len()
+    }
+    println(count)
+    let a = setOf([1, 2, 3, 4])
+    let b = setOf([3, 4, 5])
+    println(a.union(b).toVec(), a.intersection(b).toVec(), a.difference(b).toVec())
+    println(s.remove("a".toString()), s.remove("a".toString()), s.toVec(), s.isEmpty())
+    s.clear()
+    println(s.isEmpty())
+}

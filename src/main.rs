@@ -15,28 +15,70 @@ struct Options {
     keep_c: bool,
 }
 
-fn usage() -> ExitCode {
-    eprintln!(
-        "Kite — a systems language with Go's simplicity, no GC and no nil.
+const USAGE: &str = "Kite — a systems language with Go's simplicity, no GC and no nil.
 
 usage:
   kite run   <file.kite|dir> [args...]   compile and run
   kite build <file.kite|dir> [-o out]     compile to a native binary
   kite check <file.kite|dir>              type and borrow check only
-  kite test  <file.kite|dir>              run `test \"...\" {{}}` blocks
+  kite test  <file.kite|dir>              run `test \"...\" {}` blocks
   kite emit-c <file.kite|dir>             print the generated C
+  kite fmt [--check] [file.kite|dir...]  format in place (default: .); --check lists
+                                          files that aren't formatted and fails
+  kite doc [module|path] [--out dir]      API docs as Markdown: the standard library
+                                          index, one std module, or a package;
+                                          --out writes every std module to dir
+  kite version                            print the version
 
 options:
   --release        optimize (overflow checks stay on)
-  --cc <compiler>  C compiler for the backend (default: $KITE_CC, cc)
-  --target <t>     cross-compile with `zig cc -target <t>`
-  -v               print timings"
-    );
+  --cc <compiler>  C compiler for the backend (default: $KITE_CC, else the
+                   first of cc, clang, gcc and `zig cc` on the PATH)
+  --target <t>     cross-compile with `zig cc -target <t>` (Linux or macOS,
+                   e.g. x86_64-linux-musl, aarch64-macos)
+  -v               print timings
+
+Kite compiles to C: it needs a C compiler (cc, clang, gcc, or zig) on the PATH.";
+
+fn usage() -> ExitCode {
+    eprintln!("{}", USAGE);
     ExitCode::from(2)
+}
+
+fn version() -> String {
+    format!("kite {} ({}, {})", env!("CARGO_PKG_VERSION"), env!("KITE_COMMIT"), env!("KITE_HOST"))
+}
+
+/// Why the C compiler could not be started, and what to do about it.
+fn cc_missing(cc: &str, e: &std::io::Error) -> String {
+    let mut m = format!("cannot run the C compiler `{}`: {}", cc, e);
+    if e.kind() == std::io::ErrorKind::NotFound {
+        m.push_str(if cc == "zig" {
+            "\n  --target cross-compiles with zig: install it from https://ziglang.org/download/"
+        } else if cfg!(target_os = "macos") {
+            "\n  Kite compiles to C: install a C compiler with `xcode-select --install`,\n  or install zig (https://ziglang.org), which is used when no `cc` is found"
+        } else {
+            "\n  Kite compiles to C: install a C compiler (e.g. `apt install gcc` or `apk add gcc musl-dev`),\n  or install zig (https://ziglang.org), which is used when no `cc` is found"
+        });
+    }
+    m
 }
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
+    match args.get(1).map(|s| s.as_str()) {
+        Some("fmt") => return fmt_command(&args[2..]),
+        Some("doc") => return doc_command(&args[2..]),
+        Some("version" | "--version" | "-V") => {
+            println!("{}", version());
+            return ExitCode::SUCCESS;
+        }
+        Some("help" | "--help" | "-h") => {
+            println!("{}", USAGE);
+            return ExitCode::SUCCESS;
+        }
+        _ => {}
+    }
     if args.len() < 3 {
         return usage();
     }
@@ -68,6 +110,14 @@ fn main() -> ExitCode {
                 i += 1;
                 opts.target = args.get(i).cloned();
             }
+            _ if a.starts_with('-') && a.len() > 1 => {
+                eprintln!("error: unknown option `{}` (see `kite help`)", a);
+                return ExitCode::from(2);
+            }
+            _ if input.is_some() => {
+                eprintln!("error: unexpected argument `{}`: `kite {}` takes one file or directory", a, cmd);
+                return ExitCode::from(2);
+            }
             _ => input = Some(a.clone()),
         }
         i += 1;
@@ -78,7 +128,20 @@ fn main() -> ExitCode {
     };
     match cmd {
         "run" | "build" | "check" | "test" | "emit-c" => {}
-        _ => return usage(),
+        _ => {
+            eprintln!("error: unknown command `{}`\n", cmd);
+            return usage();
+        }
+    }
+    if let Some(t) = &opts.target {
+        if t.contains("windows") || t.contains("mingw") {
+            eprintln!("error: Windows is not supported: Kite's runtime needs a POSIX system (Linux or macOS)");
+            return ExitCode::from(2);
+        }
+        if !(t.contains("linux") || t.contains("macos") || t.contains("darwin")) {
+            eprintln!("error: unsupported target `{}`: Kite targets Linux and macOS (e.g. x86_64-linux-musl, aarch64-linux-gnu, aarch64-macos)", t);
+            return ExitCode::from(2);
+        }
     }
     let cmd = cmd.to_string();
     let r = kite::with_compiler_stack(move || drive(&cmd, &input, &opts, &prog_args));
@@ -88,6 +151,139 @@ fn main() -> ExitCode {
     }
 }
 
+
+/// `kite doc`: API documentation, as Markdown.
+fn doc_command(args: &[String]) -> ExitCode {
+    let std_files = |name: &str| -> Vec<(String, String)> { kite::STD.iter().filter(|(n, _)| *n == name).map(|(n, s)| (format!("{}.kite", n), s.to_string())).collect() };
+    let index = || {
+        let mut s = String::from("# The standard library
+
+The prelude is available everywhere; other modules are imported with `use`.
+
+| module | |
+| --- | --- |
+");
+        for (name, _) in kite::STD {
+            s.push_str(&format!("| [`{}`]({}.md) | {} |
+", name, name, kite::doc::summary(&std_files(name))));
+        }
+        s
+    };
+    let fail = |e: String| {
+        eprintln!("error: {}", e);
+        ExitCode::from(1)
+    };
+    if let Some(i) = args.iter().position(|a| a == "--out") {
+        let Some(dir) = args.get(i + 1) else {
+            return fail("--out needs a directory".into());
+        };
+        let dir = Path::new(dir);
+        if let Err(e) = std::fs::create_dir_all(dir) {
+            return fail(format!("cannot create {}: {}", dir.display(), e));
+        }
+        let mut pages = vec![("README".to_string(), index())];
+        for (name, _) in kite::STD {
+            match kite::doc::package(name, &std_files(name)) {
+                Ok(d) => pages.push((name.to_string(), d)),
+                Err(e) => return fail(e),
+            }
+        }
+        for (name, text) in pages {
+            let p = dir.join(format!("{}.md", name));
+            if let Err(e) = std::fs::write(&p, text + "\n") {
+                return fail(format!("cannot write {}: {}", p.display(), e));
+            }
+        }
+        return ExitCode::SUCCESS;
+    }
+    let text = match args.first() {
+        None => Ok(index()),
+        Some(name) if kite::STD.iter().any(|(n, _)| n == name) => kite::doc::package(name, &std_files(name)),
+        Some(path) => {
+            let p = Path::new(path);
+            let mut files: Vec<PathBuf> = if p.is_dir() {
+                std::fs::read_dir(p).map(|rd| rd.filter_map(|e| e.ok().map(|e| e.path())).filter(|f| f.extension().is_some_and(|x| x == "kite")).collect()).unwrap_or_default()
+            } else if p.is_file() {
+                vec![p.to_path_buf()]
+            } else {
+                return fail(format!("`{}` is neither a standard module nor a file or directory (modules: {})", path, kite::STD.iter().map(|(n, _)| *n).collect::<Vec<_>>().join(", ")));
+            };
+            files.sort();
+            let mut srcs = vec![];
+            for f in &files {
+                match std::fs::read_to_string(f) {
+                    Ok(s) => srcs.push((f.display().to_string(), s)),
+                    Err(e) => return fail(format!("cannot read {}: {}", f.display(), e)),
+                }
+            }
+            let canon = p.canonicalize().unwrap_or(p.to_path_buf());
+            let name = if p.is_dir() { canon.file_name() } else { canon.file_stem() }.map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            kite::doc::package(&name, &srcs)
+        }
+    };
+    match text {
+        Ok(t) => {
+            println!("{}", t);
+            ExitCode::SUCCESS
+        }
+        Err(e) => fail(e),
+    }
+}
+
+/// `kite fmt`: formats files (directories: every .kite file below them).
+fn fmt_command(args: &[String]) -> ExitCode {
+    let check = args.iter().any(|a| a == "--check");
+    let mut paths: Vec<PathBuf> = args.iter().filter(|a| !a.starts_with("--")).map(PathBuf::from).collect();
+    if paths.is_empty() {
+        paths.push(PathBuf::from("."));
+    }
+    fn collect(p: &Path, out: &mut Vec<PathBuf>) {
+        if p.is_dir() {
+            let mut es: Vec<PathBuf> = std::fs::read_dir(p).map(|rd| rd.filter_map(|e| e.ok().map(|e| e.path())).collect()).unwrap_or_default();
+            es.sort();
+            for e in es {
+                let hidden = e.file_name().is_some_and(|n| n.to_string_lossy().starts_with('.'));
+                if !hidden && (e.is_dir() || e.extension().is_some_and(|x| x == "kite")) {
+                    collect(&e, out);
+                }
+            }
+        } else {
+            out.push(p.to_path_buf());
+        }
+    }
+    let mut files = vec![];
+    for p in &paths {
+        collect(p, &mut files);
+    }
+    let (mut bad, mut failed) = (0, false);
+    for f in files {
+        let src = match std::fs::read_to_string(&f) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("error: cannot read {}: {}", f.display(), e);
+                failed = true;
+                continue;
+            }
+        };
+        match kite::formatter::format(&src) {
+            Ok(out) if out == src => {}
+            Ok(out) => {
+                bad += 1;
+                if check {
+                    println!("{}", f.display());
+                } else if let Err(e) = std::fs::write(&f, out) {
+                    eprintln!("error: cannot write {}: {}", f.display(), e);
+                    failed = true;
+                }
+            }
+            Err(e) => {
+                eprintln!("error: {}: {}", f.display(), e);
+                failed = true;
+            }
+        }
+    }
+    if failed || (check && bad > 0) { ExitCode::from(1) } else { ExitCode::SUCCESS }
+}
 
 fn cache_dir() -> PathBuf {
     let base = std::env::var("KITE_CACHE").map(PathBuf::from).unwrap_or_else(|_| {
@@ -117,8 +313,21 @@ fn compiler(opts: &Options) -> (String, Vec<String>) {
             let first = parts.next().unwrap_or_else(|| "cc".into());
             (first, parts.collect())
         }
-        None => ("cc".into(), vec![]),
+        // the first of cc, clang, gcc and zig on the PATH
+        None => {
+            let found = |name: &str| std::env::var_os("PATH").is_some_and(|p| std::env::split_paths(&p).any(|d| is_executable(&d.join(name))));
+            match ["cc", "clang", "gcc"].into_iter().find(|c| found(c)) {
+                Some(c) => (c.into(), vec![]),
+                None if found("zig") => ("zig".into(), vec!["cc".into()]),
+                None => ("cc".into(), vec![]),
+            }
+        }
     }
+}
+
+fn is_executable(p: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
 }
 
 /// The runtime header, in a directory of its own per runtime version, so that
@@ -131,8 +340,15 @@ fn runtime_include_dir() -> Result<PathBuf, String> {
         let tmp = dir.join(format!("kite_rt.h.{}", std::process::id()));
         std::fs::write(&tmp, RUNTIME_H).map_err(|e| e.to_string())?;
         std::fs::rename(&tmp, &h).map_err(|e| e.to_string())?;
+    } else {
+        touch(&h);
     }
     Ok(dir)
+}
+
+/// Marks a cache entry as used, so that eviction keeps it.
+fn touch(p: &Path) {
+    let _ = std::fs::File::open(p).and_then(|f| f.set_modified(std::time::SystemTime::now()));
 }
 
 fn targets_linux(opts: &Options) -> bool {
@@ -204,6 +420,8 @@ fn runtime_object(opts: &Options) -> Result<(PathBuf, bool), String> {
         }
     };
     if obj.exists() {
+        touch(&obj);
+        touch(&info);
         return Ok((obj, is_clang));
     }
     // per process: another `kite` may be compiling the same runtime right now
@@ -211,7 +429,7 @@ fn runtime_object(opts: &Options) -> Result<(PathBuf, bool), String> {
     let inc = runtime_include_dir()?;
     std::fs::write(&c, RUNTIME_C).map_err(|e| e.to_string())?;
     let tmp = dir.join(format!("kite_rt_{:016x}.{}.o", key, std::process::id()));
-    let out = cc_command(&cc, &pre).arg("-c").arg(flags).arg("-w").arg("-I").arg(&inc).arg(&c).arg("-o").arg(&tmp).output().map_err(|e| format!("cannot run C compiler `{}`: {}", cc, e))?;
+    let out = cc_command(&cc, &pre).arg("-c").arg(flags).arg("-w").arg("-I").arg(&inc).arg(&c).arg("-o").arg(&tmp).output().map_err(|e| cc_missing(&cc, &e))?;
     let _ = std::fs::remove_file(&c);
     if !out.status.success() {
         return Err(format!("runtime compilation failed:\n{}", String::from_utf8_lossy(&out.stderr)));
@@ -270,7 +488,7 @@ fn drive(cmd: &str, input: &str, opts: &Options, prog_args: &[String]) -> Result
     };
     let t_gen = t0.elapsed();
     if cmd == "emit-c" {
-        println!("{}", c_src);
+        print!("{}", codegen::strip_lines(&c_src));
         return Ok(ExitCode::SUCCESS);
     }
     let (rt, is_clang) = match runtime_object(opts) {
@@ -284,7 +502,9 @@ fn drive(cmd: &str, input: &str, opts: &Options, prog_args: &[String]) -> Result
     let stem = Path::new(input).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "out".into());
     // identical C + identical toolchain = identical binary
     let (cc0, pre0) = compiler(opts);
-    let mut flags: Vec<&str> = vec![if opts.release { "-O2" } else { "-O0" }, "-w", "-fwrapv"];
+    // debug builds carry debug info, with Kite source lines (`#line`)
+    let mut flags: Vec<&str> = if opts.release { vec!["-O2"] } else { vec!["-O0", "-g", "-gno-column-info"] };
+    flags.extend(["-w", "-fwrapv"]);
     if is_clang {
         flags.push("-fbracket-depth=16384");
     }
@@ -308,7 +528,9 @@ fn drive(cmd: &str, input: &str, opts: &Options, prog_args: &[String]) -> Result
         return finish(cmd, &cached, opts, prog_args, &stem);
     }
     let c_path = dir.join(format!("{}_{}.c", stem, std::process::id()));
-    std::fs::write(&c_path, &c_src).map_err(|e| eprintln!("error: {}", e))?;
+    // --keep-c is for reading and debugging the C itself: C lines, not Kite's
+    let final_c = if opts.keep_c { codegen::strip_lines(&c_src) } else { codegen::resolve_lines(&c_src, &c_path.display().to_string()) };
+    std::fs::write(&c_path, &final_c).map_err(|e| eprintln!("error: {}", e))?;
     let out_path = dir.join(format!("bin_{:016x}.{}.tmp", key, std::process::id()));
     let (cc, pre) = compiler(opts);
     let mut c = cc_command(&cc, &pre);
@@ -325,7 +547,7 @@ fn drive(cmd: &str, input: &str, opts: &Options, prog_args: &[String]) -> Result
     let out = match c.output() {
         Ok(o) => o,
         Err(e) => {
-            eprintln!("error: cannot run C compiler `{}`: {}", cc, e);
+            eprintln!("error: {}", cc_missing(&cc, &e));
             return Err(());
         }
     };
@@ -336,6 +558,8 @@ fn drive(cmd: &str, input: &str, opts: &Options, prog_args: &[String]) -> Result
         eprintln!("internal error: generated C failed to compile (this is a compiler bug)\n{}", String::from_utf8_lossy(&out.stderr).lines().take(40).collect::<Vec<_>>().join("\n"));
         if opts.keep_c {
             eprintln!("C source kept at {}", c_path.display());
+        } else {
+            eprintln!("(the locations above are Kite lines; rerun with --keep-c to keep the C and see C lines)");
         }
         return Err(());
     }
@@ -344,6 +568,13 @@ fn drive(cmd: &str, input: &str, opts: &Options, prog_args: &[String]) -> Result
         eprintln!("parse {:?}  check {:?}  borrowck {:?}  codegen {:?}  cc {:?}", t_parse, t_check - t_parse, t_borrow - t_check, t_gen - t_borrow, t_cc - t_gen);
     }
     publish_binary(&out_path, &cached);
+    // Apple's clang puts debug info in `<output>.dSYM` next to the binary
+    let tmp_dsym = dsym_of(&out_path);
+    if tmp_dsym.exists() {
+        if dsym_of(&cached).exists() || std::fs::rename(&tmp_dsym, dsym_of(&cached)).is_err() {
+            let _ = std::fs::remove_dir_all(&tmp_dsym);
+        }
+    }
     evict_old_binaries(&dir);
     finish(cmd, &cached, opts, prog_args, &stem)
 }
@@ -362,22 +593,76 @@ fn publish_binary(tmp: &Path, cached: &Path) {
 }
 
 /// Keep the binary cache bounded.
+/// Where the debug info of a macOS binary goes.
+fn dsym_of(bin: &Path) -> PathBuf {
+    let mut s = bin.as_os_str().to_owned();
+    s.push(".dSYM");
+    PathBuf::from(s)
+}
+
+/// Keeps the 64 most recently used binaries (with their debug info), and
+/// removes what interrupted builds left behind.
 fn evict_old_binaries(dir: &Path) {
-    let mut bins: Vec<(std::time::SystemTime, PathBuf)> = std::fs::read_dir(dir)
-        .map(|rd| {
-            rd.filter_map(|e| e.ok())
-                .filter(|e| e.file_name().to_string_lossy().starts_with("bin_"))
-                .filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.path())))
-                .collect()
-        })
-        .unwrap_or_default();
+    let now = std::time::SystemTime::now();
+    let old = |m: &std::fs::Metadata| m.modified().ok().and_then(|t| now.duration_since(t).ok()).is_some_and(|a| a.as_secs() > 3600);
+    let mut bins: Vec<(std::time::SystemTime, PathBuf)> = vec![];
+    for e in std::fs::read_dir(dir).into_iter().flatten().filter_map(|e| e.ok()) {
+        let name = e.file_name().to_string_lossy().into_owned();
+        let Ok(m) = e.metadata() else { continue };
+        // runtimes of other compiler versions, C compilers or flags: kept
+        // while used in the last 30 days
+        let unused = |p: &Path| std::fs::metadata(p).ok().and_then(|m| m.modified().ok()).and_then(|t| now.duration_since(t).ok()).is_some_and(|a| a.as_secs() > 30 * 86400);
+        if name.starts_with("kite_rt_") && unused(&e.path()) {
+            let _ = std::fs::remove_file(e.path());
+            continue;
+        }
+        if name.starts_with("include_") && unused(&e.path().join("kite_rt.h")) {
+            let _ = std::fs::remove_dir_all(e.path());
+            continue;
+        }
+        if !name.starts_with("bin_") {
+            // C files of interrupted builds (and old `--keep-c` ones)
+            if name.ends_with(".c") && name.contains('_') && m.modified().ok().and_then(|t| now.duration_since(t).ok()).is_some_and(|a| a.as_secs() > 86400) {
+                let _ = std::fs::remove_file(e.path());
+            }
+            continue;
+        }
+        if name.ends_with(".dSYM") {
+            // debug info whose binary is gone (or an interrupted build's)
+            let bin = dir.join(name.trim_end_matches(".dSYM"));
+            if (name.contains(".tmp") || !bin.exists()) && old(&m) {
+                let _ = std::fs::remove_dir_all(e.path());
+            }
+        } else if name.ends_with(".tmp") {
+            if old(&m) {
+                let _ = std::fs::remove_file(e.path());
+            }
+        } else if let Ok(t) = m.modified() {
+            bins.push((t, e.path()));
+        }
+    }
     if bins.len() <= 64 {
         return;
     }
     bins.sort();
     for (_, p) in bins.iter().take(bins.len() - 64) {
         let _ = std::fs::remove_file(p);
+        let _ = std::fs::remove_dir_all(dsym_of(p));
     }
+}
+
+fn copy_dir(from: &Path, to: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(to)?;
+    for e in std::fs::read_dir(from)? {
+        let e = e?;
+        let t = to.join(e.file_name());
+        if e.file_type()?.is_dir() {
+            copy_dir(&e.path(), &t)?;
+        } else {
+            std::fs::copy(e.path(), t)?;
+        }
+    }
+    Ok(())
 }
 
 fn finish(cmd: &str, bin: &Path, opts: &Options, prog_args: &[String], stem: &str) -> Result<ExitCode, ()> {
@@ -386,6 +671,14 @@ fn finish(cmd: &str, bin: &Path, opts: &Options, prog_args: &[String], stem: &st
         if let Err(e) = std::fs::copy(bin, &out) {
             eprintln!("error: cannot write {}: {}", out, e);
             return Err(());
+        }
+        // and its debug info (macOS keeps it beside the binary)
+        let out_dsym = dsym_of(Path::new(&out));
+        let _ = std::fs::remove_dir_all(&out_dsym);
+        if dsym_of(bin).exists() {
+            if let Err(e) = copy_dir(&dsym_of(bin), &out_dsym) {
+                eprintln!("warning: cannot write {}: {}", out_dsym.display(), e);
+            }
         }
         return Ok(ExitCode::SUCCESS);
     }

@@ -1,224 +1,23 @@
-// A small JSON parser and printer.
-use fmt, os, strings
+// Reads a JSON document, looks things up in it, changes it and prints it
+// again: `kite run examples/json.kite [FILE]` (without FILE: a sample).
+use json, os
 
-pub enum Value {
-    Null
-    Bool(b bool)
-    Num(n f64)
-    Str(s String)
-    Arr(items Vec[Value])
-    Obj(fields Map[String, Value])
+fn sample() str {
+    return `{"name": "kite", "version": 0.1, "tags": ["fast", "safe", null, true],
+        "nested": {"a": [1, 2, {"b": "q\"uote"}], "empty": {}, "none": []}}`
 }
 
-pub struct ParseError {
-    pos int
-    msg String
-
-    fn message(self) String {
-        return fmt.sprint("at byte", self.pos, ":", self.msg)
-    }
-}
-
-struct Parser {
-    src String
-    pos int = 0
-
-    fn peek(self) ?byte {
-        if self.pos < self.src.len {
-            return self.src[self.pos]
-        }
-        return none
-    }
-
-    fn skipSpace(self inout) {
-        for self.pos < self.src.len {
-            let c = self.src[self.pos]
-            if c != ' ' && c != '\n' && c != '\t' && c != '\r' {
-                break
-            }
-            self.pos += 1
-        }
-    }
-
-    fn expect(self inout, c byte) ! ParseError {
-        self.skipSpace()
-        if self.peek() != some(c) {
-            return err(fail(self, fmt.sprint("expected", String(rune(c))).asStr()))
-        }
-        self.pos += 1
-    }
-
-    fn literal(self inout, word str, v sink Value) Value ! ParseError {
-        let end = self.pos + word.len
-        if end > self.src.len || self.src[self.pos..end] != word {
-            return err(fail(self, "invalid literal"))
-        }
-        self.pos = end
-        return v
-    }
-
-    fn string(self inout) String ! ParseError {
-        try self.expect('"')
-        var out = strings.Builder{}
-        for {
-            let c = self.peek() catch {
-                return err(fail(self, "unterminated string"))
-            }
-            self.pos += 1
-            match c {
-                '"' => break
-                '\\' => {
-                    let e = self.peek() ?? 'x'
-                    self.pos += 1
-                    match e {
-                        'n' => out.write("\n")
-                        't' => out.write("\t")
-                        '"' => out.write("\"")
-                        '\\' => out.write("\\")
-                        _ => return err(fail(self, "bad escape"))
-                    }
-                }
-                _ => out.writeRune(rune(c))
-            }
-        }
-        return out.finish()
-    }
-
-    fn number(self inout) Value ! ParseError {
-        let start = self.pos
-        for self.pos < self.src.len {
-            let c = self.src[self.pos]
-            if (c >= '0' && c <= '9') || c == '-' || c == '.' || c == 'e' || c == '+' {
-                self.pos += 1
-            } else {
-                break
-            }
-        }
-        let text = self.src[start..p.pos]
-        let n = text.parseFloat() catch {
-            return err(fail(self, "bad number"))
-        }
-        return Value.Num(n)
-    }
-
-    fn value(self inout) Value ! ParseError {
-        self.skipSpace()
-        let c = self.peek() catch {
-            return err(fail(self, "unexpected end of input"))
-        }
-        return match c {
-            'n' => self.literal("null", .Null)
-            't' => self.literal("true", .Bool(true))
-            'f' => self.literal("false", .Bool(false))
-            '"' => Value.Str(try self.string())
-            '[' => {
-                self.pos += 1
-                var items = Vec[Value]{}
-                self.skipSpace()
-                if self.peek() == some(']') {
-                    self.pos += 1
-                    return Value.Arr(items)
-                }
-                for {
-                    items.push(try self.value())
-                    self.skipSpace()
-                    if self.peek() == some(',') {
-                        self.pos += 1
-                        continue
-                    }
-                    try self.expect(']')
-                    break
-                }
-                Value.Arr(items)
-            }
-            '{' => {
-                self.pos += 1
-                var fields = Map[String, Value]{}
-                self.skipSpace()
-                if self.peek() == some('}') {
-                    self.pos += 1
-                    return Value.Obj(fields)
-                }
-                for {
-                    self.skipSpace()
-                    let key = try self.string()
-                    try self.expect(':')
-                    fields[key] = try self.value()
-                    self.skipSpace()
-                    if self.peek() == some(',') {
-                        self.pos += 1
-                        continue
-                    }
-                    try self.expect('}')
-                    break
-                }
-                Value.Obj(fields)
-            }
-            _ => self.number()
-        }
-    }
-}
-
-fn fail(p Parser, msg str) ParseError {
-    return ParseError{pos: p.pos, msg: msg.toString()}
-}
-
-pub fn parse(text sink String) Value ! ParseError {
-    var p = Parser{src: text}
-    let v = try p.value()
-    p.skipSpace()
-    if p.pos != p.src.len {
-        return err(fail(p, "trailing characters"))
-    }
-    return v
-}
-
-fn render(v Value, indent int, out inout strings.Builder) {
-    let pad = "  ".repeat(indent)
-    match v {
-        Null => out.write("null")
-        Bool(b) => out.write(if b { "true" } else { "false" })
-        Num(n) => out.write(fmt.sprint(n).asStr())
-        Str(s) => out.write(fmt.sprint(s.len, "chars:", s).asStr())
-        Arr(items) => {
-            out.write("[\n")
-            for i, it in items {
-                out.write(pad.asStr())
-                out.write("  ")
-                render(it, indent + 1, &out)
-                if i + 1 < items.len {
-                    out.write(",")
-                }
-                out.write("\n")
-            }
-            out.write(pad.asStr())
-            out.write("]")
-        }
-        Obj(fields) => {
-            out.write("{\n")
-            var keys = fields.keys()
-            keys.sort()
-            for i, k in keys {
-                out.write(pad.asStr())
-                out.write("  ")
-                out.write(k.asStr())
-                out.write(": ")
-                render(fields[k], indent + 1, &out)
-                if i + 1 < keys.len {
-                    out.write(",")
-                }
-                out.write("\n")
-            }
-            out.write(pad.asStr())
-            out.write("}")
-        }
-    }
-}
-
-fn count(v Value) int {
+// The number of values in `v`, counting `v` itself.
+fn count(v json.Value) int {
     return match v {
-        Arr(items) => items.map((x) => count(x)).sum() + 1
-        Obj(fields) => {
+        .Arr(items) => {
+            var n = 1
+            for x in items {
+                n += count(x)
+            }
+            n
+        }
+        .Obj(fields) => {
             var n = 1
             for _, x in fields {
                 n += count(x)
@@ -229,25 +28,41 @@ fn count(v Value) int {
     }
 }
 
-fn main() ! ParseError {
+fn main() ! json.Error {
     let args = os.args()
-    let text = if args.len > 1 {
+    let text = if args.len() > 1 {
         os.readText(args[1]) catch e {
-            eprintln("cannot read input:", e)
+            eprintln("cannot read input:", e.message())
             os.exit(1)
         }
     } else {
-        `{"name": "kite", "version": 0.1, "tags": ["fast", "safe", null, true],
-          "nested": {"a": [1, 2, {"b": "q\"uote"}], "empty": {}, "none": []}}`.toString()
+        sample().toString()
     }
-    let v = try parse(text)
-    var out = strings.Builder{}
-    render(v, 0, &out)
-    println(out.finish())
-    println("values:", count(v))
-    let bad = parse("[1, 2,, 3]".toString()) catch e {
-        println("error:", e)
-        Value.Null
+    var doc = try json.parse(text)
+    println("values:", count(doc), "keys:", doc.keys())
+
+    // lookups produce nothing when the key or index is missing
+    if let name = doc.get("name") {
+        println("name:", name.str() ?? "(not a string)")
     }
-    _ = bad
+    if let tags = doc.get("tags") {
+        for i in 0..tags.len() {
+            let t = tags.at(i).unwrap()
+            println("  tag", i, t.encode())
+        }
+    }
+    println("has license:", doc.get("license").isSome())
+
+    // changing the document
+    doc.set("version", json.number(0.2))
+    var authors = json.array()
+    authors.push(json.string("you"))
+    doc.set("authors", authors)
+    println(doc.pretty())
+
+    // errors say where
+    _ = json.parse("[1, 2,, 3]") catch e {
+        println("error:", e.message())
+        json.null()
+    }
 }

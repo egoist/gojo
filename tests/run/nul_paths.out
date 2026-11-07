@@ -1,0 +1,13 @@
+writeText: true
+create: true
+created: false
+readText: true
+stat: true
+rename: true
+remove: true
+mkdir: true
+setenv: true
+getenv: true
+run: true
+still there: true
+dial: true

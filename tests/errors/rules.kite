@@ -35,9 +35,14 @@ interface Bumper {
     fn bump(self inout) int
 }
 
+interface Reading {
+    fn bump(self) int
+}
+
+// changes its receiver where the interface only lends it
 struct WrongMode {
     n int
-    fn bump(self) int { return self.n }
+    fn bump(self inout) int { return self.n }
 }
 
 struct GenericMethod {
@@ -46,10 +51,12 @@ struct GenericMethod {
 
 fn useBumper(b inout Bumper) int { return b.bump() }
 
+fn useReading(b Reading) int { return b.bump() }
+
 fn notInout() {
     var w = WrongMode{n: 1}
-    println(useBumper(&w))
-    // error: method `bump` of `WrongMode` has a borrowed receiver, but `Bumper` requires inout
+    println(useReading(w))
+    // error: method `bump` of `WrongMode` has an inout receiver, but `Reading` requires borrowed
     var g = GenericMethod{}
     println(useBumper(&g))
     // error: method `bump` has type parameters and cannot satisfy an interface

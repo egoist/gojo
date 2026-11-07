@@ -6,20 +6,10 @@
 //       let c = try ln.accept()
 //       go serve(c)
 //   }
+use io
 
-pub struct Error {
-    pub msg String
-    pub code int
-
-    pub fn message(self) String {
-        return self.msg.clone()
-    }
-
-    // The call stopped because its task was cancelled.
-    pub fn isCancelled(self) bool {
-        return __isCancelled(self.code)
-    }
-}
+// Errors here are io.Error; `isCancelled()` tells a cancelled call apart.
+pub type Error = io.Error
 
 fn __listen(addr str) int
 fn __connect(addr str) int
@@ -29,13 +19,11 @@ fn __write(fd int, data []byte) int
 fn __close(fd int)
 fn __shutdownWrite(fd int)
 fn __port(fd int) int
-fn __errMsg(code int) String
-fn __isCancelled(code int) bool
-
 fn fail(what str, code int) Error {
-    return Error{msg: what + ": " + __errMsg(code), code: code}
+    return io.fromCode(what, code)
 }
 
+// A listening TCP socket, from `listen`. Closed when dropped.
 pub struct Listener {
     fd int
 
@@ -58,6 +46,8 @@ pub struct Listener {
     }
 }
 
+// A TCP connection, from `dial` or `Listener.accept`. Closed when dropped. It
+// is an `io.Reader` and an `io.Writer`.
 pub struct Conn {
     fd int
 
@@ -83,6 +73,7 @@ pub struct Conn {
         }
     }
 
+    // Writes the bytes of `s`.
     pub fn writeText(self, s str) ! Error {
         return self.write(s.bytes())
     }
@@ -117,6 +108,7 @@ pub fn listen(addr str) Listener ! Error {
     return Listener{fd: fd}
 }
 
+// Connects to `addr` ("host:port"; the host may be a name, which is looked up).
 pub fn dial(addr str) Conn ! Error {
     let fd = __connect(addr)
     if fd < 0 {

@@ -1,0 +1,8 @@
+// truncating to a negative length used to drop every element but keep them
+fn main() {
+    var v = ["a".toString(), "b".toString()]
+    let n = v.len() - 3
+    v.truncate(n)
+    println(v)
+    // panic: truncate to a negative length
+}

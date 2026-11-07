@@ -1,0 +1,568 @@
+// JSON: parse text into a `json.Value` tree and encode it back.
+//
+//   let v = try json.parse(`{"name": "kite", "tags": ["fast", "safe"]}`)
+//   if let name = v.get("name") {
+//       println(name.str() ?? "not a string")
+//   }
+//   var out = json.object()
+//   out.set("ok", json.boolean(true))
+//   println(out.encode())          // {"ok":true}
+//
+// Objects keep their keys in insertion order. Integers that fit in `int` stay
+// exact (`Int`); other numbers are `Num` (f64).
+use fmt
+
+// A JSON value. Build one with the functions below (`json.object()`,
+// `json.string(s)`...) or with the variants, and read one with the methods.
+pub enum Value {
+    Null
+    Bool(b bool)
+    Int(i int)
+    Num(f f64)
+    Str(s String)
+    Arr(items Vec[Value])
+    Obj(fields Map[String, Value])
+
+    // Whether this is `null`.
+    pub fn isNull(self) bool {
+        return match self {
+            .Null => true
+            _ => false
+        }
+    }
+
+    // Whether this is an object.
+    pub fn isObject(self) bool {
+        return match self {
+            .Obj(_) => true
+            _ => false
+        }
+    }
+
+    // Whether this is an array.
+    pub fn isArray(self) bool {
+        return match self {
+            .Arr(_) => true
+            _ => false
+        }
+    }
+
+    // The value of `true` or `false`.
+    pub fn boolean(self) ?bool {
+        return match self {
+            .Bool(b) => some(b)
+            _ => none
+        }
+    }
+
+    // An integer (also a float with no fractional part that fits).
+    pub fn int(self) ?int {
+        return match self {
+            .Int(i) => some(i)
+            .Num(f) => if isWhole(f) { some(int(f)) } else { none }
+            _ => none
+        }
+    }
+
+    // A number, integer or not.
+    pub fn num(self) ?f64 {
+        return match self {
+            .Int(i) => some(f64(i))
+            .Num(f) => some(f)
+            _ => none
+        }
+    }
+
+    // The text of a string.
+    pub fn str(self) ?str {
+        return match self {
+            .Str(s) => some(s.asStr())
+            _ => none
+        }
+    }
+
+    // The value at `key` of an object.
+    pub fn get(self, key str) yield ?&Value {
+        match self {
+            .Obj(fields) => {
+                if let v = fields.get(key.toString()) {
+                    yield v
+                }
+            }
+            _ => {}
+        }
+        yield none
+    }
+
+    // Element `i` of an array.
+    pub fn at(self, i int) yield ?&Value {
+        match self {
+            .Arr(items) => {
+                if i >= 0 && i < items.len() {
+                    yield items[i]
+                }
+            }
+            _ => {}
+        }
+        yield none
+    }
+
+    // Elements of an array, members of an object, or 0.
+    pub fn len(self) int {
+        return match self {
+            .Arr(items) => items.len()
+            .Obj(fields) => fields.len()
+            _ => 0
+        }
+    }
+
+    // The keys of an object, in order.
+    pub fn keys(self) Vec[String] {
+        return match self {
+            .Obj(fields) => fields.keys()
+            _ => []
+        }
+    }
+
+    // Sets a member of an object (does nothing to other values).
+    pub fn set(self inout, key str, v sink Value) {
+        match self {
+            .Obj(fields) => {
+                _ = fields.insert(key.toString(), v)
+            }
+            _ => {}
+        }
+    }
+
+    // Appends to an array (does nothing to other values).
+    pub fn push(self inout, v sink Value) {
+        match self {
+            .Arr(items) => items.push(v)
+            _ => {}
+        }
+    }
+
+    // Compact JSON text.
+    pub fn encode(self) String {
+        var out = "".toString()
+        write(&out, self, -1, 0)
+        return out
+    }
+
+    // JSON text indented by two spaces.
+    pub fn pretty(self) String {
+        var out = "".toString()
+        write(&out, self, 2, 0)
+        return out
+    }
+}
+
+fn isWhole(f f64) bool {
+    return f >= -9.0e18 && f <= 9.0e18 && f64(int(f)) == f
+}
+
+// Values to build documents with; `array()` and `object()` are empty (add to
+// them with `push` and `set`).
+pub fn null() Value {
+    return .Null
+}
+pub fn boolean(b bool) Value {
+    return .Bool(b)
+}
+pub fn integer(i int) Value {
+    return .Int(i)
+}
+pub fn number(f f64) Value {
+    return .Num(f)
+}
+pub fn string(s str) Value {
+    return .Str(s.toString())
+}
+pub fn array() Value {
+    return .Arr(Vec[Value]{})
+}
+pub fn object() Value {
+    return .Obj(Map[String, Value]{})
+}
+
+// ---------------------------------------------------------------- encoding
+
+fn newline(out inout String, indent int, level int) {
+    if indent >= 0 {
+        out.push("\n")
+        out.push(" ".repeat(indent * level))
+    }
+}
+
+fn write(out inout String, v Value, indent int, level int) {
+    match v {
+        .Null => out.push("null")
+        .Bool(b) => out.push(if b { "true" } else { "false" })
+        .Int(i) => out.push(fmt.sprint(i))
+        .Num(f) => {
+            // JSON has no NaN or infinity
+            if f != f || f > 1.7976931348623157e308 || f < -1.7976931348623157e308 {
+                out.push("null")
+            } else {
+                out.push(fmt.sprint(f))
+            }
+        }
+        .Str(s) => quote(&out, s)
+        .Arr(items) => {
+            out.push("[")
+            for i, x in items {
+                if i > 0 {
+                    out.push(",")
+                }
+                newline(&out, indent, level + 1)
+                write(&out, x, indent, level + 1)
+            }
+            if items.len() > 0 {
+                newline(&out, indent, level)
+            }
+            out.push("]")
+        }
+        .Obj(fields) => {
+            out.push("{")
+            var first = true
+            for k, x in fields {
+                if !first {
+                    out.push(",")
+                }
+                first = false
+                newline(&out, indent, level + 1)
+                quote(&out, k)
+                out.push(if indent >= 0 { ": " } else { ":" })
+                write(&out, x, indent, level + 1)
+            }
+            if fields.len() > 0 {
+                newline(&out, indent, level)
+            }
+            out.push("}")
+        }
+    }
+}
+
+fn quote(out inout String, s str) {
+    out.push("\"")
+    for r in s.runes() {
+        match r {
+            '"' => out.push("\\\"")
+            '\\' => out.push("\\\\")
+            '\n' => out.push("\\n")
+            '\r' => out.push("\\r")
+            '\t' => out.push("\\t")
+            _ => {
+                if r < 32 {
+                    out.push(fmt.format("\\u{:04x}", r))
+                } else {
+                    out.pushRune(r)
+                }
+            }
+        }
+    }
+    out.push("\"")
+}
+
+// Quotes a string as JSON.
+pub fn quoted(s str) String {
+    var out = "".toString()
+    quote(&out, s)
+    return out
+}
+
+// ---------------------------------------------------------------- parsing
+
+// Why `parse` failed, and where.
+pub struct Error {
+    pub msg String
+    // where, from 1
+    pub line int
+    pub column int
+
+    // The message, with the line and column.
+    pub fn message(self) String {
+        return fmt.format("json: {} at line {}, column {}", self.msg, self.line, self.column)
+    }
+}
+
+// Deeper nesting is refused: parsing is recursive, and goroutine stacks are small.
+pub const maxDepth = 500
+
+struct Parser {
+    b Vec[byte]
+    pos int = 0
+
+    fn fail(self, msg str) Error {
+        var line = 1
+        var col = 1
+        for i in 0..self.pos {
+            if i >= self.b.len() {
+                break
+            }
+            if self.b[i] == 10 {
+                line += 1
+                col = 1
+            } else if self.b[i] < 128 || self.b[i] >= 192 {
+                col += 1
+            }
+        }
+        return Error{msg: msg.toString(), line: line, column: col}
+    }
+
+    fn space(self inout) {
+        for self.pos < self.b.len() {
+            let c = self.b[self.pos]
+            if c != 32 && c != 9 && c != 10 && c != 13 {
+                return
+            }
+            self.pos += 1
+        }
+    }
+
+    fn peek(self) int {
+        if self.pos < self.b.len() {
+            return int(self.b[self.pos])
+        }
+        return -1
+    }
+
+    fn word(self inout, w str, v sink Value) Value ! Error {
+        let wb = w.bytes()
+        for i in 0..wb.len() {
+            if self.pos + i >= self.b.len() || self.b[self.pos + i] != wb[i] {
+                return err(self.fail("unexpected character"))
+            }
+        }
+        self.pos += wb.len()
+        return v
+    }
+
+    fn value(self inout, depth int) Value ! Error {
+        if depth > maxDepth {
+            return err(self.fail("nested too deeply"))
+        }
+        self.space()
+        let c = self.peek()
+        if c == 123 {
+            self.pos += 1
+            var fields = Map[String, Value]{}
+            self.space()
+            if self.peek() == 125 {
+                self.pos += 1
+                return .Obj(fields)
+            }
+            for {
+                self.space()
+                if self.peek() != 34 {
+                    return err(self.fail("expected a string key"))
+                }
+                let k = try self.string()
+                self.space()
+                if self.peek() != 58 {
+                    return err(self.fail("expected `:`"))
+                }
+                self.pos += 1
+                let v = try self.value(depth + 1)
+                _ = fields.insert(k, v)
+                self.space()
+                let d = self.peek()
+                self.pos += 1
+                if d == 125 {
+                    return .Obj(fields)
+                }
+                if d != 44 {
+                    self.pos -= 1
+                    return err(self.fail("expected `,` or `}`"))
+                }
+            }
+        }
+        if c == 91 {
+            self.pos += 1
+            var items = Vec[Value]{}
+            self.space()
+            if self.peek() == 93 {
+                self.pos += 1
+                return .Arr(items)
+            }
+            for {
+                items.push(try self.value(depth + 1))
+                self.space()
+                let d = self.peek()
+                self.pos += 1
+                if d == 93 {
+                    return .Arr(items)
+                }
+                if d != 44 {
+                    self.pos -= 1
+                    return err(self.fail("expected `,` or `]`"))
+                }
+            }
+        }
+        if c == 34 {
+            return .Str(try self.string())
+        }
+        if c == 116 {
+            return self.word("true", .Bool(true))
+        }
+        if c == 102 {
+            return self.word("false", .Bool(false))
+        }
+        if c == 110 {
+            return self.word("null", .Null)
+        }
+        if c == 45 || (c >= 48 && c <= 57) {
+            return self.number()
+        }
+        if c < 0 {
+            return err(self.fail("unexpected end of input"))
+        }
+        return err(self.fail("unexpected character"))
+    }
+
+    fn digits(self inout) int {
+        let start = self.pos
+        for self.pos < self.b.len() && self.b[self.pos] >= 48 && self.b[self.pos] <= 57 {
+            self.pos += 1
+        }
+        return self.pos - start
+    }
+
+    fn number(self inout) Value ! Error {
+        let start = self.pos
+        if self.peek() == 45 {
+            self.pos += 1
+        }
+        let lead = self.peek()
+        let n = self.digits()
+        if n == 0 {
+            return err(self.fail("expected a digit"))
+        }
+        if lead == 48 && n > 1 {
+            return err(self.fail("numbers can't have leading zeros"))
+        }
+        var whole = true
+        if self.peek() == 46 {
+            self.pos += 1
+            whole = false
+            if self.digits() == 0 {
+                return err(self.fail("expected a digit after `.`"))
+            }
+        }
+        if self.peek() == 101 || self.peek() == 69 {
+            self.pos += 1
+            whole = false
+            if self.peek() == 43 || self.peek() == 45 {
+                self.pos += 1
+            }
+            if self.digits() == 0 {
+                return err(self.fail("expected a digit in the exponent"))
+            }
+        }
+        var text = Vec[byte]{}
+        for i in start..self.pos {
+            text.push(self.b[i])
+        }
+        let s = String(text)
+        if whole {
+            if let i = s.parseInt() {
+                return .Int(i)
+            }
+        }
+        if let f = s.parseFloat() {
+            return .Num(f)
+        }
+        return err(self.fail("bad number"))
+    }
+
+    fn hex4(self inout) int ! Error {
+        var v = 0
+        for _ in 0..4 {
+            let c = self.peek()
+            self.pos += 1
+            let d = if c >= 48 && c <= 57 { c - 48 } else if c >= 97 && c <= 102 { c - 87 } else if c >= 65 && c <= 70 { c - 55 } else { -1 }
+            if d < 0 {
+                self.pos -= 1
+                return err(self.fail("bad \\u escape"))
+            }
+            v = v * 16 + d
+        }
+        return v
+    }
+
+    fn string(self inout) String ! Error {
+        self.pos += 1
+        var out = Vec[byte]{}
+        for {
+            if self.pos >= self.b.len() {
+                return err(self.fail("unterminated string"))
+            }
+            let c = self.b[self.pos]
+            self.pos += 1
+            if c == 34 {
+                return String(out)
+            }
+            if c < 32 {
+                self.pos -= 1
+                return err(self.fail("control character in a string"))
+            }
+            if c != 92 {
+                out.push(c)
+                continue
+            }
+            let e = self.peek()
+            self.pos += 1
+            var piece = "".toString()
+            match e {
+                34 => piece.push("\"")
+                92 => piece.push("\\")
+                47 => piece.push("/")
+                98 => piece.push("\u{8}")
+                102 => piece.push("\u{c}")
+                110 => piece.push("\n")
+                114 => piece.push("\r")
+                116 => piece.push("\t")
+                117 => {
+                    var cp = try self.hex4()
+                    if cp >= 0xD800 && cp < 0xDC00 {
+                        // a surrogate pair
+                        if self.peek() != 92 {
+                            return err(self.fail("lone surrogate in \\u escape"))
+                        }
+                        self.pos += 1
+                        if self.peek() != 117 {
+                            return err(self.fail("lone surrogate in \\u escape"))
+                        }
+                        self.pos += 1
+                        let lo = try self.hex4()
+                        if lo < 0xDC00 || lo >= 0xE000 {
+                            return err(self.fail("bad surrogate pair"))
+                        }
+                        cp = 0x10000 + (cp - 0xD800) * 0x400 + (lo - 0xDC00)
+                    } else if cp >= 0xDC00 && cp < 0xE000 {
+                        return err(self.fail("lone surrogate in \\u escape"))
+                    }
+                    piece.pushRune(i32(cp))
+                }
+                _ => {
+                    self.pos -= 1
+                    return err(self.fail("bad escape"))
+                }
+            }
+            for x in piece.bytes() {
+                out.push(x)
+            }
+        }
+    }
+}
+
+// Parses one JSON value (with nothing but white space after it).
+pub fn parse(text str) Value ! Error {
+    var p = Parser{b: text.bytes().toVec()}
+    let v = try p.value(0)
+    p.space()
+    if p.pos != p.b.len() {
+        return err(p.fail("unexpected text after the value"))
+    }
+    return v
+}

@@ -1,0 +1,25 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
+      - run: cargo build --locked
+      - run: cargo test --locked
+      - name: sanitizers (ASan, UBSan, TSan)
+        if: runner.os == 'Linux'
+        run: cargo test --locked -- --ignored
+      - run: ./target/debug/kite fmt --check std examples

@@ -1,0 +1,6 @@
+// `len + extra` must not overflow
+fn main() {
+    var v = ["x".toString()]
+    v.reserve(9223372036854775807)
+    // panic: capacity overflow
+}

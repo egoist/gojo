@@ -17,11 +17,15 @@ fn files(dir: &str) -> Vec<PathBuf> {
     v
 }
 
+/// Every program in tests/run, and every single-file example, prints its `.out`.
 #[test]
 fn run_programs() {
     let mut failures = vec![];
-    for f in files("tests/run") {
-        let expected = std::fs::read_to_string(f.with_extension("out")).unwrap_or_default();
+    for f in files("tests/run").into_iter().chain(files("examples")) {
+        let Ok(expected) = std::fs::read_to_string(f.with_extension("out")) else {
+            failures.push(format!("{}: no .out file", f.display()));
+            continue;
+        };
         let out = Command::new(kite()).arg("run").arg(&f).output().unwrap();
         let stdout = String::from_utf8_lossy(&out.stdout);
         if stdout != expected {
@@ -93,14 +97,17 @@ fn runtime_panics() {
     }
 }
 
-/// Runs every program under AddressSanitizer: `cargo test -- --ignored`.
+/// Runs every program under AddressSanitizer: `cargo test -- --ignored`. The
+/// panic tests too: each must panic before anything goes wrong in memory.
 #[test]
 #[ignore]
 fn address_sanitizer() {
     let mut failures = vec![];
     let dir = std::env::temp_dir().join("kite_asan");
     let _ = std::fs::create_dir_all(&dir);
-    for f in files("tests/run") {
+    // (not stack overflows: ASan catches those itself, before the guard page)
+    let panics = files("tests/panic").into_iter().filter(|f| !std::fs::read_to_string(f).unwrap().contains("panic: stack overflow"));
+    for f in files("tests/run").into_iter().chain(panics) {
         let bin = dir.join(f.file_stem().unwrap());
         let out = Command::new(kite()).arg("build").arg("--cc").arg("cc -fsanitize=address,undefined -g").arg(&f).arg("-o").arg(&bin).output().unwrap();
         if !out.status.success() {
@@ -158,6 +165,30 @@ fn projects() {
     }
     dirs.sort();
     for d in dirs {
+        // a command-line tool: `runs.txt` lists argument lines; each runs in the
+        // example's directory, and the transcript is compared
+        if let Ok(runs) = std::fs::read_to_string(d.join("runs.txt")) {
+            let bin = std::env::temp_dir().join(format!("kite_tool_{}_{}", d.file_name().unwrap().to_string_lossy(), std::process::id()));
+            let b = Command::new(kite()).arg("build").arg(&d).arg("-o").arg(&bin).output().unwrap();
+            if !b.status.success() {
+                failures.push(format!("{}: build failed\n{}", d.display(), String::from_utf8_lossy(&b.stderr)));
+                continue;
+            }
+            let mut transcript = String::new();
+            for line in runs.lines().filter(|l| !l.trim().is_empty()) {
+                let out = Command::new(&bin).args(line.split_whitespace()).current_dir(&d).output().unwrap();
+                transcript.push_str(&format!("$ {}\n{}{}", line, String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr)));
+                if out.status.code() != Some(0) {
+                    transcript.push_str(&format!("[exit {:?}]\n", out.status.code()));
+                }
+            }
+            let _ = std::fs::remove_file(&bin);
+            let expected = std::fs::read_to_string(d.join("expected.out")).unwrap_or_default();
+            if transcript != expected {
+                failures.push(format!("{}:\n--- expected\n{}\n--- got\n{}", d.display(), expected, transcript));
+            }
+            continue;
+        }
         let out = Command::new(kite()).arg("run").arg(&d).output().unwrap();
         let stdout = String::from_utf8_lossy(&out.stdout);
         let stderr = String::from_utf8_lossy(&out.stderr);
@@ -310,4 +341,156 @@ fn unsafe_programs_rejected() {
     if !failures.is_empty() {
         panic!("{} unsafe program(s) were not rejected:\n{}", failures.len(), failures.join("\n"));
     }
+}
+
+/// Every well-formed Kite file in the repository is formatted, and formatting
+/// is stable. (The fuzz regressions keep the shape they were found in.)
+#[test]
+fn formatted() {
+    fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
+        for e in std::fs::read_dir(dir).unwrap() {
+            let p = e.unwrap().path();
+            if p.is_dir() {
+                walk(&p, out);
+            } else if p.extension().is_some_and(|x| x == "kite") {
+                out.push(p);
+            }
+        }
+    }
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut paths = vec![];
+    for d in ["std", "examples", "bench/kite", "tests/run", "tests/errors", "tests/panic", "tests/projects", "tests/testblocks", "tests/unsafe"] {
+        walk(&root.join(d), &mut paths);
+    }
+    let mut bad = vec![];
+    let mut formatted = 0;
+    for p in &paths {
+        let src = std::fs::read_to_string(p).unwrap();
+        let Ok(out) = kite::formatter::format(&src) else {
+            // only the deliberately malformed error tests
+            assert!(p.starts_with(root.join("tests/errors")), "{} does not parse", p.display());
+            continue;
+        };
+        formatted += 1;
+        if out != src {
+            bad.push(p.display().to_string());
+        }
+        assert_eq!(kite::formatter::format(&out).as_deref(), Ok(out.as_str()), "{}: formatting is not stable", p.display());
+    }
+    assert!(formatted > 100, "only {} files", formatted);
+    assert!(bad.is_empty(), "not formatted (run `kite fmt`):\n{}", bad.join("\n"));
+}
+
+/// docs/std is what `kite doc --out` generates from the standard library.
+#[test]
+fn std_docs_current() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let out = std::env::temp_dir().join(format!("kite_std_docs_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&out);
+    let r = Command::new(kite()).arg("doc").arg("--out").arg(&out).output().unwrap();
+    assert!(r.status.success(), "{}", String::from_utf8_lossy(&r.stderr));
+    let mut names: Vec<String> = std::fs::read_dir(&out).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+    names.sort();
+    let mut have: Vec<String> = std::fs::read_dir(root.join("docs/std")).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+    have.sort();
+    assert_eq!(names, have, "run `kite doc --out docs/std`");
+    for n in names {
+        let want = std::fs::read_to_string(out.join(&n)).unwrap();
+        let got = std::fs::read_to_string(root.join("docs/std").join(&n)).unwrap();
+        assert!(want == got, "docs/std/{} is out of date: run `kite doc --out docs/std`", n);
+    }
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+/// Every program in docs/tour.md (a ```kite block with `fn main`) runs and
+/// prints the ```text block after it, and is formatted.
+#[test]
+fn tour_examples() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let tour = std::fs::read_to_string(root.join("docs/tour.md")).unwrap();
+    // (language, body) of each fenced block
+    let mut blocks: Vec<(String, String)> = vec![];
+    let mut lines = tour.lines();
+    while let Some(l) = lines.next() {
+        if let Some(lang) = l.strip_prefix("```") {
+            let mut body = String::new();
+            for b in lines.by_ref() {
+                if b.starts_with("```") {
+                    break;
+                }
+                body.push_str(b);
+                body.push('\n');
+            }
+            blocks.push((lang.to_string(), body));
+        }
+    }
+    let dir = std::env::temp_dir().join(format!("kite_tour_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut failures = vec![];
+    let mut programs = 0;
+    for (i, (lang, body)) in blocks.iter().enumerate() {
+        if lang != "kite" || !body.contains("fn main") {
+            continue;
+        }
+        programs += 1;
+        let first = body.lines().next().unwrap_or("");
+        if kite::formatter::format(body).as_deref() != Ok(body.as_str()) {
+            failures.push(format!("program starting `{}` is not formatted", first));
+        }
+        let f = dir.join(format!("p{}.kite", i));
+        std::fs::write(&f, body).unwrap();
+        let out = Command::new(kite()).arg("run").arg(&f).output().unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let want = match blocks.get(i + 1) {
+            Some((l, b)) if l == "text" => b.clone(),
+            _ => {
+                failures.push(format!("program starting `{}` has no ```text output after it", first));
+                continue;
+            }
+        };
+        if !out.status.success() || stdout != want {
+            failures.push(format!("program starting `{}`:\n--- want\n{}--- got\n{}--- stderr\n{}", first, want, stdout, String::from_utf8_lossy(&out.stderr)));
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(programs >= 15, "only {} programs", programs);
+    assert!(failures.is_empty(), "{} tour program(s) failed:\n{}", failures.len(), failures.join("\n"));
+}
+
+/// Debug builds carry Kite source lines: a debugger (when there is one)
+/// resolves `file.kite:line`, also inside a loop that is many C lines long.
+/// `emit-c` shows the plain C.
+#[test]
+fn debug_info_lines() {
+    let dir = std::env::temp_dir().join(format!("kite_dbg_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = dir.join("dbgline.kite");
+    std::fs::write(&src, "fn square(x int) int {\n    let y = x * x\n    return y\n}\n\nfn main() {\n    var total = 0\n    for i in 0..3 {\n        total += square(i)\n    }\n    println(total)\n}\n").unwrap();
+    let bin = dir.join("dbgline");
+    let out = Command::new(kite()).arg("build").arg(&src).arg("-o").arg(&bin).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    // the source file is named in the debug info
+    // (macOS: in the dSYM beside the binary, under the name it was built with)
+    let dwarf = if cfg!(target_os = "macos") {
+        std::fs::read_dir(dir.join("dbgline.dSYM/Contents/Resources/DWARF")).unwrap().next().unwrap().unwrap().path()
+    } else {
+        bin.clone()
+    };
+    let bytes = std::fs::read(&dwarf).unwrap_or_else(|e| panic!("{}: {}", dwarf.display(), e));
+    assert!(bytes.windows(12).any(|w| w == b"dbgline.kite"), "no Kite file in the debug info");
+    let c = Command::new(kite()).arg("emit-c").arg(&src).output().unwrap();
+    assert!(!String::from_utf8_lossy(&c.stdout).contains("#line"), "emit-c should show plain C");
+    // stopped in `square`, the caller's frame is line 9: the call inside the
+    // loop (a C line count drifting inside the loop would show another line)
+    let probe = if cfg!(target_os = "macos") {
+        Command::new("lldb").arg("-b").arg("-o").arg("breakpoint set --file dbgline.kite --line 2").arg("-o").arg("run").arg("-o").arg("bt 2").arg(&bin).output()
+    } else {
+        Command::new("gdb").arg("-batch").arg("-ex").arg("break dbgline.kite:2").arg("-ex").arg("run").arg("-ex").arg("bt 2").arg(&bin).output()
+    };
+    if let Ok(p) = probe {
+        let text = String::from_utf8_lossy(&p.stdout).to_string() + &String::from_utf8_lossy(&p.stderr);
+        let caller = text.lines().find(|l| l.contains("frame #1") || l.starts_with("#1 "));
+        assert!(caller.is_some_and(|l| l.contains("dbgline.kite:9")), "the caller should be at dbgline.kite:9:\n{}", text);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
 }

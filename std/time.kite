@@ -1,10 +1,23 @@
+// Time: a monotonic clock for measuring, the wall clock and calendar dates.
+//
+//   let start = time.now()
+//   ...
+//   println("took", time.formatDuration(time.since(start)))
+//   let d = time.local(time.unixNanos())
+//   println(d.format("%Y-%m-%d %H:%M"))
+use fmt
+
 // Durations are integer nanoseconds.
 pub const nanosecond = 1
 pub const microsecond = 1000
 pub const millisecond = 1000000
 pub const second = 1000000000
+pub const minute = 60000000000
+pub const hour = 3600000000000
 
 fn __sleep(d int) bool
+fn __unixNanos() int
+fn __localOffset(secs int) int
 
 // Parks the goroutine; other goroutines keep running on its thread. Returns
 // early when the task is cancelled (see task.cancelled).
@@ -12,9 +25,345 @@ pub fn sleep(d int) {
     _ = __sleep(d)
 }
 
-// Monotonic clock in nanoseconds.
+// Monotonic clock in nanoseconds, for measuring; not related to the date.
 pub fn now() int
 
+// Nanoseconds since `start`, a value of `now()`.
 pub fn since(start int) int {
     return now() - start
+}
+
+// The wall clock: nanoseconds since 1970-01-01 00:00 UTC.
+pub fn unixNanos() int {
+    return __unixNanos()
+}
+
+// Seconds since 1970-01-01 00:00 UTC.
+pub fn unix() int {
+    return floorDiv(__unixNanos(), second)
+}
+
+// "1.5s", "250ms", "3µs", "2h5m0s".
+pub fn formatDuration(d int) String {
+    if d < 0 {
+        return "-" + formatDuration(0 -% d)
+    }
+    if d < microsecond {
+        return fmt.format("{}ns", d)
+    }
+    if d < millisecond {
+        return trimmed(d, microsecond) + "µs"
+    }
+    if d < second {
+        return trimmed(d, millisecond) + "ms"
+    }
+    if d < minute {
+        return trimmed(d, second) + "s"
+    }
+    let h = d / hour
+    let m = (d % hour) / minute
+    let s = trimmed(d % minute, second)
+    if h > 0 {
+        return fmt.format("{}h{}m{}s", h, m, s)
+    }
+    return fmt.format("{}m{}s", m, s)
+}
+
+// `d / unit` with up to three decimals, without trailing zeros.
+fn trimmed(d int, unit int) String {
+    let whole = d / unit
+    let frac = (d % unit) * 1000 / unit
+    if frac == 0 {
+        return fmt.format("{}", whole)
+    }
+    var f = fmt.format("{:03}", frac)
+    for f.endsWith("0") {
+        f = f[0..f.len() - 1].toString()
+    }
+    return fmt.format("{}.{}", whole, f)
+}
+
+// ---------------------------------------------------------------- dates
+
+// A calendar date and time of day, at some offset from UTC.
+pub copy struct Date {
+    pub year int
+    // 1 to 12
+    pub month int
+    // 1 to 31
+    pub day int
+    pub hour int
+    pub minute int
+    pub second int
+    pub nanosecond int
+    // seconds east of UTC (+08:00 is 28800)
+    pub offset int = 0
+
+    // The moment this is, as nanoseconds since 1970 (see `unixNanos`).
+    pub fn unixNanos(self) int {
+        let days = daysFromCivil(self.year, self.month, self.day)
+        let secs = days * 86400 + self.hour * 3600 + self.minute * 60 + self.second - self.offset
+        return secs * second + self.nanosecond
+    }
+
+    // 0 is Sunday.
+    pub fn weekday(self) int {
+        let d = daysFromCivil(self.year, self.month, self.day)
+        return floorMod(d + 4, 7)
+    }
+
+    // 1 to 366.
+    pub fn yearDay(self) int {
+        return daysFromCivil(self.year, self.month, self.day) - daysFromCivil(self.year, 1, 1) + 1
+    }
+
+    // RFC 3339: "2026-11-06T14:41:31Z", "2026-11-06T14:41:31.592+08:00".
+    pub fn iso(self) String {
+        var s = fmt.format("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}", self.year, self.month, self.day, self.hour, self.minute, self.second)
+        if self.nanosecond != 0 {
+            var f = fmt.format("{:09}", self.nanosecond)
+            for f.endsWith("0") {
+                f = f[0..f.len() - 1].toString()
+            }
+            s = s + "." + f
+        }
+        return s + offsetText(self.offset, true, "Z")
+    }
+
+    // Formats with `strftime`-style directives:
+    //   %Y year   %m month   %d day     %H hour   %M minute   %S second
+    //   %L milliseconds   %f microseconds   %N nanoseconds
+    //   %z +0800   %Z +08:00 (Z for UTC)   %a Mon   %A Monday   %b Jan   %B January
+    //   %j day of the year   %e day without zero padding   %%
+    pub fn format(self, layout str) String {
+        var out = "".toString()
+        var esc = false
+        for r in layout.runes() {
+            if !esc {
+                if r == '%' {
+                    esc = true
+                } else {
+                    out.pushRune(r)
+                }
+                continue
+            }
+            esc = false
+            let piece = match r {
+                'Y' => fmt.format("{:04}", self.year)
+                'm' => fmt.format("{:02}", self.month)
+                'd' => fmt.format("{:02}", self.day)
+                'e' => fmt.format("{}", self.day)
+                'H' => fmt.format("{:02}", self.hour)
+                'M' => fmt.format("{:02}", self.minute)
+                'S' => fmt.format("{:02}", self.second)
+                'L' => fmt.format("{:03}", self.nanosecond / 1000000)
+                'f' => fmt.format("{:06}", self.nanosecond / 1000)
+                'N' => fmt.format("{:09}", self.nanosecond)
+                'z' => offsetText(self.offset, false, "+0000")
+                'Z' => offsetText(self.offset, true, "Z")
+                'a' => dayName(self.weekday())[0..3].toString()
+                'A' => dayName(self.weekday()).toString()
+                'b' => monthName(self.month)[0..3].toString()
+                'B' => monthName(self.month).toString()
+                'j' => fmt.format("{:03}", self.yearDay())
+                '%' => "%".toString()
+                _ => {
+                    var u = "%".toString()
+                    u.pushRune(r)
+                    u
+                }
+            }
+            out.push(piece)
+        }
+        if esc {
+            out.push("%")
+        }
+        return out
+    }
+}
+
+// 0 is Sunday.
+pub fn dayName(weekday int) str {
+    return match weekday {
+        0 => "Sunday"
+        1 => "Monday"
+        2 => "Tuesday"
+        3 => "Wednesday"
+        4 => "Thursday"
+        5 => "Friday"
+        _ => "Saturday"
+    }
+}
+
+// 1 is January.
+pub fn monthName(month int) str {
+    return match month {
+        1 => "January"
+        2 => "February"
+        3 => "March"
+        4 => "April"
+        5 => "May"
+        6 => "June"
+        7 => "July"
+        8 => "August"
+        9 => "September"
+        10 => "October"
+        11 => "November"
+        _ => "December"
+    }
+}
+
+fn offsetText(off int, colon bool, zero str) String {
+    if off == 0 {
+        return zero.toString()
+    }
+    let sign = if off < 0 { "-" } else { "+" }
+    let a = if off < 0 { 0 - off } else { off }
+    if colon {
+        return fmt.format("{}{:02}:{:02}", sign, a / 3600, (a % 3600) / 60)
+    }
+    return fmt.format("{}{:02}{:02}", sign, a / 3600, (a % 3600) / 60)
+}
+
+fn floorDiv(a int, b int) int {
+    let q = a / b
+    if (a % b != 0) && ((a < 0) != (b < 0)) {
+        return q - 1
+    }
+    return q
+}
+
+fn floorMod(a int, b int) int {
+    return a - floorDiv(a, b) * b
+}
+
+// Days since 1970-01-01 of a date in the proleptic Gregorian calendar
+// (H. Hinnant's algorithm).
+fn daysFromCivil(year int, month int, day int) int {
+    let y = if month <= 2 { year - 1 } else { year }
+    let era = floorDiv(y, 400)
+    let yoe = y - era * 400
+    let mp = (month + 9) % 12
+    let doy = (153 * mp + 2) / 5 + day - 1
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy
+    return era * 146097 + doe - 719468
+}
+
+// The date `ns` nanoseconds after 1970 is, at `offset` seconds east of UTC.
+pub fn at(ns int, offset int) Date {
+    let secs = floorDiv(ns, second) + offset
+    let nanos = floorMod(ns, second)
+    let z = floorDiv(secs, 86400) + 719468
+    let rem = floorMod(secs, 86400)
+    let era = floorDiv(z, 146097)
+    let doe = z - era * 146097
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100)
+    let mp = (5 * doy + 2) / 153
+    let day = doy - (153 * mp + 2) / 5 + 1
+    let month = if mp < 10 { mp + 3 } else { mp - 9 }
+    let year = yoe + era * 400 + (if month <= 2 { 1 } else { 0 })
+    return Date{year: year, month: month, day: day, hour: rem / 3600, minute: (rem % 3600) / 60, second: rem % 60, nanosecond: nanos, offset: offset}
+}
+
+// The date in UTC.
+pub fn utc(ns int) Date {
+    return at(ns, 0)
+}
+
+// The date in the local time zone.
+pub fn local(ns int) Date {
+    return at(ns, __localOffset(floorDiv(ns, second)))
+}
+
+// A date in UTC.
+pub fn date(year int, month int, day int, hour int, minute int, sec int) Date {
+    return Date{year: year, month: month, day: day, hour: hour, minute: minute, second: sec, nanosecond: 0}
+}
+
+// Why `parseIso` could not read a date.
+pub struct ParseError {
+    pub msg String
+
+    // The message, which quotes the input.
+    pub fn message(self) String {
+        return self.msg.clone()
+    }
+}
+
+fn parseFail(s str, why str) ParseError {
+    return ParseError{msg: fmt.format("cannot read `{}` as an RFC 3339 date: {}", s, why)}
+}
+
+// The decimal number in b[from..to], or -1.
+fn digitsAt(b []byte, from int, to int) int {
+    if to > b.len() {
+        return -1
+    }
+    var v = 0
+    for i in from..to {
+        if b[i] < 48 || b[i] > 57 {
+            return -1
+        }
+        v = v * 10 + int(b[i] - 48)
+    }
+    return v
+}
+
+// Reads an RFC 3339 date: "2026-11-06T14:41:31Z", "2026-11-06 14:41:31.5+08:00".
+pub fn parseIso(s str) Date ! ParseError {
+    let b = s.bytes()
+    if b.len() < 19 || b[4] != 45 || b[7] != 45 || (b[10] != 84 && b[10] != 116 && b[10] != 32) || b[13] != 58 || b[16] != 58 {
+        return err(parseFail(s, "expected YYYY-MM-DDTHH:MM:SS"))
+    }
+    let year = digitsAt(b, 0, 4)
+    let month = digitsAt(b, 5, 7)
+    let day = digitsAt(b, 8, 10)
+    let hh = digitsAt(b, 11, 13)
+    let mm = digitsAt(b, 14, 16)
+    let ss = digitsAt(b, 17, 19)
+    if year < 0 || month < 1 || month > 12 || day < 1 || day > 31 || hh < 0 || hh > 23 || mm < 0 || mm > 59 || ss < 0 || ss > 60 {
+        return err(parseFail(s, "a field is out of range"))
+    }
+    var i = 19
+    var nanos = 0
+    if i < b.len() && b[i] == 46 {
+        i += 1
+        var digits = 0
+        for i < b.len() && b[i] >= 48 && b[i] <= 57 {
+            if digits < 9 {
+                nanos = nanos * 10 + int(b[i] - 48)
+                digits += 1
+            }
+            i += 1
+        }
+        if digits == 0 {
+            return err(parseFail(s, "expected digits after `.`"))
+        }
+        for digits < 9 {
+            nanos *= 10
+            digits += 1
+        }
+    }
+    var offset = 0
+    if i < b.len() && (b[i] == 90 || b[i] == 122) {
+        i += 1
+    } else if i + 6 == b.len() && (b[i] == 43 || b[i] == 45) && b[i + 3] == 58 {
+        let oh = digitsAt(b, i + 1, i + 3)
+        let om = digitsAt(b, i + 4, i + 6)
+        if oh < 0 || om < 0 || oh > 23 || om > 59 {
+            return err(parseFail(s, "bad UTC offset"))
+        }
+        offset = oh * 3600 + om * 60
+        if b[i] == 45 {
+            offset = 0 - offset
+        }
+        i += 6
+    } else {
+        return err(parseFail(s, "expected `Z` or an offset like +08:00"))
+    }
+    if i != b.len() {
+        return err(parseFail(s, "unexpected text at the end"))
+    }
+    return Date{year: year, month: month, day: day, hour: hh, minute: mm, second: ss, nanosecond: nanos, offset: offset}
 }

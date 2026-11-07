@@ -171,6 +171,9 @@ static inline void kite_string_drop(kite_string *s) { free(s->ptr); }
 void kite_string_push(kite_string *s, kite_str t);
 void kite_String_push(kite_string *s, kite_str t);
 void kite_string_push_byte(kite_string *s, uint8_t b);
+void kite_fmt_radix(kite_string *b, int64_t v, bool is_signed, int64_t radix, bool upper);
+void kite_fmt_fixed(kite_string *b, double v, int64_t prec);
+void kite_fmt_pad(kite_string *b, kite_string *t, int64_t width, int64_t align, uint32_t fill, bool zero, bool numeric);
 void kite_String_pushRune(kite_string *s, int32_t r);
 void kite_String_clear(kite_string *s);
 bool kite_str_eq(kite_str a, kite_str b);
@@ -211,9 +214,10 @@ void kite_fmt_ptr(kite_string *b, const void *p);
 void kite_write(int fd, kite_string *b);
 
 // ---- vectors
-void kite_vec_grow(kite_vec *v, int64_t need, size_t esize);
+void kite_vec_grow(kite_vec *v, int64_t extra, size_t esize);
+// room for `extra` more elements (`extra` > 0; no overflow in `len + extra`)
 static inline void kite_vec_reserve(kite_vec *v, int64_t extra, size_t esize) {
-    if (v->len + extra > v->cap) kite_vec_grow(v, v->len + extra, esize);
+    if (extra > v->cap - v->len) kite_vec_grow(v, extra, esize);
 }
 void kite_sort(void *base, int64_t n, size_t size, int (*cmp)(const void *, const void *, void *), void *ctx);
 
@@ -317,8 +321,6 @@ int64_t kite_net___write(int64_t fd, kite_slice data);
 void kite_net___close(int64_t fd);
 void kite_net___shutdownWrite(int64_t fd);
 int64_t kite_net___port(int64_t fd);
-kite_string kite_net___errMsg(int64_t code);
-bool kite_net___isCancelled(int64_t code);
 
 // ---- os / time / ffi
 void kite_rt_init(int argc, char **argv);
@@ -327,7 +329,25 @@ kite_vec kite_os_args(void);
 _Noreturn void kite_os_exit(int64_t code);
 int64_t kite_os___readFile(kite_str path, kite_vec *out);
 int64_t kite_os___writeFile(kite_str path, kite_slice data);
-kite_string kite_os___errMsg(kite_str path, int64_t code);
+int64_t kite_io___kind(int64_t code);
+kite_string kite_io___strerror(int64_t code);
+int64_t kite_os___open(kite_str path, int64_t mode);
+int64_t kite_os___read(int64_t fd, kite_vec *buf, int64_t max);
+int64_t kite_os___write(int64_t fd, kite_slice data);
+void kite_os___close(int64_t fd);
+void kite_os___flush(int64_t fd);
+int64_t kite_os___stat(kite_str path, bool follow, int64_t *size, int64_t *mtime, int64_t *kind, int64_t *mode);
+int64_t kite_os___readDir(kite_str path, kite_vec *names);
+int64_t kite_os___mkdir(kite_str path);
+int64_t kite_os___remove(kite_str path);
+int64_t kite_os___rename(kite_str from, kite_str to);
+int64_t kite_os___cwd(kite_string *out);
+int64_t kite_os___chdir(kite_str path);
+int64_t kite_os___setenv(kite_str name, kite_str value, bool unset);
+void kite_os___tempDir(kite_string *out);
+int64_t kite_os___run(kite_str prog, kite_slice args, kite_slice input, bool capture, kite_vec *out, kite_vec *errout, int64_t *status);
+int64_t kite_time___unixNanos(void);
+int64_t kite_time___localOffset(int64_t secs);
 bool kite_os___getenv(kite_str name, kite_string *out);
 int64_t kite_time_now(void);
 void *kite_dlsym(const char *lib, const char *name);

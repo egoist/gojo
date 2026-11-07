@@ -1,0 +1,164 @@
+// A small grep: `grep [-i] [-n] [-c] [-v] [-r] [-l] PATTERN [PATH...]`.
+//
+// Prints the lines that contain PATTERN (a plain string). Reads standard input
+// without paths, searches directories with -r. Exits with 0 when something
+// matched, 1 when nothing did, 2 on errors -- like grep.
+use bufio, fmt, io, os
+
+struct Options {
+    ignoreCase bool = false
+    numbers bool = false
+    count bool = false
+    invert bool = false
+    recursive bool = false
+    namesOnly bool = false
+    pattern String = ""
+    paths Vec[String] = []
+}
+
+fn usage() never {
+    eprintln("usage: grep [-i] [-n] [-c] [-v] [-r] [-l] PATTERN [PATH...]")
+    os.exit(2)
+}
+
+fn parseArgs() Options {
+    var o = Options{}
+    var havePattern = false
+    let args = os.args()
+    for i in 1..args.len() {
+        let a = args[i].asStr()
+        if !havePattern && a.startsWith("-") && a.len() > 1 {
+            for r in a[1..].runes() {
+                match r {
+                    'i' => o.ignoreCase = true
+                    'n' => o.numbers = true
+                    'c' => o.count = true
+                    'v' => o.invert = true
+                    'r' => o.recursive = true
+                    'l' => o.namesOnly = true
+                    _ => {
+                        var opt = "-".toString()
+                        opt.pushRune(r)
+                        eprintln("grep: unknown option " + opt)
+                        usage()
+                    }
+                }
+            }
+        } else if !havePattern {
+            o.pattern = a.toString()
+            havePattern = true
+        } else {
+            o.paths.push(a.toString())
+        }
+    }
+    if !havePattern {
+        usage()
+    }
+    if o.ignoreCase {
+        o.pattern = o.pattern.toLower()
+    }
+    return o
+}
+
+struct Search {
+    o Options
+    matched bool = false
+    failed bool = false
+    // print file names before lines: several files, or a directory
+    names bool = false
+
+    fn matches(self, line str) bool {
+        let found = if self.o.ignoreCase { line.toLower().contains(self.o.pattern) } else { line.contains(self.o.pattern) }
+        return found != self.o.invert
+    }
+
+    // Searches one stream; `name` is what to print for it.
+    fn stream[R io.Reader](self inout, src sink R, name str) ! io.Error {
+        var input = bufio.reader(src)
+        var n = 0
+        var hits = 0
+        for {
+            let line = try input.readLine() ?? break
+            n += 1
+            if !self.matches(line) {
+                continue
+            }
+            hits += 1
+            self.matched = true
+            if self.o.namesOnly {
+                println(name)
+                return
+            }
+            if self.o.count {
+                continue
+            }
+            var prefix = "".toString()
+            if self.names {
+                prefix.push(name)
+                prefix.push(":")
+            }
+            if self.o.numbers {
+                prefix.push(fmt.format("{}:", n))
+            }
+            println(prefix + line)
+        }
+        if self.o.count {
+            if self.names {
+                println(fmt.format("{}:{}", name, hits))
+            } else {
+                println(hits)
+            }
+        }
+    }
+
+    fn path(self inout, p str) {
+        let info = os.stat(p) catch e {
+            self.fail(e)
+            return
+        }
+        if info.isDir() {
+            if !self.o.recursive {
+                eprintln(fmt.format("grep: {}: is a directory", p))
+                self.failed = true
+                return
+            }
+            let entries = os.readDir(p) catch e {
+                self.fail(e)
+                return
+            }
+            for name in entries {
+                self.path(os.joinPath(p, name))
+            }
+            return
+        }
+        let f = os.open(p) catch e {
+            self.fail(e)
+            return
+        }
+        self.stream(f, p) catch e { self.fail(e) }
+    }
+
+    fn fail(self inout, e io.Error) {
+        eprintln("grep: " + e.message())
+        self.failed = true
+    }
+}
+
+fn main() {
+    let o = parseArgs()
+    let several = o.paths.len() > 1 || o.recursive
+    let noPaths = o.paths.len() == 0
+    var s = Search{o: o, names: several}
+    if noPaths {
+        s.stream(os.stdin(), "(standard input)") catch e { s.fail(e) }
+    } else {
+        let paths = s.o.paths.clone()
+        for p in paths {
+            s.path(p)
+        }
+    }
+    if s.failed {
+        os.exit(2)
+    }
+    os.exit(if s.matched { 0 } else { 1 })
+}

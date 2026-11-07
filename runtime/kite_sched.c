@@ -1314,6 +1314,7 @@ struct kite_chan {
 
 kite_chan *kite_chan_new(size_t esize, int64_t cap) {
     if (cap < 0) kite_panic("negative channel capacity", "<runtime>");
+    if (cap > (int64_t)(PTRDIFF_MAX / (esize ? esize : 1))) kite_panic("channel capacity too large", "<runtime>");
     kite_chan *c = kite_alloc(sizeof *c);
     memset(c, 0, sizeof *c);
     c->esize = esize ? esize : 1;
@@ -2175,6 +2176,7 @@ static int resolve(kite_str addr, bool passive, struct addrinfo **out) {
 }
 
 int64_t kite_net___listen(kite_str addr) {
+    if (addr.len && memchr(addr.ptr, 0, (size_t)addr.len)) return -EINVAL;
     struct addrinfo *ai;
     int r = resolve(addr, true, &ai);
     if (r) return -r;
@@ -2200,6 +2202,7 @@ int64_t kite_net___listen(kite_str addr) {
 }
 
 int64_t kite_net___connect(kite_str addr) {
+    if (addr.len && memchr(addr.ptr, 0, (size_t)addr.len)) return -EINVAL;
     struct addrinfo *ai;
     int r = resolve(addr, false, &ai);
     if (r) return -r;
@@ -2289,13 +2292,6 @@ int64_t kite_net___port(int64_t fd) {
     return -EINVAL;
 }
 
-kite_string kite_net___errMsg(int64_t code) {
-    kite_string s = { NULL, 0, 0 };
-    kite_fmt_cstr(&s, code == ECANCELED ? "cancelled" : strerror((int)code));
-    return s;
-}
-
-bool kite_net___isCancelled(int64_t code) { return code == ECANCELED; }
 
 // ------------------------------------------------------------------ tests
 

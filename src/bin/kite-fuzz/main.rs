@@ -415,6 +415,112 @@ fn build_dict(corpus: &[String]) -> Vec<String> {
 }
 
 // ---------------------------------------------------------------------------
+// `kite-fuzz fmt [N]`: the formatter (and `kite doc`) on generated programs,
+// corpus files and mutants. For every file that parses: formatting succeeds, keeps the tokens,
+// still parses, checks the same way, is stable, and ignores how the input
+// was indented.
+
+fn fmt_mode(n: usize, seed: u64, out: &Path) {
+    install_panic_hook();
+    let corpus = load_corpus(Path::new("/nonexistent"));
+    let dict = build_dict(&corpus);
+    let mut rng = Rng(seed | 1);
+    let dir = out.join("fmt-findings");
+    let (mut tried, mut found) = (0, 0);
+    for i in 0..n {
+        let src = match i % 4 {
+            0 => progen::Gen::new(&mut rng).program(),
+            1 => borrowgen::BorrowGen::new(&mut rng).program(),
+            2 => rng.pick(&corpus).clone(),
+            _ => {
+                let base = rng.pick(&corpus).clone();
+                Mutator { corpus: &corpus, dict: &dict }.mutate(&mut rng, &base)
+            }
+        };
+        let shifted = reindent(&mut rng, &src);
+        let problem = std::panic::catch_unwind(AssertUnwindSafe(|| fmt_problem(&src, &shifted)))
+            .unwrap_or_else(|_| Some("the formatter panicked".into()))
+            .or_else(|| {
+                // and `kite doc`, on the same input
+                let files = [("fuzz.kite".to_string(), src.clone())];
+                std::panic::catch_unwind(AssertUnwindSafe(|| kite::doc::package("fuzz", &files))).err().map(|_| "`kite doc` panicked".to_string())
+            });
+        if !kite::lexer::lex(0, &src).is_ok_and(|t| kite::parser::parse_file(0, t).is_ok()) {
+            continue;
+        }
+        tried += 1;
+        if let Some(p) = problem {
+            found += 1;
+            let _ = std::fs::create_dir_all(&dir);
+            let path = dir.join(format!("{:016x}.kite", hash(&src)));
+            let _ = std::fs::write(&path, &src);
+            eprintln!("{}: {}", path.display(), p);
+        }
+    }
+    eprintln!("kite-fuzz fmt: {} well-formed inputs, {} problems", tried, found);
+    if found > 0 {
+        std::process::exit(1);
+    }
+}
+
+/// What is wrong with formatting `src`, if anything. `shifted` is `src` with
+/// different indentation and trailing spaces.
+fn fmt_problem(src: &str, shifted: &str) -> Option<String> {
+    let parses = |s: &str| kite::lexer::lex(0, s).is_ok_and(|t| kite::parser::parse_file(0, t).is_ok());
+    if !parses(src) {
+        return None;
+    }
+    let f = match kite::formatter::format(src) {
+        Ok(f) => f,
+        Err(e) => return Some(format!("not formatted: {}", e)),
+    };
+    if !kite::formatter::same_tokens(src, &f) {
+        return Some("the tokens changed".into());
+    }
+    if !parses(&f) {
+        return Some("the output does not parse".into());
+    }
+    if kite::formatter::format(&f).as_deref() != Ok(f.as_str()) {
+        return Some("formatting is not stable".into());
+    }
+    let checks = |s: &str| kite::frontend(FAKE_PATH, Some(s)).map_err(|(_, d)| d.len());
+    if checks(src).is_ok() != checks(&f).is_ok() {
+        return Some("the checker disagrees about the output".into());
+    }
+    if kite::formatter::same_tokens(src, shifted) && kite::formatter::format(shifted).as_deref() != Ok(f.as_str()) {
+        return Some("the result depends on the indentation".into());
+    }
+    None
+}
+
+/// `src` with random indentation and trailing spaces, except inside block
+/// comments (their text is kept as written).
+fn reindent(rng: &mut Rng, src: &str) -> String {
+    let mut out = String::new();
+    let mut in_comment = false;
+    for line in src.split_inclusive('\n') {
+        if in_comment || line.contains("/*") {
+            in_comment = !line.contains("*/") || line.rfind("/*") > line.rfind("*/");
+            out.push_str(line);
+            continue;
+        }
+        let (body, nl) = line.strip_suffix('\n').map_or((line, ""), |b| (b, "\n"));
+        let body = body.trim_start_matches([' ', '\t']);
+        if !body.is_empty() {
+            for _ in 0..rng.below(9) {
+                out.push(' ');
+            }
+        }
+        out.push_str(body);
+        if rng.below(4) == 0 {
+            out.push_str("  ");
+        }
+        out.push_str(nl);
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
 // Findings
 
 struct Findings {
@@ -583,17 +689,21 @@ fn worker(id: usize, cfg: Config) {
     let mut seen_msgs: HashSet<String> = HashSet::new();
     let mut seen_c: HashSet<u64> = HashSet::new();
 
-    // watchdog: a case that runs too long is a hang
+    // watchdog: a case that runs too long is a hang -- counted in CPU time, so
+    // that a stopped or starved process (a loaded machine) isn't mistaken for one
     let started = Arc::new(Mutex::new(Instant::now()));
+    let started_cpu = Arc::new(AtomicU64::new(process_cpu_ns()));
     {
         let started = started.clone();
+        let started_cpu = started_cpu.clone();
         let cur_path = cur_path.clone();
         let limit = cfg.limit;
         let findings_dir = cfg.out.clone();
         std::thread::spawn(move || {
             loop {
                 std::thread::sleep(Duration::from_millis(200));
-                if started.lock().unwrap().elapsed() > limit {
+                let cpu = process_cpu_ns().saturating_sub(started_cpu.load(Ordering::Relaxed));
+                if started.lock().unwrap().elapsed() > limit && cpu > limit.as_nanos() as u64 / 2 {
                     let input = std::fs::read_to_string(&cur_path).unwrap_or_default();
                     let f = Findings::new(&findings_dir);
                     f.report("hang", &format!("{:016x}", hash(&input)), &input, &format!("compiling took more than {:?}", limit));
@@ -622,6 +732,7 @@ fn worker(id: usize, cfg: Config) {
         };
         let _ = std::fs::write(&cur_path, &text);
         *started.lock().unwrap() = Instant::now();
+        started_cpu.store(process_cpu_ns(), Ordering::Relaxed);
         let outcome = compile(&text);
         *started.lock().unwrap() = Instant::now();
         stats.execs.fetch_add(1, Ordering::Relaxed);
@@ -657,6 +768,27 @@ fn worker(id: usize, cfg: Config) {
             }
         }
     }
+}
+
+#[repr(C)]
+struct Timespec {
+    sec: i64,
+    nsec: i64,
+}
+
+unsafe extern "C" {
+    fn clock_gettime(clock: i32, ts: *mut Timespec) -> i32;
+}
+
+/// CPU time used by this process, in ns.
+fn process_cpu_ns() -> u64 {
+    const CLOCK_PROCESS_CPUTIME_ID: i32 = if cfg!(target_os = "macos") { 12 } else { 2 };
+    let mut ts = Timespec { sec: 0, nsec: 0 };
+    // SAFETY: a plain system call on a local struct
+    if unsafe { clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &mut ts) } != 0 {
+        return 0;
+    }
+    ts.sec as u64 * 1_000_000_000 + ts.nsec as u64
 }
 
 // ---------------------------------------------------------------------------
@@ -1149,6 +1281,10 @@ fn main() {
                 }
             });
         }
+        Some("fmt") => {
+            let n: usize = rest.get(1).and_then(|x| x.parse().ok()).unwrap_or(2000);
+            kite::with_compiler_stack(move || fmt_mode(n, seed, &out));
+        }
         Some("gen") => {
             let mut rng = Rng(seed | 1);
             print!("{}", progen::Gen::new(&mut rng).program());
@@ -1162,7 +1298,7 @@ fn main() {
             supervise(jobs, time, &out, seed, exec_rate, limit);
         }
         _ => {
-            eprintln!("usage: kite-fuzz [--jobs N] [--time SECS] [--out DIR] [--seed N] [--exec-rate N] [--limit SECS]\n       kite-fuzz check <file>\n       kite-fuzz reduce <file> [-o out]");
+            eprintln!("usage: kite-fuzz [--jobs N] [--time SECS] [--out DIR] [--seed N] [--exec-rate N] [--limit SECS]\n       kite-fuzz check <file>\n       kite-fuzz reduce <file> [-o out]\n       kite-fuzz fmt [N]");
             std::process::exit(2);
         }
     }

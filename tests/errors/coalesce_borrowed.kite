@@ -1,0 +1,21 @@
+// `x ?? d` takes the value out of `x`: on a borrowed place, the error says
+// what to write instead.
+struct Account {
+    note ?String
+
+    fn describe(self) String {
+        return self.note ?? "no note".toString()
+        // error: cannot move out of field `note` of borrowed parameter `self`
+        // error: `??` takes the value out of its left side, and this one is only borrowed
+        // error: copy it first: `x.clone() ?? default`
+    }
+}
+
+fn first(xs []?String) String {
+    return xs[0] ?? "".toString()
+    // error: cannot move out of an element of a collection
+}
+
+fn main() {
+    println(Account{note: none}.describe(), first([none]))
+}

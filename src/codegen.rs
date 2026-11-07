@@ -36,6 +36,55 @@ fn ty_depth(t: &Ty) -> usize {
 
 /// Generates the program's C. Fails only for types too large to exist (their
 /// sizes are known only once generics are instantiated).
+/// Ends the Kite-attributed part of the C: [`resolve_lines`] makes it a
+/// `#line` back to the C file itself.
+const C_LINE_MARK: &str = "//@kite-c-line";
+
+/// The final C for a file at `c_path`: each mark becomes `#line` back to the C
+/// file, so code the compiler generates around Kite functions (drop
+/// functions, helpers, `main`) is not blamed on the last Kite line.
+pub fn resolve_lines(c: &str, c_path: &str) -> String {
+    let mut out = String::with_capacity(c.len() + 1024);
+    for (i, l) in c.lines().enumerate() {
+        if l == C_LINE_MARK {
+            out.push_str(&format!("#line {} {}\n", i + 2, c_string(c_path)));
+        } else {
+            out.push_str(l);
+            out.push('\n');
+        }
+    }
+    out
+}
+
+/// The C without `#line` directives, to read or debug the generated C itself.
+pub fn strip_lines(c: &str) -> String {
+    let mut out = String::with_capacity(c.len());
+    for l in c.lines() {
+        if l != C_LINE_MARK && !l.trim_start().starts_with("#line ") {
+            out.push_str(l);
+            out.push('\n');
+        }
+    }
+    out
+}
+
+fn stmt_span(s: &TStmt) -> Option<Span> {
+    Some(match s {
+        TStmt::Let { init, .. } => init.span,
+        TStmt::LetRef { place, .. } => place.span,
+        TStmt::Expr(e) => e.span,
+        TStmt::Assign { span, .. } => *span,
+        TStmt::MapInsert { map, .. } => map.span,
+        TStmt::Return(_, sp) | TStmt::Break(_, sp) | TStmt::Continue(_, sp) | TStmt::Yield(_, sp) => *sp,
+        TStmt::Defer(b) | TStmt::ErrDefer(b) => b.span,
+        TStmt::While { cond, body, .. } => cond.as_ref().map_or(body.span, |c| c.span),
+        TStmt::For { span, .. } | TStmt::Go { span, .. } | TStmt::Select { span, .. } => *span,
+        TStmt::Send { chan, .. } => chan.span,
+        TStmt::With { place, .. } => place.span,
+        TStmt::ForEach { call, .. } => call.span,
+    })
+}
+
 pub fn generate(prog: &Program, tfuncs: &[TFunc], sm: &SourceMap, tests: Option<&Vec<(String, FuncId)>>, release: bool) -> Result<String, String> {
     let mut g = Gen::new(prog, tfuncs, sm, release);
     let mut entry = String::new();
@@ -160,6 +209,8 @@ struct Fs<'a> {
     loop_labels: Vec<(u32, String, String)>,
     /// Inside the body closure of a push-style `for` loop.
     lb: Option<LoopBody>,
+    /// The Kite source line the last `#line` directive named: (file, line).
+    line: (u32, u32),
 }
 
 /// The body of `for x in t` over a type with `each`, compiled as a closure.
@@ -898,7 +949,7 @@ static bool mr_{m}(kite_map *mp, const {k} *key, {e} *out) {{\n\
         let (sig, ps) = self.fn_signature(f, &subst, &name);
         let _ = writeln!(self.protos, "{};", sig);
         let ret = if fd.yields.is_some() { fd.ret.subst(&subst) } else { fd.ret.subst(&subst) };
-        let mut fs = Fs { tf, subst, out: String::new(), ind: 1, scopes: vec![], repr: HashMap::new(), flagged: HashSet::new(), flags: HashMap::new(), ret, yields: fd.yields.is_some(), err_mode: None, loop_labels: vec![], lb: None };
+        let mut fs = Fs { tf, subst, out: String::new(), ind: 1, scopes: vec![], repr: HashMap::new(), flagged: HashSet::new(), flags: HashMap::new(), ret, yields: fd.yields.is_some(), err_mode: None, loop_labels: vec![], lb: None, line: (u32::MAX, 0) };
         collect_moves_block(&tf.body, &mut fs.flagged, tf);
         fs.scopes.push(Scope { kind: SK::Func, items: vec![] });
         let mut lids = vec![];
@@ -922,11 +973,12 @@ static bool mr_{m}(kite_map *mp, const {k} *key, {e} *out) {{\n\
             }
         }
         let body = tf.body.clone();
+        self.line_directive(&mut fs, body.span);
         if self.may_recurse.contains(&f) {
             self.emit(&mut fs, "KITE_POLL();");
         }
         self.fn_body(&mut fs, &body);
-        let _ = writeln!(self.bodies, "{} {{\n{}}}\n", sig, fs.out);
+        let _ = writeln!(self.bodies, "{} {{\n{}}}\n{}", sig, fs.out, C_LINE_MARK);
     }
 
     fn fn_body(&mut self, fs: &mut Fs, body: &TBlock) {
@@ -986,12 +1038,35 @@ static bool mr_{m}(kite_map *mp, const {k} *key, {e} *out) {{\n\
     // Emission helpers & scopes
     // ------------------------------------------------------------------
 
-    fn emit(&mut self, fs: &mut Fs, line: &str) {
-        for _ in 0..fs.ind {
-            fs.out.push_str("    ");
+    /// `#line` for the Kite line `sp` starts on, when it differs from the last
+    /// one: debuggers and sanitizer reports then show Kite source lines.
+    fn line_directive(&mut self, fs: &mut Fs, sp: Span) {
+        if (sp.file as usize) >= self.sm.files.len() {
+            return;
         }
-        fs.out.push_str(line);
-        fs.out.push('\n');
+        let f = self.sm.file(sp.file);
+        let (l, _) = f.line_col(sp.lo);
+        if fs.line.0 != sp.file {
+            // the file once; `emit` repeats the line before every C line
+            let path = std::fs::canonicalize(&f.path).map(|p| p.display().to_string()).unwrap_or_else(|_| f.path.clone());
+            fs.out.push_str(&format!("#line {} {}\n", l, c_string(&path)));
+        }
+        fs.line = (sp.file, l as u32);
+    }
+
+    fn emit(&mut self, fs: &mut Fs, line: &str) {
+        // One Kite statement is often several C lines: each gets the Kite
+        // line, or the C compiler would count on from it.
+        for part in line.split('\n') {
+            if fs.line.0 != u32::MAX {
+                let _ = writeln!(fs.out, "#line {}", fs.line.1);
+            }
+            for _ in 0..fs.ind {
+                fs.out.push_str("    ");
+            }
+            fs.out.push_str(part);
+            fs.out.push('\n');
+        }
     }
 
     fn push_scope(&mut self, fs: &mut Fs, kind: SK) {
@@ -1188,6 +1263,9 @@ static bool mr_{m}(kite_map *mp, const {k} *key, {e} *out) {{\n\
     // ------------------------------------------------------------------
 
     fn stmt(&mut self, fs: &mut Fs, s: &TStmt) {
+        if let Some(sp) = stmt_span(s) {
+            self.line_directive(fs, sp);
+        }
         match s {
             TStmt::Let { local, init } => {
                 self.push_scope(fs, SK::Stmt);
@@ -2498,7 +2576,12 @@ static bool mr_{m}(kite_map *mp, const {k} *key, {e} *out) {{\n\
                     _ => unreachable!(),
                 };
                 let ec = self.cty(&el);
-                format!("kite_chan_new(sizeof({}), {})", ec, v)
+                let l = self.loc(e.span);
+                let n = self.tmp();
+                self.emit(fs, &format!("int64_t {} = {};", n, v));
+                self.emit(fs, &format!("if ({} < 0) kite_panic(\"negative channel capacity\", {});", n, l));
+                self.emit(fs, &format!("if ({n} > (int64_t)(PTRDIFF_MAX / (sizeof({ec}) ? sizeof({ec}) : 1))) kite_panic(\"channel capacity too large\", {l});"));
+                format!("kite_chan_new(sizeof({}), {})", ec, n)
             }
             TK::DefaultOf => self.default_value(fs, &t),
             TK::MutexRef(x) => {
@@ -2898,6 +2981,13 @@ static bool mr_{m}(kite_map *mp, const {k} *key, {e} *out) {{\n\
                     let mut s = HashMap::new();
                     if bind_params(&fd.recv.as_ref().unwrap().ty, &rt, &mut s) {
                         let targs: Vec<Ty> = fd.tparams.iter().map(|p| s.get(p).cloned().unwrap_or(Ty::Unit)).collect();
+                        // the bound's method may take `self inout` where this
+                        // type's only reads it: pass the receiver the way it wants
+                        if fd.recv.as_ref().is_some_and(|r| r.mode == Mode::Borrow) && args.first().is_some_and(|a| a.mode == ArgMode::Inout) {
+                            let mut a2 = args.to_vec();
+                            a2[0].mode = ArgMode::Borrow;
+                            return self.call_func(fs, f, targs, &a2, &t, e.span);
+                        }
                         return self.call_func(fs, f, targs, args, &t, e.span);
                     }
                 }
@@ -3185,7 +3275,7 @@ static bool mr_{m}(kite_map *mp, const {k} *key, {e} *out) {{\n\
         let ret = fty.ret.clone();
         let rc = self.ret_cty(&ret);
         let mut ps = vec!["void *envp".to_string()];
-        let mut nfs = Fs { tf: fs.tf, subst: fs.subst.clone(), out: String::new(), ind: 1, scopes: vec![], repr: HashMap::new(), flagged: fs.flagged.clone(), flags: HashMap::new(), ret: ret.clone(), yields: false, err_mode: None, loop_labels: vec![], lb: None };
+        let mut nfs = Fs { tf: fs.tf, subst: fs.subst.clone(), out: String::new(), ind: 1, scopes: vec![], repr: HashMap::new(), flagged: fs.flagged.clone(), flags: HashMap::new(), ret: ret.clone(), yields: false, err_mode: None, loop_labels: vec![], lb: None, line: (u32::MAX, 0) };
         if let (Some(lid), Some(_)) = (c.loop_body, &lbp) {
             // `return` / `try` in the body act on the enclosing function
             nfs.ret = fs.ret.clone();
@@ -3240,7 +3330,7 @@ static bool mr_{m}(kite_map *mp, const {k} *key, {e} *out) {{\n\
         } else {
             self.fn_body(&mut nfs, &body);
         }
-        let _ = writeln!(self.bodies, "{} {{\n{}}}\n", sig, nfs.out);
+        let _ = writeln!(self.bodies, "{} {{\n{}}}\n{}", sig, nfs.out, C_LINE_MARK);
         // environment value
         if let Some((ctlp, retp)) = &lbp {
             let mut inits = vec![];
@@ -3994,6 +4084,58 @@ static bool mr_{m}(kite_map *mp, const {k} *key, {e} *out) {{\n\
                     }
                 }
             }
+            "fmt.format" | "fmt.printf" => {
+                let tmpl = match &args[0].e.kind {
+                    TK::Str(t) => t.clone(),
+                    _ => String::new(),
+                };
+                let pieces = crate::fmtspec::parse(&tmpl).unwrap_or_default();
+                let b = self.tmp();
+                self.emit(fs, &format!("kite_string {} = {{0}};", b));
+                let mut next = 1;
+                for p in pieces {
+                    match p {
+                        crate::fmtspec::Piece::Lit(l) => {
+                            self.emit(fs, &format!("kite_string_push(&{}, kite_str_lit({}, {}));", b, c_string(&l), l.len()));
+                        }
+                        crate::fmtspec::Piece::Arg(spec) => {
+                            let a = &args[next].e;
+                            next += 1;
+                            let at = self.sub(fs, &a.ty);
+                            let ptr = self.addr(fs, a);
+                            let plain = spec.width == 0 && spec.radix.is_none() && spec.precision.is_none();
+                            let target = if plain { b.clone() } else { self.tmp() };
+                            if !plain {
+                                self.emit(fs, &format!("kite_string {} = {{0}};", target));
+                            }
+                            match (&at, spec.radix, spec.precision) {
+                                (Ty::Int(k), Some(r), _) => {
+                                    let radix = match r { 'x' | 'X' => 16, 'o' => 8, _ => 2 };
+                                    self.emit(fs, &format!("kite_fmt_radix(&{}, (int64_t)*{}, {}, {}, {});", target, ptr, k.signed(), radix, r == 'X'));
+                                }
+                                (Ty::F32 | Ty::F64, _, Some(pr)) => {
+                                    self.emit(fs, &format!("kite_fmt_fixed(&{}, (double)*{}, {});", target, ptr, pr));
+                                }
+                                _ => {
+                                    let f = self.fmt_fn(&at);
+                                    self.emit(fs, &format!("{}(&{}, {}, 0);", f, target, ptr));
+                                }
+                            }
+                            if !plain {
+                                let align = spec.align.map(|c| c as u32).unwrap_or(0);
+                                let numeric = matches!(at, Ty::Int(_) | Ty::F32 | Ty::F64);
+                                self.emit(fs, &format!("kite_fmt_pad(&{}, &{}, {}, {}, {}, {}, {});", b, target, spec.width, align, spec.fill as u32, spec.zero, numeric));
+                            }
+                        }
+                    }
+                }
+                if name == "fmt.printf" {
+                    self.emit(fs, &format!("kite_write(1, &{});", b));
+                    "0".into()
+                } else {
+                    b
+                }
+            }
             "task.group" => self.task_group(fs, targs, args, t, sp),
             "task.go" => {
                 let _ = l;
@@ -4306,11 +4448,14 @@ static bool mr_{m}(kite_map *mp, const {k} *key, {e} *out) {{\n\
                 let n = if name == "truncate" { self.expr(fs, &args[1].e) } else { "0".into() };
                 let nt = self.tmp();
                 self.emit(fs, &format!("int64_t {} = {};", nt, n));
+                if name == "truncate" {
+                    self.emit(fs, &format!("if ({} < 0) kite_panic(\"truncate to a negative length\", {});", nt, l));
+                }
                 if self.needs_drop(el) {
                     let d = self.drop_fn(el);
-                    self.emit(fs, &format!("for (int64_t _i = {} < 0 ? 0 : {}; _i < {}->len; _i++) {}(&{}[_i]);", nt, nt, vp, d, arr));
+                    self.emit(fs, &format!("for (int64_t _i = {}; _i < {}->len; _i++) {}(&{}[_i]);", nt, vp, d, arr));
                 }
-                self.emit(fs, &format!("if ({} >= 0 && {} < {}->len) {}->len = {};", nt, nt, vp, vp, nt));
+                self.emit(fs, &format!("if ({} < {}->len) {}->len = {};", nt, vp, vp, nt));
                 "0".into()
             }
             "extend" => {
@@ -4331,7 +4476,10 @@ static bool mr_{m}(kite_map *mp, const {k} *key, {e} *out) {{\n\
             }
             "reserve" => {
                 let n = self.expr(fs, &args[1].e);
-                self.emit(fs, &format!("if ({} > 0) kite_vec_reserve({}, {}, sizeof({}));", n, vp, n, ec));
+                let nt = self.tmp();
+                self.emit(fs, &format!("int64_t {} = {};", nt, n));
+                self.emit(fs, &format!("if ({nt} > (int64_t)(PTRDIFF_MAX / (sizeof({ec}) ? sizeof({ec}) : 1)) - {vp}->len) kite_panic(\"capacity overflow\", {l});"));
+                self.emit(fs, &format!("if ({} > 0) kite_vec_reserve({}, {}, sizeof({}));", nt, vp, nt, ec));
                 "0".into()
             }
             "cap" => format!("{}->cap", vp),

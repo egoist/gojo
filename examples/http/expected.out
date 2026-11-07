@@ -1,6 +1,8 @@
 20 requests to /: true
-/missing: HTTP/1.1 404 Not Found
-/slow: HTTP/1.1 504 Gateway Timeout
+/missing: 404 Not Found
+/hi: hi kïte lang
+/echo: 200 posted body text/plain; charset=utf-8
+/slow: 504 Gateway Timeout
 in flight at shutdown: connection closed
-served 21 timed out 1 hung up 1 stopped 1
+served 23 timed out 1 hung up 1 stopped 1
 took less than 1s: true

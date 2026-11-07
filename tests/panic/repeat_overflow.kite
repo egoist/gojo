@@ -1,0 +1,6 @@
+// the size is checked first: no endless loop toward running out of memory
+fn main() {
+    let n = 9223372036854775807
+    println("ab".repeat(n).len())
+    // panic: capacity overflow
+}

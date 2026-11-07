@@ -1,7 +1,7 @@
-use os.{exit, notThere, newError}
+use os.{exit, notThere, openMode}
 
 fn main() {
     exit(0)
     // error: package `os` has no `notThere`
-    // error: `newError` is not public in package `os`
+    // error: `openMode` is not public in package `os`
 }

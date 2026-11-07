@@ -9,6 +9,7 @@
 // in a cancelled task return early: a receive gives none, a send is dropped,
 // `time.sleep` wakes up, and network calls fail with an error whose
 // `isCancelled()` is true.
+
 // A handle to a running group. Tasks may use it to cancel the group (the
 // handle never outlives the group: `task.group` waits for every task).
 pub unsafe send copy struct Group {
@@ -22,6 +23,7 @@ pub unsafe send copy struct Group {
 
 // The error of an operation that stopped because its task was cancelled.
 pub copy struct Cancelled {
+    // "cancelled"
     pub fn message(self) String {
         return "cancelled"
     }
@@ -52,6 +54,7 @@ fn __numThreads() int
 fn __maxProcs() int
 fn __setMaxProcs(n int) int
 
+// A snapshot of the scheduler, from `stats`.
 pub struct Stats {
     // goroutines alive, `main` included
     pub goroutines int
@@ -63,6 +66,7 @@ pub struct Stats {
     pub maxProcs int
 }
 
+// How many goroutines and threads there are now.
 pub fn stats() Stats {
     return Stats{goroutines: __numGoroutines(), threads: __numThreads(), maxProcs: __maxProcs()}
 }

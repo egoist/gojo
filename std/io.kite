@@ -1,0 +1,182 @@
+// Errors from the operating system, files, processes and the network, and the
+// interfaces for streams of bytes.
+//
+//   fn copyFile(from str, to str) ! io.Error {
+//       var src = try os.open(from)
+//       var dst = try os.create(to)
+//       _ = try io.copy(&dst, &src)
+//   }
+
+// What went wrong, independent of the platform.
+pub copy enum ErrorKind {
+    Other
+    NotFound
+    PermissionDenied
+    AlreadyExists
+    NotADirectory
+    IsADirectory
+    DirectoryNotEmpty
+    InvalidInput
+    UnexpectedEof
+    BrokenPipe
+    ConnectionRefused
+    ConnectionReset
+    AddressInUse
+    TimedOut
+    Cancelled
+    Interrupted
+}
+
+// An error from the operating system or a stream: what kind, and a message
+// that says what was being done (`open notes.txt: no such file or directory`).
+// `os.Error` and `net.Error` are this type.
+pub struct Error {
+    pub kind ErrorKind
+    pub msg String
+    // the operating system's error number, or 0
+    pub code int = 0
+
+    // The message, as `print` shows it.
+    pub fn message(self) String {
+        return self.msg.clone()
+    }
+
+    // The call stopped because its task was cancelled.
+    pub fn isCancelled(self) bool {
+        return self.kind == .Cancelled
+    }
+
+    // The file or directory does not exist.
+    pub fn isNotFound(self) bool {
+        return self.kind == .NotFound
+    }
+}
+
+fn __kind(code int) int
+fn __strerror(code int) String
+
+fn kindOf(code int) ErrorKind {
+    return match __kind(code) {
+        1 => .NotFound
+        2 => .PermissionDenied
+        3 => .AlreadyExists
+        4 => .NotADirectory
+        5 => .IsADirectory
+        6 => .DirectoryNotEmpty
+        7 => .InvalidInput
+        8 => .UnexpectedEof
+        9 => .BrokenPipe
+        10 => .ConnectionRefused
+        11 => .ConnectionReset
+        12 => .AddressInUse
+        13 => .TimedOut
+        14 => .Cancelled
+        15 => .Interrupted
+        _ => .Other
+    }
+}
+
+// An error from the operating system's error number `code`, for `what` ("open
+// data.txt"). Used by `os`, `net` and code calling C directly.
+pub fn fromCode(what str, code int) Error {
+    return Error{kind: kindOf(code), msg: what + ": " + __strerror(code), code: code}
+}
+
+// An error that doesn't come from the operating system.
+pub fn newError(kind ErrorKind, msg str) Error {
+    return Error{kind: kind, msg: msg.toString()}
+}
+
+// A source of bytes: files, connections, process output, `io.BytesReader`.
+pub interface Reader {
+    // Appends at most `max` bytes to `buf` and returns how many; 0 means the
+    // end of the stream. Waits until at least one byte is there.
+    fn read(self inout, buf inout Vec[byte], max int) int ! Error
+}
+
+// A sink for bytes: files, connections, `io.Buffer`.
+pub interface Writer {
+    // Writes all of `data`.
+    fn write(self inout, data []byte) ! Error
+}
+
+// Reads `r` to its end.
+pub fn readAll(r inout Reader) Vec[byte] ! Error {
+    var out = Vec[byte]{}
+    for {
+        let n = try r.read(&out, 65536)
+        if n == 0 {
+            return out
+        }
+    }
+}
+
+// Reads `r` to its end as text.
+pub fn readText(r inout Reader) String ! Error {
+    let b = try readAll(&r)
+    return String(b)
+}
+
+// Copies `src` into `dst` until `src` ends; returns the number of bytes.
+pub fn copy(dst inout Writer, src inout Reader) int ! Error {
+    var buf = Vec[byte]{}
+    var total = 0
+    for {
+        buf.clear()
+        let n = try src.read(&buf, 65536)
+        if n == 0 {
+            return total
+        }
+        try dst.write(buf)
+        total += n
+    }
+}
+
+// Writes the bytes of `s` to `w`.
+pub fn writeText(w inout Writer, s str) ! Error {
+    return w.write(s.bytes())
+}
+
+// Reads from bytes in memory.
+pub struct BytesReader {
+    data Vec[byte]
+    pos int = 0
+
+    // Appends up to `max` of the remaining bytes to `buf`.
+    pub fn read(self inout, buf inout Vec[byte], max int) int ! Error {
+        var n = 0
+        for n < max && self.pos < self.data.len() {
+            buf.push(self.data[self.pos])
+            self.pos += 1
+            n += 1
+        }
+        return n
+    }
+}
+
+// A reader of `data`.
+pub fn bytesReader(data sink Vec[byte]) BytesReader {
+    return BytesReader{data: data}
+}
+
+// A reader of the bytes of `s`.
+pub fn textReader(s str) BytesReader {
+    return BytesReader{data: s.bytes().toVec()}
+}
+
+// Collects what is written to it.
+pub struct Buffer {
+    pub data Vec[byte] = []
+
+    // Appends `data`; never fails.
+    pub fn write(self inout, data []byte) ! Error {
+        for b in data {
+            self.data.push(b)
+        }
+    }
+
+    // What was written, as a string.
+    pub fn text(self) String {
+        return String(self.data.clone())
+    }
+}

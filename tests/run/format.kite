@@ -1,0 +1,24 @@
+// fmt.format and fmt.printf: placeholders checked at compile time.
+use fmt
+
+struct P {
+    x int
+    y int
+}
+
+fn main() {
+    let name = "kite"
+    println(fmt.format("hello, {}! {} + {} = {}", name, 1, 2, 1 + 2))
+    println(fmt.format("[{:6}] [{:<6}] [{:>6}] [{:^6}] [{:*^7}]", 42, 42, "ab", "ab", "é"))
+    println(fmt.format("[{:08}] [{:08}] [{:+>5}]", 42, -42, 7))
+    println(fmt.format("{:.2} {:.0} {:8.3} {:08.2}", 3.14159, 2.5, -1.5, -2.25))
+    println(fmt.format("{:x} {:X} {:o} {:b} {:x} {:08b}", 255, 255, 8, 5, -255, u8(5)))
+    println(fmt.format("{{literal}} {} {{{}}}", P{x: 1, y: 2}, [1, 2]))
+    let nothing ?int = none
+    println(fmt.format("{}|{}|{}", nothing, some(3), "a\\nb"))
+    let u u64 = 18446744073709551615
+    println(fmt.format("{} {:x}", u, u))
+    fmt.printf("no newline: {}", true)
+    fmt.printf("\n")
+    println(fmt.format("no placeholders"))
+}

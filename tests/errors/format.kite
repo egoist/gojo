@@ -1,0 +1,21 @@
+use fmt
+
+fn main() {
+    let t = "{}"
+    println(fmt.format("{} and {}", 1))
+    // error: the template has 2 placeholders, but 1 value is given
+    println(fmt.format("{:x}", 1.5))
+    // error: `{:x}` formats integers, not `f64`
+    println(fmt.format("{:.2}", 3))
+    // error: a precision (`{:.N}`) is for floats, not `int`
+    println(fmt.format("{:08}", "s"))
+    // error: zero padding (`{:0N}`) is for numbers, not `str`
+    println(fmt.format("{name}", 1))
+    // error: placeholders are `{}` or `{:spec}`, without names or positions
+    println(fmt.format("{", 1))
+    // error: unclosed `{` in the template
+    println(fmt.format(t, 1))
+    // error: the template must be a string literal
+    println(fmt.format("{:q}", 1))
+    // error: is not a valid placeholder
+}

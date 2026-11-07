@@ -1,0 +1,98 @@
+// Files, directories, errors, the environment and processes.
+use io, os
+
+fn work(dir str) ! io.Error {
+    let a = os.joinPath(dir, "a.txt")
+    try os.writeText(a, "one\ntwo\n")
+    println(try os.readText(a))
+
+    // streams, through io.Reader / io.Writer
+    var f = try os.append(a)
+    try f.writeText("three\n")
+    drop(f)
+    var src = try os.open(a)
+    var dst = try os.create(os.joinPath(dir, "b.txt"))
+    let n = try io.copy(&dst, &src)
+    drop(dst)
+    println("copied", n, "bytes:", try os.readText(os.joinPath(dir, "b.txt")))
+
+    let info = try os.stat(a)
+    println("size", info.size, "file", info.isFile(), "dir", info.isDir(), "recent", info.modified > 0)
+
+    try os.mkdirAll(os.joinPath(dir, "x/y/z"))
+    try os.mkdirAll(os.joinPath(dir, "x/y"))
+    try os.writeText(os.joinPath(dir, "x/y/z/deep.txt"), "deep")
+    try os.rename(os.joinPath(dir, "b.txt"), os.joinPath(dir, "c.txt"))
+    println(try os.readDir(dir))
+    println(os.exists(os.joinPath(dir, "b.txt")), os.exists(os.joinPath(dir, "c.txt")))
+
+    // errors keep their kind
+    let missing = os.readText(os.joinPath(dir, "nope")) catch e {
+        println("missing:", e.isNotFound(), e.kind == io.ErrorKind.NotFound)
+        "".toString()
+    }
+    println(missing.len())
+    let notEmpty = os.remove(os.joinPath(dir, "x")) catch e {
+        println("not empty:", e.kind == .DirectoryNotEmpty)
+    }
+    _ = notEmpty
+    try os.removeAll(os.joinPath(dir, "x"))
+    println(try os.readDir(dir))
+
+    // in-memory readers and writers
+    var r = io.textReader("hello, reader")
+    var buf = io.Buffer{}
+    _ = try io.copy(&buf, &r)
+    println(buf.text())
+    return
+}
+
+fn main() {
+    let dir = os.joinPath(os.tempDir(), "kite-files-test")
+    _ = os.removeAll(dir)
+    os.mkdir(dir) catch e {
+        println("mkdir failed:", e.message())
+    }
+    work(dir) catch e {
+        println("failed:", e.message())
+    }
+    _ = os.removeAll(dir)
+    println(os.exists(dir))
+
+    println(os.dirName("a/b/c.txt"), os.dirName("c.txt"), os.dirName("/c"), os.baseName("a/b/c.txt"), os.baseName("a/b/"))
+
+    // the environment
+    os.setenv("KITE_TEST_VAR", "42") catch e { println(e.message()) }
+    println(os.getenv("KITE_TEST_VAR") ?? "unset")
+    os.unsetenv("KITE_TEST_VAR") catch e { println(e.message()) }
+    println(os.getenv("KITE_TEST_VAR") ?? "unset")
+
+    // processes
+    let r = os.run("echo", ["hi", "there"]) catch e {
+        println("run failed:", e.message())
+        return
+    }
+    print(r.stdout)
+    println(r.ok(), r.stderr.len())
+    let s = os.run("sh", ["-c", "echo out; echo err >&2; exit 3"]) catch e {
+        println("run failed:", e.message())
+        return
+    }
+    println(s.status, s.stdout.trim(), s.stderr.trim())
+    let w = os.runWithInput("wc", ["-l"], "a\nb\nc\n") catch e {
+        println("run failed:", e.message())
+        return
+    }
+    println(w.stdout.trim())
+    let big = "x".repeat(300000)
+    let cat = os.runWithInput("cat", [], big) catch e {
+        println("run failed:", e.message())
+        return
+    }
+    println("cat round trip", cat.stdout.len() == big.len())
+    let gone = os.run("no-such-program-kite", []) catch e {
+        println("not found:", e.isNotFound())
+        return
+    }
+    println("unexpected", gone.status)
+}

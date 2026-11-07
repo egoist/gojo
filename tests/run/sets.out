@@ -1,0 +1,6 @@
+true true false 2
+true false ["b", "a"]
+2
+[1, 2, 3, 4, 5] [3, 4] [1, 2]
+true false ["b"] false
+true

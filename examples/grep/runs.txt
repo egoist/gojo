@@ -1,0 +1,11 @@
+kite data/poem.txt
+-i kite data/poem.txt
+-n -i KITE data/poem.txt
+-c todo data/notes/todo.txt
+-v todo data/notes/todo.txt
+-r todo data
+-l -r the data
+-rc o data
+zebra data/poem.txt
+nope data/missing.txt
+-x data

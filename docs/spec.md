@@ -11,9 +11,9 @@
 
 - `fuzz/`：模糊测试找到过的、曾经让编译器崩溃的输入（已化简）。每个都必须得到诊断信息或者编译成功；
 - `unsafe/`：专门写来绕过安全检查的程序（悬垂视图、逃出锁和循环的视图、藏在 `defer` 和闭包里的 move、数据竞争……），每个都必须被拒绝。其中不少在写出来的时候能通过编译，在 AddressSanitizer 下确实会出错；
-- `cargo test` 里的 `nesting_limits`：各种嵌套到接近上限的程序必须能编译运行，远超上限的必须得到错误而不是崩溃（第 14 节）。
+- `cargo test` 里的 `nesting_limits`：各种嵌套到接近上限的程序必须能编译运行，远超上限的必须得到错误而不是崩溃（第 15 节）。
 
-模糊测试工具是 `kite-fuzz`（第 14 节）。
+模糊测试工具是 `kite-fuzz`（第 15 节）。
 
 ## 1. 词法
 
@@ -22,7 +22,7 @@
 - 关键字：`use extend pub fn struct enum interface type copy let var if else for in match return break continue defer errdefer go try catch with yield unsafe extern none true false inout sink where test const chan select`。`self`、`as`、`lib` 是上下文关键字。
 - 整数字面量：十进制、`0x`、`0b`、`0o`，可以用 `_` 分隔。浮点：`1.5`、`2.5e3`、`1e-3`。
 - 字符串 `"..."` 支持 `\n \t \\ \" \xNN \u{...}`；反引号字符串是原样的，不处理转义。字符字面量 `'é'` 是 `rune`（`i32` 码点），期望类型是 `u8` 时转换为字节。
-- 无类型的整数字面量默认为 `int`，浮点字面量默认为 `f64`；有期望类型时采用期望类型，超出范围是编译错误。
+- 无类型的整数字面量默认为 `int`，浮点字面量默认为 `f64`；有期望类型时采用期望类型，超出范围是编译错误。二元运算里，值只能是字面量的一边（`5`、`-1.5`、`(1 + 2)`、各分支都是字面量的 `if`/`match`、`{ 3 }`）采用另一边的类型：`(if c { 5 } else { 7 }) +% v` 里的字面量是 `v` 的类型。
 
 测试：`run/lexical`、`run/patterns`、`errors/int_mismatch`、`errors/literals`。
 
@@ -78,7 +78,7 @@
 | 类型 | 说明 |
 | --- | --- |
 | `bool`、`int`/`i8`…`i64`、`uint`/`u8`…`u64`、`f32`、`f64`、`byte`（= `u8`）、`rune`（= `i32`） | 标量，copy |
-| `String` / `str` | 拥有的 UTF-8 字符串 / 借用视图 |
+| `String` / `str` | 拥有的 UTF-8 字符串 / 借用视图（`String(bytes)` 和读文件不检查编码，无效的字节解码为 U+FFFD） |
 | `Vec[T]` / `[]T` | 拥有的动态数组 / 借用的切片视图 |
 | `[N]T` | 定长数组；`N` 是整数常量或整数类型参数 |
 | `Map[K, V]` | 哈希表，迭代顺序是插入顺序 |
@@ -125,7 +125,7 @@
 
 ### 4.5 接口
 
-- 结构化、隐式满足：类型有接口要求的全部方法（名字、参数、`self` 模式都一致）就满足接口。
+- 结构化、隐式满足：类型有接口要求的全部方法（名字、参数、`self` 模式都一致）就满足接口。例外：接口要求 `self inout` 时，只读的 `self` 方法也满足（能借用写的地方一定能借用读），所以 `os.File` 和 `net.Conn` 的只读 `read` 满足 `io.Reader`。
 - 借用接口参数（`r Reader`、`r inout Reader`）是数据指针 + 方法表，不分配内存。
 - 接口值（变量、字段、集合元素）是堆上的独占盒子 + 方法表，释放时释放内部的值。接口值永远不为空，可空写 `?Reader`。
 - `match r { f File => ..., _ => ... }` 按具体类型分支。
@@ -133,7 +133,7 @@
 - **类型集**：`interface Num { ~int | ~f64 }`。`~T` 还接受底层类型是 `T` 的新类型。含类型集的接口只能当约束，不能作为值的类型。
 - `error` 是内置接口，只有 `fn message(self) String`。
 
-测试：`run/interfaces`、`run/generics`、`run/constraints`、`errors/constraints`、`errors/rules`。
+测试：`run/interfaces`、`run/iface_modes`、`run/generics`、`run/constraints`、`errors/constraints`、`errors/rules`。
 
 ### 4.6 能力
 
@@ -270,6 +270,8 @@
 - `e catch err { 块 }`：就地处理，块的值是整个表达式的值。
 - `match r { ok(v) => ..., err(.Kind(x)) => ... }`。
 - `x.unwrap()` 在出错时 panic。
+- 返回 `?T ! E` 的函数里，`return none` 是成功的 `none`（包成 ok）。`.Variant` 简写的期望类型是 `E ! Err` 或 `?E` 时取 `E`。
+- **错误类型**：每个模块用自己的具体错误类型，它们都满足内置接口 `error`（`fn message(self) String`），所以写 `! error` 的函数可以 `try` 任何模块的错误。操作系统、文件、进程和网络的错误统一是 `io.Error`：`kind`（`io.ErrorKind`：`NotFound`、`PermissionDenied`、`AlreadyExists`、`Cancelled` 等，与平台无关）、`message()`、`code`（系统错误号）；`os.Error` 和 `net.Error` 是它的别名。其他模块的错误带各自的信息，比如 `json.Error` 的行列号、`time.ParseError`。
 
 **panic** 表示程序 bug。panic 打印消息和源码位置（指向用户代码，而不是标准库），以退出码 2 终止整个进程，不展开栈，不执行 defer。没有 `recover`。
 
@@ -327,9 +329,9 @@
 
 - `net.listen("host:port")`（`":0"` 选一个空闲端口）返回 `Listener`；`accept()` 返回 `Conn`；`net.dial(addr)` 连接。
 - `Conn`：`read(&buf, max)` 追加最多 `max` 字节到 `buf`，返回读到的字节数，0 表示对方已关闭；`write(data)`、`writeText(s)` 写完全部数据；`readAll()` 读到对方关闭；`closeWrite()` 关闭写方向。`Listener` 和 `Conn` 离开作用域时关闭。
-- 错误是 `net.Error` 值（`message()`、`isCancelled()`）。
+- 错误是 `io.Error`（`net.Error` 是别名）；被取消的调用 `isCancelled()` 为真。`Conn` 满足 `io.Reader` 和 `io.Writer`。
 
-测试：`run/net`、`examples/http`。
+测试：`run/net`、`run/http`、`examples/http`。
 
 ## 11. unsafe 与 FFI
 
@@ -341,16 +343,40 @@
 
 测试：`run/ffi`、`run/unsafe_decls`、`run/ffi_block`、`errors/unsafe_extern`、`errors/ffi_types`、`errors/send_ptr`。
 
-## 12. 测试块
+## 12. 标准库
+
+除了 prelude，模块都要 `use`。标准库模块之间可以互相导入，编译器按依赖顺序加载。
+
+| 模块 | 内容 |
+| --- | --- |
+| prelude | `print`/`println`（参数之间加空格）、`assert`、`panic`、`drop`、`swap`、`replace`、`take`、`min`/`max`；`?T`、`T ! E`、字符串、切片、`Vec`、`Map` 的方法；`Set[T]`（插入顺序，`setOf`、`union`/`intersection`/`difference`）；`Arena[T]` |
+| `fmt` | `sprint`；`format(template, args...)` 和 `printf`：`{}`、`{:8}`、`{:<8}` `{:>8}` `{:^8}`、`{:*^8}`（填充字符）、`{:08}`、`{:.2}`、`{:x}` `{:X}` `{:o}` `{:b}`、`{{` `}}`。模板必须是字符串字面量，占位符的个数和每个格式与参数类型的匹配在编译时检查。数字默认右对齐，其他左对齐 |
+| `io` | `Error`、`ErrorKind`、`fromCode`、`newError`；接口 `Reader`（`read(self inout, buf inout Vec[byte], max int) int ! Error`，0 表示结束）和 `Writer`（`write(self inout, data []byte) ! Error`）；`readAll`、`readText`、`copy`、`writeText`；内存里的 `BytesReader`（`textReader`、`bytesReader`）和 `Buffer` |
+| `bufio` | `reader(r)`：`readLine()`（去掉 `\n` / `\r\n`，结束时 `none`）、`readUntil(byte)`、`readByte()`、`readAll()`，本身也是 `io.Reader`；`writer(w)`：`write`、`writeText`、`flush`，离开作用域时自动 flush（错误会丢失，需要时显式 `flush`） |
+| `os` | `args`、`exit`；`File`（`open`、`create`、`append`、`stdin`/`stdout`/`stderr`；`read`、`write`、`writeText`、`readAll`、`readText`、`flush`；离开作用域时关闭；满足 `io.Reader`/`io.Writer`）；`readFile`、`readText`、`writeFile`、`writeText`；`stat`、`lstat`（`Info`：`kind`、`size`、`modified`、`mode`）、`exists`、`readDir`（排序后的名字）、`mkdir`、`mkdirAll`、`remove`、`removeAll`（不跟随符号链接）、`rename`、`cwd`、`chdir`、`tempDir`、`joinPath`、`dirName`、`baseName`；`getenv`、`setenv`、`unsetenv`；`run(prog, args)`、`runWithInput`（捕获输出，返回 `Output{status, stdout, stderr}`；`status` 是退出码或 128 + 信号）、`call`（共用本进程的标准流）。文件和进程操作期间线程让出 CPU，其他 goroutine 照常运行；写标准输出和 `print` 共用一个缓冲，顺序一致 |
+| `time` | 单调时钟 `now`、`since`、`sleep`；墙上时间 `unixNanos`、`unix`；`Date`（`year`…`nanosecond`、`offset`；`unixNanos()`、`weekday()`、`yearDay()`、`iso()`（RFC 3339）、`format("%Y-%m-%d %H:%M:%S")` 等 strftime 风格的指令）；`utc`、`local`、`at(ns, offset)`、`date(...)`、`parseIso`（`! ParseError`）；`formatDuration`（`1.5s`、`250ms`、`2h5m0s`）；`dayName`、`monthName`。纳秒放在 `int` 里，能表示 1970 年前后约 292 年 |
+| `json` | `Value`（`Null`、`Bool`、`Int`、`Num`、`Str`、`Arr`、`Obj`；对象保持键的插入顺序，放得下 `int` 的整数保持精确）；`parse(text) Value ! json.Error`（带行列号，嵌套最多 `maxDepth` = 500 层）；`get(key)`、`at(i)` 投影，`str()`、`int()`、`num()`、`boolean()`、`isNull()`、`isObject()`、`isArray()`、`len()`、`keys()`、`set`、`push`；`encode()`、`pretty()`；构造函数 `object()`、`array()`、`string`、`integer`、`number`、`boolean`、`null`；`quoted(s)`。还没有结构体和 JSON 之间的自动转换 |
+| `net` | TCP，见 10.5 |
+| `http` | HTTP/1.1 服务端和客户端，只支持明文 HTTP。`Handler` 接口（`fn serve(self, req Request) Response`）；`serve(ln, h, Options{deadline, maxBody})`、`serveCounting`（附带 `Stats`）：每个连接是服务器任务组里的一个任务，每个请求有期限（到期返回 504），客户端断开就取消请求，取消 `serve` 所在的任务会取消在途的请求。`Request`：`method`、`path`、`rawQuery`、`headers`、`body`，`header(name)`（不区分大小写）、`param(name)`（解码后的查询参数）、`segments()`、`text()`；请求体支持 `Content-Length` 和 chunked，超过 `maxBody` 返回 413，头部超过 64 KB 返回 431。`Response`：`text(status, s)`、`json(status, s)`、`setHeader`。客户端：`get`、`post`、`request(method, url, headers, body)`。`encode`/`decode` 做百分号编码。目前每个连接只处理一个请求（`Connection: close`） |
+| `task`、`strings`、`math` | 见第 10 节；`strings.Builder`；数学函数 |
+
+每个模块的完整 API 见 [`docs/std`](std/README.md)（由 `kite doc` 生成，第 17 节）。
+
+示例：[`examples/todo`](../examples/todo)（带 JSON API 的服务，数据存成 JSON 文件）和 [`examples/grep`](../examples/grep)（命令行工具，`runs.txt` 里的命令行由测试逐条运行、比对输出和退出码），都只用标准库，没有 `unsafe`。
+
+测试：`run/files`、`run/buffered`、`run/format`、`run/dates`、`run/json`、`run/http`、`run/sets`、`run/iface_modes`、`errors/format`、`examples/todo`、`examples/grep`、`examples/http`。
+
+## 13. 测试块
 
 - `test "name" { ... }` 写在任何文件里，`kite test` 运行它们，`kite build`/`run` 忽略它们。
 - 每个测试在单独的进程里运行：一个测试 panic 只让这个测试失败。有失败时退出码是 1。
 
 测试：`testblocks/blocks`。
 
-## 13. 运行模型
+## 14. 运行模型
 
-- 编译器生成 C，用 `cc` 或 `zig cc` 编译。debug 与 release（`-O2`）的唯一区别是优化级别：溢出检查、下标检查都保留。
+- 编译器生成 C，用 `cc` 或 `zig cc` 编译。debug 与 release（`-O2`）的区别是优化级别和调试信息：溢出检查、下标检查都保留。
+- debug 构建带调试信息（`-g`），生成的 C 用 `#line` 指向 Kite 源码的行，所以 lldb/gdb 能按 `main.kite:12` 设断点，调用栈和 sanitizer 报告显示 Kite 的行。macOS 上调试信息在二进制旁边的 `.dSYM` 里，`kite build -o prog` 一起写出 `prog.dSYM`。`kite emit-c` 和 `--keep-c` 输出不带 `#line` 的 C，便于调试编译器本身。
 - 泛型单态化；IR 节点数不超过 60 的函数带 `inline` 提示。
 - `Box`、`rc`/`arc`、接口盒子用按大小分级的线程本地空闲链表分配；`Vec`/`String` 缓冲区用 `malloc`。
 - goroutine 是 M:N 调度的有栈协程，见 10.4。
@@ -359,7 +385,7 @@
 - Linux 目标用 `-fstack-clash-protection` 编译：大于保护页的栈帧（比如很大的数组局部变量）也会逐页触碰，所以栈溢出总是落在保护页上并 panic，不会越过它写到别的内存。Darwin 的编译器默认就这样做。
 - C 编译器以 64 MB 的栈限制运行（clang 还会加 `-fbracket-depth`），这样嵌套到上限的程序生成的 C 也能编译。
 
-## 14. 限制与模糊测试
+## 15. 限制与模糊测试
 
 **限制**（超出时是编译错误，不会让编译器崩溃）：
 
@@ -374,6 +400,27 @@
 - `kite-fuzz diff`：生成随机的、类型正确、一定终止、结果确定的程序，分别用 debug、release 和两种 sanitizer 构建运行，四者的输出和结束方式必须完全一致。程序里还有生成器自己按 Kite 语义算好结果的整数表达式（回绕运算、移位、转换、除法），程序检查算出来的值是否一致：四种构建都一样错的问题（字面量类型、转换、生成的 C 里的整数提升）也能发现。编译器拒绝生成的程序时也记录下来（生成器的 bug，或者编译器的误报）。
 - `kite-fuzz borrow`：生成一些小程序，对几个拥有值和它们的视图做随机操作（创建、重新赋值、修改和移动拥有者、`defer`、嵌套块、循环、闭包、锁和 `Map` 投影），不保证合法。大多数会被拒绝；被接受的每一个都在 AddressSanitizer 下运行，报错就说明借用检查器放过了不安全的程序。
 - `kite-fuzz reduce <file>`：按词法单元和行删减输入，保持同样的失败特征，得到最小的复现。
+- `kite-fuzz fmt [N]`：对生成的程序、语料和变异程序运行格式化器。每个能解析的输入格式化后词法单元必须不变、仍能解析、类型检查结果不变、再格式化一次不变，而且与输入原来的缩进和行尾空格无关。
 - `kite-fuzz msgs N`：统计 N 个变异程序最常见的第一条错误信息并给出例子，用来审查用户看到的报错。
 
 找到的问题放在 `fuzz-out/findings/`；化简后的回归用例放进 `tests/fuzz/`。
+
+## 16. 格式化
+
+`kite fmt [--check] [路径...]` 就地格式化 `.kite` 文件（目录递归，跳过隐藏目录）；`--check` 只列出需要格式化的文件，有则退出码为 1。只格式化能解析的文件：有语法错误的文件报错并保持原样。规则：
+
+- 缩进 4 个空格，由括号嵌套决定：一行里打开的括号（不论几个）使下一行多缩进一层；以二元运算符结尾的行，下一行再多缩进一层。
+- 保留原来的分行：不合并、不拆分行。连续空行压缩成一行，文件开头和块首尾的空行删除，行尾空格删除，文件以一个换行结束。
+- 二元运算符、`=`、`=>`、`,` 和 `:` 之后各一个空格；`..`、`..=`、`.`、一元运算符、调用和下标的括号两边没有空格。块的花括号内侧有空格（`if c { x }`），结构体和映射字面量的没有（`P{x: 1}`）。
+- 行尾注释前一个空格。注释原样保留，只调整所在行的缩进；多行块注释的内部不变。
+- 只有解析器才能区分的地方（`*` 和 `-` 是一元还是二元，`[` 是下标还是类型参数）按源码里有没有空格决定。
+- 格式化的结果与原文件的词法单元完全相同（否则报内部错误，不写文件）。仓库里的 Kite 文件都已格式化（`tests/fuzz` 里的回归用例除外），由测试检查。
+
+## 17. 文档
+
+`kite doc` 从源码生成 Markdown 格式的 API 文档：`kite doc` 是标准库的索引，`kite doc os` 是一个标准库模块，`kite doc 路径` 是一个包（目录）或文件，`kite doc --out 目录` 把整个标准库写到目录里（仓库里的 [`docs/std`](std/README.md) 就是这样生成的，测试检查它是最新的）。
+
+- 只列出 `pub` 的声明：常量、类型（`pub` 字段和变体，私有字段只注明有）、函数，以及类型的 `pub` 方法；给别处的类型补充的方法（`extend str`）单独列出。
+- 声明的文档是紧挨在它上面的注释行（中间没有空行）。紧挨着上一个声明、自己没有注释的函数或常量和上一个共用一条（`floor`、`ceil`、`round` 共用一段说明）。
+- 文件开头的注释块，后面是空行或 `use` 时，是包的说明。
+- 注释里缩进两个以上空格的行是代码示例。

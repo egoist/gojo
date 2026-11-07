@@ -1,0 +1,4 @@
+some(42) some(-7) some(3) none none none
+none none none
+some(2.5) some(-1000) none
+[1, 2]

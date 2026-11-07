@@ -1,0 +1,10 @@
+// Number parsing takes the whole string, or nothing.
+fn main() {
+    println("42".parseInt(), "-7".parseInt(), "+3".parseInt(), " 1".parseInt(), "1 ".parseInt(), "".parseInt())
+    println("12\x00junk".parseInt(), "1.5\x00".parseFloat(), "9223372036854775808".parseInt())
+    println("2.5".parseFloat(), "-1e3".parseFloat(), "x".parseFloat())
+    var v = [1, 2, 3, 4]
+    v.truncate(9)
+    v.truncate(2)
+    println(v)
+}

@@ -18,6 +18,10 @@ use std::rc::Rc;
 /// values); code generation also bounds their total size in bytes.
 pub const MAX_ARRAY_LEN: u64 = u32::MAX as u64;
 
+/// How deeply capability checks follow types into their fields: only types
+/// whose arguments grow at each level go deeper.
+const MAX_CAP_DEPTH: usize = 200;
+
 pub struct Unit {
     pub name: String,
     pub path: String,
@@ -490,6 +494,32 @@ impl Checker {
         }
     }
 
+    /// A method's receiver `Box[T]` names fresh type parameters; they have the
+    /// bounds the type declared for its own (`struct Box[T Reader]`).
+    fn inherit_bounds(&mut self, recv: &Ty, fresh: &[TParamId]) {
+        let Ty::Adt(d, args) = recv else { return };
+        let d = *d;
+        let s = self.prog.def_subst(d, args);
+        let own = self.prog.def(d).tparams.clone();
+        for (i, a) in args.iter().enumerate() {
+            let Ty::Param(p) = a else { continue };
+            if !fresh.contains(p) {
+                continue;
+            }
+            let Some(&dp) = own.get(i) else { continue };
+            let bounds: Vec<Bound> = self.prog.tparam(dp).bounds.iter().map(|b| match b {
+                Bound::Cap(c) => Bound::Cap(*c),
+                Bound::Iface(id, targs) => Bound::Iface(*id, targs.iter().map(|t| t.subst(&s)).collect()),
+            }).collect();
+            let is_int = self.prog.tparam(dp).is_int;
+            let info = &mut self.prog.tparams[*p as usize];
+            info.is_int |= is_int;
+            for b in bounds {
+                info.bounds.push(b);
+            }
+        }
+    }
+
     pub fn new_tparam(&mut self, name: &str, is_int: bool) -> TParamId {
         self.prog.tparams.push(TParamInfo { name: name.to_string(), bounds: vec![], is_int });
         (self.prog.tparams.len() - 1) as TParamId
@@ -516,6 +546,7 @@ impl Checker {
                 tparams.push(id);
             }
             let ty = self.resolve_type(o, &env);
+            self.inherit_bounds(&ty, &tparams);
             recv_key = TyKey::of(&ty);
             if let Some(TyKey::Adt(d)) = recv_key {
                 if self.prog.def(d).pkg != pkg {
@@ -535,6 +566,7 @@ impl Checker {
                 tparams.push(id);
             }
             let ty = self.resolve_type(&r.ty, &env);
+            self.inherit_bounds(&ty, &tparams);
             recv_key = TyKey::of(&ty);
             match recv_key {
                 Some(TyKey::Adt(d)) => {
@@ -1300,12 +1332,20 @@ impl Checker {
                 if self.prog.def(d).unsafe_send {
                     return true;
                 }
-                if let Some(&v) = self.send_memo.get(&d) {
-                    if args.is_empty() {
+                if args.is_empty() {
+                    if let Some(&v) = self.send_memo.get(&d) {
                         return v;
                     }
                 }
-                self.send_memo.insert(d, true); // assume for recursion
+                // A type already being checked (it contains itself) counts as
+                // `send` while its other fields decide. Types whose arguments grow
+                // at every level never end and are rejected when instantiated, so
+                // giving up on them here is safe.
+                let key = (d, args.to_vec(), "send");
+                if self.cap_stack.borrow().contains(&key) || self.cap_stack.borrow().len() > MAX_CAP_DEPTH {
+                    return true;
+                }
+                self.cap_stack.borrow_mut().push(key);
                 let def = self.prog.def(d).clone();
                 let s = self.prog.def_subst(d, args);
                 let tys: Vec<Ty> = match &def.kind {
@@ -1314,10 +1354,10 @@ impl Checker {
                     _ => vec![],
                 };
                 let r = tys.iter().all(|t| self.is_send(t));
+                self.cap_stack.borrow_mut().pop();
+                // valid under the assumption above (the greatest fixed point)
                 if args.is_empty() {
                     self.send_memo.insert(d, r);
-                } else {
-                    self.send_memo.remove(&d);
                 }
                 r
             }
@@ -1331,7 +1371,8 @@ impl Checker {
     /// being checked counts as satisfying it, so recursive types terminate.
     fn all_fields(&self, d: DefId, args: &[Ty], cap: &'static str, f: &dyn Fn(&Checker, &Ty) -> bool) -> bool {
         let key = (d, args.to_vec(), cap);
-        if self.cap_stack.borrow().contains(&key) {
+        // (see `is_send` for the depth limit)
+        if self.cap_stack.borrow().contains(&key) || self.cap_stack.borrow().len() > MAX_CAP_DEPTH {
             return true;
         }
         self.cap_stack.borrow_mut().push(key);
@@ -1421,8 +1462,10 @@ impl Checker {
                 Mode::Inout => "inout",
                 Mode::Sink => "sink",
             };
-            if recv_mode != m.recv_mode {
-                return Err(format!("method `{}` of `{}` has a {} receiver, but `{}` requires {}", m.name, self.prog.show(t), mode_name(recv_mode), def.name, mode_name(m.recv_mode)));
+            let article = |m: Mode| if m == Mode::Inout { "an" } else { "a" };
+            // a method that only reads its receiver can stand in for one that may change it
+            if recv_mode != m.recv_mode && !(recv_mode == Mode::Borrow && m.recv_mode == Mode::Inout) {
+                return Err(format!("method `{}` of `{}` has {} {} receiver, but `{}` requires {}", m.name, self.prog.show(t), article(recv_mode), mode_name(recv_mode), def.name, mode_name(m.recv_mode)));
             }
             // substitute receiver params from the concrete type
             let mut rs = HashMap::new();

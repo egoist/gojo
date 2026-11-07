@@ -24,4 +24,4 @@ fn main() {
         b.add(x)
     }
 }
-    // error: cannot modify `b` while iterating over it
+// error: cannot modify `b` while iterating over it

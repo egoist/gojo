@@ -1,0 +1,69 @@
+// http: request parsing, limits and the client, against a local server.
+use fmt, http, io, net, task
+
+struct Echo {
+    fn serve(self, req http.Request) http.Response {
+        var r = http.text(200, fmt.format("{} {} q={} name={} body={} agent={}", req.method, req.path, req.rawQuery, req.param("name") ?? "-".toString(), req.body.len(), req.header("USER-AGENT") ?? "-".toString()))
+        r.setHeader("X-Segments", fmt.sprint(req.segments()))
+        if let v = req.param("set") {
+            // user input in a header: line breaks can't add headers
+            r.setHeader("X-Echo", v)
+        }
+        return r
+    }
+}
+
+// sends raw bytes and returns the status line
+fn raw(port int, text str) String {
+    let c = net.dial(fmt.format("127.0.0.1:{}", port)) catch e {
+        return e.message()
+    }
+    c.writeText(text) catch e {
+        return e.message()
+    }
+    let reply = String(c.readAll() catch _e { Vec[byte]{} })
+    return reply.split("\r\n")[0].clone()
+}
+
+fn main() ! io.Error {
+    let ln = try net.listen("127.0.0.1:0")
+    let port = ln.port()
+    let base = fmt.format("http://127.0.0.1:{}", port)
+    let stop = chan[bool]()
+    _ = task.group((g) => {
+        g.go(() => {
+            _ = task.group((sg) => {
+                sg.go(() => http.serve(ln, Echo{}, http.Options{maxBody: 1000}))
+                _ = <-stop
+                sg.cancel()
+            })
+        })
+        let r = http.get(base + "/a/b%20c?name=x+y&z") catch e { http.text(0, e.message()) }
+        println(r.status, r.text(), r.header("x-segments") ?? "")
+        let p = http.post(base + "/up", "application/octet-stream", "x".repeat(1000).bytes()) catch e { http.text(0, e.message()) }
+        println(p.status, p.text())
+        let big = http.post(base + "/up", "text/plain", "x".repeat(1001).bytes()) catch e { http.text(0, e.message()) }
+        println(big.status)
+        println(raw(port, "POST /c HTTP/1.1\r\nTransfer-Encoding: chunked\r\nUser-Agent: test\r\n\r\n5\r\nhello\r\n6;ext=1\r\n world\r\n0\r\n\r\n"))
+        println(raw(port, "GET / HTTP/1.1\r\nTransfer-Encoding: gzip\r\n\r\n"))
+        println(raw(port, "NONSENSE\r\n\r\n"))
+        println(raw(port, "GET / HTTP/1.1\r\nX: " + "y".repeat(70000) + "\r\n\r\n"))
+        println(raw(port, "POST / HTTP/1.1\r\nContent-Length: nope\r\n\r\n"))
+        let tls = http.get("https://example.com/") catch er { http.text(0, er.message()) }
+        println(tls.text())
+        let e2 = http.get(fmt.format("http://127.0.0.1:{}", port)) catch er { http.text(0, er.message()) }
+        println(e2.status, e2.text())
+        let split = http.get(base + "/s?set=a%0D%0AX-Evil:%201") catch e { http.text(0, e.message()) }
+        println(split.status, split.header("x-echo") ?? "-", split.header("x-evil") ?? "no x-evil")
+        let inject = [http.Header{name: "X-A".toString(), value: "1\r\nX-B: 2".toString()}]
+        let hi = http.request("GET", base + "/", inject, "".bytes()) catch e { http.text(0, e.message()) }
+        println(hi.text())
+        let bm = http.request("GET /x HTTP/1.1\r\n", base + "/", Vec[http.Header]{}, "".bytes()) catch e { http.text(0, e.message()) }
+        println(bm.text())
+        let sp = http.get(base + "/a b") catch e { http.text(0, e.message()) }
+        println(sp.text().contains("spaces and control characters must be percent-encoded"))
+        stop <- true
+    })
+    println(http.encode("a/b c&d=é"), http.decode("%E2%82%AC+%41") ?? "?", http.decode("%zz") ?? "malformed", http.decode("%4") ?? "malformed")
+    return
+}

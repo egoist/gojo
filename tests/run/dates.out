@@ -1,0 +1,16 @@
+1970-01-01T00:00:00Z 4 Thursday
+2026-11-06T14:41:31Z 5 310
+Friday 6 November 2026, 14:41:31 (Fri Nov 310) +0000 Z %
+1793976091000000000 true
+2026-11-06T22:41:31.123+08:00 2026-11-06 22:41:31.123 +0800
+60 366 4
+1969-12-31T23:59:59.999999999Z 1969-01-01T00:00:00Z
+round trips true
+ok 2026-11-06T14:41:31Z 1793976091000000000
+ok 2026-11-06T14:41:31.5+08:00 1793947291500000000
+ok 1999-12-31T23:59:60.123456789-05:30 946704600123456789
+err cannot read `2026-11-06` as an RFC 3339 date: expected YYYY-MM-DDTHH:MM:SS
+err cannot read `2026-13-06T00:00:00Z` as an RFC 3339 date: a field is out of range
+err cannot read `2026-11-06T14:41:31+08` as an RFC 3339 date: expected `Z` or an offset like +08:00
+0ns  999ns  1.5µs  2.5ms  1.5s  1m1s  3h5m0s  -250ms  
+true true
