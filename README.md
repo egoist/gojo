@@ -6,7 +6,7 @@ Gojo is a systems programming language. It keeps Go's simplicity and compile spe
 
 This repository is a prototype compiler built from the [design notes](docs/design.md). The compiler is written in Rust (about 19,000 lines, no third-party dependencies). The C runtime is about 4,000 lines, and the Gojo standard library about 3,400 lines.
 
-```go
+```zig
 use std/os
 
 struct Config {
@@ -35,7 +35,7 @@ fn main() {
 
 There is no `package` declaration. A directory is a package, and the package name is the directory name. The entry package of `gojo run` holds the `main` function. Imports use `use`, and paths are not quoted:
 
-```go
+```zig
 use std/{fmt, os, time}        // standard library: all under std, several per line
 use ./geom                     // a package in this project: path relative to the current package directory
 use ../shared/util as u        // nested path, renamed with as
@@ -48,7 +48,7 @@ The start of the path tells you whether it is the standard library (`std/`) or a
 
 Methods are written together with their type. The receiver is an explicit `self`:
 
-```go
+```zig
 struct Counter {
     n int = 0
 

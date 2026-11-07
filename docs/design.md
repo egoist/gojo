@@ -26,7 +26,7 @@ Gojo (a code name; it may change) is a systems language that keeps Go's simplici
 
 The syntax starts from Go but does not copy it blindly. Types after names, braces on the same line and no semicolons are kept. The rule is: if a form is written the same as in Go, it must mean the same thing; if the meaning changes, the form changes too, so nobody falls into the trap of "looks the same, behaves the opposite".
 
-```go
+```zig
 use std/os
 
 struct Config {
@@ -72,7 +72,7 @@ fn main() {
 
 A directory is a package, the package name is the directory name, and files contain no package declaration. The entry package of `gojo run`/`gojo build` holds the `main` function (it does not need `pub`). Imports go at the top of the file:
 
-```go
+```zig
 use std/{fmt, os, time}        // standard library: all under std; one line can import several
 use ./geom                     // a package of this project: path relative to the current package's directory
 use ../shared/util as u        // nested path; as picks a different binding name
@@ -116,7 +116,7 @@ Every type states whether it owns its data, whether it can be empty and whether 
 
 **Enums** are true sum types, and variants can carry data. Without data they are plain enums and replace `iota`.
 
-```go
+```zig
 enum Shape {
     Circle(r f64)
     Rect(w f64, h f64)
@@ -165,7 +165,7 @@ A method's receiver is written as the first parameter `self` and has the same th
 
 Containers must be able to lend out their elements; otherwise every access would need a copy. A projection function lends a reference with `yield`. A lent reference (and a view such as `str` or `[]T`) is valid within the current statement. When bound with `let`, it stops holding the borrowed value **after its last use** in the block, so the original value can be modified again once the borrow ends.
 
-```go
+```zig
 extend Vec[T] {
     pub fn at(self, i int) yield &T
     pub fn atMut(self inout, i int) yield inout T
@@ -213,7 +213,7 @@ with e = counts.entry(word) {   // with binds a projection to a block
 
 Errors are still values, but the type system guarantees that they are handled. `T ! E` replaces `(T, error)`, and `try` replaces `if err != nil { return err }`.
 
-```go
+```zig
 enum LoadError {
     Io(os.Error)
     Syntax(line int, msg String)
@@ -250,7 +250,7 @@ match load(p) {                                      // handle case by case
 
 Interfaces keep Go's structural, implicit satisfaction: a type satisfies an interface as long as it has the methods, with no declaration needed. What changes: interface values are never empty, and owned and borrowed interface values are distinguished.
 
-```go
+```zig
 interface Reader {
     fn read(self inout, buf inout []byte) int ! io.Error
 }
@@ -284,7 +284,7 @@ match r {                           // replaces type assertions and type switche
 
 Methods are written inside the braces of the type declaration, and the receiver is the explicit first parameter `self`. A function without `self` is an associated function and is called through the type.
 
-```go
+```zig
 pub struct Stack[T any] {
     items Vec[T]
 
@@ -319,7 +319,7 @@ extend []String {                             // the standard library adds metho
 
 Generics fill the gaps Go users hit day to day: type parameters on methods, conditional methods, and the capability constraints that a language without GC requires. The type system itself is not made into a computation system. The default implementation is dictionary passing; besides the method table, the dictionary carries `size`, `align` and a `drop` function pointer.
 
-```go
+```zig
 pub struct Vec[T any] {
     ...
 
@@ -358,7 +358,7 @@ A user-defined type that implements `equal` and `hash` can be a map key, which G
 
 **Integer const generics** are for fixed-length arrays, matrices and SIMD. Only integer parameters are allowed, and no arithmetic happens at the type level. Array size determines memory layout, so this part is monomorphized per N.
 
-```go
+```zig
 struct Mat[R int, C int] { data [R][C]f32 }
 extend Mat[R, K] {
     fn mul[C int](self, b Mat[K, C]) Mat[R, C]   // mismatched dimensions are a compile error
@@ -372,7 +372,7 @@ extend Mat[R, K] {
 
 When both are provided, the cursor protocol is used.
 
-```go
+```zig
 extend Tree[T] {
     pub fn each(self, body fn(&T) Flow)
 }
@@ -389,7 +389,7 @@ Goroutines, channels and `select` are kept, and the scheduler is still M:N stack
 
 Stacks differ from Go: tasks borrow data on other goroutines' stacks, so stacks **cannot move**, and therefore cannot start at 2 KB and be copied wholesale when full, as Go does. Each goroutine reserves a fixed range of virtual addresses (2 MB by default, with a guard page), and only pages actually used take memory: a small suspended goroutine takes one page (4 KB on Linux, 16 KB on Apple Silicon). Blocking C calls need no special annotation: during an `extern` call, the thread gives its CPU slot to another thread. Long computations that don't block are preempted: generated code checks a global flag in loops and at the entry of recursive functions (one load, one branch), and when goroutines are waiting, a goroutine that has run for more than 10 ms yields the CPU. Across the 8 benchmarks, the geometric mean of cycle counts did not change, and no single benchmark got more than 5% slower (`bench/README.md`).
 
-```go
+```zig
 // structured concurrency: the block end waits for all child tasks; if any fails, the rest are cancelled
 fn fetchAll(urls []String) Vec[Page] ! http.Error {
     var pages = Vec[Page]{}
@@ -424,7 +424,7 @@ with s = stats.lock() { s.hits += 1 }   // the lock is released at block end; re
 - **Bare `go f(x)` is still kept** for background tasks that really must be detached from the caller. Its arguments and captures must be moved in and satisfy `send`. It belongs to no group and is never cancelled.
 - `select` keeps Go's semantics, and its arms are written like `match` arms:
 
-```go
+```zig
 select {
     let job = <-jobs => run(job)      // receive and bind: job is ?Job, none when the channel is closed
     <-done           => return        // receive only, no binding
@@ -439,7 +439,7 @@ select {
 
 Safe code has no null pointers, dangling pointers or data races; every operation that cannot guarantee this must be written in an `unsafe` block. The standard library implements `Vec`, `Map` and `arc` with it.
 
-```go
+```zig
 extern "C" lib "libz" {                       // dlopen at run time; no C toolchain needed at build time
     fn crc32(crc u64, buf *u8, len u32) u64
 }

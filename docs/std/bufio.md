@@ -2,7 +2,7 @@
 
 Buffered reading and writing on top of io.Reader / io.Writer.
 
-```gojo
+```zig
 var input = bufio.reader(os.stdin())
 for {
     let line = try input.readLine() ?? break
@@ -21,7 +21,7 @@ try out.flush()
 
 ### struct Reader
 
-```gojo
+```zig
 pub struct Reader[R io.Reader] {
     // and private fields
 }
@@ -31,7 +31,7 @@ Reads from `R` in large chunks, and line by line.
 
 #### Reader.readByte
 
-```gojo
+```zig
 pub fn readByte(self inout) ?byte ! io.Error
 ```
 
@@ -39,7 +39,7 @@ The next byte, or none at the end.
 
 #### Reader.readUntil
 
-```gojo
+```zig
 pub fn readUntil(self inout, delim byte) ?Vec[byte] ! io.Error
 ```
 
@@ -48,7 +48,7 @@ nothing is left.
 
 #### Reader.readLine
 
-```gojo
+```zig
 pub fn readLine(self inout) ?String ! io.Error
 ```
 
@@ -56,7 +56,7 @@ The next line without its "\n" (or "\r\n"), or none at the end.
 
 #### Reader.read
 
-```gojo
+```zig
 pub fn read(self inout, buf inout Vec[byte], max int) int ! io.Error
 ```
 
@@ -64,7 +64,7 @@ As an io.Reader: what is buffered first.
 
 #### Reader.readAll
 
-```gojo
+```zig
 pub fn readAll(self inout) Vec[byte] ! io.Error
 ```
 
@@ -72,7 +72,7 @@ Everything that is left.
 
 ### struct Writer
 
-```gojo
+```zig
 pub struct Writer[W io.Writer] {
     // and private fields
 }
@@ -84,7 +84,7 @@ see errors.
 
 #### Writer.write
 
-```gojo
+```zig
 pub fn write(self inout, data []byte) ! io.Error
 ```
 
@@ -92,7 +92,7 @@ Buffers `data` (large writes go straight through).
 
 #### Writer.writeText
 
-```gojo
+```zig
 pub fn writeText(self inout, s str) ! io.Error
 ```
 
@@ -100,7 +100,7 @@ Buffers the bytes of `s`.
 
 #### Writer.flush
 
-```gojo
+```zig
 pub fn flush(self inout) ! io.Error
 ```
 
@@ -110,7 +110,7 @@ Writes out everything buffered.
 
 ### reader
 
-```gojo
+```zig
 pub fn reader[R io.Reader](src sink R) Reader[R]
 ```
 
@@ -118,7 +118,7 @@ A buffered reader on `src` (which it owns).
 
 ### writer
 
-```gojo
+```zig
 pub fn writer[W io.Writer](dst sink W) Writer[W]
 ```
 

@@ -31,7 +31,7 @@ store = { path = "../store" }                    # a local package
 parse = { git = "https://github.com/bob/gojo-parse", tag = "v2.0.1" }
 ```
 
-```gojo
+```zig
 use std/{fmt, os}                  // the standard library
 use yaml, uuid                     // dependencies, by their names in gojo.toml
 use yaml/schema                    // a subpackage the dependency exports

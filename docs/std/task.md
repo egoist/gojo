@@ -2,7 +2,7 @@
 
 Structured concurrency.
 
-```gojo
+```zig
 try task.group((g) => {
     g.go(() => { ... })      // tasks may borrow data from outside the group
 })                           // waits for all tasks; returns the first error
@@ -22,7 +22,7 @@ in a cancelled task return early: a receive gives none, a send is dropped,
 
 ### struct Group
 
-```gojo
+```zig
 pub unsafe send copy struct Group {
     // and private fields
 }
@@ -33,7 +33,7 @@ handle never outlives the group: `task.group` waits for every task).
 
 #### Group.cancel
 
-```gojo
+```zig
 pub fn cancel(self)
 ```
 
@@ -41,7 +41,7 @@ Cancel every task in the group, and the group body itself.
 
 ### struct Cancelled
 
-```gojo
+```zig
 pub copy struct Cancelled {}
 ```
 
@@ -49,7 +49,7 @@ The error of an operation that stopped because its task was cancelled.
 
 #### Cancelled.message
 
-```gojo
+```zig
 pub fn message(self) String
 ```
 
@@ -57,7 +57,7 @@ pub fn message(self) String
 
 ### struct Stats
 
-```gojo
+```zig
 pub struct Stats {
     // goroutines alive, `main` included
     pub goroutines int
@@ -76,7 +76,7 @@ A snapshot of the scheduler, from `stats`.
 
 ### cancelled
 
-```gojo
+```zig
 pub fn cancelled() bool
 ```
 
@@ -84,7 +84,7 @@ Has the current task been cancelled?
 
 ### check
 
-```gojo
+```zig
 pub fn check() ! Cancelled
 ```
 
@@ -92,7 +92,7 @@ A checkpoint for long computations: `try task.check()`.
 
 ### yieldNow
 
-```gojo
+```zig
 pub fn yieldNow()
 ```
 
@@ -100,7 +100,7 @@ Let other goroutines run.
 
 ### stats
 
-```gojo
+```zig
 pub fn stats() Stats
 ```
 
@@ -108,7 +108,7 @@ How many goroutines and threads there are now.
 
 ### setMaxProcs
 
-```gojo
+```zig
 pub fn setMaxProcs(n int) int
 ```
 
@@ -116,7 +116,7 @@ Changes how many goroutines run Gojo code at the same time; returns the old valu
 
 ### timeout
 
-```gojo
+```zig
 pub fn timeout[T any](d int, body fn() T) ?T
 ```
 

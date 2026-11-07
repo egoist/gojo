@@ -2,7 +2,7 @@
 
 Files, directories, the environment and processes.
 
-```gojo
+```zig
 let text = try os.readText("notes.txt")
 for name in try os.readDir(".") {
     println(name)
@@ -19,7 +19,7 @@ print(r.stdout)
 
 ### type Error
 
-```gojo
+```zig
 pub type Error = io.Error
 ```
 
@@ -27,7 +27,7 @@ Errors here are io.Error (with an io.ErrorKind to match on).
 
 ### struct File
 
-```gojo
+```zig
 pub struct File {
     // and private fields
 }
@@ -37,7 +37,7 @@ An open file. It is closed when it goes out of scope.
 
 #### File.read
 
-```gojo
+```zig
 pub fn read(self, buf inout Vec[byte], max int) int ! Error
 ```
 
@@ -45,7 +45,7 @@ Appends at most `max` bytes to `buf`; returns how many, 0 at the end.
 
 #### File.write
 
-```gojo
+```zig
 pub fn write(self, data []byte) ! Error
 ```
 
@@ -53,7 +53,7 @@ Writes all of `data`.
 
 #### File.writeText
 
-```gojo
+```zig
 pub fn writeText(self, s str) ! Error
 ```
 
@@ -61,7 +61,7 @@ Writes the bytes of `s`.
 
 #### File.readAll
 
-```gojo
+```zig
 pub fn readAll(self) Vec[byte] ! Error
 ```
 
@@ -69,7 +69,7 @@ Reads to the end.
 
 #### File.readText
 
-```gojo
+```zig
 pub fn readText(self) String ! Error
 ```
 
@@ -77,7 +77,7 @@ Reads to the end, as a string.
 
 #### File.flush
 
-```gojo
+```zig
 pub fn flush(self)
 ```
 
@@ -85,7 +85,7 @@ Writes out what `print` and the standard streams have buffered.
 
 ### enum FileKind
 
-```gojo
+```zig
 pub copy enum FileKind { File, Directory, Symlink, Other }
 ```
 
@@ -93,7 +93,7 @@ What a path names. (`Other`: a device, socket or pipe.)
 
 ### struct Info
 
-```gojo
+```zig
 pub struct Info {
     pub kind FileKind
     pub size int
@@ -108,7 +108,7 @@ What `stat` reports about a file.
 
 #### Info.isDir
 
-```gojo
+```zig
 pub fn isDir(self) bool
 ```
 
@@ -116,7 +116,7 @@ Whether it is a directory.
 
 #### Info.isFile
 
-```gojo
+```zig
 pub fn isFile(self) bool
 ```
 
@@ -124,7 +124,7 @@ Whether it is a regular file.
 
 ### struct Output
 
-```gojo
+```zig
 pub struct Output {
     // the exit code, or 128 + the signal that ended it
     pub status int
@@ -137,7 +137,7 @@ What a finished process printed, and how it ended.
 
 #### Output.ok
 
-```gojo
+```zig
 pub fn ok(self) bool
 ```
 
@@ -147,7 +147,7 @@ Whether the process exited with status 0.
 
 ### args
 
-```gojo
+```zig
 pub fn args() Vec[String]
 ```
 
@@ -155,7 +155,7 @@ The command line: the program's name, then its arguments.
 
 ### exit
 
-```gojo
+```zig
 pub fn exit(code int) never
 ```
 
@@ -164,7 +164,7 @@ code does not run.
 
 ### open
 
-```gojo
+```zig
 pub fn open(path str) File ! Error
 ```
 
@@ -172,7 +172,7 @@ Opens a file for reading.
 
 ### create
 
-```gojo
+```zig
 pub fn create(path str) File ! Error
 ```
 
@@ -180,7 +180,7 @@ Creates a file for writing, or empties an existing one.
 
 ### append
 
-```gojo
+```zig
 pub fn append(path str) File ! Error
 ```
 
@@ -188,7 +188,7 @@ Opens a file for writing at its end, creating it if needed.
 
 ### stdin, stdout, stderr
 
-```gojo
+```zig
 pub fn stdin() File
 pub fn stdout() File
 pub fn stderr() File
@@ -198,7 +198,7 @@ The standard streams. They are not closed when the `File` is dropped.
 
 ### readFile
 
-```gojo
+```zig
 pub fn readFile(path str) Vec[byte] ! Error
 ```
 
@@ -206,7 +206,7 @@ The whole contents of a file.
 
 ### readText
 
-```gojo
+```zig
 pub fn readText(path str) String ! Error
 ```
 
@@ -215,7 +215,7 @@ UTF-8).
 
 ### writeFile
 
-```gojo
+```zig
 pub fn writeFile(path str, data []byte) ! Error
 ```
 
@@ -224,7 +224,7 @@ name and `rename` it into place for that.
 
 ### writeText
 
-```gojo
+```zig
 pub fn writeText(path str, text str) ! Error
 ```
 
@@ -232,7 +232,7 @@ Creates or replaces a file with the bytes of `text`.
 
 ### stat
 
-```gojo
+```zig
 pub fn stat(path str) Info ! Error
 ```
 
@@ -240,7 +240,7 @@ What `path` is; follows symbolic links.
 
 ### lstat
 
-```gojo
+```zig
 pub fn lstat(path str) Info ! Error
 ```
 
@@ -248,7 +248,7 @@ Like `stat`, but describes a symbolic link itself.
 
 ### exists
 
-```gojo
+```zig
 pub fn exists(path str) bool
 ```
 
@@ -257,7 +257,7 @@ file, just try it and handle the error: it may change in between.
 
 ### readDir
 
-```gojo
+```zig
 pub fn readDir(path str) Vec[String] ! Error
 ```
 
@@ -265,7 +265,7 @@ The names of the entries in a directory, sorted.
 
 ### mkdir
 
-```gojo
+```zig
 pub fn mkdir(path str) ! Error
 ```
 
@@ -273,7 +273,7 @@ Creates a directory; fails if it exists or its parent doesn't.
 
 ### mkdirAll
 
-```gojo
+```zig
 pub fn mkdirAll(path str) ! Error
 ```
 
@@ -281,7 +281,7 @@ Creates a directory and any missing parents; fine if it exists already.
 
 ### remove
 
-```gojo
+```zig
 pub fn remove(path str) ! Error
 ```
 
@@ -289,7 +289,7 @@ Removes a file or an empty directory.
 
 ### removeAll
 
-```gojo
+```zig
 pub fn removeAll(path str) ! Error
 ```
 
@@ -298,7 +298,7 @@ removed, not followed.
 
 ### rename
 
-```gojo
+```zig
 pub fn rename(from str, to str) ! Error
 ```
 
@@ -307,7 +307,7 @@ must be on the same file system.
 
 ### cwd
 
-```gojo
+```zig
 pub fn cwd() String ! Error
 ```
 
@@ -315,7 +315,7 @@ The working directory.
 
 ### chdir
 
-```gojo
+```zig
 pub fn chdir(path str) ! Error
 ```
 
@@ -323,7 +323,7 @@ Changes the working directory, for the whole process.
 
 ### tempDir
 
-```gojo
+```zig
 pub fn tempDir() String
 ```
 
@@ -331,7 +331,7 @@ The directory for temporary files ($TMPDIR, or /tmp).
 
 ### joinPath
 
-```gojo
+```zig
 pub fn joinPath(a str, b str) String
 ```
 
@@ -339,7 +339,7 @@ pub fn joinPath(a str, b str) String
 
 ### dirName
 
-```gojo
+```zig
 pub fn dirName(path str) String
 ```
 
@@ -347,7 +347,7 @@ The directory part of a path: "a/b/c" -> "a/b", "c" -> ".", "/c" -> "/".
 
 ### baseName
 
-```gojo
+```zig
 pub fn baseName(path str) String
 ```
 
@@ -355,7 +355,7 @@ The last part of a path: "a/b/c.txt" -> "c.txt".
 
 ### getenv
 
-```gojo
+```zig
 pub fn getenv(name str) ?String
 ```
 
@@ -363,7 +363,7 @@ The value of an environment variable.
 
 ### setenv
 
-```gojo
+```zig
 pub fn setenv(name str, value str) ! Error
 ```
 
@@ -371,7 +371,7 @@ Sets an environment variable, for this process and the programs it starts.
 
 ### unsetenv
 
-```gojo
+```zig
 pub fn unsetenv(name str) ! Error
 ```
 
@@ -379,7 +379,7 @@ Removes an environment variable.
 
 ### run
 
-```gojo
+```zig
 pub fn run(prog str, args []String) Output ! Error
 ```
 
@@ -388,7 +388,7 @@ prints. Fails only if it can't be started: check `status` for how it ended.
 
 ### runWithInput
 
-```gojo
+```zig
 pub fn runWithInput(prog str, args []String, input str) Output ! Error
 ```
 
@@ -396,7 +396,7 @@ Like `run`, with `input` as the program's standard input.
 
 ### call
 
-```gojo
+```zig
 pub fn call(prog str, args []String) int ! Error
 ```
 

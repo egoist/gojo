@@ -3,7 +3,7 @@
 HTTP/1.1: a server built on goroutines, task groups and cancellation, and a
 small client. Plain HTTP only (no TLS).
 
-```gojo
+```zig
 struct Hello {
     fn serve(self, req http.Request) http.Response {
         return http.text(200, "hello " + (req.param("name") ?? "world".toString()))
@@ -29,7 +29,7 @@ handler's blocking calls return early.
 
 ### struct Header
 
-```gojo
+```zig
 pub struct Header {
     pub name String
     pub value String
@@ -40,7 +40,7 @@ A header line. Names are matched without regard to case.
 
 ### struct Request
 
-```gojo
+```zig
 pub struct Request {
     pub method String
     // the path, without the query
@@ -57,7 +57,7 @@ A request, as a handler gets it: the whole body has been read (up to
 
 #### Request.header
 
-```gojo
+```zig
 pub fn header(self, name str) ?String
 ```
 
@@ -65,7 +65,7 @@ The value of header `name` (any case).
 
 #### Request.param
 
-```gojo
+```zig
 pub fn param(self, name str) ?String
 ```
 
@@ -73,7 +73,7 @@ A query parameter, decoded: "/search?q=a+b" has param("q") == "a b".
 
 #### Request.segments
 
-```gojo
+```zig
 pub fn segments(self) Vec[String]
 ```
 
@@ -81,7 +81,7 @@ The path's parts: "/todos/7" -> ["todos", "7"].
 
 #### Request.text
 
-```gojo
+```zig
 pub fn text(self) String
 ```
 
@@ -89,7 +89,7 @@ The body, as a string.
 
 ### struct Response
 
-```gojo
+```zig
 pub struct Response {
     pub status int = 200
     pub headers Vec[Header] = []
@@ -103,7 +103,7 @@ become spaces.
 
 #### Response.header
 
-```gojo
+```zig
 pub fn header(self, name str) ?String
 ```
 
@@ -111,7 +111,7 @@ The value of header `name` (any case).
 
 #### Response.setHeader
 
-```gojo
+```zig
 pub fn setHeader(self inout, name str, value str)
 ```
 
@@ -119,7 +119,7 @@ Adds a header.
 
 #### Response.text
 
-```gojo
+```zig
 pub fn text(self) String
 ```
 
@@ -127,7 +127,7 @@ The body, as a string.
 
 ### interface Handler
 
-```gojo
+```zig
 pub interface Handler {
     fn serve(self, req Request) Response
 }
@@ -139,7 +139,7 @@ the deadline passes, the client hangs up or the server stops.
 
 ### struct Options
 
-```gojo
+```zig
 pub struct Options {
     // how long a handler may run
     pub deadline int = 30 * time.second
@@ -152,7 +152,7 @@ How the server treats requests.
 
 ### struct Stats
 
-```gojo
+```zig
 pub struct Stats {
     pub served int = 0
     pub timedOut int = 0
@@ -170,7 +170,7 @@ cancelled when the server stopped, or rejected as malformed or too large.
 
 ### findHeader
 
-```gojo
+```zig
 pub fn findHeader(hs []Header, name str) ?String
 ```
 
@@ -178,7 +178,7 @@ The value of header `name` (any case) in `hs`.
 
 ### text
 
-```gojo
+```zig
 pub fn text(status int, body str) Response
 ```
 
@@ -186,7 +186,7 @@ A plain-text response.
 
 ### json
 
-```gojo
+```zig
 pub fn json(status int, body str) Response
 ```
 
@@ -194,7 +194,7 @@ A JSON response; `body` is JSON text (see json.Value.encode).
 
 ### statusText
 
-```gojo
+```zig
 pub fn statusText(status int) str
 ```
 
@@ -202,7 +202,7 @@ The reason phrase for a status code: 404 -> "Not Found".
 
 ### serve
 
-```gojo
+```zig
 pub fn serve[H Handler + send](ln net.Listener, h H, opts Options)
 ```
 
@@ -211,7 +211,7 @@ flight and waits for them.
 
 ### serveCounting
 
-```gojo
+```zig
 pub fn serveCounting[H Handler + send](ln net.Listener, h H, opts Options, stats Mutex[Stats])
 ```
 
@@ -219,7 +219,7 @@ Like `serve`, counting what happened to the requests in `stats`.
 
 ### request
 
-```gojo
+```zig
 pub fn request(method str, url str, headers []Header, body []byte) Response ! io.Error
 ```
 
@@ -228,7 +228,7 @@ Sends a request and reads the whole response. `url` is
 
 ### get
 
-```gojo
+```zig
 pub fn get(url str) Response ! io.Error
 ```
 
@@ -236,7 +236,7 @@ A GET request.
 
 ### post
 
-```gojo
+```zig
 pub fn post(url str, contentType str, body []byte) Response ! io.Error
 ```
 
@@ -244,7 +244,7 @@ A POST request with a body of the given type.
 
 ### decode
 
-```gojo
+```zig
 pub fn decode(s str) ?String
 ```
 
@@ -252,7 +252,7 @@ Percent-decoding (and `+` as a space, as in query strings); none if malformed.
 
 ### encode
 
-```gojo
+```zig
 pub fn encode(s str) String
 ```
 

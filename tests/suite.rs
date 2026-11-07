@@ -402,7 +402,8 @@ fn std_docs_current() {
     let _ = std::fs::remove_dir_all(&out);
 }
 
-/// Every program in docs/tour.md (a ```gojo block with `fn main`) runs and
+/// Every program in docs/tour.md (a ```zig block with `fn main`: GitHub has
+/// no Gojo highlighter, and Zig's suits it best) runs and
 /// prints the ```text block after it, and is formatted.
 #[test]
 fn tour_examples() {
@@ -429,7 +430,7 @@ fn tour_examples() {
     let mut failures = vec![];
     let mut programs = 0;
     for (i, (lang, body)) in blocks.iter().enumerate() {
-        if lang != "gojo" || !body.contains("fn main") {
+        if lang != "zig" || !body.contains("fn main") {
             continue;
         }
         programs += 1;
