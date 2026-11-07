@@ -1,0 +1,38 @@
+// Task-local values: bound with `task.with`, seen by the code it runs and by
+// every task started inside.
+use std/{task, time}
+
+let requestId = task.local[String]()
+let depth = task.local[int]()
+
+fn log(msg str) {
+    println(requestId.get() ?? String("-"), depth.get() ?? 0, msg)
+}
+
+fn handle(id int) {
+    task.with(requestId, String("req-") + String(["a", "b"][id]), () => {
+        log("start")
+        scope {
+            go () => {
+                time.sleep(time.millisecond)
+                task.with(depth, 2, () => log("in a task"))
+            }
+        }
+        let n = task.with(depth, 1, () => {
+            log("nested")
+            return 7
+        })
+        log("done")
+        return n
+    })
+}
+
+fn main() {
+    log("outside")
+    handle(0)
+    _ = task.shield(time.second, () => {
+        task.with(requestId, String("shielded"), () => {
+            _ = task.shield(time.second, () => log("through a shield"))
+        })
+    })
+}

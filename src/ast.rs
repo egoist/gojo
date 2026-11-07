@@ -44,6 +44,8 @@ pub enum ItemKind {
     Interface(IfaceDecl),
     TypeAlias { name: String, tparams: Vec<TParam>, ty: TypeExpr, newtype: bool },
     Const { name: String, ty: Option<TypeExpr>, value: Expr },
+    /// `let name T = value` at package level: computed once, on first use.
+    Global { name: String, name_span: Span, ty: Option<TypeExpr>, value: Expr },
     Extern(ExternBlock),
     Test { name: String, body: Block },
 }

@@ -1,0 +1,11 @@
+// Package-level values are shared by every task: `send`, and read-only.
+let shared = rc(1)
+// error: package-level value `shared` has type `rc[int]`, which can't be shared between tasks
+let limit = 10
+let names Vec[String] = Vec[String]{}
+
+fn main() {
+    limit = 20
+    // error: cannot assign to package-level value `limit`
+    println(names.len())
+}

@@ -16,9 +16,9 @@ cancelled. Blocking operations in a cancelled task return early: a receive
 gives none, a send is dropped, `time.sleep` wakes up, and network calls
 fail with an error whose `isCancelled()` is true.
 
-**Types:** [`enum Reason`](#enum-reason), [`struct Cancelled`](#struct-cancelled), [`struct Stats`](#struct-stats)
+**Types:** [`enum Reason`](#enum-reason), [`struct Cancelled`](#struct-cancelled), [`struct Local`](#struct-local), [`struct Stats`](#struct-stats)
 
-**Functions:** [`cancelled`](#cancelled), [`reason`](#reason), [`check`](#check), [`deadline`](#deadline), [`shield`](#shield), [`yieldNow`](#yieldnow), [`dump`](#dump), [`stats`](#stats), [`setMaxProcs`](#setmaxprocs), [`timeout`](#timeout), [`map`](#map), [`tryMap`](#trymap), [`each`](#each), [`race`](#race)
+**Functions:** [`cancelled`](#cancelled), [`reason`](#reason), [`check`](#check), [`deadline`](#deadline), [`shield`](#shield), [`yieldNow`](#yieldnow), [`local`](#local), [`with`](#with), [`dump`](#dump), [`stats`](#stats), [`setMaxProcs`](#setmaxprocs), [`timeout`](#timeout), [`map`](#map), [`tryMap`](#trymap), [`each`](#each), [`race`](#race)
 
 ## Types
 
@@ -56,6 +56,37 @@ pub fn message(self) String
 ```
 
 "cancelled: a task failed", ...
+
+### struct Local
+
+```zig
+pub copy struct Local[T send] {
+    // and private fields
+}
+```
+
+A task-local value: code bound with `with` sees it, and so does every task
+started inside, however deep. For what a whole request shares (an id, a
+deadline budget, a logger) without passing it through every call:
+
+```zig
+let requestId = task.local[String]()
+
+fn handle(req Request) {
+    task.with(requestId, req.id.clone(), () => serve(req))
+}
+fn log(msg str) {
+    println(requestId.get() ?? String("-"), msg)
+}
+```
+
+#### Local.get
+
+```zig
+pub fn get(self) ?T where T: clone
+```
+
+The value bound by the nearest enclosing `with` (a copy), or none.
 
 ### struct Stats
 
@@ -131,6 +162,22 @@ pub fn yieldNow()
 ```
 
 Let other tasks run.
+
+### local
+
+```zig
+pub fn local[T send]() Local[T]
+```
+
+A new task-local key; declare it at package level: `let k = task.local[T]()`.
+
+### with
+
+```zig
+pub fn with[T send, R any](key Local[T], value sink T, body fn() R) R
+```
+
+Runs `body` with `key` bound to `value`, for it and the tasks it starts.
 
 ### dump
 

@@ -393,6 +393,17 @@ impl Parser {
                 let ty = self.ty()?;
                 ItemKind::TypeAlias { name, tparams, ty, newtype }
             }
+            Tok::Kw(Kw::Let) => {
+                self.bump();
+                let (name, name_span) = self.ident()?;
+                let ty = if self.is_p("=") { None } else { Some(self.ty()?) };
+                self.expect_p("=")?;
+                let value = self.expr()?;
+                ItemKind::Global { name, name_span, ty, value }
+            }
+            Tok::Kw(Kw::Var) => {
+                return self.err("package-level values can't change: write `let` (and share changing state through a `Mutex` or an `Atomic`)");
+            }
             Tok::Kw(Kw::Const) => {
                 self.bump();
                 let (name, _) = self.ident()?;

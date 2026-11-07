@@ -282,6 +282,8 @@ pub enum TK {
     NoneLit,
     Local(LocalId),
     Const(u32),
+    /// A package-level `let` (a read-only place).
+    Global(u32),
     /// The value of an integer type parameter (`R` in `struct Mat[R int, C int]`).
     ConstParam(TParamId),
     FuncRef(FuncId, Vec<Ty>),
@@ -374,7 +376,7 @@ impl TExpr {
     }
     pub fn is_place(&self) -> bool {
         match &self.kind {
-            TK::Local(_) | TK::Deref(_) | TK::Index { .. } | TK::MapIndex { .. } | TK::Proj { opt: false, .. } | TK::ProjUnwrap { .. } => true,
+            TK::Local(_) | TK::Global(_) | TK::Deref(_) | TK::Index { .. } | TK::MapIndex { .. } | TK::Proj { opt: false, .. } | TK::ProjUnwrap { .. } => true,
             TK::Field { base, .. } => base.is_place(),
             _ => false,
         }

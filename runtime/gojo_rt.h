@@ -307,6 +307,7 @@ void gojo_mutex_unlock(gojo_mutex *m);
 void gojo_mutex_lock_all(gojo_mutex **ms, int n, const char *loc);
 gojo_group *gojo_group_new(const char *loc);
 void gojo_group_go(gojo_group *g, void (*fn)(void *), void *arg, const char *loc);
+void gojo_group_go_env(gojo_group *g, void (*fn)(void *), void *env, void (*drop)(void *), const char *loc);
 void gojo_group_wait(gojo_group *g);
 bool gojo_group_fail(gojo_group *g);
 void gojo_group_cancel(gojo_group *g);
@@ -331,6 +332,10 @@ uint8_t *gojo_task___shieldEnter(int64_t ns);
 void gojo_task___shieldExit(uint8_t *s);
 int64_t gojo_task___deadline(void);
 int64_t gojo_task___reason(void);
+int64_t gojo_task___newLocal(void);
+uint8_t *gojo_task_bind_enter(int64_t id, void *val);
+void gojo_task_bind_exit(uint8_t *s);
+void *gojo_task_lookup(int64_t id);
 bool gojo_task___scopeExit(uint8_t *s);
 void gojo_task___groupCancel(uint8_t *state);
 void gojo_task_yieldNow(void);
@@ -379,6 +384,9 @@ int64_t gojo_time_now(void);
 extern int gojo_sim_on;
 extern int64_t gojo_sim_clock;
 extern int gojo_debug_checks;
+// A package-level `let`: computed once, by the first task to use it.
+typedef struct { int state; void *owner; } gojo_once;
+void gojo_once_run(gojo_once *o, void (*init)(void), const char *name);
 // A scheduling point for the simulated scheduler (atomics).
 void gojo_sim_point(void);
 // A task tree with what each task waits for (`task.dump()`, SIGQUIT).

@@ -59,6 +59,7 @@ pub struct Checker {
     cap_stack: std::cell::RefCell<Vec<(DefId, Vec<Ty>, &'static str)>>,
     /// Per constant: 0 not checked yet, 1 being checked, 2 checked.
     pub const_state: Vec<u8>,
+    pub global_state: Vec<u8>,
 }
 
 #[derive(Clone)]
@@ -84,6 +85,7 @@ pub fn check_program(units: Vec<Unit>) -> Result<(Program, Vec<TFunc>, Vec<(Stri
         allow_typeset: false,
         copy_candidates: vec![],
         const_state: vec![],
+        global_state: vec![],
     };
     c.collect(units);
     if !c.diags.is_empty() {
@@ -360,6 +362,34 @@ impl Checker {
                         });
                         if pkg == self.prog.main_pkg {
                             self.tests.push((name.clone(), id));
+                        }
+                    }
+                    ast::ItemKind::Global { name, ty, .. } => {
+                        let env = self.file_env(fi);
+                        let t = ty.as_ref().map(|t| self.resolve_type(t, &env)).unwrap_or(Ty::Error);
+                        let fid = self.prog.funcs.len() as FuncId;
+                        self.prog.funcs.push(FuncDef {
+                            name: format!("__init_{}", name),
+                            pkg,
+                            file: self.files[fi].file_id,
+                            recv: None,
+                            tparams: vec![],
+                            params: vec![],
+                            ret: t.clone(),
+                            yields: None,
+                            yield_opt: false,
+                            is_pub: false,
+                            kind: FuncKind::Normal,
+                            span: item.span,
+                            ast: None,
+                            recv_key: None,
+                            is_extern_c_export: false,
+                            owner_ty: None,
+                        });
+                        let id = self.prog.globals.len() as u32;
+                        self.prog.globals.push(GlobalDef { name: name.clone(), ty: t, pkg, is_pub: item.is_pub, span: item.span, init: fid });
+                        if self.prog.packages[pkg as usize].items.insert(name.clone(), Sym::Global(id)).is_some() {
+                            self.err(item.span, format!("`{}` is declared twice", name));
                         }
                     }
                     ast::ItemKind::Const { name, ty, .. } => {
@@ -763,6 +793,7 @@ impl Checker {
             Sym::Type(d) => self.prog.def(*d).is_pub,
             Sym::Func(f) => self.prog.func(*f).is_pub,
             Sym::Const(c) => self.prog.consts[*c as usize].is_pub,
+            Sym::Global(g) => self.prog.globals[*g as usize].is_pub,
             Sym::Alias(_) => true,
         }
     }

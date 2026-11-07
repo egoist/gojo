@@ -530,6 +530,19 @@ pub enum Sym {
     Alias(Ty),
     Func(FuncId),
     Const(u32),
+    Global(u32),
+}
+
+/// `let name = value` at package level: `init` computes the value, once, on
+/// first use, whichever task gets there first.
+#[derive(Clone, Debug)]
+pub struct GlobalDef {
+    pub name: String,
+    pub ty: Ty,
+    pub pkg: PkgId,
+    pub is_pub: bool,
+    pub span: Span,
+    pub init: FuncId,
 }
 
 #[derive(Clone, Debug)]
@@ -548,6 +561,7 @@ pub struct Program {
     pub funcs: Vec<FuncDef>,
     pub tparams: Vec<TParamInfo>,
     pub consts: Vec<ConstDef>,
+    pub globals: Vec<GlobalDef>,
     pub packages: Vec<Package>,
     pub methods: HashMap<(TyKey, String), Vec<FuncId>>,
     /// Associated functions: `Point.new(...)`.

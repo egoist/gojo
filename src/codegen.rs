@@ -2075,9 +2075,26 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
         format!("&{}", p)
     }
 
+    /// The accessor of package-level value `g`: computes it on first use.
+    fn global_get(&mut self, g: u32) -> String {
+        let n = format!("gget_{}", g);
+        if self.helpers.insert(n.clone()) {
+            let gd = self.prog.globals[g as usize].clone();
+            let c = self.cty(&gd.ty);
+            let init = self.instance(gd.init, vec![]);
+            let _ = writeln!(self.protos, "static {} *{}(void);", c, n);
+            let _ = writeln!(self.bodies, "static {c} gval_{g};\nstatic gojo_once gonce_{g};\nstatic void ginit_{g}(void) {{ gval_{g} = {init}(); }}\nstatic {c} *{n}(void) {{\n    if (__builtin_expect(__atomic_load_n(&gonce_{g}.state, __ATOMIC_ACQUIRE) != 2, 0)) gojo_once_run(&gonce_{g}, ginit_{g}, {name});\n    return &gval_{g};\n}}", c = c, g = g, init = init, n = n, name = c_string(&gd.name));
+        }
+        n
+    }
+
     fn place(&mut self, fs: &mut Fs, e: &TExpr) -> String {
         match &e.kind {
             TK::Local(l) => self.local_place(fs, *l),
+            TK::Global(g) => {
+                let f = self.global_get(*g);
+                format!("(*{}())", f)
+            }
             TK::Field { base, index } => {
                 let bt = self.sub(fs, &base.ty);
                 let fname = match &bt {
@@ -2201,7 +2218,7 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
             TK::Bool(b) => if *b { "true".into() } else { "false".into() },
             TK::Str(s) => format!("gojo_str_lit({}, {})", c_string(s), s.len()),
             TK::NoneLit => self.zero(&t),
-            TK::Local(_) | TK::Field { .. } | TK::Deref(_) | TK::Index { .. } | TK::MapIndex { .. } | TK::ProjUnwrap { .. } => {
+            TK::Local(_) | TK::Global(_) | TK::Field { .. } | TK::Deref(_) | TK::Index { .. } | TK::MapIndex { .. } | TK::ProjUnwrap { .. } => {
                 if let TK::Field { base, index } = &e.kind {
                     if !base.is_place() {
                         return self.rvalue_field(fs, base, *index, &t);
@@ -4457,6 +4474,60 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
                     }
                 }
             }
+            "task.with" => {
+                // bind the key for the body (and the tasks it starts), run it, unbind
+                let vt = fd.params[1].ty.subst(&s);
+                let rt = ret.clone();
+                let key = self.expr(fs, &args[0].e);
+                let v = self.expr(fs, &args[1].e);
+                let vc = self.cty(&vt);
+                let vv = self.tmp();
+                self.emit(fs, &format!("{} {} = {};", vc, vv, v));
+                let b = self.tmp();
+                self.emit(fs, &format!("uint8_t *{} = gojo_task_bind_enter(({}).f_id, &{});", b, key, vv));
+                let f = self.addr(fs, &args[2].e);
+                let fp = self.tmp();
+                self.emit(fs, &format!("gojo_func *{} = {};", fp, f));
+                let res = if matches!(rt, Ty::Unit | Ty::Never) {
+                    self.emit(fs, &format!("((void (*)(void *)){}->fn)({}->env);", fp, fp));
+                    "0".to_string()
+                } else {
+                    let rc = self.cty(&rt);
+                    let r = self.tmp();
+                    self.emit(fs, &format!("{} {} = (({} (*)(void *)){}->fn)({}->env);", rc, r, rc, fp, fp));
+                    r
+                };
+                self.emit(fs, &format!("gojo_task_bind_exit({});", b));
+                if self.needs_drop(&vt) {
+                    let d = self.drop_fn(&vt);
+                    self.emit(fs, &format!("{}(&{});", d, vv));
+                }
+                res
+            }
+            "Local.get" => {
+                let et = match &recv_ty {
+                    Some(Ty::Adt(_, a)) => a[0].clone(),
+                    _ => Ty::Unit,
+                };
+                let key = self.expr(fs, &args[0].e);
+                let ec = self.cty(&et);
+                let p = self.tmp();
+                self.emit(fs, &format!("{} *{} = gojo_task_lookup(({}).f_id);", ec, p, key));
+                let copied = if self.is_copy(&et) {
+                    format!("(*{})", p)
+                } else {
+                    let cf = self.clone_fn(&et);
+                    format!("{}({})", cf, p)
+                };
+                let oc = self.cty(ret);
+                let r = self.tmp();
+                if self.niche(ret) {
+                    self.emit(fs, &format!("{} {} = {{0}}; if ({}) {} = {};", oc, r, p, r, copied));
+                } else {
+                    self.emit(fs, &format!("{} {} = {{0}}; if ({}) {{ {}.some = 1; {}.val = {}; }}", oc, r, p, r, r, copied));
+                }
+                r
+            }
             "Task.join" => {
                 let r = match &recv_ty {
                     Some(Ty::Task(r)) => (**r).clone(),
@@ -4765,6 +4836,27 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
     }
 
     fn scope_block(&mut self, fs: &mut Fs, id: u32, handle: Option<LocalId>, body: &TBlock, errt: Option<&Ty>, t: &Ty, sp: Span) -> String {
+        // a scope that never starts a task (and has no handle to start one
+        // through) is just a block
+        let mut spawns = false;
+        visit_block(body, &mut |e| {
+            if let TK::Spawn { target: SpawnTarget::Lexical(i), .. } = &e.kind {
+                spawns |= *i == id;
+            }
+        });
+        if !spawns && handle.is_none() && errt.is_none() {
+            let has_val = !matches!(t, Ty::Unit | Ty::Never);
+            let r = if has_val {
+                let c = self.cty(t);
+                let r = self.tmp();
+                self.emit(fs, &format!("{} {};", c, r));
+                Some(r)
+            } else {
+                None
+            };
+            self.block_into(fs, body, r.as_deref());
+            return r.unwrap_or_else(|| "0".into());
+        }
         let errt = errt.map(|e| self.sub(fs, e));
         let et = errt.clone().unwrap_or(Ty::Unit);
         let gs = self.scope_state_ty(&et);
@@ -4885,6 +4977,13 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
             self.emit(fs, &format!("{}->f = {}; {}->g = {}; {}->t = {};", a, f, a, g, a, tv));
             self.emit(fs, &format!("gojo_group_go_task({}, {}, {}, {}, {});", g, tv, tn, a, loc));
             return tv;
+        }
+        // a plain task with nothing to report: run the closure directly
+        if matches!(ret, Ty::Unit | Ty::Never) {
+            let fv = self.tmp();
+            self.emit(fs, &format!("gojo_func {} = {};", fv, f));
+            self.emit(fs, &format!("gojo_group_go_env({}, (void (*)(void *)){}.fn, {}.env, {}.drop, {});", g, fv, fv, fv, loc));
+            return "0".into();
         }
         // a plain task: its error (if any) is the scope's
         let et = match (&errt, &ret) {

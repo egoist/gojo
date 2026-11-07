@@ -95,6 +95,7 @@ pub enum PathRes {
     TypeCon(Ty, Option<DefId>),
     Func(FuncId, Option<Vec<Ty>>),
     Const(u32),
+    Global(u32),
     Variant(Ty, usize),
     Value,
 }
@@ -189,6 +190,11 @@ impl Checker {
         for d in 0..self.prog.types.len() {
             self.check_defaults(d as DefId);
         }
+        // package-level values (their types may be inferred)
+        self.global_state = vec![0; self.prog.globals.len()];
+        for gi in 0..self.prog.globals.len() {
+            self.ensure_global(gi, None);
+        }
         for fid in 0..self.prog.funcs.len() as FuncId {
             let fd = self.prog.func(fid).clone();
             if let Some((fi, ii, ei)) = fd.ast {
@@ -235,6 +241,81 @@ impl Checker {
             }
             None => {}
         }
+    }
+
+    /// A use of package-level value `g`.
+    fn global_value(&mut self, g: u32, sp: Span) -> TExpr {
+        self.ensure_global(g as usize, Some(sp));
+        let t = self.prog.globals[g as usize].ty.clone();
+        TExpr::new(TK::Global(g), t, sp)
+    }
+
+    /// Checks package-level value `gi` (its initializer becomes the body of
+    /// its init function) unless it already is.
+    fn ensure_global(&mut self, gi: usize, use_sp: Option<Span>) {
+        match self.global_state.get(gi).copied() {
+            None | Some(2) => {}
+            Some(1) => {
+                if self.prog.globals[gi].ty.is_error() {
+                    let name = self.prog.globals[gi].name.clone();
+                    let sp = use_sp.unwrap_or(self.prog.globals[gi].span);
+                    self.diags.push(Diag::new(sp, format!("the type of `{}` depends on itself", name)).note(None, format!("write its type: `let {} T = ...`", name)));
+                }
+            }
+            _ => {
+                self.global_state[gi] = 1;
+                self.check_global(gi);
+                self.global_state[gi] = 2;
+            }
+        }
+    }
+
+    fn check_global(&mut self, gi: usize) {
+        let g = self.prog.globals[gi].clone();
+        let mut found = None;
+        for fi in 0..self.files.len() {
+            if self.file_cx[fi].pkg != g.pkg {
+                continue;
+            }
+            for item in &self.files[fi].items {
+                if let ast::ItemKind::Global { name, value, .. } = &item.kind {
+                    if *name == g.name {
+                        found = Some((fi, value.clone()));
+                    }
+                }
+            }
+        }
+        let Some((fi, value)) = found else { return };
+        let env = self.file_env(fi);
+        let expect = if g.ty.is_error() { None } else { Some(g.ty.clone()) };
+        let mut cx = FnCx::new(env, expect.clone().unwrap_or(Ty::Error), g.name.clone());
+        let e = self.expr(&mut cx, &value, expect.as_ref());
+        let e = match &expect {
+            Some(t) => self.coerce(&mut cx, e, t, Use::Value),
+            None => self.value(&mut cx, e),
+        };
+        let t = self.resolve(&mut cx, &e.ty);
+        let t = if t.has_vars() {
+            self.diags.push(Diag::new(value.span, format!("cannot infer the type of `{}`", g.name)).note(None, format!("write it: `let {} T = ...`", g.name)));
+            Ty::Error
+        } else {
+            t
+        };
+        if !t.is_error() {
+            if t.contains_view() {
+                let s = self.prog.show(&t);
+                self.err(g.span, format!("package-level value `{}` can't be the borrowed view `{}`", g.name, s));
+            } else if !self.is_send(&t) {
+                let s = self.prog.show(&t);
+                self.diags.push(Diag::new(g.span, format!("package-level value `{}` has type `{}`, which can't be shared between tasks", g.name, s)).note(None, "every task can read a package-level value: it must be `send` (no `rc`, `Cell` or raw pointers)"));
+            }
+        }
+        self.check_pending_infer(&mut cx);
+        let e = self.zonk_expr(&mut cx, e);
+        self.prog.globals[gi].ty = t.clone();
+        self.prog.funcs[g.init as usize].ret = t;
+        let body = TBlock { stmts: vec![], value: Some(Box::new(e)), span: value.span };
+        self.tfuncs.push(TFunc { func: g.init, locals: cx.locals, params: vec![], recv: None, body, n_arms: cx.n_arms });
     }
 
     /// Checks constant `ci` unless it already is. `use_sp`: where another
@@ -683,6 +764,7 @@ impl Checker {
 
     fn place_info(&self, cx: &FnCx, e: &TExpr) -> Option<PInfo> {
         match &e.kind {
+            TK::Global(g) => Some(PInfo { root: None, owned: false, mutable: false, desc: format!("package-level value `{}`", self.prog.globals[*g as usize].name) }),
             TK::Local(id) => {
                 let l = &cx.locals[*id as usize];
                 let (owned, mutable, what) = match l.kind {
@@ -2203,6 +2285,7 @@ impl Checker {
                 let t = self.prog.consts[c as usize].ty.clone();
                 TExpr::new(TK::Const(c), t, sp)
             }
+            Some(PathRes::Global(g)) => self.global_value(g, sp),
             Some(PathRes::Pkg(..)) => {
                 self.err(sp, format!("package `{}` used as a value", name));
                 TExpr::error(sp)
@@ -2289,6 +2372,7 @@ impl Checker {
                                     Sym::Type(d) => self.prog.def(*d).is_pub,
                                     Sym::Func(f) => self.prog.func(*f).is_pub,
                                     Sym::Const(c) => self.prog.consts[*c as usize].is_pub,
+                                    Sym::Global(g) => self.prog.globals[*g as usize].is_pub,
                                     Sym::Alias(_) => true,
                                 };
                                 if !public {
@@ -2422,6 +2506,7 @@ impl Checker {
             Sym::Alias(t) => PathRes::TypeCon(t, None),
             Sym::Func(f) => PathRes::Func(f, None),
             Sym::Const(c) => PathRes::Const(c),
+            Sym::Global(g) => PathRes::Global(g),
         }
     }
 
@@ -2438,7 +2523,7 @@ impl Checker {
     fn field(&mut self, cx: &mut FnCx, whole: &Expr, base: &Expr, name: &str, nsp: Span, expect: Option<&Ty>) -> TExpr {
         let sp = whole.span;
         // paths: package members, enum variants, constants
-        if !matches!(self.resolve_path(cx, base), Some(PathRes::Value) | None) {
+        if !matches!(self.resolve_path(cx, base), Some(PathRes::Value) | Some(PathRes::Global(_)) | None) {
             match self.resolve_path(cx, whole) {
                 Some(PathRes::Variant(t, vi)) => return self.variant_value(cx, t, vi, &[], false, sp, expect),
                 Some(PathRes::Func(f, targs)) => return self.func_value(cx, f, targs, expect, sp),
@@ -2450,6 +2535,7 @@ impl Checker {
                     let t = self.prog.consts[c as usize].ty.clone();
                     return TExpr::new(TK::Const(c), t, sp);
                 }
+                Some(PathRes::Global(g)) => return self.global_value(g, sp),
                 Some(PathRes::TypeCon(..)) => {
                     self.err(sp, "type used as a value");
                     return TExpr::error(sp);
@@ -3399,13 +3485,13 @@ impl Checker {
                     self.err(*nsp, format!("unknown associated item `{}`", name));
                     return TExpr::error(sp);
                 }
-                Some(PathRes::Value) | None => return self.method_call(cx, base, name, *nsp, None, args, sp, expect),
+                Some(PathRes::Value) | Some(PathRes::Global(_)) | None => return self.method_call(cx, base, name, *nsp, None, args, sp, expect),
                 _ => {}
             }
         }
         if let ExprKind::TypeArgs(b, _) | ExprKind::Index(b, _) = &callee.kind {
             if let ExprKind::Field(base, name, nsp) = &b.kind {
-                if matches!(self.resolve_path(cx, base), Some(PathRes::Value) | None) {
+                if matches!(self.resolve_path(cx, base), Some(PathRes::Value) | Some(PathRes::Global(_)) | None) {
                     let targs = match &callee.kind {
                         ExprKind::TypeArgs(_, ts) => {
                             let env = cx.env.clone();

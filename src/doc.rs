@@ -158,6 +158,9 @@ fn collect(src: &str, items: &[Item], out: &mut Vec<Decl>) {
             ItemKind::TypeAlias { name, .. } if it.is_pub => {
                 out.push(Decl { kind: Kind::Type, title: format!("type {}", name), key: name.clone(), code: text(lo, it.span.hi), doc, methods: vec![] });
             }
+            ItemKind::Global { name, .. } if it.is_pub => {
+                out.push(Decl { kind: Kind::Const, title: format!("let {}", name), key: String::new(), code: text(lo, it.span.hi), doc, methods: vec![] });
+            }
             ItemKind::Const { name, .. } if it.is_pub => {
                 let code = text(lo, it.span.hi);
                 if let Some(i) = joins(last, out, |k| matches!(k, Kind::Const)) {

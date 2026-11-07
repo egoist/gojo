@@ -95,6 +95,35 @@ pub fn shield[T any](d int, body fn() T) T {
 // Let other tasks run.
 pub fn yieldNow()
 
+// A task-local value: code bound with `with` sees it, and so does every task
+// started inside, however deep. For what a whole request shares (an id, a
+// deadline budget, a logger) without passing it through every call:
+//
+//   let requestId = task.local[String]()
+//
+//   fn handle(req Request) {
+//       task.with(requestId, req.id.clone(), () => serve(req))
+//   }
+//   fn log(msg str) {
+//       println(requestId.get() ?? String("-"), msg)
+//   }
+pub copy struct Local[T send] {
+    id int
+
+    // The value bound by the nearest enclosing `with` (a copy), or none.
+    pub fn get(self) ?T where T: clone
+}
+
+fn __newLocal() int
+
+// A new task-local key; declare it at package level: `let k = task.local[T]()`.
+pub fn local[T send]() Local[T] {
+    return Local[T]{id: __newLocal()}
+}
+
+// Runs `body` with `key` bound to `value`, for it and the tasks it starts.
+pub fn with[T send, R any](key Local[T], value sink T, body fn() R) R
+
 // Prints every task to stderr: where it was started, what it waits for and
 // for how long, and the locks it holds. A program also prints this, and
 // stops, on SIGQUIT (Ctrl-\ in a terminal).

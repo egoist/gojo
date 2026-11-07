@@ -1,0 +1,6 @@
+- 0 outside
+req-a 0 start
+req-a 2 in a task
+req-a 1 nested
+req-a 0 done
+shielded 0 through a shield

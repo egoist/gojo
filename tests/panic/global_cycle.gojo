@@ -1,0 +1,11 @@
+// A package-level value whose computation needs itself.
+fn next() int {
+    return counter + 1
+}
+
+let counter = next()
+
+fn main() {
+    println(counter)
+    // panic: the value of `counter` depends on itself
+}
