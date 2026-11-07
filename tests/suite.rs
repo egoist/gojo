@@ -324,6 +324,29 @@ fn shutdown_signal() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Reads of a pipe with nothing in it park like network reads: a timeout
+/// cancels them, and many readers don't take a thread each. stdin is a pipe
+/// this test holds open without writing.
+#[test]
+fn stdin_pipe_cancel() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let src = root.join("tests/stdin/stdin_cancel.gojo");
+    let dir = std::env::temp_dir().join(format!("gojo_stdin_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let bin = dir.join("stdin_cancel");
+    let b = Command::new(gojo()).arg("build").arg(&src).arg("-o").arg(&bin).output().unwrap();
+    assert!(b.status.success(), "{}", String::from_utf8_lossy(&b.stderr));
+    let mut child = Command::new(&bin).stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn().unwrap();
+    let stdin = child.stdin.take();
+    let start = std::time::Instant::now();
+    let out = child.wait_with_output().unwrap();
+    drop(stdin);
+    let expected = std::fs::read_to_string(root.join("tests/stdin/stdin_cancel.out")).unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout), expected, "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(start.elapsed() < std::time::Duration::from_secs(10));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Programs nested in every way the grammar allows: moderately deep ones compile
 /// and run (no exponential passes, no stack overflow in the compiler or in the C
 /// compiler), and absurdly deep ones get an error instead of a crash.
@@ -435,7 +458,7 @@ fn formatted() {
     }
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut paths = vec![];
-    for d in ["std", "examples", "bench/gojo", "tests/run", "tests/errors", "tests/panic", "tests/projects", "tests/packages", "tests/testblocks", "tests/unsafe"] {
+    for d in ["std", "examples", "bench/gojo", "tests/run", "tests/errors", "tests/panic", "tests/projects", "tests/packages", "tests/testblocks", "tests/unsafe", "tests/stdin", "tests/signals"] {
         walk(&root.join(d), &mut paths);
     }
     let mut bad = vec![];

@@ -1,0 +1,35 @@
+// Run with stdin a pipe that stays empty (tests/suite.rs and
+// scripts/linux-test.sh do). Reads that wait for data park their tasks like
+// network reads: a timeout cancels them, and they don't take a thread each.
+use std/os
+use std/task
+use std/time
+
+fn main() {
+    let t0 = time.now()
+    let r = task.timeout(200 * time.millisecond, () => {
+        var buf = Vec[byte]{}
+        match os.stdin().read(&buf, 100) {
+            ok(k) => println("read", k),
+            err(e) => println("error:", e),
+        }
+    })
+    println("timed out:", r.isNone())
+    // the read was cancelled right away
+    println("prompt:", time.now() - t0 < time.second)
+    // many readers at once, all cancelled
+    let r2 = task.timeout(300 * time.millisecond, () => {
+        scope {
+            for _ in 0..50 {
+                go () => {
+                    var buf = Vec[byte]{}
+                    let _ = os.stdin().read(&buf, 100)
+                }
+            }
+            time.sleep(100 * time.millisecond)
+            let threads = task.stats().threads
+            println("few threads:", threads < 20)
+        }
+    })
+    println("timed out:", r2.isNone())
+}

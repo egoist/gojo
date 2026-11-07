@@ -56,12 +56,18 @@ int64_t gojo_os___open(gojo_str path, int64_t mode) {
     int e = errno;
     gojo_ffi_exit();
     free(p);
+    if (fd >= 0) fd_set_blocks(fd, false);
     return fd < 0 ? -(int64_t)e : fd;
 }
 
 int64_t gojo_os___read(int64_t fd, gojo_vec *buf, int64_t max) {
     if (max <= 0) return 0;
     gojo_vec_reserve(buf, max, 1);
+    int64_t r = file_io(false, (int)fd, (uint8_t *)buf->ptr + buf->len, (size_t)max);
+    if (r != FILE_BLOCK) {
+        if (r > 0) buf->len += r;
+        return r;
+    }
     gojo_blocking_enter();
     ssize_t n;
     do {
@@ -88,10 +94,18 @@ int64_t gojo_os___write(int64_t fd, gojo_slice data) {
         gojo_ffi_exit();
         return bad ? -(int64_t)EIO : 0;
     }
-    gojo_blocking_enter();
     const uint8_t *p = data.ptr;
     int64_t left = data.len;
     int e = 0;
+    while (left > 0) {
+        int64_t r = file_io(true, (int)fd, (void *)p, (size_t)left);
+        if (r == FILE_BLOCK) break;
+        if (r < 0) return r;
+        p += r;
+        left -= r;
+    }
+    if (left == 0) return 0;
+    gojo_blocking_enter();
     while (left > 0) {
         ssize_t n = write((int)fd, p, (size_t)left);
         if (n < 0) {
@@ -107,6 +121,7 @@ int64_t gojo_os___write(int64_t fd, gojo_slice data) {
 }
 
 void gojo_os___close(int64_t fd) {
+    fd_set_blocks((int)fd, false);
     if (fd > 2) close((int)fd);
 }
 

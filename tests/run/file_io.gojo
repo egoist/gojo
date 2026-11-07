@@ -1,0 +1,34 @@
+// File reads and writes: the fast path (data in the page cache) and the ring
+// give the same bytes.
+use std/io
+use std/os
+
+fn main() ! io.Error {
+    var data = Vec[byte]{}
+    for i in 0..300000 {
+        data.push(byte(i % 251))
+    }
+    let path = "/tmp/gojo_file_io_test.bin"
+    try os.writeFile(path, data)
+    let back = try os.readFile(path)
+    println(back.len(), back == data)
+    let f = try os.open(path)
+    var buf = Vec[byte]{}
+    var reads = 0
+    for {
+        let n = try f.read(&buf, 4096)
+        if n == 0 {
+            break
+        }
+        reads += 1
+    }
+    println(buf.len(), buf == data, reads >= 74)
+    let w = try os.create(path)
+    for _ in 0..100 {
+        try w.write(data[..3000])
+    }
+    drop(w)
+    let again = try os.readFile(path)
+    println(again.len())
+    try os.remove(path)
+}

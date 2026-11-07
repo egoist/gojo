@@ -29,6 +29,7 @@
 #include <netdb.h>
 #include <signal.h>
 #include <sched.h>
+#include <poll.h>
 #if defined(__APPLE__)
 #include <sys/event.h>
 #include <mach/mach.h>
@@ -36,6 +37,8 @@
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
 #include <sys/timerfd.h>
+#include <sys/syscall.h>
+#include <sys/uio.h>
 #endif
 
 #if defined(__has_feature)
@@ -328,10 +331,12 @@ static void xsave_setup(void) {
 
 // ------------------------------------------------------------------ core types
 
-enum { WAIT_NONE = 0, WAIT_CANCELLABLE = 1 };
+// (WAIT_DRAIN: waiting for an io_uring operation to finish after a cancel;
+// cancellation doesn't wake it)
+enum { WAIT_NONE = 0, WAIT_CANCELLABLE = 1, WAIT_DRAIN = 2 };
 enum { WAKE_NONE, WAKE_CANCEL, WAKE_CHAN, WAKE_TIMER, WAKE_IO, WAKE_TASK };
 enum { POST_NONE, POST_DEAD, POST_YIELD };
-enum { BLK_NONE, BLK_RECV, BLK_SEND, BLK_SELECT, BLK_LOCK, BLK_JOIN, BLK_SCOPE, BLK_SLEEP, BLK_IO, BLK_RWLOCK };
+enum { BLK_NONE, BLK_RECV, BLK_SEND, BLK_SELECT, BLK_LOCK, BLK_JOIN, BLK_SCOPE, BLK_SLEEP, BLK_IO, BLK_RWLOCK, BLK_FILE };
 
 typedef struct gojo_scope gojo_scope;
 
@@ -387,6 +392,13 @@ typedef struct gojo_g {
     size_t hib_size;
     struct gojo_group *open_groups; // scopes it opened: their tasks may borrow its stack
     bool rw_write;          // waiting for an RwLock: as a writer
+    // an io_uring operation: its number (in its user_data), its result, and
+    // the number of the last one finished; while one is in flight the kernel
+    // may write into the stack, so it isn't put away
+    uint32_t io_seq;
+    uint32_t io_done;
+    int32_t io_res;
+    int io_inflight;
 #ifdef GOJO_ASAN
     void *fake_stack;
 #endif
@@ -593,6 +605,8 @@ static bool hibernate(gojo_g *g, int64_t now) {
     bool done = false;
     // still parked (a wait that was claimed means it is about to run)
     bool waiting = b == BLK_LOCK || b == BLK_RWLOCK || b == BLK_JOIN || (GOJO_SC_LOAD(&g->wait) & 3) == WAIT_CANCELLABLE;
+    // (set before its wait starts, cleared after it ends)
+    if (GOJO_SC_LOAD(&g->io_inflight)) waiting = false;
     if (!g->hib && waiting && GOJO_RELAXED(&g->blocked) == b) {
         GOJO_SC_STORE(&g->hib, 1);
         // now it can't run (a worker that picks it waits for this lock), so its
@@ -3005,6 +3019,11 @@ static void deliver_token(uint64_t data) {
     }
 }
 
+#if defined(__linux__)
+static int s_ur_efd = -1;
+static void ur_reap(gojo_g *self);
+#endif
+
 static void *poller_main(void *arg) {
     (void)arg;
     sigset_t all;
@@ -3055,6 +3074,13 @@ static void *poller_main(void *arg) {
         }
         int n = epoll_wait(s_poll_fd, evs, 64, ms);
         for (int i = 0; i < n; i++) {
+            if (evs[i].data.u64 == 2) {
+                uint64_t v;
+                ssize_t r = read(s_ur_efd, &v, sizeof v);
+                (void)r;
+                ur_reap(NULL);
+                continue;
+            }
             if (evs[i].data.u64 <= 1) {
                 uint64_t v;
                 ssize_t r = read(evs[i].data.u64 == 0 ? s_wake_fd : s_timer_fd, &v, sizeof v);
@@ -3102,31 +3128,43 @@ static void ensure_poller(void) {
     pthread_mutex_unlock(&s_lock);
 }
 
-// Parks until fd is ready. False: the task was cancelled.
-static bool wait_fd(int fd, bool for_write) {
+// Parks until fd is ready: 1, or 0 when the task was cancelled. With `soft`,
+// -1 when the poller can't watch fd (a regular file, /dev/null) instead of a
+// panic.
+static int wait_fd_r(int fd, bool for_write, bool soft) {
     ensure_poller();
     gojo_g *g = cur_g();
-    if (scope_cancelled(g->scope)) return false;
+    if (scope_cancelled(g->scope)) return 0;
     uint64_t token = wait_begin(g);
     uint64_t data = ((uint64_t)g->idx << 34) | (token & (((uint64_t)1 << 34) - 1));
     GOJO_ADD(&s_io_waiters, 1);
 #if defined(__APPLE__)
     struct kevent ev;
     EV_SET(&ev, fd, for_write ? EVFILT_WRITE : EVFILT_READ, EV_ADD | EV_ONESHOT, 0, 0, (void *)data);
-    if (kevent(s_poll_fd, &ev, 1, NULL, 0, NULL) != 0) gojo_panic("cannot register a file descriptor with the poller", "<runtime>");
+    if (kevent(s_poll_fd, &ev, 1, NULL, 0, NULL) != 0) {
+        if (!soft) gojo_panic("cannot register a file descriptor with the poller", "<runtime>");
+        wait_claim(g, token);
+        GOJO_ADD(&s_io_waiters, -1);
+        return -1;
+    }
 #else
     struct epoll_event ev;
     memset(&ev, 0, sizeof ev);
     ev.events = (for_write ? EPOLLOUT : EPOLLIN) | EPOLLONESHOT | EPOLLRDHUP;
     ev.data.u64 = data;
     if (epoll_ctl(s_poll_fd, EPOLL_CTL_MOD, fd, &ev) != 0) {
-        if (errno != ENOENT || epoll_ctl(s_poll_fd, EPOLL_CTL_ADD, fd, &ev) != 0) gojo_panic("cannot register a file descriptor with the poller", "<runtime>");
+        if (errno != ENOENT || epoll_ctl(s_poll_fd, EPOLL_CTL_ADD, fd, &ev) != 0) {
+            if (!soft) gojo_panic("cannot register a file descriptor with the poller", "<runtime>");
+            wait_claim(g, token);
+            GOJO_ADD(&s_io_waiters, -1);
+            return -1;
+        }
     }
 #endif
     blk(g, BLK_IO, NULL);
     wait_park(g, token);
     unblk(g);
-    if (g->wake == WAKE_IO) return true;
+    if (g->wake == WAKE_IO) return 1;
     // cancelled: the registration is stale now, and a late event won't match the token
     GOJO_ADD(&s_io_waiters, -1);
 #if defined(__APPLE__)
@@ -3136,7 +3174,354 @@ static bool wait_fd(int fd, bool for_write) {
     ev.events = 0;
     epoll_ctl(s_poll_fd, EPOLL_CTL_MOD, fd, &ev);
 #endif
+    return 0;
+}
+
+static bool wait_fd(int fd, bool for_write) { return wait_fd_r(fd, for_write, false) == 1; }
+
+#if defined(__linux__)
+// ------------------------------------------------------------------ io_uring
+//
+// File reads and writes that would block (a pipe or terminal with nothing to
+// read, a full pipe, a file not in the page cache) go to an io_uring instead
+// of blocking a worker thread: the task parks, other tasks keep the thread,
+// and cancelling the task cancels the operation. Each read or write first
+// tries the plain syscall with RWF_NOWAIT, so data that is already there costs
+// one syscall, as before. The poller watches an eventfd the ring signals on
+// completion; a submitter also takes the completions that are ready when its
+// submit returns. Without io_uring (old kernels, seccomp filters such as
+// Docker's default, GOJO_IO_URING=0) file I/O blocks its thread as before.
+//
+// The kernel ABI is declared here rather than taken from <linux/io_uring.h>,
+// which older systems don't have.
+
+#ifndef __NR_io_uring_setup
+#define __NR_io_uring_setup 425
+#define __NR_io_uring_enter 426
+#define __NR_io_uring_register 427
+#endif
+#ifndef RWF_NOWAIT
+#define RWF_NOWAIT 0x00000008
+#endif
+#if !defined(__NR_preadv2) && defined(__x86_64__)
+#define __NR_preadv2 327
+#define __NR_pwritev2 328
+#elif !defined(__NR_preadv2) && defined(__aarch64__)
+#define __NR_preadv2 286
+#define __NR_pwritev2 287
+#endif
+
+typedef struct { uint32_t head, tail, ring_mask, ring_entries, flags, dropped, array, resv1; uint64_t user_addr; } ur_sq_off;
+typedef struct { uint32_t head, tail, ring_mask, ring_entries, overflow, cqes, flags, resv1; uint64_t user_addr; } ur_cq_off;
+typedef struct { uint32_t sq_entries, cq_entries, flags, sq_thread_cpu, sq_thread_idle, features, wq_fd, resv[3]; ur_sq_off sq_off; ur_cq_off cq_off; } ur_params;
+typedef struct { uint8_t opcode, flags; uint16_t ioprio; int32_t fd; uint64_t off, addr; uint32_t len, op_flags; uint64_t user_data; uint16_t buf_index, personality; int32_t splice_fd_in; uint64_t addr3, pad; } ur_sqe;
+typedef struct { uint64_t user_data; int32_t res; uint32_t flags; } ur_cqe;
+_Static_assert(sizeof(ur_params) == 120, "io_uring_params");
+_Static_assert(sizeof(ur_sqe) == 64, "io_uring_sqe");
+
+enum { UR_OP_ASYNC_CANCEL = 14, UR_OP_READ = 22, UR_OP_WRITE = 23 };
+#define UR_SETUP_CQSIZE (1u << 3)
+#define UR_SETUP_CLAMP (1u << 4)
+#define UR_FEAT_SINGLE_MMAP (1u << 0)
+#define UR_FEAT_NODROP (1u << 1)
+#define UR_FEAT_RW_CUR_POS (1u << 3)
+#define UR_ENTER_GETEVENTS 1u
+#define UR_SQ_CQ_OVERFLOW (1u << 1)
+#define UR_REGISTER_EVENTFD 4
+#define UR_OFF_CQ_RING 0x8000000ULL
+#define UR_OFF_SQES 0x10000000ULL
+#define UR_FALLBACK INT64_MIN       // io_uring can't take it: block instead
+
+static int s_ur_state;              // 0: not tried, 1: on, -1: off
+static bool s_ur_always;            // GOJO_IO_URING=always: every file read and write (tests)
+static pthread_mutex_t s_ur_init_lock = PTHREAD_MUTEX_INITIALIZER;
+static int s_ur_fd = -1;
+static uint32_t *s_sq_head, *s_sq_tail, *s_sq_array, *s_sq_flags, s_sq_mask, s_sq_entries;
+static ur_sqe *s_sqes;
+static uint32_t *s_cq_head, *s_cq_tail, s_cq_mask;
+static ur_cqe *s_cqes;
+static pthread_mutex_t s_sq_lock = PTHREAD_MUTEX_INITIALIZER;
+static gojo_spin s_cq_lock;
+
+static int ur_enter(unsigned submit, unsigned min, unsigned flags) {
+    return (int)syscall(__NR_io_uring_enter, s_ur_fd, submit, min, flags, NULL, 0);
+}
+
+static bool ur_setup(void) {
+    const char *e = getenv("GOJO_IO_URING");
+    if (e && e[0] == '0') return false;
+    s_ur_always = e && strcmp(e, "always") == 0;
+    if (gojo_sim_on) return false;  // simulated tests: one thread, real blocking
+    ur_params p;
+    memset(&p, 0, sizeof p);
+    p.flags = UR_SETUP_CQSIZE | UR_SETUP_CLAMP;
+    p.cq_entries = 4096;
+    int fd = (int)syscall(__NR_io_uring_setup, 256, &p);
+    if (fd < 0) return false;
+    uint32_t need = UR_FEAT_NODROP | UR_FEAT_RW_CUR_POS;
+    if ((p.features & need) != need) {
+        close(fd);
+        return false;
+    }
+    size_t sqsz = p.sq_off.array + p.sq_entries * sizeof(uint32_t);
+    size_t cqsz = p.cq_off.cqes + p.cq_entries * sizeof(ur_cqe);
+    bool single = p.features & UR_FEAT_SINGLE_MMAP;
+    if (single && cqsz > sqsz) sqsz = cqsz;
+    uint8_t *sq = mmap(NULL, sqsz, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_POPULATE, fd, 0);
+    if (sq == MAP_FAILED) {
+        close(fd);
+        return false;
+    }
+    uint8_t *cq = single ? sq : mmap(NULL, cqsz, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_POPULATE, fd, UR_OFF_CQ_RING);
+    ur_sqe *sqes = mmap(NULL, p.sq_entries * sizeof(ur_sqe), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_POPULATE, fd, UR_OFF_SQES);
+    int efd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+    if (cq == MAP_FAILED || sqes == MAP_FAILED || efd < 0 || syscall(__NR_io_uring_register, fd, UR_REGISTER_EVENTFD, &efd, 1) != 0) {
+        // (the mappings go with the process; this happens at most once)
+        if (efd >= 0) close(efd);
+        close(fd);
+        return false;
+    }
+    s_ur_fd = fd;
+    s_sq_head = (uint32_t *)(sq + p.sq_off.head);
+    s_sq_tail = (uint32_t *)(sq + p.sq_off.tail);
+    s_sq_array = (uint32_t *)(sq + p.sq_off.array);
+    s_sq_flags = (uint32_t *)(sq + p.sq_off.flags);
+    s_sq_mask = *(uint32_t *)(sq + p.sq_off.ring_mask);
+    s_sq_entries = p.sq_entries;
+    s_sqes = sqes;
+    s_cq_head = (uint32_t *)(cq + p.cq_off.head);
+    s_cq_tail = (uint32_t *)(cq + p.cq_off.tail);
+    s_cq_mask = *(uint32_t *)(cq + p.cq_off.ring_mask);
+    s_cqes = (ur_cqe *)(cq + p.cq_off.cqes);
+    ensure_poller();
+    struct epoll_event ev;
+    memset(&ev, 0, sizeof ev);
+    ev.events = EPOLLIN;
+    ev.data.u64 = 2;
+    s_ur_efd = efd;
+    if (epoll_ctl(s_poll_fd, EPOLL_CTL_ADD, efd, &ev) != 0) gojo_panic("cannot watch the io_uring", "<runtime>");
+    return true;
+}
+
+static inline bool ur_on(void) {
+#ifndef __NR_preadv2
     return false;
+#endif
+    int st = GOJO_LOAD(&s_ur_state);
+    if (__builtin_expect(st != 0, 1)) return st > 0;
+    pthread_mutex_lock(&s_ur_init_lock);
+    if (!s_ur_state) GOJO_STORE(&s_ur_state, ur_setup() ? 1 : -1);
+    pthread_mutex_unlock(&s_ur_init_lock);
+    return GOJO_LOAD(&s_ur_state) > 0;
+}
+
+// Queues one operation and hands it to the kernel. False: it couldn't take it.
+static bool ur_submit(uint8_t op, int fd, uint64_t addr, uint32_t len, uint64_t ud) {
+    pthread_mutex_lock(&s_sq_lock);
+    uint32_t tail = *s_sq_tail;
+    if (tail - __atomic_load_n(s_sq_head, __ATOMIC_ACQUIRE) >= s_sq_entries) {
+        pthread_mutex_unlock(&s_sq_lock);
+        return false;
+    }
+    uint32_t i = tail & s_sq_mask;
+    ur_sqe *e = &s_sqes[i];
+    memset(e, 0, sizeof *e);
+    e->opcode = op;
+    e->fd = fd;
+    // reads and writes at the file's position, as read(2) and write(2); a
+    // cancel takes no offset
+    e->off = op == UR_OP_ASYNC_CANCEL ? 0 : (uint64_t)-1;
+    e->addr = addr;
+    e->len = len;
+    e->user_data = ud;
+    s_sq_array[i] = i;
+    __atomic_store_n(s_sq_tail, tail + 1, __ATOMIC_RELEASE);
+    int r, tries = 0;
+    for (;;) {
+        r = ur_enter(1, 0, 0);
+        if (r >= 0 || (errno != EINTR && errno != EAGAIN && errno != EBUSY) || ++tries > 1000) break;
+        // the completion queue is full: let the kernel move what overflowed
+        if (errno != EINTR) {
+            ur_enter(0, 0, UR_ENTER_GETEVENTS);
+            sched_yield();
+        }
+    }
+    bool ok = r == 1;
+    if (!ok) {
+        // still in the queue: take it back
+        __atomic_store_n(s_sq_tail, tail, __ATOMIC_RELEASE);
+    }
+    pthread_mutex_unlock(&s_sq_lock);
+    return ok;
+}
+
+// A finished operation: the result goes to its task, which is woken if it is
+// waiting. `self` is the calling task: it looks for itself before it waits.
+static void ur_complete(uint64_t ud, int32_t res, gojo_g *self) {
+    if (!ud) return;    // a cancel request
+    uint32_t idx = (uint32_t)(ud >> 32), seq = (uint32_t)ud;
+    if (idx >= GOJO_LOAD(&s_g_count)) return;
+    gojo_g *g = g_slot(idx);
+    if (GOJO_LOAD(&g->io_seq) != seq) return;
+    g->io_res = res;
+    GOJO_SC_STORE(&g->io_done, seq);
+    if (g == self) return;
+    uint64_t w = GOJO_SC_LOAD(&g->wait);
+    if ((w & 3) != WAIT_NONE && wait_claim(g, w)) {
+        g->wake = WAKE_IO;
+        g_ready(g);
+    }
+}
+
+static void ur_reap(gojo_g *self) {
+    if (GOJO_LOAD(&s_ur_state) <= 0) return;
+    for (;;) {
+        spin_lock(&s_cq_lock);
+        uint32_t head = *s_cq_head;
+        uint32_t tail = __atomic_load_n(s_cq_tail, __ATOMIC_ACQUIRE);
+        while (head != tail) {
+            ur_cqe c = s_cqes[head & s_cq_mask];
+            head++;
+            __atomic_store_n(s_cq_head, head, __ATOMIC_RELEASE);
+            ur_complete(c.user_data, c.res, self);
+        }
+        spin_unlock(&s_cq_lock);
+        if (!(__atomic_load_n(s_sq_flags, __ATOMIC_ACQUIRE) & UR_SQ_CQ_OVERFLOW)) break;
+        ur_enter(0, 0, UR_ENTER_GETEVENTS);
+    }
+}
+
+// Reads or writes through the ring; parks until it is done. The result of the
+// syscall (or -errno), -ECANCELED, or UR_FALLBACK.
+static int64_t ur_rw(bool write, int fd, void *p, size_t len) {
+    gojo_g *g = cur_g();
+    if (scope_cancelled(g->scope)) return -ECANCELED;
+    if (len > 0x7ffff000) len = 0x7ffff000;
+    uint32_t seq = g->io_seq + 1;
+    if (!seq) seq = 1;
+    GOJO_SC_STORE(&g->io_inflight, 1);
+    GOJO_SC_STORE(&g->io_done, 0);
+    GOJO_STORE(&g->io_seq, seq);
+    uint64_t ud = ((uint64_t)g->idx << 32) | seq;
+    if (!ur_submit(write ? UR_OP_WRITE : UR_OP_READ, fd, (uint64_t)(uintptr_t)p, (uint32_t)len, ud)) {
+        GOJO_SC_STORE(&g->io_inflight, 0);
+        return UR_FALLBACK;
+    }
+    ur_reap(g);
+    if (GOJO_SC_LOAD(&g->io_done) != seq) {
+        GOJO_ADD(&s_io_waiters, 1);
+        uint64_t token = wait_begin(g);
+        if (GOJO_SC_LOAD(&g->io_done) == seq) {
+            // it finished meanwhile; if the poller claimed the wait, take its wake-up
+            if (!wait_claim(g, token)) g_park();
+        } else {
+            blk(g, BLK_FILE, NULL);
+            wait_park(g, token);
+            unblk(g);
+            if (GOJO_SC_LOAD(&g->io_done) != seq) {
+                // cancelled: the kernel may still use the buffer, so ask it to
+                // stop and wait until it has
+                ur_submit(UR_OP_ASYNC_CANCEL, -1, ud, 0, 0);
+                while (GOJO_SC_LOAD(&g->io_done) != seq) {
+                    g->epoch++;
+                    uint64_t t = ((uint64_t)g->epoch << 2) | WAIT_DRAIN;
+                    g->wake = WAKE_NONE;
+                    GOJO_SC_STORE(&g->wait, t);
+                    if (GOJO_SC_LOAD(&g->io_done) == seq) {
+                        if (!wait_claim(g, t)) g_park();
+                        break;
+                    }
+                    blk(g, BLK_FILE, NULL);
+                    g_park();
+                    unblk(g);
+                }
+            }
+        }
+        GOJO_ADD(&s_io_waiters, -1);
+    }
+    GOJO_SC_STORE(&g->io_inflight, 0);
+    return g->io_res;
+}
+
+#endif
+
+// ------------------------------------------------------------------ file reads and writes
+//
+// os.File reads and writes don't block a worker thread when they don't have
+// to. A pipe, terminal or socket that has nothing to read (or no room to
+// write) is waited for like a network connection: the task parks on the
+// poller and can be cancelled. On Linux, a regular file whose data isn't in
+// the page cache goes through the io_uring, if there is one. Anything else
+// (a regular file without RWF_NOWAIT, a macOS file) blocks its thread as
+// before, giving its CPU slot away meanwhile.
+
+#define FILE_BLOCK INT64_MIN
+// fds known to need the blocking path: regular files (macOS), regular files
+// whose filesystem can't do RWF_NOWAIT (Linux). Cleared when opened or closed.
+static uint8_t s_fd_block[65536 / 8];
+
+static bool fd_blocks(int fd) { return fd >= 0 && fd < 65536 && (GOJO_RELAXED(&s_fd_block[fd >> 3]) >> (fd & 7) & 1); }
+
+static void fd_set_blocks(int fd, bool on) {
+    if (fd < 0 || fd >= 65536) return;
+    uint8_t bit = (uint8_t)(1u << (fd & 7));
+    if (on) __atomic_fetch_or(&s_fd_block[fd >> 3], bit, __ATOMIC_RELAXED);
+    else __atomic_fetch_and(&s_fd_block[fd >> 3], (uint8_t)~bit, __ATOMIC_RELAXED);
+}
+
+// Reads or writes `fd` without blocking the thread where it can: the result
+// (or -errno), -ECANCELED, or FILE_BLOCK: do it the blocking way (when this
+// waited for the fd to be ready, that won't wait).
+static int64_t file_io(bool write, int fd, void *p, size_t len) {
+    if (fd_blocks(fd) || cur_worker() == NULL || gojo_sim_on) return FILE_BLOCK;
+#if defined(__linux__) && defined(__NR_preadv2)
+    if (ur_on() && s_ur_always) {
+        for (;;) {
+            int64_t r = ur_rw(write, fd, p, len);
+            if (r != -EAGAIN) return r == UR_FALLBACK ? FILE_BLOCK : r;
+            int w = wait_fd_r(fd, write, true);
+            if (w == 0) return -ECANCELED;
+            if (w < 0) return FILE_BLOCK;
+        }
+    }
+    struct iovec iov = { p, len };
+    for (;;) {
+        // (offset -1: the file's position; as two longs, low half first)
+        ssize_t n = syscall(write ? __NR_pwritev2 : __NR_preadv2, fd, &iov, 1, -1L, 0L, RWF_NOWAIT);
+        if (n >= 0) return n;
+        int e = errno;
+        if (e == EINTR) continue;
+        if (e != EAGAIN && e != EOPNOTSUPP && e != EINVAL) return -(int64_t)e;
+        struct stat st;
+        if (fstat(fd, &st) == 0 && S_ISREG(st.st_mode)) {
+            if (e != EAGAIN) {
+                // no RWF_NOWAIT on this filesystem
+                fd_set_blocks(fd, true);
+                return FILE_BLOCK;
+            }
+            // not in the page cache
+            if (!ur_on()) return FILE_BLOCK;
+            int64_t r = ur_rw(write, fd, p, len);
+            return r == UR_FALLBACK || r == -EAGAIN ? FILE_BLOCK : r;
+        }
+        // a pipe, terminal or socket: wait until it's ready
+        int w = wait_fd_r(fd, write, true);
+        if (w == 0) return -ECANCELED;
+        if (w < 0 || e != EAGAIN) return FILE_BLOCK;
+    }
+#else
+    (void)p;
+    (void)len;
+    struct stat st;
+    if (fstat(fd, &st) != 0) return FILE_BLOCK;
+    if (!S_ISFIFO(st.st_mode) && !S_ISSOCK(st.st_mode)) {
+        if (S_ISREG(st.st_mode)) fd_set_blocks(fd, true);
+        return FILE_BLOCK;
+    }
+    struct pollfd pf = { fd, write ? POLLOUT : POLLIN, 0 };
+    if (poll(&pf, 1, 0) == 0 && wait_fd_r(fd, write, true) == 0) return -ECANCELED;
+    return FILE_BLOCK;
+#endif
 }
 
 // ------------------------------------------------------------------ TCP
@@ -3338,6 +3723,7 @@ static void dump_task(FILE *f, gojo_g *g, int64_t now) {
     case BLK_RWLOCK: fprintf(f, "waiting for an RwLock"); break;
     case BLK_SLEEP: fprintf(f, "sleeping"); break;
     case BLK_IO: fprintf(f, "waiting for the network"); break;
+    case BLK_FILE: fprintf(f, "waiting for a file read or write"); break;
     default: fprintf(f, "running or ready"); secs = -1; break;
     }
     if (secs >= 0) fprintf(f, " (%.3f s)", secs);
