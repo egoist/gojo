@@ -1,6 +1,6 @@
 # Gojo Language Design
 
-Nov 4, 2026 · @xinyu zeng
+Nov 4, 2026
 
 ## 1. Overview
 
