@@ -74,9 +74,10 @@ Tests: `projects/app`, `projects/cycle`, `projects/private`, `projects/groups`, 
 - **No shadowing within a function**: an inner block cannot declare a variable with the same name as a local variable of an outer block.
 - A local variable that is declared but never used is a compile error. Names that start with `_`, and `_` itself, are exempt.
 - `const Name = constant expression`. It can refer to other constants. Integer constants can be used as array lengths.
-- The order of package-level declarations (functions, types, aliases, constants) does not matter; a declaration can use declarations written after it. An alias or constant that refers to itself, directly or indirectly, is a compile error (recursive types need a struct or enum).
+- The order of package-level declarations (functions, types, aliases, constants, values) does not matter; a declaration can use declarations written after it. An alias or constant that refers to itself, directly or indirectly, is a compile error (recursive types need a struct or enum).
+- **Package-level values**: `let name = e` (or `let name T = e`) at the top level of a file, `pub let` to export it. `e` is any expression; it is computed once, on first use, by whichever task gets there first (the others wait), so a program pays only for the values it uses. The type must be `send` and can't be or contain a view: every task can see the value. It is read-only: no assignment, no `inout` borrow, no move out of it; state that changes goes inside, in a `Mutex`, `RwLock` or `Atomic` (`let hits = Atomic.new(0)`). A value whose computation needs itself panics: `the value of x depends on itself`. There is no top-level `var`.
 
-Tests: `run/basics`, `run/decls`, `run/forward_decls`, `errors/let_immutable`, `errors/shadowing`, `errors/unused`, `errors/constraints`, `errors/decl_cycles`, `errors/const_cycle`.
+Tests: `run/basics`, `run/decls`, `run/forward_decls`, `run/globals`, `errors/let_immutable`, `errors/shadowing`, `errors/unused`, `errors/constraints`, `errors/decl_cycles`, `errors/const_cycle`, `errors/globals`, `errors/global_move`, `panic/global_cycle`.
 
 ### 3.2 Type declarations
 
@@ -361,12 +362,15 @@ Tests: `run/select`, `run/concurrency`, `run/sched`, `errors/select_arms`, `erro
 - `Mutex(x)` owns its data; `arc(Mutex(x))` is for long-term sharing. `with v = mu.lock() { }` locks; the lock is released when the block ends, and the reference can't leave the block. `Mutex(&x)` makes a `MutexRef[T]`, a lock that borrows `x` (a `var`); while it exists `x` is reachable only through it.
 - `with a, b = lock(m1, m2) { }` takes two or more locks at once, in one order everywhere (by address), so code that always takes several locks this way can't deadlock on them. The same mutex twice is an error, or a panic when only known at run time.
 - **No waiting under a lock.** A send, receive, `select`, `time.sleep`, `join` or `scope` written directly inside a `with ... lock()` body is an error: the tasks waiting for the lock would wait too. (Waits inside called functions are found at run time, 10.7.)
+- `RwLock.new(x)` lets many tasks read at once, or one write: `with v = rw.read() { }` gives a read-only reference, `with v = rw.write() { }` a mutable one; neither can leave its block, and the rules for waiting under a lock apply to both. Waiters are served in order, a run of readers together, so a stream of readers can't starve a writer.
 - `Atomic[T]`, for integer types: `Atomic.new(x)`, `load`, `store`, `add` and `sub` (wrapping; they give the new value), `swap` (gives the old one), `compareSwap(old, new)` and `clone`. Every operation is atomic and sequentially consistent; tasks share an `Atomic` by borrowing it.
 - `send interface Name { }` is an interface that only `send` types implement, so its values are `send`; a type parameter bounded by it is `send`.
 - `isolate { body }` has type `Iso[T]` (`T` is the type of `body`, not a view). The body may use variables from outside only if their types are `send`, so nothing outside points into what it builds. `Iso[T]` is `send` whatever `T` is (it may hold `rc` and `Cell`), can't be cloned, and `iso.take()` gives back the `T`.
 - `task.yieldNow()` lets other tasks run.
 
-Tests: `run/sharing`, `run/isolate`, `run/mutexref`, `errors/wait_under_lock`, `errors/send_interface`, `errors/isolate`, `errors/isolate_clone`, `errors/mutexref`, `errors/mutexref_borrow`, `errors/mutexref_immutable`, `panic/deadlock_locks`.
+- **Task-local values**: `let key = task.local[T]()` (at package level) makes a key; `task.with(key, value, () => body)` binds it while `body` runs, and `key.get()` gives a copy (`?T`; `T` must be `send` and cloneable) in that code and in every task started inside it, through any number of scopes and shields. An inner `task.with` of the same key hides the outer one until it ends. Nothing else can change a binding, so tasks never race on one.
+
+Tests: `run/sharing`, `run/isolate`, `run/mutexref`, `run/rwlock`, `run/task_locals`, `errors/rwlock`, `errors/wait_under_lock`, `errors/send_interface`, `errors/isolate`, `errors/isolate_clone`, `errors/mutexref`, `errors/mutexref_borrow`, `errors/mutexref_immutable`, `panic/deadlock_locks`.
 
 ### 10.6 Cancellation
 

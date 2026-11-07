@@ -621,6 +621,12 @@ fn drive(cmd: &str, input: &str, opts: &Options, prog_args: &[String]) -> Result
     // debug builds carry debug info, with Gojo source lines (`#line`)
     let mut flags: Vec<&str> = if opts.release { vec!["-O2"] } else { vec!["-O0", "-g", "-gno-column-info"] };
     flags.extend(["-w", "-fwrapv"]);
+    if opts.release {
+        // Where a small hot function lands relative to the CPU's fetch blocks
+        // changed its speed by up to 7% when unrelated code before it grew;
+        // aligned, it doesn't depend on that.
+        flags.push("-falign-functions=32");
+    }
     if is_clang {
         flags.push("-fbracket-depth=16384");
     }

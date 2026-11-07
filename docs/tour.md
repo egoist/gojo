@@ -395,6 +395,30 @@ the: 2
 
 Maps keep their insertion order. To keep something you borrowed, clone it.
 
+A slice is read-only, even in a `var`: other views of the same elements may
+exist. A function changes elements through an `inout []T` parameter, called
+with `&v` or with a range of it, `&v[a..b]`:
+
+```zig
+fn bump(v inout []int) {
+    for x in &v {
+        x += 100
+    }
+    v.reverse()
+}
+
+fn main() {
+    var nums = [5, 3, 8, 1, 9]
+    bump(&nums[1..4])
+    nums[..2].sort()
+    println(nums)
+}
+```
+
+```text
+[5, 101, 108, 103, 9]
+```
+
 ## Collections and closures
 
 `Vec[T]`, `Map[K, V]` and `Set[T]` are in the prelude, with the usual methods.
@@ -649,7 +673,62 @@ Tasks are scheduled M:N on a thread per CPU, and preempted, so a long
 computation doesn't starve the others. A data race is a compile error: two
 tasks can't use a variable one of them changes, and values with `rc` or raw
 pointers can't cross to another thread. `par for x in &v { }` runs the
-iterations of a loop on every CPU, each owning its element.
+iterations of a loop on every CPU, each owning its element. Two tasks may
+also change parts of one slice, when the borrow checker can see that the
+ranges don't overlap:
+
+```zig
+fn fill(v inout []int, x int) {
+    for e in &v {
+        e = x
+    }
+}
+
+fn main() {
+    var cells = [0, 0, 0, 0, 0, 0]
+    let mid = 3
+    scope {
+        go fill(&cells[..mid], 1)
+        go fill(&cells[mid..], 2)
+    }
+    println(cells)
+}
+```
+
+```text
+[1, 1, 1, 2, 2, 2]
+```
+
+A package-level `let` is computed once, the first time it is used, and every
+task sees it. It is read-only; what changes goes in a `Mutex`, an `RwLock`
+(many readers or one writer) or an `Atomic` inside it:
+
+```zig
+use std/fmt
+
+let hits = Atomic.new(0)
+let names = RwLock.new(Vec[String]{})
+
+fn main() {
+    scope {
+        for i in 0..4 {
+            go () => {
+                _ = hits.add(1)
+                with n = names.write() {
+                    n.push(fmt.sprint("task", i))
+                }
+            }
+        }
+    }
+    with n = names.read() {
+        println(hits.load(), n.len())
+    }
+}
+```
+
+```text
+4 4
+```
 
 Tests run on a simulated scheduler: one thread, a virtual clock, and an
 interleaving chosen by a seed, so a test does the same thing every time.
