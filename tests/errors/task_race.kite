@@ -1,4 +1,4 @@
-use task
+use std/task
 fn main() {
     var total = 0
     let xs = [1, 2, 3]

@@ -8,7 +8,7 @@
 //   var out = bufio.writer(os.stdout())
 //   try out.writeText("many small writes, one system call\n")
 //   try out.flush()
-use io
+use std/io
 
 // Reads from `R` in large chunks, and line by line.
 pub struct Reader[R io.Reader] {

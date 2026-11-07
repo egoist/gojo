@@ -1,5 +1,5 @@
 // bufio: lines, delimiters and buffered writes, over files and memory.
-use bufio, fmt, io, os
+use std/{bufio, fmt, io, os}
 
 fn lines(text str) ! io.Error {
     var r = bufio.reader(io.textReader(text))

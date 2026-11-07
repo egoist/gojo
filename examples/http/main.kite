@@ -1,6 +1,6 @@
 // `kite run examples/http`: starts the server and checks it with a few clients.
 // `kite run examples/http serve`: serves on :8080 until interrupted.
-use fmt, http, io, net, os, task, time
+use std/{fmt, http, io, net, os, task, time}
 
 struct App {
     fn serve(self, req http.Request) http.Response {

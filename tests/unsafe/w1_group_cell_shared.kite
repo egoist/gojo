@@ -1,4 +1,4 @@
-use task
+use std/task
 fn main() {
     let c = Cell(0)
     _ = task.group((g) => {

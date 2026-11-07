@@ -3,7 +3,7 @@
 // Prints the lines that contain PATTERN (a plain string). Reads standard input
 // without paths, searches directories with -r. Exits with 0 when something
 // matched, 1 when nothing did, 2 on errors -- like grep.
-use bufio, fmt, io, os
+use std/{bufio, fmt, io, os}
 
 struct Options {
     ignoreCase bool = false

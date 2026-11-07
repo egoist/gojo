@@ -7,7 +7,7 @@ Kite 是一门系统编程语言：保留 Go 的简单和编译速度，用 Rust
 这个仓库是按 [设计文档](docs/design.md) 实现的编译器原型：编译器用 Rust 编写（约 1.9 万行，无第三方依赖），C 运行时约 4000 行，Kite 标准库约 3400 行。
 
 ```go
-use os
+use std/os
 
 struct Config {
     name String // 必填
@@ -36,13 +36,13 @@ fn main() {
 没有 `package` 声明：一个目录就是一个包，包名就是目录名；`kite run` 的入口包里放 `main` 函数。导入用 `use`，路径不加引号：
 
 ```go
-use fmt, os, time              // 标准库：直接写名字，一行可以写多个
+use std/{fmt, os, time}        // 标准库：都在 std 下，一行可以导入几个
 use ./geom                     // 本项目的包：相对当前包目录的路径
 use ../shared/util as u        // 嵌套路径，as 重命名
 use ./geom.{Vec2, Shape}       // 把名字直接引入作用域，不再绑定 geom
 ```
 
-看路径开头就知道是标准库还是项目内的包，不会重名。`print`/`println`/`eprint`/`eprintln` 在 prelude 里，hello world 不需要任何导入；`fmt` 只剩 `fmt.sprint`、`fmt.format` 这类格式化函数。未使用的导入（包括 `.{...}` 里的名字）是编译错误。
+看路径开头就知道是标准库（`std/`）还是项目内的包（`./`），不会重名；`use std/os` 绑定的名字是 `os`。`print`/`println`/`eprint`/`eprintln` 在 prelude 里，hello world 不需要任何导入；`fmt` 只剩 `fmt.sprint`、`fmt.format` 这类格式化函数。未使用的导入（包括 `.{...}` 里的名字）是编译错误。
 
 ## 方法
 

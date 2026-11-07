@@ -1,5 +1,5 @@
 // Goroutines are scheduled onto a few threads; blocking parks only the goroutine.
-use fmt, time, task
+use std/{fmt, time, task}
 
 fn pingPong(n int) int {
     let ping = chan[int]()

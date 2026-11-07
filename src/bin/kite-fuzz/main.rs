@@ -607,7 +607,8 @@ fn run_limited(cmd: &mut Command, limit: Duration) -> Option<std::process::Outpu
 /// Whether a program may be run: its behavior has to be defined by the safety
 /// rules alone (no `unsafe`, no C), and it mustn't touch files or the network.
 fn runnable(text: &str) -> bool {
-    !["unsafe", "extern", "os.", "net.", "use os", "use net", "use ./", "use ../"].iter().any(|w| text.contains(w))
+    // (a module that is imported is used: unused imports don't compile)
+    !["unsafe", "extern", "os.", "net.", "http.", "use ./", "use ../"].iter().any(|w| text.contains(w))
 }
 
 fn exec_check(text: &str, work: &Path, findings: &Findings) {

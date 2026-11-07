@@ -1,5 +1,5 @@
 // Files, directories, errors, the environment and processes.
-use io, os
+use std/{io, os}
 
 fn work(dir str) ! io.Error {
     let a = os.joinPath(dir, "a.txt")

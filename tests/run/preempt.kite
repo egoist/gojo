@@ -1,6 +1,6 @@
 // Goroutines that never block still share the CPU: the scheduler asks a
 // goroutine that has run for a while to yield.
-use task, time
+use std/{task, time}
 
 fn spin(n int) int {
     var x = 0

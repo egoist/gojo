@@ -122,6 +122,13 @@ pub fn load(input: &str, source: Option<&str>) -> Result<Loaded, (SourceMap, Vec
     let mut names_used: HashSet<String> = ["main".to_string()].into_iter().chain(STD.iter().map(|(n, _)| n.to_string())).collect();
     let main_key = if source.is_none() && in_path.is_dir() { in_path.canonicalize().map(|p| p.display().to_string()).unwrap_or_default() } else { String::new() };
 
+    fn std_module(name: &str) -> bool {
+        name != "prelude" && STD.iter().any(|(n, _)| *n == name)
+    }
+    fn std_list() -> String {
+        STD.iter().filter(|(n, _)| *n != "prelude").map(|(n, _)| format!("`{}`", n)).collect::<Vec<_>>().join(", ")
+    }
+
     fn is_ident(s: &str) -> bool {
         let mut cs = s.chars();
         matches!(cs.next(), Some(c) if c.is_alphabetic() || c == '_') && cs.all(|c| c.is_alphanumeric() || c == '_')
@@ -153,12 +160,20 @@ pub fn load(input: &str, source: Option<&str>) -> Result<Loaded, (SourceMap, Vec
                     imp.alias = Some(last.clone());
                 }
                 if !imp.path.starts_with("./") && !imp.path.starts_with("../") {
-                    if STD.iter().any(|(n, _)| *n == imp.path && *n != "prelude") {
-                        if !std_needed.contains(&imp.path) {
-                            std_needed.push(imp.path.clone());
+                    if let Some(m) = imp.path.strip_prefix("std/") {
+                        if std_module(m) {
+                            if !std_needed.iter().any(|n| n == m) {
+                                std_needed.push(m.to_string());
+                            }
+                            // from here on, the standard module's own name
+                            imp.path = m.to_string();
+                        } else {
+                            diags.push(Diag::new(imp.span, format!("there is no standard module `{}` (the standard library has {})", m, std_list())));
                         }
+                    } else if std_module(&imp.path) {
+                        diags.push(Diag::new(imp.span, format!("standard modules are written with `std/`: `use std/{}`", imp.path)));
                     } else {
-                        diags.push(Diag::new(imp.span, format!("unknown standard module `{}` (packages in this project are written `use ./{}`)", imp.path, imp.path)));
+                        diags.push(Diag::new(imp.span, format!("unknown package `{}`: a package in this project is written `use ./{}` (the standard library has {})", imp.path, imp.path, std_list())));
                     }
                     continue;
                 }
@@ -224,6 +239,10 @@ pub fn load(input: &str, source: Option<&str>) -> Result<Loaded, (SourceMap, Vec
     let mut units = vec![];
     for f in std_files.values_mut() {
         for imp in f.imports.iter_mut() {
+            // std imports std as `use std/io`, like any other code
+            if let Some(m) = imp.path.strip_prefix("std/") {
+                imp.path = m.to_string();
+            }
             if imp.alias.is_none() {
                 imp.alias = Some(imp.path.clone());
             }

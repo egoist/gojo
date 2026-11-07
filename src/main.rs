@@ -158,7 +158,7 @@ fn doc_command(args: &[String]) -> ExitCode {
     let index = || {
         let mut s = String::from("# The standard library
 
-The prelude is available everywhere; other modules are imported with `use`.
+The prelude is available everywhere; other modules are imported with `use std/name` (`use std/{os, json}` for several).
 
 | module | |
 | --- | --- |

@@ -1,4 +1,4 @@
-use task
+use std/task
 fn main() {
     var n = 0
     let mu = Mutex(&n)

@@ -1,4 +1,4 @@
-use task
+use std/task
 fn work(v inout Vec[int]) {
     _ = task.group((g) => {
         g.go(() => v.push(1))

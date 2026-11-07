@@ -1,4 +1,4 @@
-use fmt
+use std/fmt
 
 struct Stack[T any] {
     items Vec[T]

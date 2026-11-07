@@ -1,4 +1,4 @@
-use fmt
+use std/fmt
 
 // Pull iteration: `cursor` + `next`. The cursor is plain data.
 struct Countdown {

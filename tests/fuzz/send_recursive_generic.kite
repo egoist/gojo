@@ -1,4 +1,4 @@
-use task
+use std/task
 enum Tree[T] {
     Leaf
     Node(l Box[Tree[T]], v T, r Box[Tree[T]])

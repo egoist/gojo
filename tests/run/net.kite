@@ -1,5 +1,5 @@
 // TCP: an echo server and its clients, all goroutines in one process.
-use fmt, net, task, time
+use std/{fmt, net, task, time}
 
 fn serve(c net.Conn) {
     var buf = Vec[byte]{}

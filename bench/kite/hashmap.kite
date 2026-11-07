@@ -1,4 +1,4 @@
-use fmt
+use std/fmt
 
 fn main() {
     let n = 1000000

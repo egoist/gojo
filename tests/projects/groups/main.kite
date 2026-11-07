@@ -1,0 +1,12 @@
+// Grouped imports: `std/{...}`, with `as` and `.{...}` inside, over several
+// lines, and a group of this project's packages.
+use std/{
+    fmt as f,
+    os.{args},
+    json,
+}
+use ./shapes/{circle, rect}
+
+fn main() {
+    println(f.format("{}", circle.area() + rect.area()), args().len(), json.null().isNull())
+}

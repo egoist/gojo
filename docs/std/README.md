@@ -1,6 +1,6 @@
 # The standard library
 
-The prelude is available everywhere; other modules are imported with `use`.
+The prelude is available everywhere; other modules are imported with `use std/name` (`use std/{os, json}` for several).
 
 | module | |
 | --- | --- |

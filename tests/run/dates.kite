@@ -1,5 +1,5 @@
 // Calendar dates, formatting and parsing.
-use time
+use std/time
 
 fn main() {
     let epoch = time.utc(0)

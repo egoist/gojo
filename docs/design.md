@@ -27,7 +27,7 @@ Kite（代号，可改）是一门保留 Go 的简单和编译速度、去掉 GC
 语法以 Go 为起点，但不必照搬。类型写在名字后面、大括号不换行、没有分号这些保留下来。原则是：写法和 Go 相同，含义也必须相同；含义变了，就换一种写法，不让人踩“看着一样、行为相反”的坑。
 
 ```go
-use os
+use std/os
 
 struct Config {
     name  String            // 必填：没有默认值
@@ -73,13 +73,14 @@ fn main() {
 一个目录就是一个包，包名就是目录名，文件里不写包声明。`kite run`/`kite build` 的入口包里放 `main` 函数（不需要 `pub`）。导入写在文件开头：
 
 ```go
-use fmt, os, time              // 标准库：直接写名字，一行可以写多个
+use std/{fmt, os, time}        // 标准库：都在 std 下，一行可以导入几个
 use ./geom                     // 本项目的包：相对当前包所在目录的路径
 use ../shared/util as u        // 嵌套路径；as 换一个绑定名
 use ./geom.{Vec2, Shape}       // 把名字直接引入作用域，此时不绑定 geom
 ```
 
-- 默认绑定名是路径的最后一段；最后一段不是合法标识符时必须写 `as`。
+- 默认绑定名是路径的最后一段（`use std/os` 绑定 `os`）；最后一段不是合法标识符时必须写 `as`。
+- 标准库只占用 `std` 一个名字（和 Rust、Zig、Gleam 一样），看路径开头就知道来源：`std/` 是标准库，`./` 是本项目，以后的依赖包是 `kite.toml` 里的名字（见 [packages.md](packages.md)）。
 - `.{...}` 引入的名字必须是 `pub` 的，不能和本包的声明重名。
 - 未使用的导入，包括 `.{...}` 里没用到的名字，是编译错误。导入不能成环。
 - `print`、`println`、`eprint`、`eprintln` 在 prelude 里，不需要导入；`fmt` 提供 `sprint` 等格式化函数。

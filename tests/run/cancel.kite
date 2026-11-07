@@ -1,5 +1,5 @@
 // Cancellation flows down the task tree.
-use fmt, time, task
+use std/{fmt, time, task}
 
 enum JobError {
     Bad(id int)

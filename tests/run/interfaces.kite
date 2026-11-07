@@ -1,4 +1,4 @@
-use fmt
+use std/fmt
 
 interface Animal {
     fn name(self) String

@@ -6,7 +6,7 @@
 //   }
 //   let r = try os.run("git", ["status", "--short"])
 //   print(r.stdout)
-use io
+use std/io
 
 // Errors here are io.Error (with an io.ErrorKind to match on).
 pub type Error = io.Error

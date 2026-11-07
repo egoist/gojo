@@ -1,6 +1,6 @@
 // A goroutine in a long C call gives its CPU to another thread, so the other
 // goroutines keep running even with one CPU.
-use task, time
+use std/{task, time}
 
 extern "C" {
     fn usleep(us u32) i32

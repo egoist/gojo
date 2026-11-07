@@ -1,5 +1,5 @@
-use os
-use time.{sleep, now}
+use std/os
+use std/time.{sleep, now}
 
 fn main() {
     let x = 1

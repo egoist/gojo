@@ -208,7 +208,7 @@ impl Parser {
         while self.is_kw(Kw::Use) {
             self.bump();
             loop {
-                imports.push(self.use_spec()?);
+                imports.extend(self.use_specs()?);
                 if !self.eat_p(",") {
                     break;
                 }
@@ -226,7 +226,45 @@ impl Parser {
         Ok(File { package: String::new(), imports, items, file_id: self.file })
     }
 
-    /// `fmt`, `./geom`, `../shared/util`, `./geom.{Vec2, Shape}`, `./net/http as h`
+    /// One `use` item, or a group of them: `std/{fmt, os as o}` is
+    /// `std/fmt, std/os as o`.
+    fn use_specs(&mut self) -> PResult<Vec<Import>> {
+        let first = self.use_spec()?;
+        if !(self.is_p("/") && matches!(self.peek_at(1), Tok::P("{"))) {
+            return Ok(vec![first]);
+        }
+        if first.names.is_some() || first.alias.is_some() {
+            return self.err("a group `/{...}` follows the path directly: `std/{fmt, os}`");
+        }
+        self.bump();
+        self.bump();
+        self.skip_nl();
+        let mut out = vec![];
+        while !self.is_p("}") {
+            let mut item = self.use_spec()?;
+            if item.path.starts_with("./") || item.path.starts_with("../") {
+                return self.err("the paths in a group are inside it: `std/{fmt, os}`, not `./`");
+            }
+            if self.is_p("/") && matches!(self.peek_at(1), Tok::P("{")) {
+                return self.err("groups can't be nested");
+            }
+            item.path = format!("{}/{}", first.path, item.path);
+            item.span = Span { lo: first.span.lo, ..item.span };
+            out.push(item);
+            self.skip_nl();
+            if !self.eat_p(",") {
+                break;
+            }
+            self.skip_nl();
+        }
+        self.expect_p("}")?;
+        if out.is_empty() {
+            return self.err("an empty group imports nothing");
+        }
+        Ok(out)
+    }
+
+    /// `std/fmt`, `./geom`, `../shared/util`, `./geom.{Vec2, Shape}`, `./net/http as h`
     fn use_spec(&mut self) -> PResult<Import> {
         let lo = self.span();
         let mut path = String::new();
@@ -245,7 +283,7 @@ impl Parser {
         }
         let (first, _) = self.ident()?;
         path.push_str(&first);
-        while self.is_p("/") {
+        while self.is_p("/") && !matches!(self.peek_at(1), Tok::P("{")) {
             self.bump();
             let (seg, _) = self.ident()?;
             path.push('/');

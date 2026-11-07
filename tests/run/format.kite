@@ -1,5 +1,5 @@
 // fmt.format and fmt.printf: placeholders checked at compile time.
-use fmt
+use std/fmt
 
 struct P {
     x int

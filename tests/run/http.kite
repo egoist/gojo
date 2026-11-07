@@ -1,5 +1,5 @@
 // http: request parsing, limits and the client, against a local server.
-use fmt, http, io, net, task
+use std/{fmt, http, io, net, task}
 
 struct Echo {
     fn serve(self, req http.Request) http.Response {

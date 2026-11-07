@@ -1,6 +1,6 @@
 // A task borrows what lives outside its group, and takes what was declared
 // inside the group body, like `go` does.
-use fmt, task
+use std/{fmt, task}
 
 struct Res {
     name String

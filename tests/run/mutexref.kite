@@ -1,4 +1,4 @@
-use task, time
+use std/{task, time}
 
 struct Page {
     url String

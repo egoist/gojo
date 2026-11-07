@@ -564,7 +564,7 @@ Shared mutable data goes in a `Mutex`, whose `lock` is a projection: the data
 can't escape the `with` block, so it can't be used without the lock.
 
 ```kite
-use task
+use std/task
 
 fn main() {
     let words = ["alpha", "beta", "gamma", "delta"]
@@ -596,7 +596,7 @@ network calls fail with an error whose `isCancelled()` is true. `task.timeout`
 runs code under a deadline:
 
 ```kite
-use task, time
+use std/{task, time}
 
 fn main() {
     let quick = task.timeout(time.second, () => 42)
@@ -620,12 +620,14 @@ can't cross to another thread.
 ## Packages and the standard library
 
 A directory is a package. `use ./geom` imports the package in the directory
-`geom` next to the current one; `use os, json` imports standard modules. Only
+`geom` next to the current one. The standard library lives under `std`:
+`use std/os` imports one module and `use std/{os, json}` several, and each is
+then used by its own name (`os.readText`). Only
 `pub` declarations are visible outside their package, and an unused import is
 an error.
 
 ```kite
-use fmt, json, os, time
+use std/{fmt, json, os, time}
 
 fn main() {
     var doc = json.object()

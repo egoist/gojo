@@ -1,4 +1,4 @@
-use task
+use std/task
 fn take(s sink String) {}
 fn main() {
     let s = "abcdefghijklmnopqrstuvwxyz0123456789".toString()

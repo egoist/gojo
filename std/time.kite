@@ -5,7 +5,7 @@
 //   println("took", time.formatDuration(time.since(start)))
 //   let d = time.local(time.unixNanos())
 //   println(d.format("%Y-%m-%d %H:%M"))
-use fmt
+use std/fmt
 
 // Durations are integer nanoseconds.
 pub const nanosecond = 1

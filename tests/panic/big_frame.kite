@@ -1,6 +1,6 @@
 // A frame far bigger than a goroutine's stack (and its guard page) must still
 // end in a clean stack-overflow panic, never in writes past the guard page.
-use os
+use std/os
 
 fn big(n int) int {
     var a [100000000]u8

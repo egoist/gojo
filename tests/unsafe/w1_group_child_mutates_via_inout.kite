@@ -1,4 +1,4 @@
-use task
+use std/task
 fn bump(v inout Vec[int]) {
     v.push(1)
 }

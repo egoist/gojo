@@ -6,7 +6,7 @@
 //       let c = try ln.accept()
 //       go serve(c)
 //   }
-use io
+use std/io
 
 // Errors here are io.Error; `isCancelled()` tells a cancelled call apart.
 pub type Error = io.Error

@@ -1,0 +1,4 @@
+use std/{os, net/{x}}
+// error: groups can't be nested
+
+fn main() {}

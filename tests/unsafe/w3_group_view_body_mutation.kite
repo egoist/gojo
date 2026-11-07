@@ -1,4 +1,4 @@
-use task
+use std/task
 fn main() {
     var s = "abcdefghijklmnopqrstuvwxyz".toString()
     let v = s.asStr()

@@ -10,7 +10,7 @@
 //
 // Objects keep their keys in insertion order. Integers that fit in `int` stay
 // exact (`Int`); other numbers are `Num` (f64).
-use fmt
+use std/fmt
 
 // A JSON value. Build one with the functions below (`json.object()`,
 // `json.string(s)`...) or with the variants, and read one with the methods.

@@ -139,6 +139,9 @@ fn layout(src: &str) -> Result<String, String> {
     let mut header = false;
     // on a `use` line: paths like `./geom` and `os.{exit}` keep their spacing
     let mut use_line = false;
+    // the bracket depth where the current `use` began: its group's lines
+    // (`use std/{` ... `}`) are part of it
+    let mut use_depth: Option<usize> = None;
     for (ei, e) in entries.iter().enumerate() {
         let closer = matches!(&e.item, Item::Tok(k) if matches!(toks[*k].tok, Tok::P(")") | Tok::P("]") | Tok::P("}")));
         if e.newlines > 0 && !first {
@@ -156,7 +159,13 @@ fn layout(src: &str) -> Result<String, String> {
             }
         }
         if at_line_start {
-            use_line = matches!(&e.item, Item::Tok(k) if toks[*k].tok == Tok::Kw(Kw::Use));
+            let starts_use = matches!(&e.item, Item::Tok(k) if toks[*k].tok == Tok::Kw(Kw::Use));
+            if starts_use {
+                use_depth = Some(stack.len());
+            } else if use_depth.is_some_and(|d| stack.len() <= d && !matches!(&e.item, Item::Tok(k) if toks[*k].tok == Tok::P("}"))) {
+                use_depth = None;
+            }
+            use_line = use_depth.is_some();
             let base = match stack.last() {
                 Some(o) => o.line_indent + 1,
                 None => 0,
@@ -339,7 +348,8 @@ mod tests {
         check("{\n\n    x\n\n}\n", "{\n    x\n}\n");
         check("select {\n<-quit => x\n}\nmatch v {\n-1..=0 => y\n}\n", "select {\n    <-quit => x\n}\nmatch v {\n    -1..=0 => y\n}\n");
         check("let a = f(x\n- y)\n", "let a = f(x\n    - y)\n");
-        check("use ./geom\nuse os.{exit, args}\n", "use ./geom\nuse os.{exit, args}\n");
+        check("use ./geom\nuse std/os.{exit, args}\nuse std/{fmt, os}\n", "use ./geom\nuse std/os.{exit, args}\nuse std/{fmt, os}\n");
+        check("use std/{\nfmt as f,\nos.{args},\n}\nfn main() { let s = S{a: 1} }\n", "use std/{\n    fmt as f,\n    os.{args},\n}\nfn main() { let s = S{a: 1} }\n");
         check("let c = chan[int]()\nlet s = \"hello\"[1..3]\n", "let c = chan[int]()\nlet s = \"hello\"[1..3]\n");
         check("fn f(xs []?String, m Map[int, ?int]) ?int {}\n", "fn f(xs []?String, m Map[int, ?int]) ?int {}\n");
         check("swap(& &a)\nlet x = - -1\nlet y = !!ok\n", "swap(& &a)\nlet x = - -1\nlet y = !!ok\n");

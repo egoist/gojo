@@ -1,0 +1,4 @@
+use std/{}
+// error: an empty group imports nothing
+
+fn main() {}

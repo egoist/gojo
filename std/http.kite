@@ -16,7 +16,7 @@
 // deadline (`Options.deadline`): a handler still running then is cancelled and
 // the client gets 504. A client that hangs up cancels its request too: the
 // handler's blocking calls return early.
-use fmt, io, net, task, time
+use std/{fmt, io, net, task, time}
 
 // A header line. Names are matched without regard to case.
 pub struct Header {

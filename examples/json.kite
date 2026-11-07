@@ -1,6 +1,6 @@
 // Reads a JSON document, looks things up in it, changes it and prints it
 // again: `kite run examples/json.kite [FILE]` (without FILE: a sample).
-use json, os
+use std/{json, os}
 
 fn sample() str {
     return `{"name": "kite", "version": 0.1, "tags": ["fast", "safe", null, true],

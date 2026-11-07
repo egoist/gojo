@@ -1,4 +1,4 @@
-use math
+use std/math
 
 copy struct Body {
     x, y, z, vx, vy, vz, mass f64

@@ -1,4 +1,4 @@
-use fmt
+use std/fmt
 
 pub fn shout(s str) String {
     return s.toUpper() + "!"

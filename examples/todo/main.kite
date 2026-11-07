@@ -9,7 +9,7 @@
 // `kite run examples/todo serve [FILE]` serves on :8080, saving to FILE (JSON)
 // after every change. `kite run examples/todo` starts it on a free port and
 // checks it with a client.
-use fmt, http, io, json, net, os, task, time
+use std/{fmt, http, io, json, net, os, task, time}
 
 struct Todo {
     id int

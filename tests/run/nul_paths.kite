@@ -1,6 +1,6 @@
 // A NUL byte can't be part of a path, name or argument: the call fails
 // instead of using only what comes before it.
-use io, net, os
+use std/{io, net, os}
 
 fn invalid(e io.Error) bool {
     return e.kind == .InvalidInput
