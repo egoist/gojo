@@ -4382,6 +4382,12 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
                 let a = self.addr(fs, &args[0].e);
                 format!("gojo_string_view({})", a)
             }
+            "Slice.reverse" | "Slice.swap" | "Slice.sort" | "Slice.sortBy" => {
+                let v = self.addr(fs, &args[0].e);
+                let vp = self.tmp();
+                self.emit(fs, &format!("gojo_slice *{} = {};", vp, v));
+                self.inplace_op(fs, &qn[6..], &elem(&recv_ty), &vp, args, &l)
+            }
             "Slice.len" => {
                 let a = self.expr(fs, &args[0].e);
                 format!("({}).len", a)
@@ -4688,6 +4694,40 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
     }
 
 
+    /// `reverse`, `swap`, `sort` and `sortBy` on the elements behind `vp`, a
+    /// `gojo_vec *` or `gojo_slice *` (both start with `ptr` and `len`).
+    fn inplace_op(&mut self, fs: &mut Fs, name: &str, el: &Ty, vp: &str, args: &[TArg], l: &str) -> String {
+        let ec = self.cty(el);
+        let arr = format!("(({} *){}->ptr)", ec, vp);
+        match name {
+            "reverse" => {
+                self.emit(fs, &format!("for (int64_t _i = 0, _j = {}->len - 1; _i < _j; _i++, _j--) {{ {} _t = {}[_i]; {}[_i] = {}[_j]; {}[_j] = _t; }}", vp, ec, arr, arr, arr, arr));
+            }
+            "swap" => {
+                let i = self.expr(fs, &args[1].e);
+                let j = self.expr(fs, &args[2].e);
+                self.emit(fs, &format!("{{ int64_t _i = gojo_idx({}, {}->len, {}), _j = gojo_idx({}, {}->len, {}); {} _t = {}[_i]; {}[_i] = {}[_j]; {}[_j] = _t; }}", i, vp, l, j, vp, l, ec, arr, arr, arr, arr));
+            }
+            "sort" => {
+                let f = self.sort_fn(el);
+                self.emit(fs, &format!("{}(({} *){}->ptr, {}->len);", f, ec, vp, vp));
+            }
+            "sortBy" => {
+                let f = self.addr(fs, &args[1].e);
+                let w = format!("sortby_{}", self.mangle(el));
+                if self.helpers.insert(w.clone()) {
+                    let pc = self.param_cty(Mode::Borrow, el);
+                    let (aa, bb) = if self.is_copy(el) { (format!("*({} *)a", ec), format!("*({} *)b", ec)) } else { (format!("({} *)a", ec), format!("({} *)b", ec)) };
+                    let _ = writeln!(self.protos, "static int {}(const void *a, const void *b, void *c);", w);
+                    let _ = writeln!(self.bodies, "static int {}(const void *a, const void *b, void *c) {{\n    gojo_func *f = c;\n    bool (*fn)(void *, {}, {}) = (bool (*)(void *, {}, {}))f->fn;\n    if (fn(f->env, {}, {})) return -1;\n    if (fn(f->env, {}, {})) return 1;\n    return 0;\n}}", w, pc, pc, pc, pc, aa, bb, bb, aa);
+                }
+                self.emit(fs, &format!("gojo_sort({}->ptr, {}->len, sizeof({}), {}, {});", vp, vp, ec, w, f));
+            }
+            _ => unreachable!(),
+        }
+        "0".into()
+    }
+
     fn vec_intrinsic(&mut self, fs: &mut Fs, name: &str, el: &Ty, args: &[TArg], ret: &Ty, l: &str) -> String {
         let ec = self.cty(el);
         let v = self.addr(fs, &args[0].e);
@@ -4750,16 +4790,7 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
                 self.emit(fs, &format!("gojo_vec {} = {}; gojo_vec_reserve({}, {}.len, sizeof({})); if ({}.len) memcpy({} + {}->len, {}.ptr, (size_t){}.len * sizeof({})); {}->len += {}.len; free({}.ptr);", ot, o, vp, ot, ec, ot, arr, vp, ot, ot, ec, vp, ot, ot));
                 "0".into()
             }
-            "reverse" => {
-                self.emit(fs, &format!("for (int64_t _i = 0, _j = {}->len - 1; _i < _j; _i++, _j--) {{ {} _t = {}[_i]; {}[_i] = {}[_j]; {}[_j] = _t; }}", vp, ec, arr, arr, arr, arr));
-                "0".into()
-            }
-            "swap" => {
-                let i = self.expr(fs, &args[1].e);
-                let j = self.expr(fs, &args[2].e);
-                self.emit(fs, &format!("{{ int64_t _i = gojo_idx({}, {}->len, {}), _j = gojo_idx({}, {}->len, {}); {} _t = {}[_i]; {}[_i] = {}[_j]; {}[_j] = _t; }}", i, vp, l, j, vp, l, ec, arr, arr, arr, arr));
-                "0".into()
-            }
+            "reverse" | "swap" | "sort" | "sortBy" => self.inplace_op(fs, name, el, &vp, args, l),
             "reserve" => {
                 let n = self.expr(fs, &args[1].e);
                 let nt = self.tmp();
@@ -4769,23 +4800,6 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
                 "0".into()
             }
             "cap" => format!("{}->cap", vp),
-            "sort" => {
-                let f = self.sort_fn(el);
-                self.emit(fs, &format!("{}(({} *){}->ptr, {}->len);", f, ec, vp, vp));
-                "0".into()
-            }
-            "sortBy" => {
-                let f = self.addr(fs, &args[1].e);
-                let w = format!("sortby_{}", self.mangle(el));
-                if self.helpers.insert(w.clone()) {
-                    let pc = self.param_cty(Mode::Borrow, el);
-                    let (aa, bb) = if self.is_copy(el) { (format!("*({} *)a", ec), format!("*({} *)b", ec)) } else { (format!("({} *)a", ec), format!("({} *)b", ec)) };
-                    let _ = writeln!(self.protos, "static int {}(const void *a, const void *b, void *c);", w);
-                    let _ = writeln!(self.bodies, "static int {}(const void *a, const void *b, void *c) {{\n    gojo_func *f = c;\n    bool (*fn)(void *, {}, {}) = (bool (*)(void *, {}, {}))f->fn;\n    if (fn(f->env, {}, {})) return -1;\n    if (fn(f->env, {}, {})) return 1;\n    return 0;\n}}", w, pc, pc, pc, pc, aa, bb, bb, aa);
-                }
-                self.emit(fs, &format!("gojo_sort({}->ptr, {}->len, sizeof({}), {}, {});", vp, vp, ec, w, f));
-                "0".into()
-            }
             _ => panic!("unknown Vec intrinsic {}", name),
         }
     }

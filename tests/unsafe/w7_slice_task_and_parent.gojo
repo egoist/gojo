@@ -1,0 +1,15 @@
+// the parent writes an element the task's range covers
+fn fill(v inout []int, x int) {
+    for i in 0..v.len() {
+        v[i] = x
+    }
+}
+
+fn main() {
+    var xs = [0, 0, 0, 0]
+    scope {
+        go fill(&xs[..2], 1)
+        xs[1] = 5
+    }
+    println(xs)
+}

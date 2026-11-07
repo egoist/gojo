@@ -383,6 +383,19 @@ extend []T {
     // The number of elements.
     pub fn len(self) int
 
+    // Reverses the order in place. Only an `inout []T` (or a range of a
+    // `var` Vec or array, `v[a..b]`) can be changed.
+    pub fn reverse(self inout)
+
+    // Exchanges elements `i` and `j`; panics when either is out of range.
+    pub fn swap(self inout, i int, j int)
+
+    // Sorts in ascending order. Stable; O(n log n).
+    pub fn sort(self inout) where T: ordered
+
+    // Sorts by `less(a, b)`: true when `a` goes before `b`. Stable.
+    pub fn sortBy(self inout, less fn(T, T) bool)
+
     // raw pointer to the first element, for FFI
     pub fn ptr(self) *T
 

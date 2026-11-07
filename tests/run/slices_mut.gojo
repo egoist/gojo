@@ -1,0 +1,96 @@
+// Mutable slice views: `inout []T` lends elements; tasks may hold disjoint
+// ranges of the same Vec.
+
+fn partition(v inout []int) int {
+    let n = v.len()
+    let pivot = v[n - 1]
+    var i = 0
+    for j in 0..n - 1 {
+        if v[j] < pivot {
+            v.swap(i, j)
+            i += 1
+        }
+    }
+    v.swap(i, n - 1)
+    return i
+}
+
+// parallel quicksort: each half goes to its own task
+fn psort(v inout []int) {
+    if v.len() < 64 {
+        v.sort()
+        return
+    }
+    let p = partition(&v)
+    scope {
+        go psort(&v[..p])
+        go psort(&v[p + 1..])
+    }
+}
+
+fn fill(v inout []int, x int) {
+    for e in &v {
+        e = x
+    }
+}
+
+fn halves(a inout []int, b inout []int) {
+    a[0] = -1
+    b[0] = -2
+}
+
+fn double(v inout []int) {
+    par for x in &v {
+        x *= 2
+    }
+}
+
+fn main() {
+    var xs = Vec[int]{}
+    var s = 12345
+    for _ in 0..20000 {
+        s = (s * 1103515245 + 12345) % 2147483648
+        xs.push(s % 100000)
+    }
+    psort(&xs)
+    var sorted = true
+    for i in 1..xs.len() {
+        if xs[i - 1] > xs[i] {
+            sorted = false
+        }
+    }
+    println("sorted:", sorted)
+
+    var ys = [0, 0, 0, 0, 0, 0, 0, 0]
+    let mid = 4
+    scope {
+        go fill(&ys[..mid], 1)
+        go fill(&ys[mid..mid + 2], 2)
+        go fill(&ys[mid + 2..], 3)
+    }
+    println(ys)
+
+    // a range of a range, and two disjoint arguments of one call
+    halves(&ys[..2], &ys[2..])
+    double(&ys[4..])
+    println(ys)
+
+    // one task writes a range while the loop writes another
+    scope {
+        go fill(&ys[6..], 9)
+        for y in &ys[..2] {
+            y = 7
+        }
+    }
+    println(ys)
+
+    // in-place methods on ranges and arrays
+    var zs = [5, 1, 4, 2, 3]
+    zs[1..4].sort()
+    zs[..2].reverse()
+    println(zs)
+    var arr [4]int = [1, 2, 3, 4]
+    arr.swap(0, 3)
+    arr[1..3].sortBy(fn(a int, b int) bool { a > b })
+    println(arr)
+}

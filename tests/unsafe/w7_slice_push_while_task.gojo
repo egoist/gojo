@@ -1,0 +1,15 @@
+// growing the Vec moves its elements while a task writes them
+fn fill(v inout []int, x int) {
+    for i in 0..v.len() {
+        v[i] = x
+    }
+}
+
+fn main() {
+    var xs = [0, 0, 0, 0]
+    scope {
+        go fill(&xs[..2], 1)
+        xs.push(9)
+    }
+    println(xs)
+}

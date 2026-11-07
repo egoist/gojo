@@ -266,8 +266,50 @@ struct Loan {
     /// Taken in an earlier iteration of the loop being checked, by a view
     /// declared outside it.
     carried: bool,
+    /// Only these elements of the target (a range of a Vec, array or inout
+    /// slice): loans of disjoint ranges of the same target don't conflict.
+    range: Option<SymRange>,
     /// Held by a task until its scope ends.
     task: bool,
+}
+
+/// A bound of a slice range the checker can compare without knowing values:
+/// a constant, an immutable local plus a constant, or the end.
+#[derive(Clone, Debug, PartialEq)]
+enum RBound {
+    Const(i128),
+    Var(LocalId, i128),
+    End,
+}
+
+/// The elements `lo..hi` of a range expression.
+#[derive(Clone, Debug, PartialEq)]
+struct SymRange {
+    lo: RBound,
+    hi: RBound,
+}
+
+/// Whether `a <= b` for every value the bounds can take (indices are >= 0).
+fn bound_le(a: &RBound, b: &RBound) -> bool {
+    match (a, b) {
+        (_, RBound::End) => true,
+        (RBound::Const(0), _) => true,
+        (RBound::Const(x), RBound::Const(y)) => x <= y,
+        (RBound::Var(l, x), RBound::Var(m, y)) => l == m && x <= y,
+        _ => false,
+    }
+}
+
+fn disjoint(a: &SymRange, b: &SymRange) -> bool {
+    bound_le(&a.hi, &b.lo) || bound_le(&b.hi, &a.lo)
+}
+
+/// Whether two loans of overlapping paths actually share elements.
+fn ranges_meet(pa: &Path, ra: Option<&SymRange>, pb: &Path, rb: Option<&SymRange>) -> bool {
+    match (ra, rb) {
+        (Some(a), Some(b)) if pa == pb => !disjoint(a, b),
+        _ => true,
+    }
 }
 
 struct LoopCx {
@@ -451,7 +493,89 @@ impl<'a> Bc<'a> {
     }
 
     fn check_loans(&mut self, p: &Path, acc: Acc, sp: Span, via: Option<LocalId>) {
-        let conflict = self.loans.iter().find(|l| overlap(&l.target, p) && (acc == Acc::Mut || l.mutable) && (via.is_none() || l.holder != via)).cloned();
+        self.check_loans_r(p, None, acc, sp, via)
+    }
+
+    /// The range `lo..hi` of slicing `base` when its bounds can be compared
+    /// symbolically. `fixed` says which locals keep their value for as long
+    /// as the loan lasts.
+    fn sym_range(&self, lo: Option<&TExpr>, hi: Option<&TExpr>, fixed: &dyn Fn(LocalId) -> bool) -> Option<SymRange> {
+        fn bound(e: &TExpr, fixed: &dyn Fn(LocalId) -> bool) -> Option<RBound> {
+            match &e.kind {
+                TK::Int(n) => Some(RBound::Const(*n)),
+                TK::Copy(x) | TK::Cast(x) => bound(x, fixed),
+                TK::Local(l) if fixed(*l) => Some(RBound::Var(*l, 0)),
+                TK::Binary { op: BinOp::Add, l, r } => match (bound(l, fixed)?, bound(r, fixed)?) {
+                    (RBound::Var(v, a), RBound::Const(b)) | (RBound::Const(b), RBound::Var(v, a)) => Some(RBound::Var(v, a.checked_add(b)?)),
+                    (RBound::Const(a), RBound::Const(b)) => Some(RBound::Const(a.checked_add(b)?)),
+                    _ => None,
+                },
+                TK::Binary { op: BinOp::Sub, l, r } => match (bound(l, fixed)?, bound(r, fixed)?) {
+                    (RBound::Var(v, a), RBound::Const(b)) => Some(RBound::Var(v, a.checked_sub(b)?)),
+                    (RBound::Const(a), RBound::Const(b)) => Some(RBound::Const(a.checked_sub(b)?)),
+                    _ => None,
+                },
+                _ => None,
+            }
+        }
+        let lo = match lo {
+            Some(e) => bound(e, fixed)?,
+            None => RBound::Const(0),
+        };
+        let hi = match hi {
+            Some(e) => bound(e, fixed)?,
+            None => RBound::End,
+        };
+        Some(SymRange { lo, hi })
+    }
+
+    /// Locals that can't change: their value at a call (or a task's start)
+    /// is their value for as long as it runs.
+    fn immutable_local(&self, l: LocalId) -> bool {
+        matches!(self.tf.locals[l as usize].kind, LocalKind::Let | LocalKind::Param(Mode::Borrow)) && self.is_copy(&self.tf.locals[l as usize].ty)
+    }
+
+    /// Evaluates what a loop iterates over. A range of a place is checked
+    /// against loans by the loop itself, with its range, not as a use of the
+    /// whole place.
+    fn iter_expr(&mut self, st: &mut St, iter: &TExpr) {
+        if let TK::SliceOf { base, lo, hi } = &iter.kind {
+            if base.is_place() {
+                self.subexprs_of_place(st, base);
+                if let Some(p) = place_path(base) {
+                    self.check_moved(st, &p, base.span, "use of");
+                }
+                for x in [lo, hi].into_iter().flatten() {
+                    self.expr(st, x);
+                }
+                return;
+            }
+        }
+        self.expr(st, iter);
+    }
+
+    /// What a loop over `iter` borrows while it runs: a place, or the
+    /// elements a range of one (`xs[a..b]`, `v[i..]`) covers.
+    fn iter_targets(&self, iter: &TExpr) -> Option<(Vec<(Path, bool)>, Option<SymRange>)> {
+        if iter.is_place() {
+            return Some((self.targets(iter), None));
+        }
+        match &iter.kind {
+            TK::SliceOf { base, lo, hi } => {
+                let ts = self.view_sources(iter).ok()?;
+                // the range is relative to the base: only meaningful when the
+                // base is the place itself, not a view of something else
+                let direct = place_path(base).is_some_and(|p| !self.is_holder(p.0)) && base.is_place();
+                let range = if direct { self.sym_range(lo.as_deref(), hi.as_deref(), &|l| self.immutable_local(l)) } else { None };
+                Some((ts, range))
+            }
+            TK::Coerce(Coercion::VecToSlice | Coercion::ArrayToSlice | Coercion::StringToStr, x) if x.is_place() => Some((self.targets(x), None)),
+            _ => None,
+        }
+    }
+
+    fn check_loans_r(&mut self, p: &Path, range: Option<&SymRange>, acc: Acc, sp: Span, via: Option<LocalId>) {
+        let conflict = self.loans.iter().find(|l| overlap(&l.target, p) && ranges_meet(&l.target, l.range.as_ref(), p, range) && (acc == Acc::Mut || l.mutable) && (via.is_none() || l.holder != via)).cloned();
         if let Some(l) = conflict {
             let n = self.name(p);
             if l.returned {
@@ -599,7 +723,7 @@ impl<'a> Bc<'a> {
             self.loans = saved;
         }
         for (t, _) in &targets {
-            self.loans.push(Loan { target: t.clone(), mutable, holder: Some(holder), span: sp, depth: self.depth, returned: false, carried: false, task: false });
+            self.loans.push(Loan { target: t.clone(), mutable, holder: Some(holder), span: sp, depth: self.depth, returned: false, carried: false, range: None, task: false });
         }
         self.holders.insert(holder, targets.into_iter().map(|(p, _)| (p, mutable)).collect());
     }
@@ -999,7 +1123,7 @@ impl<'a> Bc<'a> {
                         // while the `defer`s run, after it was computed
                         if let Ok(srcs) = self.view_sources(e) {
                             for (t, _) in srcs {
-                                self.loans.push(Loan { target: t, mutable: false, holder: None, span: e.span, depth: 0, returned: true, carried: false, task: false });
+                                self.loans.push(Loan { target: t, mutable: false, holder: None, span: e.span, depth: 0, returned: true, carried: false, range: None, task: false });
                                 kept += 1;
                             }
                         }
@@ -1055,7 +1179,7 @@ impl<'a> Bc<'a> {
                 }, cond.is_none(), (cond.as_ref(), body));
             }
             TStmt::For { id, kind, iter, hi, elem, index, mutable, body, .. } => {
-                self.expr(st, iter);
+                self.iter_expr(st, iter);
                 if let Some(h) = hi {
                     self.expr(st, h);
                 }
@@ -1065,13 +1189,12 @@ impl<'a> Bc<'a> {
                 if let Some(i) = index {
                     self.decl_depth.insert(*i, self.depth);
                 }
-                if holds && iter.is_place() {
-                    let targets = self.targets(iter);
+                if let Some((targets, range)) = self.iter_targets(iter).filter(|_| holds) {
                     for (t, _) in &targets {
-                        self.check_loans(t, if *mutable { Acc::Mut } else { Acc::Read }, iter.span, None);
+                        self.check_loans_r(t, range.as_ref(), if *mutable { Acc::Mut } else { Acc::Read }, iter.span, None);
                     }
                     for (t, _) in &targets {
-                        self.loans.push(Loan { target: t.clone(), mutable: *mutable, holder: Some(*elem), span: iter.span, depth: self.depth, returned: false, carried: false, task: false });
+                        self.loans.push(Loan { target: t.clone(), mutable: *mutable, holder: Some(*elem), span: iter.span, depth: self.depth, returned: false, carried: false, range: range.clone(), task: false });
                     }
                     self.holders.insert(*elem, targets.iter().map(|(p, _)| (p.clone(), *mutable)).collect());
                     if let Some(i) = index {
@@ -1100,16 +1223,21 @@ impl<'a> Bc<'a> {
                         self.read(st, iter);
                     }
                 } else {
-                    self.expr(st, iter);
+                    self.iter_expr(st, iter);
                 }
                 if let Some(h) = hi {
                     self.expr(st, h);
                 }
                 // the iterated value stays borrowed while the body runs
                 let before = self.loans.len();
-                if iter.is_place() && hi.is_none() {
-                    for (t, _) in self.targets(iter) {
-                        self.loans.push(Loan { target: t, mutable: *mutable, holder: None, span: iter.span, depth: self.depth + 1, returned: false, carried: false, task: false });
+                if let Some((targets, range)) = self.iter_targets(iter).filter(|_| hi.is_none()) {
+                    if !iter.is_place() {
+                        for (t, _) in &targets {
+                            self.check_loans_r(t, range.as_ref(), if *mutable { Acc::Mut } else { Acc::Read }, iter.span, None);
+                        }
+                    }
+                    for (t, _) in targets {
+                        self.loans.push(Loan { target: t, mutable: *mutable, holder: None, span: iter.span, depth: self.depth + 1, returned: false, carried: false, range: range.clone(), task: false });
                     }
                 }
                 if let TK::Closure(c) = &body.kind {
@@ -1275,7 +1403,8 @@ impl<'a> Bc<'a> {
             .loans
             .iter()
             .filter(|l| (l.holder.is_some_and(|h| outside.contains(&h) && !overwritten_first(h, src.0, src.1)) || (l.holder.is_none() && !l.returned && l.depth <= outer_depth)) && !before.contains(&key(l)))
-            .map(|l| Loan { carried: true, ..l.clone() })
+            // (a range's bounds may differ in the next iteration)
+            .map(|l| Loan { carried: true, range: None, ..l.clone() })
             .collect();
         let carried_holders: Vec<(LocalId, Vec<(Path, bool)>)> = carried.iter().filter_map(|l| l.holder).filter_map(|h| self.holders.get(&h).map(|t| (h, t.clone()))).collect();
         self.loans = saved_loans;
@@ -1413,7 +1542,7 @@ impl<'a> Bc<'a> {
                             };
                             let mutable = refs.iter().any(|b| matches!(self.tf.locals[*b as usize].kind, LocalKind::Ref { mutable: true }));
                             for (t, _) in &targets {
-                                self.loans.push(Loan { target: t.clone(), mutable, holder: Some(refs[0]), span: scrut.span, depth: self.depth, returned: false, carried: false, task: false });
+                                self.loans.push(Loan { target: t.clone(), mutable, holder: Some(refs[0]), span: scrut.span, depth: self.depth, returned: false, carried: false, range: None, task: false });
                             }
                             // Bindings into a temporary (`if let x = w.upgrade()`) point
                             // into something that lives only for this `match`: they own
@@ -1494,14 +1623,18 @@ impl<'a> Bc<'a> {
             // a task borrows only the parts of a variable it uses: `ch.rx`
             // leaves `ch.tx` free to move
             if c.scoped && !taken && !self.is_holder(*l) {
-                if let Some(paths) = capture_paths(c, *l) {
+                // a range's bounds must keep their value while the task runs:
+                // immutable locals it captures
+                let fixed = |x: LocalId| c.captures.iter().any(|(y, _)| *y == x) && self.immutable_local(x);
+                let rng = |lo: Option<&TExpr>, hi: Option<&TExpr>| self.sym_range(lo, hi, &fixed);
+                if let Some(paths) = capture_paths(c, *l, &rng) {
                     let d = self.spawn_depth.unwrap_or(1);
                     let acc = if *u == CapUse::Mutate { Acc::Mut } else { Acc::Read };
-                    for p in paths {
+                    for (p, range) in paths {
                         let path = (*l, p);
                         self.check_moved(st, &path, c.span, if acc == Acc::Mut { "modification of" } else { "use of" });
-                        self.check_loans(&path, acc, c.span, None);
-                        self.loans.push(Loan { target: path, mutable: acc == Acc::Mut, holder: None, span: c.span, depth: d, returned: false, carried: false, task: true });
+                        self.check_loans_r(&path, range.as_ref(), acc, c.span, None);
+                        self.loans.push(Loan { target: path, mutable: acc == Acc::Mut, holder: None, span: c.span, depth: d, returned: false, carried: false, range, task: true });
                     }
                     continue;
                 }
@@ -1519,7 +1652,7 @@ impl<'a> Bc<'a> {
                 let held: Vec<(Path, bool)> = place_path(&le).and_then(|p| self.holders.get(&p.0).cloned()).unwrap_or_default();
                 for (p, m) in self.arg_targets(&le) {
                     let via_mut = m || held.iter().any(|(h, hm)| *hm && overlap(h, &p));
-                    self.loans.push(Loan { target: p, mutable: *u == CapUse::Mutate || via_mut, holder: None, span: c.span, depth: d, returned: false, carried: false, task: true });
+                    self.loans.push(Loan { target: p, mutable: *u == CapUse::Mutate || via_mut, holder: None, span: c.span, depth: d, returned: false, carried: false, range: None, task: true });
                 }
             }
         }
@@ -1540,14 +1673,32 @@ impl<'a> Bc<'a> {
             TK::Proj { call, .. } => return self.call_args(st, call),
             _ => return self.expr(st, e),
         };
-        // (path, access, span, comes from a push-style loop body)
-        let mut accesses: Vec<(Path, Acc, Span, bool)> = vec![];
+        // (path, access, span, comes from a push-style loop body, range)
+        let mut accesses: Vec<(Path, Acc, Span, bool, Option<SymRange>)> = vec![];
         for a in args {
             match a.mode {
+                // `&v[a..b]`: only those elements
+                ArgMode::Inout if matches!(&a.e.kind, TK::SliceOf { base, .. } if base.is_place()) => {
+                    let TK::SliceOf { base, lo, hi } = &a.e.kind else { unreachable!() };
+                    let range = self.sym_range(lo.as_deref(), hi.as_deref(), &|l| self.immutable_local(l));
+                    self.subexprs_of_place(st, base);
+                    for x in [lo, hi].into_iter().flatten() {
+                        self.expr(st, x);
+                    }
+                    if let Some(p) = place_path(base) {
+                        if !self.is_holder(p.0) {
+                            self.check_moved(st, &p, base.span, "modification of");
+                            self.check_loans_r(&p, range.as_ref(), Acc::Mut, base.span, None);
+                        }
+                    }
+                    for (p, _) in self.arg_targets(base) {
+                        accesses.push((p, Acc::Mut, a.e.span, false, range.clone()));
+                    }
+                }
                 ArgMode::Inout => {
                     self.write(st, &a.e);
                     for (p, _) in self.arg_targets(&a.e) {
-                        accesses.push((p, Acc::Mut, a.e.span, false));
+                        accesses.push((p, Acc::Mut, a.e.span, false, None));
                     }
                 }
                 ArgMode::Borrow => {
@@ -1558,7 +1709,7 @@ impl<'a> Bc<'a> {
                             for (l, u) in c.captures.iter().filter(|(l, _)| !c.by_value.contains(l)) {
                                 let le = TExpr::new(TK::Local(*l), self.tf.locals[*l as usize].ty.clone(), c.span);
                                 for (p, _) in self.arg_targets(&le) {
-                                    accesses.push((p, if *u == CapUse::Mutate { Acc::Mut } else { Acc::Read }, c.span, c.loop_body.is_some()));
+                                    accesses.push((p, if *u == CapUse::Mutate { Acc::Mut } else { Acc::Read }, c.span, c.loop_body.is_some(), None));
                                 }
                             }
                         }
@@ -1571,7 +1722,7 @@ impl<'a> Bc<'a> {
                     }
                     if !self.is_copy(&a.e.ty) || a.e.ty.is_view() {
                         for (p, _) in self.arg_targets(&a.e) {
-                            accesses.push((p, Acc::Read, a.e.span, false));
+                            accesses.push((p, Acc::Read, a.e.span, false, None));
                         }
                     }
                 }
@@ -1580,13 +1731,13 @@ impl<'a> Bc<'a> {
                     if let TK::Move(x) = &a.e.kind {
                         if let Some(p) = place_path(x) {
                             if !self.is_holder(p.0) {
-                                accesses.push((p, Acc::Mut, a.e.span, false));
+                                accesses.push((p, Acc::Mut, a.e.span, false, None));
                             }
                         }
                     } else if a.e.ty.is_view() {
                         if let Ok(srcs) = self.view_sources(&a.e) {
                             for (p, _) in srcs {
-                                accesses.push((p, Acc::Read, a.e.span, false));
+                                accesses.push((p, Acc::Read, a.e.span, false, None));
                             }
                         }
                     }
@@ -1596,7 +1747,7 @@ impl<'a> Bc<'a> {
         for i in 0..accesses.len() {
             for j in 0..i {
                 let (a, b) = (&accesses[i], &accesses[j]);
-                if overlap(&a.0, &b.0) && (a.1 == Acc::Mut || b.1 == Acc::Mut) {
+                if overlap(&a.0, &b.0) && ranges_meet(&a.0, a.4.as_ref(), &b.0, b.4.as_ref()) && (a.1 == Acc::Mut || b.1 == Acc::Mut) {
                     let n = self.name(&a.0);
                     let (sp, other) = (a.2, b.2);
                     if a.3 || b.3 {
@@ -1633,7 +1784,7 @@ impl<'a> Bc<'a> {
 /// The parts of captured local `l` that closure `c` uses: field paths, or the
 /// whole variable (an empty path). None when the variable isn't used through
 /// a place at all (then the caller treats it as a whole).
-fn capture_paths(c: &TClosure, l: LocalId) -> Option<Vec<Vec<usize>>> {
+fn capture_paths(c: &TClosure, l: LocalId, range: &dyn Fn(Option<&TExpr>, Option<&TExpr>) -> Option<SymRange>) -> Option<Vec<(Vec<usize>, Option<SymRange>)>> {
     use std::collections::HashSet;
     // the child a place goes through: the inner node is part of the outer place
     fn inner(e: &TExpr) -> Option<&TExpr> {
@@ -1646,7 +1797,14 @@ fn capture_paths(c: &TClosure, l: LocalId) -> Option<Vec<Vec<usize>>> {
     }
     let mut found: Vec<(*const TExpr, Vec<usize>)> = vec![];
     let mut nested: HashSet<*const TExpr> = HashSet::new();
+    // places used only through a range `v[a..b]`, with the range
+    let mut ranged: HashMap<*const TExpr, SymRange> = HashMap::new();
     visit_block(&c.body, &mut |e| {
+        if let TK::SliceOf { base, lo, hi } = &e.kind {
+            if let Some(r) = range(lo.as_deref(), hi.as_deref()) {
+                ranged.insert(&**base as *const TExpr, r);
+            }
+        }
         if let Some((r, p)) = place_path(e) {
             if r == l {
                 found.push((e as *const TExpr, p));
@@ -1656,16 +1814,18 @@ fn capture_paths(c: &TClosure, l: LocalId) -> Option<Vec<Vec<usize>>> {
             }
         }
     });
-    let mut out: Vec<Vec<usize>> = vec![];
+    let mut out: Vec<(Vec<usize>, Option<SymRange>)> = vec![];
     for (ptr, p) in found {
         if nested.contains(&ptr) {
             continue;
         }
-        if p.is_empty() {
-            return Some(vec![vec![]]);
+        let r = ranged.get(&ptr).cloned();
+        if p.is_empty() && r.is_none() {
+            return Some(vec![(vec![], None)]);
         }
-        if !out.contains(&p) {
-            out.push(p);
+        let x = (p, r);
+        if !out.contains(&x) {
+            out.push(x);
         }
     }
     if out.is_empty() {

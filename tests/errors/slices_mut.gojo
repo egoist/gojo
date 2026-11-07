@@ -1,0 +1,23 @@
+// Slices are read-only views; `inout []T` lends elements; tasks may share a
+// Vec only through ranges the checker can tell apart.
+fn bump(v inout []int) {
+    v[0] += 1
+}
+
+fn fill(v inout []int, x int) {
+    for e in &v {
+        e = x
+    }
+}
+
+fn main() {
+    var xs = [1, 2, 3, 4]
+    var a []int = xs
+    a[0] = 5
+    // error: cannot assign to an element of a read-only slice: `a` is a read-only view
+    bump(&a)
+    // error: cannot mutably borrow this slice: `a` is a read-only view
+    let ys = [1, 2]
+    bump(&ys[1..])
+    // error: cannot mutably borrow this slice: variable `ys` is not mutable
+}

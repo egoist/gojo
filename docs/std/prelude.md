@@ -891,6 +891,39 @@ pub fn len(self) int
 
 The number of elements.
 
+#### []T.reverse
+
+```zig
+pub fn reverse(self inout)
+```
+
+Reverses the order in place. Only an `inout []T` (or a range of a
+`var` Vec or array, `v[a..b]`) can be changed.
+
+#### []T.swap
+
+```zig
+pub fn swap(self inout, i int, j int)
+```
+
+Exchanges elements `i` and `j`; panics when either is out of range.
+
+#### []T.sort
+
+```zig
+pub fn sort(self inout) where T: ordered
+```
+
+Sorts in ascending order. Stable; O(n log n).
+
+#### []T.sortBy
+
+```zig
+pub fn sortBy(self inout, less fn(T, T) bool)
+```
+
+Sorts by `less(a, b)`: true when `a` goes before `b`. Stable.
+
 #### []T.ptr
 
 ```zig

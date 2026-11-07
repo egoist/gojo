@@ -1,0 +1,15 @@
+// pointing an inout slice at other data would let it write a `let` Vec that
+// another task reads
+fn retarget(v inout []int, other []int) {
+    v = other
+    v[0] = 99
+}
+
+fn main() {
+    var xs = [1, 2]
+    let ys = [3, 4]
+    scope {
+        go println(ys)
+        retarget(&xs, ys)
+    }
+}

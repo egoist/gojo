@@ -1,0 +1,27 @@
+// Tasks may hold ranges of one Vec only when the checker can see they don't
+// overlap: constants and immutable locals plus constants.
+fn fill(v inout []int, x int) {
+    for e in &v {
+        e = x
+    }
+}
+
+// an inout slice may be re-sliced, but not pointed at other elements
+fn retarget(v inout []int, other []int) {
+    v = v[1..]
+    v[0] = 1
+    v = other
+    // error: cannot store a view of `other` in the `inout` parameter `v`
+}
+
+fn main() {
+    var xs = [1, 2, 3, 4]
+    let p = 2
+    scope {
+        go fill(&xs[..p + 1], 1)
+        go fill(&xs[p..], 2)
+        // error: cannot modify `xs`: a task modifies it until its scope ends
+    }
+    fill(&xs[..p], 0)
+    println(xs)
+}

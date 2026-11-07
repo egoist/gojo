@@ -1,0 +1,12 @@
+// a range of a `let` Vec is not writable: a task reads the Vec
+fn bump(v inout []int) {
+    v[0] += 1
+}
+
+fn main() {
+    let xs = [1, 2, 3]
+    scope {
+        go println(xs)
+        bump(&xs[1..])
+    }
+}

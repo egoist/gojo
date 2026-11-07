@@ -1,0 +1,11 @@
+// two arguments of one call share element 2
+fn both(a inout []int, b inout []int) {
+    a[a.len() - 1] = 1
+    b[0] = 2
+}
+
+fn main() {
+    var xs = [0, 0, 0, 0]
+    both(&xs[..3], &xs[2..])
+    println(xs)
+}

@@ -1,0 +1,8 @@
+// sorting part of the Vec while a task reads it
+fn main() {
+    var xs = [4, 3, 2, 1]
+    scope {
+        go println(xs)
+        xs[..2].sort()
+    }
+}

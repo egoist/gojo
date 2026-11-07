@@ -1,0 +1,8 @@
+// pushing reallocates the elements the loop is reading
+fn main() {
+    var xs = [1, 2, 3]
+    for x in xs[1..] {
+        xs.push(x)
+    }
+    println(xs)
+}

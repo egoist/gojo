@@ -1,0 +1,16 @@
+// two tasks write overlapping ranges: element p is in both
+fn fill(v inout []int, x int) {
+    for i in 0..v.len() {
+        v[i] = x
+    }
+}
+
+fn main() {
+    var xs = [0, 0, 0, 0]
+    let p = 2
+    scope {
+        go fill(&xs[..p + 1], 1)
+        go fill(&xs[p..], 2)
+    }
+    println(xs)
+}

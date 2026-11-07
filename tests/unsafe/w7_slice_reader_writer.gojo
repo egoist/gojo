@@ -1,0 +1,23 @@
+// one task reads the whole Vec while another writes a part of it
+fn fill(v inout []int, x int) {
+    for i in 0..v.len() {
+        v[i] = x
+    }
+}
+
+fn sum(v []int) int {
+    var s = 0
+    for x in v {
+        s += x
+    }
+    return s
+}
+
+fn main() {
+    var xs = [0, 0, 0, 0]
+    scope {
+        go fill(&xs[2..], 1)
+        let t = go sum(xs)
+        println(t.join())
+    }
+}

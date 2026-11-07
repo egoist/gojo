@@ -1,0 +1,18 @@
+// each iteration's `lo` is a new value: ranges of different iterations can't
+// be compared, and here they overlap
+fn fill(v inout []int, x int) {
+    for i in 0..v.len() {
+        v[i] = x
+    }
+}
+
+fn main() {
+    var xs = [0, 0, 0, 0, 0, 0]
+    scope {
+        for k in 0..3 {
+            let lo = k
+            go fill(&xs[lo..lo + 3], k)
+        }
+    }
+    println(xs)
+}

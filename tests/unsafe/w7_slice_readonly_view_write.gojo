@@ -1,0 +1,14 @@
+// a plain `[]int` is a read-only view: another view of the same elements is
+// read by a task while this one would write them
+fn bump(v inout []int) {
+    v[0] += 1
+}
+
+fn main() {
+    var xs = [1, 2, 3]
+    var a []int = xs
+    scope {
+        go println(xs[0])
+        bump(&a)
+    }
+}

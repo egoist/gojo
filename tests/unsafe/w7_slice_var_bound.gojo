@@ -1,0 +1,18 @@
+// the bound is a `var`: it changes after the first task starts, so the
+// ranges overlap even though they look disjoint
+fn fill(v inout []int, x int) {
+    for i in 0..v.len() {
+        v[i] = x
+    }
+}
+
+fn main() {
+    var xs = [0, 0, 0, 0]
+    var m = 3
+    scope {
+        go fill(&xs[..m], 1)
+        m = 1
+        go fill(&xs[m..], 2)
+    }
+    println(xs)
+}

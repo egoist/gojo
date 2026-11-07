@@ -798,8 +798,9 @@ impl Checker {
             }
             TK::Index { base, .. } | TK::MapIndex { base, .. } => {
                 let b = self.place_info(cx, base);
-                let mutable = match &base.ty {
-                    Ty::Slice(_) => b.as_ref().map(|b| b.mutable).unwrap_or(false),
+                let mutable = match self.resolve(cx, &base.ty) {
+                    // a slice is a read-only view unless it came in `inout`
+                    Ty::Slice(_) => self.slice_writable(cx, base).is_ok(),
                     _ => b.as_ref().map(|b| b.mutable).unwrap_or(true),
                 };
                 Some(PInfo { root: b.and_then(|b| b.root), owned: false, mutable, desc: "an element of a collection".into() })
@@ -924,14 +925,72 @@ impl Checker {
         e
     }
 
+    /// Whether the elements of slice `e` may be written: it is an `inout []T`
+    /// parameter, a range of one, or a range of a mutable `Vec` or array.
+    /// Otherwise what it is, for the error message. A plain `[]T` is a
+    /// read-only view, even in a `var`: other views of the same elements may
+    /// exist, in this task or another.
+    pub fn slice_writable(&self, cx: &FnCx, e: &TExpr) -> Result<Option<LocalId>, String> {
+        match &e.kind {
+            TK::Local(id) => {
+                let l = &cx.locals[*id as usize];
+                match l.kind {
+                    LocalKind::Param(Mode::Inout) => Ok(Some(*id)),
+                    LocalKind::Param(_) => Err(format!("parameter `{}` is a read-only view", l.name)),
+                    _ => Err(format!("`{}` is a read-only view", l.name)),
+                }
+            }
+            TK::Copy(x) => self.slice_writable(cx, x),
+            TK::SliceOf { base, .. } => match self.resolve(cx, &base.ty) {
+                Ty::Slice(_) => self.slice_writable(cx, base),
+                Ty::Vec(_) | Ty::Array(..) | Ty::ArrayT(..) => match self.place_info(cx, base) {
+                    Some(p) if p.mutable => Ok(p.root),
+                    Some(p) => Err(format!("{} is not mutable", p.desc)),
+                    None => Err("a range of a temporary value".into()),
+                },
+                _ => Err("the range is read-only".into()),
+            },
+            TK::Coerce(Coercion::VecToSlice | Coercion::ArrayToSlice, inner) => match self.place_info(cx, inner) {
+                Some(p) if p.mutable => Ok(p.root),
+                Some(p) => Err(format!("{} is not mutable", p.desc)),
+                None => Err("a temporary value".into()),
+            },
+            _ => Err("a temporary view".into()),
+        }
+    }
+
     pub fn require_mut(&mut self, cx: &mut FnCx, e: &TExpr, what: &str) -> bool {
         if matches!(e.ty, Ty::Error) {
             return true;
+        }
+        // (assigning a slice variable points it elsewhere; an `inout` one may
+        // only be re-sliced, which the borrow checker enforces)
+        if let Ty::Slice(_) = self.resolve(cx, &e.ty) {
+            if what != "assign to" {
+                return match self.slice_writable(cx, e) {
+                    Ok(root) => {
+                        if let Some(r) = root {
+                            self.note_use(cx, r, CapUse::Mutate);
+                        }
+                        true
+                    }
+                    Err(why) => {
+                        self.diags.push(Diag::new(e.span, format!("cannot {} this slice: {}", what, why)).note(None, "only `inout []T` parameters may change elements; pass `&v` or `&v[a..b]` of a `var` Vec or array"));
+                        false
+                    }
+                };
+            }
         }
         match self.place_info(cx, e) {
             Some(p) => {
                 if let Some(r) = p.root {
                     self.note_use(cx, r, CapUse::Mutate);
+                }
+                if let (false, TK::Index { base, .. }) = (p.mutable, &e.kind) {
+                    if let (Ty::Slice(_), Err(why)) = (self.resolve(cx, &base.ty), self.slice_writable(cx, base)) {
+                        self.diags.push(Diag::new(e.span, format!("cannot {} an element of a read-only slice: {}", what, why)).note(None, "only `inout []T` parameters may change elements; pass `&v` or `&v[a..b]` of a `var` Vec or array"));
+                        return false;
+                    }
                 }
                 if !p.mutable {
                     let mut d = Diag::new(e.span, format!("cannot {} {}: it is not mutable", what, p.desc));
@@ -1828,7 +1887,7 @@ impl Checker {
             let it = self.borrow(cx, it);
             let (kind, et) = match &ity {
                 Ty::Vec(t) => (IterKind::Vec, (**t).clone()),
-                Ty::Slice(t) if !by_ref => (IterKind::Slice, (**t).clone()),
+                Ty::Slice(t) => (IterKind::Slice, (**t).clone()),
                 Ty::Array(t, _) | Ty::ArrayT(t, _) => (IterKind::Array, (**t).clone()),
                 Ty::Error => return None,
                 _ => {
@@ -3835,6 +3894,11 @@ impl Checker {
                         self.require_mut(cx, &e, "mutably borrow");
                         let sp = e.span;
                         TExpr::new(TK::Coerce(Coercion::VecToSlice, Box::new(e)), pty.clone(), sp)
+                    }
+                    (Ty::Array(x, _) | Ty::ArrayT(x, _), Ty::Slice(y)) if self.try_unify(cx, x, y) => {
+                        self.require_mut(cx, &e, "mutably borrow");
+                        let sp = e.span;
+                        TExpr::new(TK::Coerce(Coercion::ArrayToSlice, Box::new(e)), pty.clone(), sp)
                     }
                     (Ty::Iface(..), Ty::Iface(..)) => {
                         let ok = self.unify(cx, &et, &pty);
