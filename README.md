@@ -106,6 +106,7 @@ cargo build --release
 | `kite fmt [--check] [文件或目录...]` | 就地格式化（默认当前目录）；`--check` 只列出没格式化的文件，有则退出码 1 |
 | `kite doc [模块或路径] [--out 目录]` | Markdown 格式的 API 文档：标准库索引、一个标准库模块或一个包；`--out` 把整个标准库写到目录里（即 [`docs/std`](docs/std/README.md)） |
 | `kite emit-c <文件或目录>` | 输出生成的 C 代码 |
+| `kite init [名字]` | 在当前目录写一个 `kite.toml`（包清单，见 [`docs/packages.md`](docs/packages.md)） |
 | `kite version` | 版本、提交和目标平台 |
 
 选项：`--release`（`-O2`，溢出检查仍然开启）、`--cc "<编译器 参数>"`、`--target <三元组>`（用 `zig cc` 交叉编译，例如 `--target x86_64-linux-musl` 直接得到静态 Linux 二进制）、`-v`（打印各阶段耗时）。
@@ -238,6 +239,7 @@ target/fuzz/kite-fuzz --jobs 4          # 变异模糊测试：编译器崩溃�
 target/fuzz/kite-fuzz diff --jobs 2     # 差分测试：随机生成的程序在 debug / release / sanitizer 下结果必须一致
 target/fuzz/kite-fuzz borrow --jobs 2   # 借用检查器：随机摆弄视图的程序，被接受的必须在 ASan 下干净
 target/fuzz/kite-fuzz fmt 6000         # 格式化器：保持词法单元不变、结果稳定、与原来的缩进无关
+target/fuzz/kite-fuzz toml 200000      # kite.toml 读取器：变异的清单不能让它 panic
 target/fuzz/kite-fuzz reduce fuzz-out/findings/xxx.kite   # 化简复现
 ```
 

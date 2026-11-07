@@ -1,0 +1,6 @@
+[package]
+name = "store"
+
+[dependencies]
+# the same package as the app's `yaml`: one copy in the build
+yml = { path = "../yaml" }

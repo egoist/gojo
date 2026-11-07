@@ -1,0 +1,5 @@
+[package]
+name = "greet"
+
+[dependencies]
+shout = { path = "../shout" }

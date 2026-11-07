@@ -1,0 +1,9 @@
+use std/json as stdjson
+use json, store, yaml
+use yaml/schema
+
+fn main() {
+    println(yaml.parse("a: 1"), schema.check("a: 1"))
+    println(store.save("note"), json.describe())
+    println(stdjson.null().isNull())
+}

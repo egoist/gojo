@@ -1,0 +1,5 @@
+use std/fmt
+
+pub fn check(s str) String {
+    return fmt.format("{} ok ({} bytes)", s, s.len())
+}

@@ -359,7 +359,7 @@ fn formatted() {
     }
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut paths = vec![];
-    for d in ["std", "examples", "bench/kite", "tests/run", "tests/errors", "tests/panic", "tests/projects", "tests/testblocks", "tests/unsafe"] {
+    for d in ["std", "examples", "bench/kite", "tests/run", "tests/errors", "tests/panic", "tests/projects", "tests/packages", "tests/testblocks", "tests/unsafe"] {
         walk(&root.join(d), &mut paths);
     }
     let mut bad = vec![];
@@ -493,4 +493,60 @@ fn debug_info_lines() {
         assert!(caller.is_some_and(|l| l.contains("dbgline.kite:9")), "the caller should be at dbgline.kite:9:\n{}", text);
     }
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Packages with kite.toml: each case in tests/packages runs `kite run
+/// <case>/app` and compares `expected.out`, or finds every line of
+/// `expected.err` in the errors.
+#[test]
+fn packages() {
+    let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/packages");
+    let mut failures = vec![];
+    let mut cases: Vec<PathBuf> = std::fs::read_dir(&base).unwrap().filter_map(|e| e.ok().map(|e| e.path())).filter(|p| p.is_dir()).collect();
+    cases.sort();
+    for c in &cases {
+        let out = Command::new(kite()).arg("run").arg(c.join("app")).current_dir(&base).output().unwrap();
+        let (stdout, stderr) = (String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        if let Ok(want) = std::fs::read_to_string(c.join("expected.out")) {
+            if stdout != want || !out.status.success() {
+                failures.push(format!("{}:\n--- want\n{}--- got\n{}--- stderr\n{}", c.display(), want, stdout, stderr));
+            }
+        } else if let Ok(want) = std::fs::read_to_string(c.join("expected.err")) {
+            if out.status.success() {
+                failures.push(format!("{}: expected errors, but it ran", c.display()));
+            }
+            for w in want.lines().filter(|l| !l.is_empty()) {
+                if !stderr.contains(w) {
+                    failures.push(format!("{}: missing `{}` in:\n{}", c.display(), w, stderr));
+                }
+            }
+            if stderr.contains("panicked") {
+                failures.push(format!("{}: the compiler crashed:\n{}", c.display(), stderr));
+            }
+        } else {
+            failures.push(format!("{}: no expected.out or expected.err", c.display()));
+        }
+    }
+    // a workspace: `check` and `test` cover every member, `run` asks for one
+    let ws = base.join("workspace");
+    let check = Command::new(kite()).arg("check").arg(&ws).output().unwrap();
+    let test = Command::new(kite()).arg("test").arg(&ws).output().unwrap();
+    let run = Command::new(kite()).arg("run").arg(&ws).output().unwrap();
+    let test_err = String::from_utf8_lossy(&test.stderr);
+    if !check.status.success() || !test.status.success() || !test_err.contains("1 passed, 0 failed") || run.status.success() || !String::from_utf8_lossy(&run.stderr).contains("is a workspace") {
+        failures.push(format!("workspace:\ncheck {:?} {}\ntest {:?} {}\nrun {:?} {}", check.status, String::from_utf8_lossy(&check.stderr), test.status, test_err, run.status, String::from_utf8_lossy(&run.stderr)));
+    }
+    // `kite init` writes a manifest that loads
+    let dir = std::env::temp_dir().join(format!("kite_init_{}", std::process::id())).join("my-tool");
+    std::fs::create_dir_all(&dir).unwrap();
+    let init = Command::new(kite()).arg("init").current_dir(&dir).output().unwrap();
+    std::fs::write(dir.join("main.kite"), "fn main() {\n    println(\"hi\")\n}\n").unwrap();
+    let r = Command::new(kite()).arg("run").arg(&dir).output().unwrap();
+    let again = Command::new(kite()).arg("init").current_dir(&dir).output().unwrap();
+    if !init.status.success() || String::from_utf8_lossy(&r.stdout) != "hi\n" || again.status.success() || !std::fs::read_to_string(dir.join("kite.toml")).unwrap_or_default().contains("name = \"my-tool\"") {
+        failures.push(format!("kite init: {:?} / {:?} {} / second init {:?}", init.status, r.status, String::from_utf8_lossy(&r.stderr), again.status));
+    }
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+    assert!(cases.len() >= 9, "only {} cases", cases.len());
+    assert!(failures.is_empty(), "{} package case(s) failed:\n{}", failures.len(), failures.join("\n"));
 }

@@ -406,10 +406,19 @@ impl Parser {
                 if let Tok::Ident(w) = self.peek().clone() {
                     if w == "lib" || w == "static" {
                         self.bump();
-                        if let Tok::Str(s) = self.peek().clone() {
-                            self.bump();
-                            lib = Some(if w == "static" { format!("static:{}", s) } else { s });
+                        let Tok::Str(s) = self.peek().clone() else {
+                            return self.err(format!("expected the library's name after `{}`: `extern \"C\" {} \"z\"`", w, w));
+                        };
+                        // The name reaches the C compiler's command line (`-lz`)
+                        // or `dlopen`: only plain names, so that it can't add
+                        // other options or code. (`lib` may also be a file name
+                        // with a directory: `lib "vendor/libfoo.so"`.)
+                        let ok_char = |c: char| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '+' | '-') || (w == "lib" && c == '/');
+                        if s.is_empty() || s.starts_with('-') || !s.chars().all(ok_char) {
+                            return self.err(format!("`{}` is not a library name: use letters, digits, `_`, `.`, `+` and `-`{}, not starting with `-`", s.escape_default(), if w == "lib" { " (and `/`)" } else { "" }));
                         }
+                        self.bump();
+                        lib = Some(if w == "static" { format!("static:{}", s) } else { s });
                     }
                 }
                 if self.is_kw(Kw::Func) {

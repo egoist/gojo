@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 use std::time::Instant;
 
+#[derive(Clone)]
 struct Options {
     release: bool,
     output: Option<String>,
@@ -28,6 +29,8 @@ usage:
   kite doc [module|path] [--out dir]      API docs as Markdown: the standard library
                                           index, one std module, or a package;
                                           --out writes every std module to dir
+  kite init [name]                        write a kite.toml here: a package named after
+                                          the directory (or `name`)
   kite version                            print the version
 
 options:
@@ -69,6 +72,7 @@ fn main() -> ExitCode {
     match args.get(1).map(|s| s.as_str()) {
         Some("fmt") => return fmt_command(&args[2..]),
         Some("doc") => return doc_command(&args[2..]),
+        Some("init") => return init_command(&args[2..]),
         Some("version" | "--version" | "-V") => {
             println!("{}", version());
             return ExitCode::SUCCESS;
@@ -143,6 +147,23 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     }
+    // a workspace without a package of its own: `check` and `test` run on
+    // every member; anything else needs a member
+    if let Some(members) = workspace_members(&input) {
+        if !matches!(cmd, "check" | "test") {
+            let names: Vec<String> = members.iter().map(|m| m.display().to_string()).collect();
+            eprintln!("error: {} is a workspace: `kite {}` one of its members:\n  {}", input, cmd, names.join("\n  "));
+            return ExitCode::from(2);
+        }
+        let mut failed = false;
+        for m in members {
+            eprintln!("== {}", m.display());
+            let (cmd, m, opts) = (cmd.to_string(), m.display().to_string(), opts.clone());
+            let r = kite::with_compiler_stack(move || drive(&cmd, &m, &opts, &[]));
+            failed |= !matches!(r, Ok(c) if c == ExitCode::SUCCESS);
+        }
+        return if failed { ExitCode::from(1) } else { ExitCode::SUCCESS };
+    }
     let cmd = cmd.to_string();
     let r = kite::with_compiler_stack(move || drive(&cmd, &input, &opts, &prog_args));
     match r {
@@ -151,6 +172,66 @@ fn main() -> ExitCode {
     }
 }
 
+
+/// The directory of `name` (`yaml`, `yaml/schema`) when it is a dependency of
+/// the package in the current directory: `None` when it isn't one.
+fn dependency_dir(name: &str) -> Option<Result<PathBuf, String>> {
+    if name.starts_with('.') || name.starts_with('/') || name.starts_with("std/") {
+        return None;
+    }
+    let root = kite::manifest::find_root(Path::new("."))?;
+    let mut sm = kite::diag::SourceMap::default();
+    let m = kite::manifest::read(&mut sm, &root).ok()?;
+    let (dep, sub) = name.split_once('/').unwrap_or((name, ""));
+    let d = m.dependency(dep)?;
+    Some(match &d.source {
+        kite::manifest::Source::Path(dir) => {
+            let exported = kite::manifest::read(&mut sm, dir).ok().and_then(|dm| dm.package).is_some_and(|p| p.exports.iter().any(|e| e == sub));
+            if exported { Ok(dir.join(sub)) } else { Err(format!("`{}` doesn't export `{}`", dep, if sub.is_empty() { "." } else { sub })) }
+        }
+        _ => Err(format!("`{}` isn't available locally yet (only path dependencies are)", dep)),
+    })
+}
+
+/// `kite init`: a kite.toml for the current directory.
+fn init_command(args: &[String]) -> ExitCode {
+    let path = Path::new(kite::manifest::FILE);
+    if path.exists() {
+        eprintln!("error: there is already a kite.toml here");
+        return ExitCode::from(1);
+    }
+    let name = match args.first() {
+        Some(n) => n.clone(),
+        None => {
+            let dir = std::env::current_dir().ok().and_then(|d| d.file_name().map(|n| n.to_string_lossy().into_owned())).unwrap_or_default();
+            let n: String = dir.to_lowercase().chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' }).collect();
+            n.trim_matches('-').to_string()
+        }
+    };
+    if !kite::manifest::valid_package_name(&name) {
+        eprintln!("error: `{}` is not a package name: lower-case letters, digits, `-` and `_`, optionally scoped (`@scope/name`); give one: `kite init my-app`", name);
+        return ExitCode::from(1);
+    }
+    let text = format!("[package]\nname = \"{}\"\nversion = \"0.1.0\"\nedition = \"{}\"\n\n[dependencies]\n", name, kite::manifest::LATEST_EDITION);
+    if let Err(e) = std::fs::write(path, text) {
+        eprintln!("error: cannot write kite.toml: {}", e);
+        return ExitCode::from(1);
+    }
+    println!("wrote kite.toml for package `{}`", name);
+    ExitCode::SUCCESS
+}
+
+/// The members of the workspace at `dir`, when `dir`'s kite.toml is a
+/// workspace without a [package].
+fn workspace_members(dir: &str) -> Option<Vec<PathBuf>> {
+    let d = Path::new(dir);
+    if !d.join(kite::manifest::FILE).is_file() {
+        return None;
+    }
+    let mut sm = kite::diag::SourceMap::default();
+    let m = kite::manifest::read(&mut sm, d).ok()?;
+    (m.package.is_none() && !m.members.is_empty()).then_some(m.members)
+}
 
 /// `kite doc`: API documentation, as Markdown.
 fn doc_command(args: &[String]) -> ExitCode {
@@ -198,9 +279,20 @@ The prelude is available everywhere; other modules are imported with `use std/na
     }
     let text = match args.first() {
         None => Ok(index()),
-        Some(name) if kite::STD.iter().any(|(n, _)| n == name) => kite::doc::package(name, &std_files(name)),
+        // `std/os` (or just `os`, when it isn't a dependency)
+        Some(name) if name.strip_prefix("std/").is_some_and(|m| kite::STD.iter().any(|(n, _)| *n == m)) => {
+            let m = &name[4..];
+            kite::doc::package(m, &std_files(m))
+        }
+        Some(name) if dependency_dir(name).is_none() && kite::STD.iter().any(|(n, _)| n == name) => kite::doc::package(name, &std_files(name)),
         Some(path) => {
-            let p = Path::new(path);
+            // a dependency of the package here (`yaml`, `yaml/schema`), or a path
+            let dep = dependency_dir(path);
+            if let Some(Err(e)) = &dep {
+                return fail(e.clone());
+            }
+            let resolved = dep.and_then(|d| d.ok());
+            let p = resolved.as_deref().unwrap_or(Path::new(path));
             let mut files: Vec<PathBuf> = if p.is_dir() {
                 std::fs::read_dir(p).map(|rd| rd.filter_map(|e| e.ok().map(|e| e.path())).filter(|f| f.extension().is_some_and(|x| x == "kite")).collect()).unwrap_or_default()
             } else if p.is_file() {
@@ -217,7 +309,7 @@ The prelude is available everywhere; other modules are imported with `use std/na
                 }
             }
             let canon = p.canonicalize().unwrap_or(p.to_path_buf());
-            let name = if p.is_dir() { canon.file_name() } else { canon.file_stem() }.map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let name = if resolved.is_some() { path.to_string() } else { if p.is_dir() { canon.file_name() } else { canon.file_stem() }.map(|n| n.to_string_lossy().into_owned()).unwrap_or_default() };
             kite::doc::package(&name, &srcs)
         }
     };

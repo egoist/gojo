@@ -1,0 +1,2 @@
+use ./lib
+fn main() {}

@@ -1,0 +1,1 @@
+standard modules are written with `std/`: `use std/os`

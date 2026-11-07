@@ -1,0 +1,3 @@
+pub fn clean(s str) String {
+    return s.trim().toString()
+}

@@ -37,7 +37,33 @@
 - 只有 `pub` 的声明能被其他包使用。函数、类型、方法、关联函数和结构体字段默认都对包外不可见。
 - `print`、`println`、`eprint`、`eprintln`、`assert`、`assertEq`、`drop`、`ok`、`err`、`some`、`none` 在 prelude 里，不需要导入。
 
-测试：`projects/app`、`projects/cycle`、`projects/private`、`errors/bad_use`、`errors/bad_use_names`、`errors/unused`。
+### 2.1 包清单 `kite.toml`
+
+带 `kite.toml` 的目录是一个**包**（package），它下面的子目录是它的子包（各自有 `kite.toml` 的子目录除外，它们是另外的包）。没有 `kite.toml` 的程序照旧运行，只是不能有依赖。设计和理由见 [packages.md](packages.md)。
+
+```toml
+[package]
+name = "@ann/notes"        # 小写字母、数字、`-`、`_`，可以带作用域 `@scope/name`
+version = "0.3.0"          # MAJOR.MINOR.PATCH，默认 0.1.0
+edition = "2026"           # 默认最新的版次
+exports = [".", "schema"]  # 其他包能导入的子包，默认只有根包 "."
+
+[dependencies]
+yaml = { path = "../yaml" }                     # 键是代码里 `use` 的名字
+uuid = { path = "../uuid", package = "@carol/uuid" }
+
+[workspace]                                     # 可选：一起检查和测试的成员
+members = ["app", "libs/*"]
+```
+
+- 导入的写法说明来源：`std/...` 是标准库，`./...`、`../...` 是本包里的子包，不带前缀的名字是 `[dependencies]` 里的依赖（`use yaml`、`use yaml/schema`）。依赖可以和标准库模块同名，只有 `std` 是保留的。
+- 相对路径不能离开本包（`kite.toml` 所在的目录），也不能指向另一个有 `kite.toml` 的包：那样的包要写进 `[dependencies]`。依赖的子包必须在它的 `exports` 里。
+- 目前只支持 `path` 依赖；`version`（注册表）和 `git` 依赖会被识别，但报错说明还不可用。
+- 同一个目录被几个包依赖时只编译一份（菱形依赖）。
+- `kite.toml` 是严格的 TOML 子集（表、字符串、整数、布尔、数组、内联表）：未知的键、写错的名字、找不到的路径都是带位置的错误，不会被忽略。
+- `kite init [name]` 在当前目录写一个 `kite.toml`。对没有 `[package]` 的工作区根目录，`kite check` 和 `kite test` 依次处理每个成员，`kite run`/`build` 要求指定成员。`kite doc yaml/schema` 显示依赖的 API。
+
+测试：`projects/app`、`projects/cycle`、`projects/private`、`projects/groups`、`packages/*`、`errors/bad_use`、`errors/bad_use_names`、`errors/unused`、`errors/use_groups`。
 
 ## 3. 声明
 
@@ -402,6 +428,7 @@
 - `kite-fuzz borrow`：生成一些小程序，对几个拥有值和它们的视图做随机操作（创建、重新赋值、修改和移动拥有者、`defer`、嵌套块、循环、闭包、锁和 `Map` 投影），不保证合法。大多数会被拒绝；被接受的每一个都在 AddressSanitizer 下运行，报错就说明借用检查器放过了不安全的程序。
 - `kite-fuzz reduce <file>`：按词法单元和行删减输入，保持同样的失败特征，得到最小的复现。
 - `kite-fuzz fmt [N]`：对生成的程序、语料和变异程序运行格式化器。每个能解析的输入格式化后词法单元必须不变、仍能解析、类型检查结果不变、再格式化一次不变，而且与输入原来的缩进和行尾空格无关。
+- `kite-fuzz toml [N]`：变异 `tests/packages` 里的 `kite.toml`，读清单不能 panic，每个错误的位置都必须能显示。
 - `kite-fuzz msgs N`：统计 N 个变异程序最常见的第一条错误信息并给出例子，用来审查用户看到的报错。
 
 找到的问题放在 `fuzz-out/findings/`；化简后的回归用例放进 `tests/fuzz/`。

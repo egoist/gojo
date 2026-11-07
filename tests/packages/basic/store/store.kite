@@ -1,0 +1,5 @@
+use yml
+
+pub fn save(s str) String {
+    return "saved " + yml.parse(s)
+}

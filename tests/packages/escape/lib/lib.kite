@@ -1,0 +1,5 @@
+use ../secret
+
+pub fn f() int {
+    return secret.key()
+}

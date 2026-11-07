@@ -1,0 +1,9 @@
+use shout
+
+pub fn hello(n str) String {
+    return shout.loud("hello " + n)
+}
+
+test "hello" {
+    assertEq(hello("x"), "HELLO X")
+}

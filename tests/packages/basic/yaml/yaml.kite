@@ -1,0 +1,5 @@
+use ./internal
+
+pub fn parse(s str) String {
+    return "parsed " + internal.clean(s)
+}

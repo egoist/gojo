@@ -198,11 +198,9 @@ whatever else is decided.
 
 ## Implementation plan
 
-1. **The fix and local packages.**
-   - The link-name fix.
-   - `kite.toml` (a TOML subset parser), package roots, path dependencies,
-     dependency names shadowing std, `use std/...`.
-   - `exports`, workspaces.
+1. **The fix and local packages.** Done: the link-name check, `kite.toml`
+   (with `kite-fuzz toml`), path dependencies, `exports`, workspaces,
+   `kite init`, `kite doc <dependency>`, and the `std/` imports.
 2. **Resolution and git sources.**
    - Semver and ranges, the PubGrub solver with explained failures.
    - `kite.lock`, the content-addressed cache with SHA-256 (in-tree).

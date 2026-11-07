@@ -1,0 +1,2 @@
+use yaml/internal
+fn main() {}

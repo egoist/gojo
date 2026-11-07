@@ -8,12 +8,13 @@ pub mod diag;
 pub mod fmtspec;
 pub mod formatter;
 pub mod doc;
+pub mod manifest;
 pub mod lexer;
 pub mod parser;
 pub mod tir;
 pub mod types;
 
-use diag::{Diag, SourceMap};
+use diag::{Diag, SourceMap, Span};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
@@ -60,6 +61,32 @@ fn parse_source(sm: &mut SourceMap, path: String, text: String) -> Result<ast::F
     let id = sm.add(path, text);
     let toks = lexer::lex(id, &sm.file(id).text.clone())?;
     parser::parse_file(id, toks)
+}
+
+/// The manifest of the package rooted at `root`, read once. `None` inside
+/// means it had errors (already reported).
+fn manifest_of<'m>(root: &Path, sm: &mut SourceMap, diags: &mut Vec<Diag>, manifests: &'m mut HashMap<PathBuf, Option<manifest::Manifest>>) -> Option<&'m Option<manifest::Manifest>> {
+    if !manifests.contains_key(root) {
+        let m = match manifest::read(sm, root) {
+            Ok(m) => Some(m),
+            Err(ds) => {
+                diags.extend(ds);
+                None
+            }
+        };
+        manifests.insert(root.to_path_buf(), m);
+    }
+    manifests.get(root)
+}
+
+/// `to` relative to `from`, for messages (`../store`).
+fn pathdiff(to: &Path, from: &Path) -> Option<String> {
+    let to: Vec<_> = to.components().collect();
+    let from: Vec<_> = from.components().collect();
+    let common = to.iter().zip(from.iter()).take_while(|(a, b)| a == b).count();
+    let mut parts: Vec<String> = vec!["..".into(); from.len() - common];
+    parts.extend(to[common..].iter().map(|c| c.as_os_str().to_string_lossy().into_owned()));
+    Some(if parts.is_empty() { ".".into() } else { parts.join("/") })
 }
 
 /// Loads `input` (a file or a package directory) and everything it imports.
@@ -147,6 +174,8 @@ pub fn load(input: &str, source: Option<&str>) -> Result<Loaded, (SourceMap, Vec
         parsed: &mut HashMap<String, (String, Vec<ast::File>)>,
         std_needed: &mut Vec<String>,
         names_used: &mut HashSet<String>,
+        manifests: &mut HashMap<PathBuf, Option<manifest::Manifest>>,
+        pkg: Option<&Path>,
     ) {
         visiting.insert(key.to_string());
         for f in files.iter_mut() {
@@ -170,20 +199,79 @@ pub fn load(input: &str, source: Option<&str>) -> Result<Loaded, (SourceMap, Vec
                         } else {
                             diags.push(Diag::new(imp.span, format!("there is no standard module `{}` (the standard library has {})", m, std_list())));
                         }
-                    } else if std_module(&imp.path) {
-                        diags.push(Diag::new(imp.span, format!("standard modules are written with `std/`: `use std/{}`", imp.path)));
-                    } else {
-                        diags.push(Diag::new(imp.span, format!("unknown package `{}`: a package in this project is written `use ./{}` (the standard library has {})", imp.path, imp.path, std_list())));
-                    }
-                    continue;
-                }
-                let target = match dir.join(&imp.path).canonicalize() {
-                    Ok(t) if t.is_dir() => t,
-                    _ => {
-                        let shown: PathBuf = dir.join(&imp.path).components().filter(|c| !matches!(c, std::path::Component::CurDir)).collect();
-                        diags.push(Diag::new(imp.span, format!("cannot find package `{}` (looked in {})", imp.path, shown.display())));
                         continue;
                     }
+                }
+                // the directory imported, and the package it belongs to
+                let (target, target_pkg) = if imp.path.starts_with("./") || imp.path.starts_with("../") {
+                    let target = match dir.join(&imp.path).canonicalize() {
+                        Ok(t) if t.is_dir() => t,
+                        _ => {
+                            let shown: PathBuf = dir.join(&imp.path).components().filter(|c| !matches!(c, std::path::Component::CurDir)).collect();
+                            diags.push(Diag::new(imp.span, format!("cannot find package `{}` (looked in {})", imp.path, shown.display())));
+                            continue;
+                        }
+                    };
+                    if let Some(p) = pkg {
+                        if !target.starts_with(p) {
+                            diags.push(Diag::new(imp.span, format!("`{}` is outside this package (the directory with its kite.toml, {}): make it a package and depend on it instead", imp.path, p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default())));
+                            continue;
+                        }
+                    }
+                    let tp = manifest::find_root(&target);
+                    if tp.as_deref() != pkg && tp.is_some() {
+                        let rel = tp.as_ref().and_then(|t| pathdiff(t, pkg.unwrap_or(dir))).unwrap_or_else(|| imp.path.clone());
+                        diags.push(Diag::new(imp.span, format!("`{}` is a separate package (it has its own kite.toml): add `{} = {{ path = \"{}\" }}` to [dependencies] and write `use {}`", imp.path, last, rel, last)));
+                        continue;
+                    }
+                    (target, pkg.map(|p| p.to_path_buf()))
+                } else {
+                    // a dependency, or a package inside one
+                    let (name, sub) = imp.path.split_once('/').unwrap_or((imp.path.as_str(), ""));
+                    // (a standard module's name, when it isn't a dependency's)
+                    let std_hint = std_module(&imp.path).then(|| format!("standard modules are written with `std/`: `use std/{}`", imp.path));
+                    let Some(root) = pkg else {
+                        let msg = std_hint.clone().unwrap_or_else(|| format!("unknown package `{}`: a package in this project is written `use ./{}`, and dependencies are listed in a kite.toml (the standard library has {})", imp.path, imp.path, std_list()));
+                        diags.push(Diag::new(imp.span, msg));
+                        continue;
+                    };
+                    let Some(Some(m)) = manifest_of(root, sm, diags, manifests) else { continue };
+                    let pname = m.package.as_ref().map(|p| p.name.clone()).unwrap_or_default();
+                    let Some(dep) = m.dependency(name).cloned() else {
+                        let msg = std_hint.clone().unwrap_or_else(|| format!("`{}` is not a dependency of `{}`: add it to [dependencies] in its kite.toml", name, pname));
+                        diags.push(Diag::new(imp.span, msg));
+                        continue;
+                    };
+                    let droot = match &dep.source {
+                        manifest::Source::Path(d) => d.clone(),
+                        manifest::Source::Registry(v) => {
+                            diags.push(Diag::new(imp.span, format!("`{}` = \"{}\" comes from the registry, which isn't available yet: use `{} = {{ path = \"...\" }}` for now", name, v, name)));
+                            continue;
+                        }
+                        manifest::Source::Git(g) => {
+                            diags.push(Diag::new(imp.span, format!("`{}` comes from git ({}), which isn't available yet: use `{} = {{ path = \"...\" }}` for now", name, g, name)));
+                            continue;
+                        }
+                    };
+                    let Some(Some(dm)) = manifest_of(&droot, sm, diags, manifests) else { continue };
+                    let Some(dpkg) = &dm.package else {
+                        diags.push(Diag::new(imp.span, format!("`{}` ({}) is a workspace, not a package", name, droot.display())));
+                        continue;
+                    };
+                    if !dpkg.exports.iter().any(|e| e == sub) {
+                        let list = dpkg.exports.iter().map(|e| if e.is_empty() { format!("`{}`", name) } else { format!("`{}/{}`", name, e) }).collect::<Vec<_>>().join(", ");
+                        let what = if sub.is_empty() { format!("`{}` doesn't export its root package", name) } else { format!("`{}` doesn't export `{}`", name, sub) };
+                        diags.push(Diag::new(imp.span, format!("{} (it exports {}; see `exports` in its kite.toml)", what, if list.is_empty() { "nothing".to_string() } else { list })));
+                        continue;
+                    }
+                    let target = match droot.join(sub).canonicalize() {
+                        Ok(t) if t.is_dir() => t,
+                        _ => {
+                            diags.push(Diag::new(imp.span, format!("`{}` has no package `{}`", name, sub)));
+                            continue;
+                        }
+                    };
+                    (target, Some(droot))
                 };
                 let tkey = target.display().to_string();
                 let tkey = if tkey == main_key { "\0main".to_string() } else { tkey };
@@ -219,14 +307,27 @@ pub fn load(input: &str, source: Option<&str>) -> Result<Loaded, (SourceMap, Vec
                 }
                 names_used.insert(name.clone());
                 parsed.insert(tkey.clone(), (name.clone(), vec![]));
-                visit(&tkey, &target, &mut pfs, main_key, sm, diags, order, visiting, parsed, std_needed, names_used);
+                visit(&tkey, &target, &mut pfs, main_key, sm, diags, order, visiting, parsed, std_needed, names_used, manifests, target_pkg.as_deref());
                 parsed.insert(tkey.clone(), (name, pfs));
                 order.push(tkey);
             }
         }
         visiting.remove(key);
     }
-    visit("\0main", &root, &mut main_parsed, &main_key, &mut sm, &mut diags, &mut order, &mut visiting, &mut parsed, &mut std_needed, &mut names_used);
+    // the package the program belongs to: the nearest kite.toml above it
+    let mut manifests: HashMap<PathBuf, Option<manifest::Manifest>> = HashMap::new();
+    let main_pkg = if source.is_none() { manifest::find_root(&root) } else { None };
+    if let Some(r) = &main_pkg {
+        if let Some(Some(m)) = manifest_of(r, &mut sm, &mut diags, &mut manifests) {
+            if m.package.is_none() {
+                diags.push(Diag::new(Span::new(m.file, 0, 0), format!("{} belongs to a workspace without a [package]: run a member of it", input)));
+            }
+        }
+    }
+    if !diags.is_empty() {
+        return Err((sm, diags));
+    }
+    visit("\0main", &root, &mut main_parsed, &main_key, &mut sm, &mut diags, &mut order, &mut visiting, &mut parsed, &mut std_needed, &mut names_used, &mut manifests, main_pkg.as_deref());
     for key in &order {
         let (name, files) = parsed.remove(key).unwrap_or_default();
         user.push((key.clone(), name, files));

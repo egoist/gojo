@@ -45,8 +45,12 @@ impl SourceFile {
             Err(i) => i - 1,
         };
         let start = self.line_starts[line] as usize;
-        let end = (pos as usize).min(self.text.len());
-        let col = self.text[start..end].chars().count() + 1;
+        // (a position inside a multi-byte character counts as that character)
+        let mut end = (pos as usize).min(self.text.len());
+        while !self.text.is_char_boundary(end) {
+            end -= 1;
+        }
+        let col = self.text[start..end.max(start)].chars().count() + 1;
         (line + 1, col)
     }
 

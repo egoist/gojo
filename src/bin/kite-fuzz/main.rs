@@ -463,6 +463,82 @@ fn fmt_mode(n: usize, seed: u64, out: &Path) {
     }
 }
 
+/// `kite-fuzz toml [N]`: the kite.toml reader on mutated manifests. It must
+/// return a manifest or errors with valid spans, never panic.
+fn toml_mode(n: usize, seed: u64, out: &Path) {
+    install_panic_hook();
+    let base = repo_root().join("tests/packages");
+    let mut seeds = vec![];
+    for e in walk_files(&base) {
+        if e.file_name().is_some_and(|f| f == "kite.toml") {
+            if let Ok(t) = std::fs::read_to_string(&e) {
+                seeds.push((e.parent().unwrap().to_path_buf(), t));
+            }
+        }
+    }
+    let pieces = ["[", "]", "{", "}", "=", "\"", "'", ",", ".", "\n", "#", "\\u00e9", "\\", "[[a]]", "a.b.c", "\"\"\"", "-", "1_000", "true", "path = \"../x\"", "@s/n", "\u{e9}", "\r\n", "[dependencies]", "x = { }"];
+    let mut rng = Rng(seed | 1);
+    let (mut ok, mut errs, mut found) = (0, 0, 0);
+    for _ in 0..n {
+        let (root, base_text) = rng.pick(&seeds).clone();
+        let mut t: Vec<char> = base_text.chars().collect();
+        for _ in 0..1 + rng.below(4) {
+            let at = rng.below(t.len() + 1);
+            match rng.below(3) {
+                0 if !t.is_empty() => {
+                    let end = (at + 1 + rng.below(6)).min(t.len());
+                    t.drain(at.min(end)..end);
+                }
+                1 => {
+                    let p: Vec<char> = rng.pick(&pieces).chars().collect();
+                    t.splice(at..at, p);
+                }
+                _ => {
+                    let other = &rng.pick(&seeds).1;
+                    let cs: Vec<char> = other.chars().collect();
+                    let from = rng.below(cs.len().max(1));
+                    let piece: Vec<char> = cs[from..(from + rng.below(20)).min(cs.len())].to_vec();
+                    t.splice(at..at, piece);
+                }
+            }
+        }
+        let text: String = t.into_iter().collect();
+        let r = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            let mut sm = kite::diag::SourceMap::default();
+            match kite::manifest::from_text(&mut sm, &root, "kite.toml".into(), text.clone()) {
+                Ok(_) => (true, true),
+                // every error must render (its span inside the file)
+                Err(ds) => (false, ds.iter().all(|d| !kite::diag::render(&sm, d, false).is_empty())),
+            }
+        }));
+        match r {
+            Ok((true, _)) => ok += 1,
+            Ok((false, true)) => errs += 1,
+            _ => {
+                found += 1;
+                let dir = out.join("toml-findings");
+                let _ = std::fs::create_dir_all(&dir);
+                let p = dir.join(format!("{:016x}.toml", hash(&text)));
+                let _ = std::fs::write(&p, &text);
+                eprintln!("{}: the manifest reader panicked", p.display());
+            }
+        }
+    }
+    eprintln!("kite-fuzz toml: {} accepted, {} rejected with errors, {} problems", ok, errs, found);
+    if found > 0 {
+        std::process::exit(1);
+    }
+}
+
+fn walk_files(d: &Path) -> Vec<PathBuf> {
+    let mut out = vec![];
+    for e in std::fs::read_dir(d).into_iter().flatten().filter_map(|e| e.ok()) {
+        let p = e.path();
+        if p.is_dir() { out.extend(walk_files(&p)) } else { out.push(p) }
+    }
+    out
+}
+
 /// What is wrong with formatting `src`, if anything. `shifted` is `src` with
 /// different indentation and trailing spaces.
 fn fmt_problem(src: &str, shifted: &str) -> Option<String> {
@@ -1282,6 +1358,10 @@ fn main() {
                 }
             });
         }
+        Some("toml") => {
+            let n: usize = rest.get(1).and_then(|x| x.parse().ok()).unwrap_or(100000);
+            toml_mode(n, seed, &out);
+        }
         Some("fmt") => {
             let n: usize = rest.get(1).and_then(|x| x.parse().ok()).unwrap_or(2000);
             kite::with_compiler_stack(move || fmt_mode(n, seed, &out));
@@ -1299,7 +1379,7 @@ fn main() {
             supervise(jobs, time, &out, seed, exec_rate, limit);
         }
         _ => {
-            eprintln!("usage: kite-fuzz [--jobs N] [--time SECS] [--out DIR] [--seed N] [--exec-rate N] [--limit SECS]\n       kite-fuzz check <file>\n       kite-fuzz reduce <file> [-o out]\n       kite-fuzz fmt [N]");
+            eprintln!("usage: kite-fuzz [--jobs N] [--time SECS] [--out DIR] [--seed N] [--exec-rate N] [--limit SECS]\n       kite-fuzz check <file>\n       kite-fuzz reduce <file> [-o out]\n       kite-fuzz fmt [N]\n       kite-fuzz toml [N]");
             std::process::exit(2);
         }
     }

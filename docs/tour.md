@@ -647,6 +647,22 @@ fn main() {
  right|left  |003.14
 ```
 
+A directory with a `kite.toml` is a package, and it can depend on other
+packages. `kite init` writes one; dependencies are named in it and imported by
+that name:
+
+```toml
+[package]
+name = "notes"
+
+[dependencies]
+yaml = { path = "../yaml" }
+```
+
+`use yaml` then imports the package in `../yaml`, and `kite doc yaml` shows
+its API. For now dependencies are local directories; versions from git and a
+registry are coming (see [packages.md](packages.md)).
+
 The standard library has files and processes (`os`), streams (`io`, `bufio`),
 TCP (`net`), an HTTP/1.1 server and client (`http`), `json`, `time` and dates,
 and formatting (`fmt`). See [docs/std](std/README.md), or `kite doc <module>`.

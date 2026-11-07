@@ -1,0 +1,5 @@
+use greet
+
+fn main() {
+    println(greet.hello("ws"))
+}

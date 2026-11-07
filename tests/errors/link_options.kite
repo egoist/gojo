@@ -1,0 +1,6 @@
+extern "C" static "-Wl,--wrap=open" {
+    fn open() i32
+}
+// error: is not a library name: use letters, digits, `_`, `.`, `+` and `-`, not starting with `-`
+
+fn main() {}
