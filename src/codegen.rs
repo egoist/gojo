@@ -178,6 +178,8 @@ enum Cl {
     /// Runs only on error returns.
     ErrDefer(TBlock),
     Unlock(String),
+    /// An RwLock (its handle), read or write.
+    UnlockRw(String, bool),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1168,6 +1170,7 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
                 }
             }
             Cl::Unlock(m) => self.emit(fs, &format!("gojo_mutex_unlock({});", m)),
+            Cl::UnlockRw(m, w) => self.emit(fs, &format!("gojo_rw_{}unlock({});", if *w { "w" } else { "r" }, m)),
         }
     }
 
@@ -1525,7 +1528,12 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
                 let t = self.local_ty(fs, *local);
                 let c = self.cty(&t);
                 let n = self.local_cname(fs, *local);
-                if *lock {
+                if let Some(w) = self.rw_lock_kind(place) {
+                    let (m, v) = self.lock_target(fs, place);
+                    self.emit(fs, &format!("gojo_rw_{}lock({}->f_lk);", if w { "w" } else { "r" }, m));
+                    self.register(fs, Cl::UnlockRw(format!("{}->f_lk", m), w));
+                    self.emit(fs, &format!("{} *{} = {};", c, n, v));
+                } else if *lock {
                     let (m, v) = self.lock_target(fs, place);
                     self.emit(fs, &format!("gojo_mutex_lock({}->mu);", m));
                     self.register(fs, Cl::Unlock(format!("{}->mu", m)));
@@ -4559,6 +4567,13 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
                 self.emit(fs, &format!("gojo_group_cancel({});", x));
                 "0".into()
             }
+            "RwLock.read" | "RwLock.write" => {
+                let w = qn.ends_with("write");
+                let (m, v) = self.lock_target(fs, &args[0].e);
+                self.emit(fs, &format!("gojo_rw_{}lock({}->f_lk);", if w { "w" } else { "r" }, m));
+                self.register_stmt(fs, Cl::UnlockRw(format!("{}->f_lk", m), w));
+                format!("({})", v)
+            }
             "Mutex.lock" | "MutexRef.lock" => {
                 let (m, v) = self.lock_target(fs, &args[0].e);
                 self.emit(fs, &format!("gojo_mutex_lock({}->mu);", m));
@@ -4648,8 +4663,28 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
         let p = self.lval(fs, &recv);
         let m = self.tmp();
         self.emit(fs, &format!("{} *{} = &{};", c, m, p));
-        let v = if matches!(mt, Ty::MutexRef(_)) { format!("{}->ptr", m) } else { format!("&{}->val", m) };
+        let v = if matches!(mt, Ty::MutexRef(_)) {
+            format!("{}->ptr", m)
+        } else if matches!(mt, Ty::Adt(..)) {
+            format!("&{}->f_val", m)
+        } else {
+            format!("&{}->val", m)
+        };
         (m, v)
+    }
+
+    /// `rw.read()` / `rw.write()`: Some(true) for write.
+    fn rw_lock_kind(&self, e: &TExpr) -> Option<bool> {
+        match crate::check::body::lock_kind(self.prog, e) {
+            Some(w) => match &e.kind {
+                TK::Proj { call, .. } => match &call.kind {
+                    TK::Call { callee: Callee::Func(f, _), .. } if matches!(self.prog.func(*f).recv_key, Some(TyKey::Adt(_))) => Some(w),
+                    _ => None,
+                },
+                _ => None,
+            },
+            None => None,
+        }
     }
 
 

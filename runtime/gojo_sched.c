@@ -331,7 +331,7 @@ static void xsave_setup(void) {
 enum { WAIT_NONE = 0, WAIT_CANCELLABLE = 1 };
 enum { WAKE_NONE, WAKE_CANCEL, WAKE_CHAN, WAKE_TIMER, WAKE_IO, WAKE_TASK };
 enum { POST_NONE, POST_DEAD, POST_YIELD };
-enum { BLK_NONE, BLK_RECV, BLK_SEND, BLK_SELECT, BLK_LOCK, BLK_JOIN, BLK_SCOPE, BLK_SLEEP, BLK_IO };
+enum { BLK_NONE, BLK_RECV, BLK_SEND, BLK_SELECT, BLK_LOCK, BLK_JOIN, BLK_SCOPE, BLK_SLEEP, BLK_IO, BLK_RWLOCK };
 
 typedef struct gojo_scope gojo_scope;
 
@@ -386,6 +386,7 @@ typedef struct gojo_g {
     uint8_t *hib_buf;
     size_t hib_size;
     struct gojo_group *open_groups; // scopes it opened: their tasks may borrow its stack
+    bool rw_write;          // waiting for an RwLock: as a writer
 #ifdef GOJO_ASAN
     void *fake_stack;
 #endif
@@ -591,7 +592,7 @@ static bool hibernate(gojo_g *g, int64_t now) {
     if (!spin_trylock(&g->hib_lock)) return false;
     bool done = false;
     // still parked (a wait that was claimed means it is about to run)
-    bool waiting = b == BLK_LOCK || b == BLK_JOIN || (GOJO_SC_LOAD(&g->wait) & 3) == WAIT_CANCELLABLE;
+    bool waiting = b == BLK_LOCK || b == BLK_RWLOCK || b == BLK_JOIN || (GOJO_SC_LOAD(&g->wait) & 3) == WAIT_CANCELLABLE;
     if (!g->hib && waiting && GOJO_RELAXED(&g->blocked) == b) {
         GOJO_SC_STORE(&g->hib, 1);
         // now it can't run (a worker that picks it waits for this lock), so its
@@ -2241,6 +2242,114 @@ static void mutex_unlock_slow(gojo_mutex *m) {
     spin_unlock(&m->lock);
 }
 
+// ------------------------------------------------------------------ rwlock
+//
+// Readers share, a writer is alone. Waiters queue in order; a writer at the
+// front keeps later readers waiting, so writers aren't starved; readers at the
+// front all go in together.
+
+typedef struct {
+    gojo_spin lock;
+    int readers;
+    bool writer;
+    gojo_g *head, *tail;    // waiters; g->rw_write says which kind
+} gojo_rwlock;
+
+uint8_t *gojo_prelude___rwNew(void) {
+    gojo_rwlock *l = gojo_alloc(sizeof *l);
+    memset(l, 0, sizeof *l);
+    return (uint8_t *)l;
+}
+
+void gojo_prelude___rwFree(uint8_t *l) { free(l); }
+
+static void rw_wait(gojo_rwlock *l, bool write) {
+    gojo_g *g = cur_g();
+    g->rw_write = write;
+    g->qnext = NULL;
+    if (l->tail) l->tail->qnext = g;
+    else l->head = g;
+    l->tail = g;
+    spin_unlock(&l->lock);
+    blk(g, BLK_RWLOCK, l);
+    g_park();
+    unblk(g);
+    // the unlocker handed it over
+}
+
+// With l->lock held: let in whoever is first in line. Returns the list to wake.
+static gojo_g *rw_grant(gojo_rwlock *l) {
+    gojo_g *wake = NULL;
+    while (l->head) {
+        gojo_g *g = l->head;
+        if (g->rw_write) {
+            if (l->readers > 0 || l->writer || wake) break;
+            l->writer = true;
+        } else {
+            if (l->writer) break;
+            l->readers++;
+        }
+        l->head = g->qnext;
+        if (!l->head) l->tail = NULL;
+        g->qnext = wake;
+        wake = g;
+        if (g->rw_write) break;
+    }
+    return wake;
+}
+
+void gojo_rw_rlock(uint8_t *p) {
+    sim_point();
+    gojo_rwlock *l = (gojo_rwlock *)p;
+    spin_lock(&l->lock);
+    if (!l->writer && !l->head) {
+        l->readers++;
+        spin_unlock(&l->lock);
+        return;
+    }
+    rw_wait(l, false);
+}
+
+void gojo_rw_wlock(uint8_t *p) {
+    sim_point();
+    gojo_rwlock *l = (gojo_rwlock *)p;
+    spin_lock(&l->lock);
+    if (!l->writer && l->readers == 0 && !l->head) {
+        l->writer = true;
+        spin_unlock(&l->lock);
+        return;
+    }
+    rw_wait(l, true);
+}
+
+static void rw_wake(gojo_g *w) {
+    while (w) {
+        gojo_g *n = w->qnext;
+        w->qnext = NULL;
+        g_ready(w);
+        w = n;
+    }
+}
+
+void gojo_rw_runlock(uint8_t *p) {
+    gojo_rwlock *l = (gojo_rwlock *)p;
+    spin_lock(&l->lock);
+    gojo_g *w = --l->readers == 0 ? rw_grant(l) : NULL;
+    spin_unlock(&l->lock);
+    rw_wake(w);
+    sim_point();
+}
+
+void gojo_rw_wunlock(uint8_t *p) {
+    gojo_rwlock *l = (gojo_rwlock *)p;
+    spin_lock(&l->lock);
+    l->writer = false;
+    gojo_g *w = rw_grant(l);
+    spin_unlock(&l->lock);
+    rw_wake(w);
+    sim_point();
+}
+
 // ------------------------------------------------------------------ task groups
 
 // Tasks started and finished are counted per group of workers (each count on
@@ -3226,6 +3335,7 @@ static void dump_task(FILE *f, gojo_g *g, int64_t now) {
         fprintf(f, "waiting for %lld task(s) of the scope at %s", (long long)group_live(grp), loc_or(grp->loc, "?"));
         break;
     }
+    case BLK_RWLOCK: fprintf(f, "waiting for an RwLock"); break;
     case BLK_SLEEP: fprintf(f, "sleeping"); break;
     case BLK_IO: fprintf(f, "waiting for the network"); break;
     default: fprintf(f, "running or ready"); secs = -1; break;

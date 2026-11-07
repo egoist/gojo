@@ -62,6 +62,42 @@ pub unsafe send struct Atomic[T Integer] {
     }
 }
 
+fn __rwNew() *u8
+fn __rwFree(l *u8)
+
+// A lock that many readers may hold at once, or one writer:
+//
+//   let cache = RwLock.new(Map[String, String]{})
+//   with c = cache.read() { ... }     // shared: other readers too
+//   with c = cache.write() { ... }    // exclusive
+//
+// Like `Mutex.lock`, `read` and `write` are projections: the reference can't
+// leave the block. A writer waiting keeps new readers out, so writers don't
+// starve.
+pub unsafe send struct RwLock[T send] {
+    lk *u8
+    val T
+
+    pub fn new(x sink T) RwLock[T] {
+        return RwLock[T]{lk: __rwNew(), val: x}
+    }
+
+    // Shared access.
+    pub fn read(self) yield &T
+
+    // Exclusive access.
+    pub fn write(self) yield inout T
+
+    // "RwLock" (the value can't be read without the lock).
+    pub fn toString(self) String {
+        return String("RwLock")
+    }
+
+    fn drop(self inout) {
+        __rwFree(self.lk)
+    }
+}
+
 // implemented by the compiler / runtime
 fn __panicErr[E any](msg str, e E) never
 fn __strFind(s str, sub str) int

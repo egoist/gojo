@@ -303,6 +303,13 @@ gojo_mutex *gojo_mutex_new(const char *loc);
 void gojo_mutex_free(gojo_mutex *m);
 void gojo_mutex_lock(gojo_mutex *m);
 void gojo_mutex_unlock(gojo_mutex *m);
+// RwLock: many readers or one writer; tasks wait parked.
+uint8_t *gojo_prelude___rwNew(void);
+void gojo_prelude___rwFree(uint8_t *l);
+void gojo_rw_rlock(uint8_t *l);
+void gojo_rw_runlock(uint8_t *l);
+void gojo_rw_wlock(uint8_t *l);
+void gojo_rw_wunlock(uint8_t *l);
 // `with a, b = lock(m1, m2)`: all of them, in address order.
 void gojo_mutex_lock_all(gojo_mutex **ms, int n, const char *loc);
 gojo_group *gojo_group_new(const char *loc);

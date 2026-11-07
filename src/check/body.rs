@@ -1425,8 +1425,9 @@ impl Checker {
                 let te = self.expr(cx, expr, None);
                 let info = self.place_info(cx, &te);
                 let lock = is_lock_proj(&self.prog, &te);
+                let lock_writes = lock_kind(&self.prog, &te) == Some(true);
                 let mutable = match &info {
-                    Some(p) => p.mutable || lock,
+                    Some(p) => p.mutable || lock_writes,
                     None => {
                         self.err(expr.span, "`with` binds a reference to a place (a projection, field or element), not a temporary");
                         false
@@ -4694,13 +4695,29 @@ pub fn bound_name(prog: &Program, b: &Bound) -> String {
 }
 
 pub fn is_lock_proj(prog: &Program, e: &TExpr) -> bool {
+    lock_kind(prog, e).is_some()
+}
+
+/// A lock projection: `m.lock()`, `rw.read()`, `rw.write()`. Some(true)
+/// when it gives write access.
+pub fn lock_kind(prog: &Program, e: &TExpr) -> Option<bool> {
     if let TK::Proj { call, .. } = &e.kind {
         if let TK::Call { callee: Callee::Func(f, _), .. } = &call.kind {
             let fd = prog.func(*f);
-            return fd.kind == FuncKind::Intrinsic && matches!(fd.recv_key, Some(TyKey::Mutex) | Some(TyKey::MutexRef)) && fd.name == "lock";
+            if fd.kind != FuncKind::Intrinsic {
+                return None;
+            }
+            if matches!(fd.recv_key, Some(TyKey::Mutex) | Some(TyKey::MutexRef)) && fd.name == "lock" {
+                return Some(true);
+            }
+            if let Some(TyKey::Adt(d)) = fd.recv_key {
+                if Some(d) == prog.prelude_type("RwLock") && (fd.name == "read" || fd.name == "write") {
+                    return Some(fd.name == "write");
+                }
+            }
         }
     }
-    false
+    None
 }
 
 pub fn block_diverges(b: &TBlock) -> bool {

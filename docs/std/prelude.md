@@ -6,7 +6,7 @@ methods of the built-in types (`str`, `String`, slices, `Vec`, `Map`, `?T`,
 `assert`, and a few general types: `Set`, `Arena`, `Hasher`, `Span`.
 Functions without a body are implemented by the compiler or runtime.
 
-**Types:** [`enum Ordering`](#enum-ordering), [`enum Flow`](#enum-flow), [`interface error`](#interface-error), [`interface Number`](#interface-number), [`interface Integer`](#interface-integer), [`struct Atomic`](#struct-atomic), [`struct Chan`](#struct-chan), [`struct Hasher`](#struct-hasher), [`struct Id`](#struct-id), [`struct Arena`](#struct-arena), [`struct Span`](#struct-span), [`struct Set`](#struct-set)
+**Types:** [`enum Ordering`](#enum-ordering), [`enum Flow`](#enum-flow), [`interface error`](#interface-error), [`interface Number`](#interface-number), [`interface Integer`](#interface-integer), [`struct Atomic`](#struct-atomic), [`struct RwLock`](#struct-rwlock), [`struct Chan`](#struct-chan), [`struct Hasher`](#struct-hasher), [`struct Id`](#struct-id), [`struct Arena`](#struct-arena), [`struct Span`](#struct-span), [`struct Set`](#struct-set)
 
 **Functions:** [`panic`](#panic), [`assert`](#assert), [`assertEq`](#asserteq), [`unreachable`](#unreachable), [`drop`](#drop), [`swap`](#swap), [`replace`](#replace), [`take`](#take), [`min`](#min), [`max`](#max), [`setOf`](#setof)
 
@@ -138,6 +138,56 @@ pub fn clone(self) Atomic[T]
 ```
 
 A new `Atomic` with the value now.
+
+### struct RwLock
+
+```zig
+pub unsafe send struct RwLock[T send] {
+    // and private fields
+}
+```
+
+A lock that many readers may hold at once, or one writer:
+
+```zig
+let cache = RwLock.new(Map[String, String]{})
+with c = cache.read() { ... }     // shared: other readers too
+with c = cache.write() { ... }    // exclusive
+```
+
+Like `Mutex.lock`, `read` and `write` are projections: the reference can't
+leave the block. A writer waiting keeps new readers out, so writers don't
+starve.
+
+#### RwLock.new
+
+```zig
+pub fn new(x sink T) RwLock[T]
+```
+
+#### RwLock.read
+
+```zig
+pub fn read(self) yield &T
+```
+
+Shared access.
+
+#### RwLock.write
+
+```zig
+pub fn write(self) yield inout T
+```
+
+Exclusive access.
+
+#### RwLock.toString
+
+```zig
+pub fn toString(self) String
+```
+
+"RwLock" (the value can't be read without the lock).
 
 ### struct Chan
 

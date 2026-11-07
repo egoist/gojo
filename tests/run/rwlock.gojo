@@ -1,0 +1,56 @@
+// RwLock: many readers at once, or one writer.
+use std/time
+
+let cache = RwLock.new(Map[String, int]{})
+
+fn lookup(k str) int {
+    with c = cache.read() {
+        if let v = c.get(String(k)) {
+            return v
+        }
+    }
+    return -1
+}
+
+fn main() {
+    scope {
+        for i in 0..20 {
+            go () => {
+                if i % 5 == 0 {
+                    with c = cache.write() { c[String(["a", "b", "c", "d"][i / 5])] = i }
+                } else {
+                    _ = lookup("a")
+                }
+            }
+        }
+    }
+    println(lookup("a"), lookup("b"), lookup("d"), lookup("z"))
+    // readers at the same time
+    let rw = RwLock.new(0)
+    let inside = Atomic.new(0)
+    let most = Atomic.new(0)
+    scope {
+        for _ in 0..4 {
+            go () => {
+                with v = rw.read() {
+                    let n = inside.add(1)
+                    for {
+                        let m = most.load()
+                        if n <= m || most.compareSwap(m, n) { break }
+                    }
+                    spin()
+                    _ = inside.sub(1)
+                    _ = v
+                }
+            }
+        }
+    }
+    println("readers at once > 1:", most.load() > 1)
+    with v = rw.write() { v = 5 }
+    with v = rw.read() { println(v, rw) }
+}
+
+fn spin() {
+    let start = time.now()
+    for time.since(start) < 5 * time.millisecond {}
+}

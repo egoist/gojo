@@ -1,0 +1,14 @@
+// A read lock gives read-only access, and the reference can't leave the block.
+fn main() {
+    let rw = RwLock.new([1, 2, 3])
+    with v = rw.read() {
+        v.push(4)
+        // error: cannot call `push` (it modifies its receiver) on reference `v`
+    }
+    var keep = 0
+    with v = rw.write() {
+        v.push(4)
+        keep = v.len()
+    }
+    println(keep)
+}
