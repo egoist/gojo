@@ -48,10 +48,12 @@ fn main() {
             let fs = files.tx.clone()
             go () => {
                 if i < users {
-                    var buf: [64]u8
+                    // (glibc writes straight to the file, past the buffer, when
+                    // the buffer is smaller than 128 bytes)
+                    var buf: [256]u8
                     let f = unsafe { fopen("/dev/null\0".ptr(), "w\0".ptr()) }
                     // full buffering (`_IOFBF` is 0 in glibc, musl and macOS)
-                    _ = unsafe { setvbuf(f, buf[..].ptr(), 0, 64) }
+                    _ = unsafe { setvbuf(f, buf[..].ptr(), 0, 256) }
                     fs <- File{f: f}
                     _ = <-rx
                     out <- contains(buf[..], "hello")
