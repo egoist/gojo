@@ -1,0 +1,9 @@
+// a closure reading a `Cell` passed where a `send fn` is needed
+fn run(f: send fn() -> int) -> int {
+    return f()
+}
+
+fn main() {
+    let c = Cell(1)
+    println(run(() => c.get()))
+}

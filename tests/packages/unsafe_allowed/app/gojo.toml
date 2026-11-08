@@ -1,0 +1,9 @@
+[package]
+name = "app"
+
+[dependencies]
+mathx = { path = "../mathx" }
+
+[unsafe]
+# reviewed: one call to libc's labs
+allow = ["@c/fastabs"]

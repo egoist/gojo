@@ -1,0 +1,15 @@
+// a long-lived task captures an `inout` parameter
+fn spawn(s: Scope, n: inout int) {
+    s.go(() => {
+        n += 1
+    })
+}
+
+fn main() {
+    var n = 0
+    scope s {
+        spawn(s, &n)
+        n += 1
+    }
+    println(n)
+}

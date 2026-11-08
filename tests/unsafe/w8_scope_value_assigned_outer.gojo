@@ -1,0 +1,10 @@
+// a `Scope` assigned to a variable outside it, then used after it ended
+fn main() {
+    var keep: ?Scope = none
+    scope s {
+        keep = some(s)
+    }
+    if let s = keep {
+        s.go(() => println(1))
+    }
+}

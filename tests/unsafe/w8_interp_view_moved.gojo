@@ -1,0 +1,11 @@
+// a view used in an interpolation after its owner was moved
+fn consume(s: sink String) {
+    println(s)
+}
+
+fn main() {
+    let s = String("abc")
+    let v = s.asStr()
+    consume(s)
+    println("${v}")
+}

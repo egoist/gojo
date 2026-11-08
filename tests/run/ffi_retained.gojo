@@ -1,0 +1,89 @@
+use std/{task, time}
+// libc keeps a pointer into a task's stack: `setvbuf` makes a stack buffer the
+// buffer of a FILE, and every `fputs` after that writes into it, while the
+// task that owns the buffer is parked (and might have its stack put away).
+// The write must land in the task's live memory. The other tasks, which give C
+// nothing, are there so that stacks are put away at all (more than 256 parked).
+extern "C" {
+    fn fopen(path: *u8, mode: *u8) -> *u8
+    fn setvbuf(f: *u8, buf: *u8, mode: i32, size: u64) -> i32
+    fn fputs(s: *u8, f: *u8) -> i32
+    fn fclose(f: *u8) -> i32
+}
+
+// A FILE, handed from the task that made it to `main`.
+unsafe send struct File {
+    f: *u8
+}
+
+fn contains(buf: []u8, word: str) -> bool {
+    let w = word.bytes()
+    for i in 0..buf.len() - w.len() + 1 {
+        var all = true
+        for j in 0..w.len() {
+            if buf[i + j] != w[j] {
+                all = false
+                break
+            }
+        }
+        if all {
+            return true
+        }
+    }
+    return false
+}
+
+fn main() {
+    let n = 400
+    let users = 16
+    let files = Chan[File](users)
+    let results = Chan[bool](n)
+    var gates = Vec[Sender[int]]{}
+    scope {
+        for i in 0..n {
+            let gate = Chan[int]()
+            gates.push(gate.tx)
+            let rx = gate.rx
+            let out = results.tx.clone()
+            let fs = files.tx.clone()
+            go () => {
+                if i < users {
+                    var buf: [64]u8
+                    let f = unsafe { fopen("/dev/null\0".ptr(), "w\0".ptr()) }
+                    // full buffering (`_IOFBF` is 0 in glibc, musl and macOS)
+                    _ = unsafe { setvbuf(f, buf[..].ptr(), 0, 64) }
+                    fs <- File{f: f}
+                    _ = <-rx
+                    out <- contains(buf[..], "hello")
+                    _ = unsafe { fclose(f) }
+                } else {
+                    _ = <-rx
+                    out <- true
+                }
+            }
+        }
+        // give the runtime the time to put parked stacks away
+        var tries = 0
+        while task.stats().hibernated < (n - users) / 2 && tries < 100 {
+            time.sleep(10 * time.millisecond)
+            tries += 1
+        }
+        for _ in 0..users {
+            if let file = <-files.rx {
+                _ = unsafe { fputs("hello\0".ptr(), file.f) }
+            }
+        }
+        for g in gates {
+            g <- 1
+        }
+        gates.clear()
+    }
+    drop(results.tx)
+    var ok = 0
+    for r in results.rx {
+        if r {
+            ok += 1
+        }
+    }
+    println("tasks that saw C's writes:", ok, "of", n)
+}

@@ -1,0 +1,9 @@
+// the body of an `unsafe fn` is not an `unsafe` block
+unsafe fn peek(p: *u8) -> u8 {
+    return *p
+}
+
+fn main() {
+    let s = String("x")
+    println(unsafe { peek(s.ptr()) })
+}

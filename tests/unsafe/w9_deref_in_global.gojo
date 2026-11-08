@@ -1,0 +1,6 @@
+// a raw pointer dereferenced in a package-level value
+let first = *"x".ptr()
+
+fn main() {
+    println(first)
+}

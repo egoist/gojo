@@ -1,0 +1,71 @@
+// `unsafe fn`: a function whose callers uphold what the compiler can't check.
+extern "C" {
+    fn malloc(n: u64) -> *Node
+    fn free(p: *Node)
+}
+
+copy struct Node {
+    value: int
+    next: int
+}
+
+// `p` must point at a live `Node`.
+unsafe fn valueAt(p: *Node) -> int {
+    // the body is checked like any other: the dereference still needs a block
+    return unsafe { p.value }
+}
+
+// `p` must point at a live `Node`, and nothing else may be reading it.
+pub unsafe fn setValue(p: *Node, v: int) {
+    unsafe {
+        p.value = v
+        p.next = -1
+    }
+}
+
+struct Pool {
+    cells: Vec[*Node]
+
+    // Safe: the pool owns its cells, and frees them when it is dropped.
+    fn add(inout self, v: int) {
+        let p = unsafe { malloc(16) }
+        unsafe { setValue(p, v) }
+        self.cells.push(p)
+    }
+
+    // `i` must be in range: unlike `cells[i]`, nothing checks it.
+    unsafe fn getUnchecked(self, i: int) -> *Node {
+        return self.cells[i]
+    }
+
+    fn drop(inout self) {
+        for p in self.cells {
+            unsafe { free(p) }
+        }
+        println("freed", self.cells.len(), "cells")
+    }
+}
+
+extend Pool {
+    // `i` must be in range.
+    unsafe fn valueUnchecked(self, i: int) -> int {
+        return unsafe { valueAt(self.getUnchecked(i)) }
+    }
+}
+
+// generic unsafe functions are called the same way
+unsafe fn first[T: copy](v: Vec[T]) -> T {
+    return v[0]
+}
+
+fn main() {
+    var pool = Pool{cells: Vec[*Node]{}}
+    pool.add(10)
+    pool.add(20)
+    let total = unsafe { pool.valueUnchecked(0) + pool.valueUnchecked(1) }
+    println(total)
+    // a closure that upholds the conditions is an ordinary function value
+    let get = (i: int) => unsafe { pool.valueUnchecked(i) }
+    println(get(1))
+    println(unsafe { first([3, 4]) })
+}

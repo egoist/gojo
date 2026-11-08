@@ -1,0 +1,17 @@
+// the functions raced against each other change the same variable
+use std/task
+
+struct Failed {
+    why: String
+}
+
+fn one(n: inout int) -> int ! Failed {
+    n += 1
+    return 1
+}
+
+fn main() {
+    var n = 0
+    let r = task.race([() => one(&n), () => one(&n)])
+    println(r, n)
+}

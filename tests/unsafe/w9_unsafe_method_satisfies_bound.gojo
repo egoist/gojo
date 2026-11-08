@@ -1,0 +1,20 @@
+// an `unsafe` method satisfying an interface used as a bound
+interface At {
+    fn at(self, i: int) -> u8
+}
+
+struct Buf {
+    data: Vec[u8]
+
+    unsafe fn at(self, i: int) -> u8 {
+        return unsafe { *self.data[i..].ptr() }
+    }
+}
+
+fn first[T: At](t: T) -> u8 {
+    return t.at(5)
+}
+
+fn main() {
+    println(first(Buf{data: [1]}))
+}

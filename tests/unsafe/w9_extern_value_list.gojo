@@ -1,0 +1,10 @@
+// an `extern` function in a list of function values, called with no `unsafe`
+extern "C" {
+    fn free(p: *u8)
+}
+
+fn main() {
+    let s = String("hello")
+    let fs = [free]
+    fs[0](s.ptr())
+}

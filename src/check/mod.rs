@@ -366,6 +366,7 @@ impl Checker {
                             ast: Some((fi, ii, None)),
                             recv_key: None,
                             is_extern_c_export: false,
+                            is_unsafe: false,
                             owner_ty: None,
                         });
                         if pkg == self.prog.main_pkg {
@@ -392,6 +393,7 @@ impl Checker {
                             ast: None,
                             recv_key: None,
                             is_extern_c_export: false,
+                            is_unsafe: false,
                             owner_ty: None,
                         });
                         let id = self.prog.globals.len() as u32;
@@ -570,6 +572,16 @@ impl Checker {
 
     fn declare_func(&mut self, fi: usize, ii: usize, ei: Option<usize>, f: &ast::FuncDecl, is_pub: bool, kind: FuncKind) {
         let pkg = self.file_cx[fi].pkg;
+        if f.is_unsafe {
+            // The compiler calls these itself (`==`, `print`, `for`, drops...),
+            // where no `unsafe` block could be written.
+            if f.recv.is_some() && IMPLICIT_METHODS.contains(&f.name.as_str()) {
+                self.diags.push(Diag::new(f.name_span, format!("`{}` can't be `unsafe`: the compiler calls it implicitly, outside any `unsafe` block", f.name)).note(None, "keep the method safe and do the unsafe part in an `unsafe` block inside it"));
+            }
+            if f.recv.is_none() && f.owner.is_none() && f.name == "main" && pkg == self.prog.main_pkg {
+                self.err(f.name_span, "`main` can't be `unsafe`: nothing calls it from an `unsafe` block");
+            }
+        }
         let mut env = self.file_env(fi);
         let mut tparams = vec![];
         // receiver: unknown names in type-argument position introduce type params
@@ -703,6 +715,7 @@ impl Checker {
             ast: Some((fi, ii, ei)),
             recv_key,
             is_extern_c_export: f.is_extern_c && f.body.is_some(),
+            is_unsafe: f.is_unsafe,
             owner_ty: owner_ty.clone(),
         });
         if owner_ty.is_some() {
@@ -1398,8 +1411,11 @@ impl Checker {
             Ty::Map(a, b) | Ty::Result(a, b) => self.is_send(a) && self.is_send(b),
             Ty::Adt(d, args) => {
                 let d = *d;
+                // `unsafe send`: the author vouches for the type's own fields
+                // (its raw pointers), not for whatever its type parameters are
+                // given: `Wrap[Rc[int]]` is no more `send` than `Rc[int]`
                 if self.prog.def(d).unsafe_send {
-                    return true;
+                    return args.clone().iter().all(|a| self.is_send(a));
                 }
                 if args.is_empty() {
                     if let Some(&v) = self.send_memo.get(&d) {
@@ -1543,6 +1559,9 @@ impl Checker {
                 None => return Err(format!("`{}` does not implement `{}`: missing method `{}`", self.prog.show(t), def.name, m.name)),
             };
             let fd = self.prog.func(fid).clone();
+            if fd.is_unsafe {
+                return Err(format!("method `{}` of `{}` is an `unsafe fn`, so it can't satisfy `{}`: code calling it through the interface couldn't know to uphold its conditions", m.name, self.prog.show(t), def.name));
+            }
             if !fd.tparams.is_empty() && fd.recv.as_ref().map(|r| !r.ty.has_params()).unwrap_or(true) {
                 return Err(format!("method `{}` has type parameters and cannot satisfy an interface", m.name));
             }
@@ -1611,6 +1630,11 @@ impl Checker {
         }
     }
 }
+
+/// Methods the compiler calls by itself: protocol methods (`==`, ordering,
+/// hashing, `.clone()`, drops), how `print` shows a value, and the iteration
+/// protocols behind `for`.
+pub const IMPLICIT_METHODS: &[&str] = &["equal", "compare", "hash", "clone", "drop", "toString", "message", "cursor", "next", "nextMut", "each", "eachMut"];
 
 /// Match a pattern type containing params against a concrete type, binding params.
 pub fn bind_params(pat: &Ty, t: &Ty, s: &mut HashMap<TParamId, Ty>) -> bool {

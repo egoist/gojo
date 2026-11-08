@@ -448,8 +448,17 @@ pub struct FuncDef {
     /// Receiver key (for methods).
     pub recv_key: Option<TyKey>,
     pub is_extern_c_export: bool,
+    /// `unsafe fn`: every call needs an `unsafe` block.
+    pub is_unsafe: bool,
     /// Associated functions: the owning type (with this function's type params).
     pub owner_ty: Option<Ty>,
+}
+
+impl FuncDef {
+    /// Whether a call needs an `unsafe` block: an `unsafe fn`, or a C function.
+    pub fn needs_unsafe(&self) -> bool {
+        self.is_unsafe || matches!(self.kind, FuncKind::ExternC { .. })
+    }
 }
 
 /// Head constructor used to look up methods.

@@ -1,0 +1,14 @@
+// an `RwLock` of a non-`send` value, shared by tasks
+fn main() {
+    let rw = RwLock(Rc(1))
+    scope {
+        go () => {
+            with v = rw.read() {
+                _ = v.clone()
+            }
+        }
+        with v = rw.read() {
+            _ = v.clone()
+        }
+    }
+}

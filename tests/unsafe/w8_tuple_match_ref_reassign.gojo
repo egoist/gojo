@@ -1,0 +1,10 @@
+// `x` borrows the String in `pair`, which is replaced while `x` is used
+fn main() {
+    var pair = (String("first"), 1)
+    match pair {
+        (x, _) => {
+            pair = (String("second"), 2)
+            println(x)
+        }
+    }
+}

@@ -1,0 +1,68 @@
+use std/{task, time}
+// C keeps a pointer into a task's stack and writes through it while the task
+// is parked. The runtime puts parked stacks away ("hibernation"), but not one
+// C was given a pointer into: the write must land in the task's live memory.
+// Half the tasks give C a pointer (or have a task of their own give it one);
+// the others are the control group, whose stacks are put away. Run by the test suite with GOJO_HIBERNATE=2 and the
+// library's path in place of LIB.
+extern "C" lib "LIB" {
+    fn keep(i: int, p: *int)
+    fn poke(i: int, v: int)
+}
+
+fn main() {
+    let n = 600
+    let results = Chan[bool](n)
+    var gates = Vec[Sender[int]]{}
+    scope {
+        for i in 0..n {
+            let gate = Chan[int]()
+            gates.push(gate.tx)
+            let rx = gate.rx
+            let out = results.tx.clone()
+            go () => {
+                var cell: [1]int = [-1]
+                if i % 4 == 0 {
+                    unsafe { keep(i, cell[..].ptr()) }
+                } else if i % 4 == 2 {
+                    // a task of an inner scope, pointing into this one's stack
+                    scope {
+                        go () => {
+                            unsafe { keep(i, cell[..].ptr()) }
+                        }
+                    }
+                }
+                // parked here long enough to be put away
+                let want = <-rx ?? -2
+                out <- i % 2 == 1 || cell[0] == want
+            }
+        }
+        // wait until the control group has been put away
+        var tries = 0
+        while task.stats().hibernated < n / 4 && tries < 500 {
+            time.sleep(10 * time.millisecond)
+            tries += 1
+        }
+        let hib = task.stats().hibernated
+        println("control group put away:", hib >= n / 4)
+        println("pinned stacks left alone:", hib <= n / 2)
+        // C writes into the parked tasks' stacks
+        for i in 0..n {
+            if i % 2 == 0 {
+                unsafe { poke(i, i * 10) }
+            }
+        }
+        for i in 0..n {
+            gates[i] <- i * 10
+        }
+        gates.clear()
+    }
+    drop(results.tx)
+    var ok = 0
+    for r in results.rx {
+        if r {
+            ok += 1
+        }
+    }
+    println("tasks that saw C's write:", ok, "of", n)
+}

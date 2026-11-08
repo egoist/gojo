@@ -1,0 +1,4 @@
+extern "C" {
+    unsafe fn abs(x: i32) -> i32
+    // error: functions in an `extern` block are already unsafe to call
+}

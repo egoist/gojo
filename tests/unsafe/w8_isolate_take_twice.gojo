@@ -1,0 +1,7 @@
+// the isolated value is taken twice
+fn main() {
+    let iso = isolate { Rc(String("x")) }
+    let a = iso.take()
+    let b = iso.take()
+    println(a, b)
+}

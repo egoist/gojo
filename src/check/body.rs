@@ -28,7 +28,9 @@ pub struct FnCx {
     /// Label for the next loop being checked.
     pub pending_label: Option<String>,
     pub frames: Vec<Frame>,
-    pub unsafe_depth: u32,
+    /// For each enclosing `unsafe` block, innermost last: whether anything in
+    /// it needed it. A block that doesn't is an error.
+    pub unsafe_used: Vec<bool>,
     pub env: TyEnv,
     pub n_arms: u32,
     pub arm_consuming: Vec<bool>,
@@ -124,7 +126,7 @@ impl FnCx {
             next_loop: 0,
             pending_label: None,
             frames: vec![],
-            unsafe_depth: 0,
+            unsafe_used: vec![],
             env,
             n_arms: 0,
             arm_consuming: vec![],
@@ -2236,9 +2238,12 @@ impl Checker {
             ExprKind::Go(inner) => self.go_expr(cx, inner, true, sp),
             ExprKind::Isolate(b) => self.isolate_expr(cx, b, sp),
             ExprKind::Unsafe(b) => {
-                cx.unsafe_depth += 1;
+                cx.unsafe_used.push(false);
                 let tb = self.block(cx, b, ex);
-                cx.unsafe_depth -= 1;
+                if cx.unsafe_used.pop() == Some(false) {
+                    let lo = Span::new(sp.file, sp.lo, sp.lo + 6);
+                    self.diags.push(Diag::new(lo, "this `unsafe` block has nothing that needs it").note(None, "only dereferencing a raw pointer and calling an `extern` or `unsafe fn` function need `unsafe`; remove the block"));
+                }
                 let t = self.block_ty(&tb);
                 TExpr::new(TK::Unsafe(tb), t, sp)
             }
@@ -2522,11 +2527,27 @@ impl Checker {
         }
     }
 
+    /// An operation that needs an `unsafe` block: an error outside one, and
+    /// otherwise a use of the innermost one.
+    fn unsafe_op(&mut self, cx: &mut FnCx, sp: Span, msg: String) {
+        match cx.unsafe_used.last_mut() {
+            Some(u) => *u = true,
+            None => self.err(sp, msg),
+        }
+    }
+
     fn func_value(&mut self, cx: &mut FnCx, f: FuncId, targs: Option<Vec<Ty>>, expect: Option<&Ty>, sp: Span) -> TExpr {
         let fd = self.prog.func(f).clone();
         if fd.recv.is_some() || fd.yields.is_some() || fd.kind == FuncKind::Intrinsic {
             self.err(sp, format!("`{}` cannot be used as a function value", fd.name));
             return TExpr::error(sp);
+        }
+        if fd.needs_unsafe() {
+            // A function value is called without `unsafe`: wrapping it is the
+            // only way to say who upholds its conditions.
+            let what = if fd.is_unsafe { "an `unsafe fn`" } else { "an `extern` function" };
+            let ps: Vec<String> = fd.params.iter().map(|p| p.name.clone()).collect();
+            self.diags.push(Diag::new(sp, format!("`{}` is {}: it can't be used as a function value, since calling the value wouldn't need `unsafe`", fd.name, what)).note(None, format!("wrap the call in a closure that upholds its conditions: `({}) => unsafe {{ {}({}) }}`", ps.join(", "), fd.name, ps.join(", "))));
         }
         let targs: Vec<Ty> = match targs {
             Some(t) => t,
@@ -2806,9 +2827,7 @@ impl Checker {
                     continue;
                 }
                 Ty::Ptr(inner) => {
-                    if cx.unsafe_depth == 0 {
-                        self.err(sp, "dereferencing a raw pointer requires an `unsafe` block");
-                    }
+                    self.unsafe_op(cx, sp, "dereferencing a raw pointer requires an `unsafe` block".into());
                     let it = (**inner).clone();
                     b = TExpr::new(TK::Deref(Box::new(b)), it, sp);
                     continue;
@@ -2911,9 +2930,7 @@ impl Checker {
                 let t = self.resolve(cx, &e.ty);
                 match &t {
                     Ty::Ptr(p) => {
-                        if cx.unsafe_depth == 0 {
-                            self.err(sp, "dereferencing a raw pointer requires an `unsafe` block");
-                        }
+                        self.unsafe_op(cx, sp, "dereferencing a raw pointer requires an `unsafe` block".into());
                         let pt = (**p).clone();
                         let e = self.value(cx, e);
                         TExpr::new(TK::Deref(Box::new(e)), pt, sp)
@@ -4307,8 +4324,10 @@ impl Checker {
             self.err(sp, "tests cannot be called");
             return TExpr::error(sp);
         }
-        if matches!(fd.kind, FuncKind::ExternC { .. }) && cx.unsafe_depth == 0 {
-            self.err(sp, format!("calling the extern function `{}` requires an `unsafe` block", fd.name));
+        if matches!(fd.kind, FuncKind::ExternC { .. }) {
+            self.unsafe_op(cx, sp, format!("calling the extern function `{}` requires an `unsafe` block", fd.name));
+        } else if fd.is_unsafe {
+            self.unsafe_op(cx, sp, format!("calling the unsafe function `{}` requires an `unsafe` block", fd.name));
         }
         let mut s: HashMap<TParamId, Ty> = HashMap::new();
         let n_recv_params = match &fd.recv {
@@ -4800,6 +4819,14 @@ impl Checker {
         cx.next_scope += 1;
         self.push_scope(cx);
         let handle = name.map(|(n, nsp)| self.declare(cx, n, Ty::Scope, LocalKind::Let, *nsp, false));
+        let anchor = handle.unwrap_or_else(|| {
+            let id = cx.locals.len() as LocalId;
+            let name = format!("__scope{}", id);
+            cx.locals.push(Local { name: name.clone(), ty: Ty::Scope, kind: LocalKind::Let, span: sp, closure_depth: cx.depth(), block_level: cx.scopes.len() as u32, match_arm: None, ref_root: None });
+            cx.used.push(true);
+            cx.scopes.last_mut().unwrap().push((name, id));
+            id
+        });
         // `block` opens the body's own level
         cx.task_scopes.push(TaskScopeCx { id, depth: cx.depth(), block: cx.scopes.len() as u32 + 1, errt: None, handle });
         let tb = self.block(cx, body, ex);
@@ -4812,7 +4839,7 @@ impl Checker {
             None => t,
         };
         let fail_sp = ts.errt.as_ref().map(|e| e.1);
-        let scope = TExpr::new(TK::Scope { id, handle, body: tb, errt: errt.clone() }, ty, sp);
+        let scope = TExpr::new(TK::Scope { id, handle, anchor, body: tb, errt: errt.clone() }, ty, sp);
         match (implicit, errt) {
             (true, Some(e1)) => {
                 // `main` and tests: a failing task fails the function
@@ -5218,6 +5245,8 @@ pub fn expr_to_type(e: &Expr) -> Option<ast::TypeExpr> {
         ExprKind::TypeExpr(t) => return Some(t.clone()),
         ExprKind::Tuple(xs) => ast::TypeExprKind::Tuple(xs.iter().map(expr_to_type).collect::<Option<Vec<_>>>()?),
         ExprKind::Int(n) => ast::TypeExprKind::IntLit(*n),
+        // `Vec[*Node]{}`: the brackets parsed as an index holding `*Node`
+        ExprKind::Unary("*", x) => ast::TypeExprKind::Ptr(Box::new(expr_to_type(x)?)),
         _ => return None,
     };
     Some(ast::TypeExpr { kind, span: e.span })

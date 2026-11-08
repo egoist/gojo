@@ -1,0 +1,15 @@
+// a view made in one iteration of `loop`, used in the next after a change
+fn main() {
+    var s = String("abc")
+    var v = ""
+    var i = 0
+    loop {
+        if i == 1 {
+            s.clear()
+            println(v)
+            break
+        }
+        v = s.asStr()
+        i += 1
+    }
+}

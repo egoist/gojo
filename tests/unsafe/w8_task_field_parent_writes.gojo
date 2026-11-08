@@ -1,0 +1,13 @@
+// the task reads `s.a` while the body appends to it
+struct S {
+    a: Vec[int]
+    b: int
+}
+
+fn main() {
+    var s = S{a: [1, 2], b: 0}
+    scope {
+        go () => println(s.a.len())
+        s.a.push(3)
+    }
+}

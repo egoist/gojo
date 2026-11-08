@@ -1,0 +1,21 @@
+// the bound changes between the two tasks, through an `inout` call
+fn fill(v: inout []int, x: int) {
+    for i in 0..v.len() {
+        v[i] = x
+    }
+}
+
+fn lower(p: inout int) {
+    p = 1
+}
+
+fn main() {
+    var xs = [0, 0, 0, 0]
+    var p = 3
+    scope {
+        go fill(&xs[..p], 1)
+        lower(&p)
+        go fill(&xs[p..], 2)
+    }
+    println(xs)
+}

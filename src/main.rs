@@ -35,6 +35,10 @@ usage:
                                           --out writes every std module to dir
   gojo init [name]                        write a gojo.toml here: a package named after
                                           the directory (or `name`)
+  gojo unsafe [file.gojo|dir] [--json]    list the code the compiler can't check (`unsafe`
+                                          blocks, `unsafe fn`, `unsafe send`, `extern`),
+                                          package by package, and whether gojo.toml's
+                                          [unsafe] table allows it; fails when it doesn't
   gojo version                            print the version
 
 options:
@@ -83,6 +87,10 @@ fn main() -> ExitCode {
         Some("fmt") => return fmt_command(&args[2..]),
         Some("doc") => return doc_command(&args[2..]),
         Some("init") => return init_command(&args[2..]),
+        Some("unsafe") => {
+            let rest = args[2..].to_vec();
+            return gojo::with_compiler_stack(move || unsafe_command(&rest));
+        }
         Some("version" | "--version" | "-V") => {
             println!("{}", version());
             return ExitCode::SUCCESS;
@@ -346,6 +354,166 @@ The prelude is available everywhere; other modules are imported with `use std/na
     }
 }
 
+/// `gojo unsafe`: every site of unsafe code in the program, by package.
+fn unsafe_command(args: &[String]) -> ExitCode {
+    let mut json = false;
+    let mut input = None;
+    for a in args {
+        match a.as_str() {
+            "--json" => json = true,
+            _ if a.starts_with('-') => {
+                eprintln!("error: unknown option `{}` (`gojo unsafe [file.gojo|dir] [--json]`)", a);
+                return ExitCode::from(2);
+            }
+            _ if input.is_some() => {
+                eprintln!("error: `gojo unsafe` takes one file or directory");
+                return ExitCode::from(2);
+            }
+            _ => input = Some(a.clone()),
+        }
+    }
+    let input = input.unwrap_or_else(|| ".".into());
+    // a workspace: each member in turn
+    let (ok, out) = match workspace_members(&input) {
+        Some(members) => {
+            let mut ok = true;
+            let mut parts = vec![];
+            for m in members {
+                let m = m.display().to_string();
+                if !json {
+                    println!("== {}", shown_path(&m));
+                }
+                let (good, j) = unsafe_report(&m, json);
+                ok &= good;
+                if let Some(j) = j {
+                    parts.push(format!("{{\"member\": {}, \"report\": {}}}", json_str(&shown_path(&m)), j));
+                }
+            }
+            (ok, json.then(|| format!("{{\"members\": [{}], \"ok\": {}}}", parts.join(", "), ok)))
+        }
+        None => unsafe_report(&input, json),
+    };
+    if let Some(j) = out {
+        println!("{}", j);
+    }
+    if ok { ExitCode::SUCCESS } else { ExitCode::from(1) }
+}
+
+/// A path relative to here (`../zlib/lib.gojo`), unless that takes a long way round.
+fn shown_path(p: &str) -> String {
+    let cwd = std::env::current_dir().and_then(|d| d.canonicalize()).unwrap_or_default();
+    let pb = Path::new(p);
+    let abs = if pb.is_absolute() { pb.to_path_buf() } else { cwd.join(pb) };
+    let abs = abs.canonicalize().unwrap_or(abs);
+    match gojo::pathdiff(&abs, &cwd) {
+        Some(r) if r.split('/').filter(|c| *c == "..").count() <= 3 => r,
+        _ => abs.display().to_string(),
+    }
+}
+
+fn json_str(s: &str) -> String {
+    let mut o = String::from("\"");
+    for c in s.chars() {
+        match c {
+            '"' => o.push_str("\\\""),
+            '\\' => o.push_str("\\\\"),
+            c if (c as u32) < 0x20 => o.push_str(&format!("\\u{:04x}", c as u32)),
+            c => o.push(c),
+        }
+    }
+    o.push('"');
+    o
+}
+
+/// The report for one program: printed, or (with `json`) returned. Whether
+/// its policy holds.
+fn unsafe_report(input: &str, json: bool) -> (bool, Option<String>) {
+    let loaded = match gojo::load(input, None) {
+        Ok(l) => l,
+        Err((sm, diags)) => {
+            report(&sm, &diags);
+            return (false, None);
+        }
+    };
+    let info = &loaded.unsafe_info;
+    let sm = &loaded.sm;
+    let shown = shown_path;
+    let status = |p: &gojo::unsafety::Package| -> &'static str {
+        if info.forbidding.contains(&p.name) {
+            if p.sites.is_empty() { "forbidden, none" } else { "forbidden" }
+        } else if p.sites.is_empty() {
+            "none"
+        } else if p.is_root {
+            "this package"
+        } else if info.policy.allow.iter().any(|(n, _)| *n == p.name) {
+            "allowed"
+        } else {
+            "not allowed"
+        }
+    };
+    let violations = info.check();
+    let q = json_str;
+    let mut out = None;
+    if json {
+        let opt = |s: Option<String>| s.map(|s| q(&s)).unwrap_or_else(|| "null".into());
+        let pkgs: Vec<String> = info
+            .packages
+            .iter()
+            .map(|p| {
+                let sites: Vec<String> = p
+                    .sites
+                    .iter()
+                    .map(|(f, s)| format!("{{\"kind\": {}, \"file\": {}, \"line\": {}, \"end_line\": {}, \"what\": {}}}", q(s.kind.name()), q(&shown(&sm.file(*f).path)), s.lines.0, s.lines.1, opt(s.what.clone())))
+                    .collect();
+                format!(
+                    "{{\"name\": {}, \"version\": {}, \"path\": {}, \"root\": {}, \"status\": {}, \"lines\": {}, \"sites\": [{}]}}",
+                    q(&p.name),
+                    opt(p.version.clone()),
+                    opt(p.root.as_ref().map(|r| shown(&r.display().to_string()))),
+                    p.is_root,
+                    q(status(p)),
+                    p.lines(),
+                    sites.join(", ")
+                )
+            })
+            .collect();
+        out = Some(format!("{{\"packages\": [{}], \"ok\": {}}}", pkgs.join(", "), violations.is_empty()));
+    } else {
+        for p in &info.packages {
+            let at = match (&p.version, &p.root) {
+                (Some(v), Some(r)) => format!(" {} ({})", v, shown(&r.display().to_string())),
+                _ => String::new(),
+            };
+            let note = match status(p) {
+                "none" => "no unsafe code".to_string(),
+                "forbidden, none" => "no unsafe code (forbidden by its gojo.toml)".to_string(),
+                "this package" => format!("{} (the package being built)", p.summary()),
+                "allowed" => format!("{} (allowed by [unsafe] in gojo.toml)", p.summary()),
+                "forbidden" => format!("{} (FORBIDDEN by its own gojo.toml)", p.summary()),
+                _ => format!("{} (NOT ALLOWED: add it to [unsafe] allow in gojo.toml once reviewed)", p.summary()),
+            };
+            println!("{}{}: {}", p.name, at, note);
+            let locs: Vec<String> = p.sites.iter().map(|(f, s)| if s.lines.0 == s.lines.1 { format!("{}:{}", shown(&sm.file(*f).path), s.lines.0) } else { format!("{}:{}-{}", shown(&sm.file(*f).path), s.lines.0, s.lines.1) }).collect();
+            let width = locs.iter().map(|l| l.chars().count()).max().unwrap_or(0);
+            for ((_, s), loc) in p.sites.iter().zip(&locs) {
+                let what = match (&s.what, s.kind) {
+                    (Some(w), gojo::unsafety::Kind::Extern) => format!(" \"{}\"", w),
+                    (Some(w), _) => format!(" {}", w),
+                    (None, _) => String::new(),
+                };
+                println!("    {:<width$}  {}{}", loc, s.kind.name(), what, width = width);
+            }
+        }
+        let total: usize = info.packages.iter().map(|p| p.lines()).sum();
+        let n = info.packages.iter().filter(|p| !p.sites.is_empty()).count();
+        println!("{} line{} of unsafe code in {} of {} package{}; the standard library is not included", total, if total == 1 { "" } else { "s" }, n, info.packages.len(), if info.packages.len() == 1 { "" } else { "s" });
+    }
+    if !violations.is_empty() && !json {
+        report(sm, &violations);
+    }
+    (violations.is_empty(), out)
+}
+
 /// `gojo fmt`: formats files (directories: every .gojo file below them).
 fn fmt_command(args: &[String]) -> ExitCode {
     let check = args.iter().any(|a| a == "--check");
@@ -518,10 +686,24 @@ fn raise_stack_limit(want: u64) {
 /// The runtime object for this compiler and optimization level, compiled once
 /// and cached, and whether the compiler is clang (which caps nesting with
 /// `-fbracket-depth`, while gcc rejects the flag).
+/// The C semantics generated code and the runtime are written for, whatever
+/// the C compiler would otherwise assume:
+/// - `-fwrapv`: signed arithmetic wraps. Gojo checks overflow itself, and `+%`
+///   relies on wrapping.
+/// - `-fno-strict-aliasing`: memory may be read through a type other than the
+///   one it was written with. The runtime reuses freed blocks for other types
+///   and reads headers and interface layouts through other structs; with type-
+///   based alias analysis, `-O2` could reorder or drop those accesses (clang's
+///   TypeSanitizer reports them). It also gives `extern` declarations that view
+///   C memory as another type a defined meaning.
+/// - `-fno-delete-null-pointer-checks`: a null check is never removed because
+///   the pointer was used before (say, passed to `memcpy` with a length of 0).
+const C_SEMANTICS: &[&str] = &["-fwrapv", "-fno-strict-aliasing", "-fno-delete-null-pointer-checks"];
+
 fn runtime_object(opts: &Options) -> Result<(PathBuf, bool), String> {
     let (cc, pre) = compiler(opts);
     let flags = if opts.release { "-O2" } else { "-O1" };
-    let key = hash_str(&format!("{}{}{:?}{}{}", RUNTIME_C, RUNTIME_H, pre, cc, flags));
+    let key = hash_str(&format!("{}{}{:?}{}{}{:?}", RUNTIME_C, RUNTIME_H, pre, cc, flags, C_SEMANTICS));
     let dir = cache_dir();
     let obj = dir.join(format!("gojo_rt_{:016x}.o", key));
     let info = dir.join(format!("gojo_rt_{:016x}.cc", key));
@@ -545,7 +727,7 @@ fn runtime_object(opts: &Options) -> Result<(PathBuf, bool), String> {
     let inc = runtime_include_dir()?;
     std::fs::write(&c, RUNTIME_C).map_err(|e| e.to_string())?;
     let tmp = dir.join(format!("gojo_rt_{:016x}.{}.o", key, std::process::id()));
-    let out = cc_command(&cc, &pre).arg("-c").arg(flags).arg("-w").arg("-I").arg(&inc).arg(&c).arg("-o").arg(&tmp).output().map_err(|e| cc_missing(&cc, &e))?;
+    let out = cc_command(&cc, &pre).arg("-c").arg(flags).args(C_SEMANTICS).arg("-w").arg("-I").arg(&inc).arg(&c).arg("-o").arg(&tmp).output().map_err(|e| cc_missing(&cc, &e))?;
     let _ = std::fs::remove_file(&c);
     if !out.status.success() {
         return Err(format!("runtime compilation failed:\n{}", String::from_utf8_lossy(&out.stderr)));
@@ -563,6 +745,11 @@ fn drive(cmd: &str, input: &str, opts: &Options, prog_args: &[String]) -> Result
             return Err(());
         }
     };
+    let policy = loaded.unsafe_info.check();
+    if !policy.is_empty() {
+        report(&loaded.sm, &policy);
+        return Err(());
+    }
     let sm = loaded.sm;
     let t_parse = t0.elapsed();
     let (prog, tfuncs, tests) = match gojo::check::check_program(loaded.units) {
@@ -620,7 +807,8 @@ fn drive(cmd: &str, input: &str, opts: &Options, prog_args: &[String]) -> Result
     let (cc0, pre0) = compiler(opts);
     // debug builds carry debug info, with Gojo source lines (`#line`)
     let mut flags: Vec<&str> = if opts.release { vec!["-O2"] } else { vec!["-O0", "-g", "-gno-column-info"] };
-    flags.extend(["-w", "-fwrapv"]);
+    flags.push("-w");
+    flags.extend(C_SEMANTICS);
     if opts.release {
         // Where a small hot function lands relative to the CPU's fetch blocks
         // changed its speed by up to 7% when unrelated code before it grew;

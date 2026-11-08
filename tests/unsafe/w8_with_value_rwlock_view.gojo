@@ -1,0 +1,9 @@
+// a read lock's value is a view of the data, which a writer changes later
+fn main() {
+    let rw = RwLock(Vec[int]{})
+    let first = with v = rw.read() { v[..] }
+    with v = rw.write() {
+        v.push(1)
+    }
+    println(first.len())
+}

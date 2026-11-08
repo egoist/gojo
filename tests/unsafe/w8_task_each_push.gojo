@@ -1,0 +1,8 @@
+// `task.each` pushes onto a captured vector from many tasks
+use std/task
+
+fn main() {
+    var seen = Vec[int]{}
+    task.each([1, 2, 3], 0, (x) => seen.push(x))
+    println(seen)
+}

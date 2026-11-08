@@ -1,0 +1,12 @@
+// an `Rc` from outside inside the isolated value: two tasks change its count
+fn main() {
+    let r = Rc(1)
+    let iso = isolate { r.clone() }
+    scope {
+        go () => {
+            let x = iso.take()
+            _ = x.clone()
+        }
+        _ = r.clone()
+    }
+}

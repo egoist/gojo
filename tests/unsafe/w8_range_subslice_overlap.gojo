@@ -1,0 +1,19 @@
+// a slice of a slice: `a[1..]` of `xs[..3]` overlaps `xs[2..]`
+fn fill(v: inout []int, x: int) {
+    for i in 0..v.len() {
+        v[i] = x
+    }
+}
+
+fn halves(a: inout []int, b: inout []int) {
+    scope {
+        go fill(&a[1..], 1)
+        go fill(&b, 2)
+    }
+}
+
+fn main() {
+    var xs = [0, 0, 0, 0]
+    halves(&xs[..3], &xs[2..])
+    println(xs)
+}

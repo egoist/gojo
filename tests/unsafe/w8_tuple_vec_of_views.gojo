@@ -1,0 +1,8 @@
+// a vector of tuples holding views stores views where the checker can't follow
+fn main() {
+    var s = String("abc")
+    var v = Vec[(str, int)]{}
+    v.push((s.asStr(), 1))
+    s.clear()
+    println(v[0].0)
+}

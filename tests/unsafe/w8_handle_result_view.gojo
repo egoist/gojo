@@ -1,0 +1,10 @@
+// a task's result is a view of the body's String, which the body changes
+fn main() {
+    var s = String("abc")
+    scope {
+        let t = go () => s.asStr()
+        let v = t.join()
+        s.clear()
+        println(v)
+    }
+}

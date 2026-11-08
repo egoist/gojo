@@ -1,0 +1,10 @@
+// the last name's view is kept outside the loop, then the names are cleared
+fn main() {
+    var names = [String("a"), String("b")]
+    var last = ""
+    for n in names {
+        last = n.asStr()
+    }
+    names.clear()
+    println(last)
+}

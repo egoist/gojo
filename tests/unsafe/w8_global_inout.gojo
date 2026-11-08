@@ -1,0 +1,11 @@
+// passing a package-level value as `inout`
+let names = [String("a")]
+
+fn grow(v: inout Vec[String]) {
+    v.push(String("b"))
+}
+
+fn main() {
+    grow(&names)
+    println(names)
+}

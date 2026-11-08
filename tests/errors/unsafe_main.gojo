@@ -1,0 +1,3 @@
+unsafe fn main() {
+    // error: `main` can't be `unsafe`
+}

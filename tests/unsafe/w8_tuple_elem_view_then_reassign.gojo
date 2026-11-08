@@ -1,0 +1,7 @@
+// a view of a tuple element outlives the element
+fn main() {
+    var t = (String("aaaa"), 0)
+    let v = t.0.asStr()
+    t.0 = String("b")
+    println(v)
+}

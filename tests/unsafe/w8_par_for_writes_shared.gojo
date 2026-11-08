@@ -1,0 +1,9 @@
+// every iteration adds to the same variable at once
+fn main() {
+    var v = [1, 2, 3, 4]
+    var total = 0
+    par for x in &v {
+        total += x
+    }
+    println(total)
+}

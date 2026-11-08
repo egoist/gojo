@@ -1,0 +1,12 @@
+// an `unsafe fn` called inside a closure that is not in an `unsafe` block
+unsafe fn peek(p: *u8) -> u8 {
+    return unsafe { *p }
+}
+
+fn main() {
+    let s = String("x")
+    let p = s.ptr()
+    let f = () => peek(p)
+    drop(s)
+    println(f())
+}

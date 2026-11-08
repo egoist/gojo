@@ -1,0 +1,7 @@
+// writing through a read lock, which other readers hold at the same time
+fn main() {
+    let rw = RwLock(Vec[int]{})
+    with v = rw.read() {
+        v.push(1)
+    }
+}

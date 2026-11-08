@@ -1,0 +1,9 @@
+// moving the locked String out as the block's value leaves the mutex empty
+fn main() {
+    let m = Mutex(String("x"))
+    let s = with v = m.lock() { v }
+    with v = m.lock() {
+        println(v)
+    }
+    println(s)
+}

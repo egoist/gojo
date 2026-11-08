@@ -1,0 +1,14 @@
+// an `extern` function stored in a struct field
+extern "C" {
+    fn free(p: *u8)
+}
+
+struct Hooks {
+    release: fn(*u8)
+}
+
+fn main() {
+    let h = Hooks{release: free}
+    let s = String("x")
+    h.release(s.ptr())
+}

@@ -350,6 +350,7 @@ int64_t gojo_task___numGoroutines(void);
 int64_t gojo_task___numThreads(void);
 int64_t gojo_task___maxProcs(void);
 int64_t gojo_task___numHibernated(void);
+void *gojo_ptr_escape(const void *p);
 int64_t gojo_task___setMaxProcs(int64_t n);
 int64_t gojo_net___listen(gojo_str addr);
 int64_t gojo_net___connect(gojo_str addr);

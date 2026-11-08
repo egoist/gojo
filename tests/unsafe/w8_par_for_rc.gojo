@@ -1,0 +1,7 @@
+// an `Rc` cloned by parallel iterations: its count isn't atomic
+fn main() {
+    let r = Rc(1)
+    par for i in 0..100 {
+        _ = r.clone()
+    }
+}

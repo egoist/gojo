@@ -1,0 +1,10 @@
+// a package-level `Cell`, which tasks can reach without capturing it
+let counter = Cell(0)
+
+fn main() {
+    scope {
+        go () => counter.set(counter.get() + 1)
+        go () => counter.set(counter.get() + 1)
+    }
+    println(counter.get())
+}

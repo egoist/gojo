@@ -1,0 +1,20 @@
+// a type holding an `Rc` used as a `send interface`, then sent to a task
+send interface Job {
+    fn run(self) -> int
+}
+
+struct Counter {
+    r: Rc[int]
+
+    fn run(self) -> int {
+        _ = self.r.clone()
+        return 1
+    }
+}
+
+fn main() {
+    let c = Counter{r: Rc(1)}
+    let j: Job = c
+    let ch = Chan[Job](1)
+    ch.tx <- j
+}

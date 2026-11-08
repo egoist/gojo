@@ -1,0 +1,17 @@
+// the task uses `s.a`; the body moves all of `s` away
+struct S {
+    a: Vec[int]
+    b: int
+}
+
+fn consume(s: sink S) {
+    println(s.b)
+}
+
+fn main() {
+    let s = S{a: [1, 2], b: 0}
+    scope {
+        go () => println(s.a.len())
+        consume(s)
+    }
+}

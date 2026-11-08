@@ -1,0 +1,9 @@
+// iterations push onto a captured vector at once
+fn main() {
+    let v = [1, 2, 3, 4]
+    var out = Vec[int]{}
+    par for x in v {
+        out.push(x)
+    }
+    println(out.len())
+}

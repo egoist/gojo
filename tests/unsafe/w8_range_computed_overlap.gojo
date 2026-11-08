@@ -1,0 +1,17 @@
+// `q` is one below `p`: the two ranges share element 1
+fn fill(v: inout []int, x: int) {
+    for i in 0..v.len() {
+        v[i] = x
+    }
+}
+
+fn main() {
+    var xs = [0, 0, 0, 0]
+    let p = 2
+    let q = p - 1
+    scope {
+        go fill(&xs[..p], 1)
+        go fill(&xs[q..], 2)
+    }
+    println(xs)
+}

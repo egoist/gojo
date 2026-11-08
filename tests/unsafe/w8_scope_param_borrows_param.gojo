@@ -1,0 +1,12 @@
+// a task that outlives the function borrows a borrowed parameter
+fn spawn(s: Scope, v: Vec[int]) {
+    s.go(() => println(v.len()))
+}
+
+fn main() {
+    scope s {
+        var v = [1, 2]
+        spawn(s, v)
+        v.clear()
+    }
+}

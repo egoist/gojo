@@ -1,0 +1,7 @@
+// the tuple's String is moved out by the pattern, then used through the tuple
+fn main() {
+    let t = (String("a"), String("b"))
+    let (a, b) = t
+    drop(a)
+    println(t.0, b)
+}

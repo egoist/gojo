@@ -448,7 +448,7 @@ Stacks differ from Go: tasks borrow data on other tasks' stacks, so stacks **can
 
 ## 9. unsafe and FFI
 
-Safe code has no null pointers, dangling pointers or data races; every operation that cannot guarantee this must be written in an `unsafe` block. The standard library implements `Vec`, `Map` and `Arc` with it.
+Safe code has no null pointers, dangling pointers or data races; every operation that cannot guarantee this must be written in an `unsafe` block. Below that line is the runtime, written in C (the scheduler, `Vec`, `Map`, reference counts), and the standard library's two `unsafe send` types (`Atomic`, `RwLock`).
 
 ```gojo
 extern "C" lib "libz" {                       // dlopen at run time; no C toolchain needed at build time
@@ -462,20 +462,28 @@ pub fn checksum(data: []byte) -> u64 {
 struct Node {
     next: *Node                              // raw pointers can be stored in structs and can be null
 }
+
+// `p` must point at a live `Node`.
+unsafe fn nextOf(p: *Node) -> *Node {
+    return unsafe { p.next }
+}
 ```
 
 | Allowed only in `unsafe` | Notes |
 | --- | --- |
 | Dereferencing `*T` | Raw pointers can be created and passed around; only dereferencing is unsafe |
-| Pointer arithmetic, `unsafe.cast` | Reinterpreting any type |
 | Calling `extern` functions | The compiler cannot verify that the other side respects ownership |
-| Manually declaring that a type satisfies `send` | `unsafe send struct Pool { ... }`; the author vouches for it |
-| `unsafe.forget(x)` | Skips the release and hands ownership to external code |
+| Calling an `unsafe fn` | Its callers uphold conditions the compiler can't check; its body is checked like any other (Rust 2024's rule) |
+| Manually declaring that a type satisfies `send` | `unsafe send struct Pool { ... }`; the author vouches for its own fields, and its type arguments must still be `send` |
+| Planned: pointer arithmetic, `unsafe.cast`, `unsafe.forget(x)` | Not implemented yet; an `extern` declaration can view C memory as another type |
 
-- Keep `unsafe` blocks as small as possible. The compiler counts the unsafe lines in each package and writes the count into the package metadata, for review and dependency policies.
+- An `unsafe` block that needs nothing is an error, and `unsafe fn`s and `extern` functions can't become function values, satisfy interfaces, or be called implicitly (`==`, `print`, `for`, drops): every unchecked call is under an `unsafe` the reader can find. The reference lists what unsafe code must never do (spec 11.1), as Rust's reference does, so "correct unsafe code" has a definition.
+- Keep `unsafe` blocks as small as possible. `gojo unsafe` lists the unsafe code of every package of a program, with locations and line counts. A dependency with unsafe code builds only when the manifest being built allows it by name (`[unsafe] allow`), so adding a package that calls C takes a decision, the way pnpm makes install scripts opt-in. `forbid = true` keeps a package's own code safe (Rust's `forbid(unsafe_code)`), which also keeps coding agents from reaching for `unsafe` to get past the borrow checker. The registry will show the count on package pages.
 - Libraries in `extern "C" lib "z"` are loaded at run time, like approaches that avoid cgo, so cross-compiling needs no C toolchain for the target platform. libc functions (no library given) and `extern "C" static "z"` are ordinary link-time calls.
-- External callbacks are provided by Gojo functions declared with `extern "C" fn`. They cannot capture variables; context is passed through a `*void` parameter.
+- C may keep a pointer into a task's stack after the call returns; `.ptr()` pins that task, so its stack is never put away while it waits (section 8).
+- External callbacks will be Gojo functions declared with `extern "C" fn`. They cannot capture variables; context is passed through a `*void` parameter. (Exporting works today; passing them to C as values doesn't yet.)
 - A panic cannot cross an `extern` boundary: a panic inside a callback aborts the process immediately.
+- The generated C is compiled with `-fwrapv -fno-strict-aliasing -fno-delete-null-pointer-checks`, so the C compiler's own undefined behaviour (type-based aliasing, signed overflow, null-check deletion) can't change what the code means. TypeSanitizer found aliasing violations, in the generated code as well as the runtime (free lists reused for other types, interface and `Rc` layouts read through other structs), that `-O2` could have miscompiled. The flags cost 2–4% on two of the ten benchmarks (`fannkuch`, `hashmap`: 6–8% more instructions) and nothing on the others; generating TBAA-clean code would win that back.
 
 ## 10. Compilation model and performance
 

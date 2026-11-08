@@ -143,6 +143,40 @@ Today that last check is missing: the name goes into the generated C
 unchecked, and a newline in it injects C code. That gets fixed first,
 whatever else is decided.
 
+## Unsafe code is opted into
+
+A package that calls C, dereferences raw pointers or vouches for a type with
+`unsafe send` can break every guarantee the compiler gives the program, so
+using one is a decision, made where it can be seen:
+
+```toml
+[unsafe]
+allow = ["@c/zlib"]   # reviewed: crc32 and inflate, through `extern "C" lib "z"`
+forbid = true         # and none in this package itself
+```
+
+- **A dependency with unsafe code builds only when the manifest being built
+  allows it,** by the name in its own `gojo.toml`, however deep in the tree it
+  is. Only that manifest counts: a library's own `allow` doesn't vouch for its
+  dependencies on the program's behalf. This is pnpm's rule for install
+  scripts (`onlyBuiltDependencies`) and cargo-vet's root audits, applied to
+  the code that can do what install scripts do. Most packages have no unsafe
+  code, so most programs never write the table.
+- **What counts:** `unsafe` blocks, `unsafe fn` declarations, `unsafe send`
+  types and `extern` blocks (linking a library runs its initializers).
+  Functions exported to C (`extern "C" fn`) are ordinary safe code.
+- **`gojo unsafe`** lists all of it, package by package: every site, its
+  lines, and whether it is allowed, with `--json` for tools; it fails when
+  the policy does, so CI can run it. The error for a package that isn't
+  allowed names the package, says how much unsafe code it has and where, and
+  gives the line to add.
+- **`forbid = true`** makes unsafe code in the package's own files an error:
+  a statement that it is safe all the way down to its allowed dependencies,
+  and a guard against an agent "fixing" a borrow error with `unsafe`.
+- **The registry will show the count** on package pages and in the index, so
+  agents can prefer safe packages before adding one.
+- The standard library is trusted, and isn't listed.
+
 ## Building and caching
 
 - **The cache is content-addressed:** `~/.cache/gojo/pkg/<sha256>/`, written
@@ -200,7 +234,8 @@ whatever else is decided.
 
 1. **The fix and local packages.** Done: the link-name check, `gojo.toml`
    (with `gojo-fuzz toml`), path dependencies, `exports`, workspaces,
-   `gojo init`, `gojo doc <dependency>`, and the `std/` imports.
+   `gojo init`, `gojo doc <dependency>`, the `std/` imports, and the
+   `[unsafe]` policy with `gojo unsafe`.
 2. **Resolution and git sources.**
    - Semver and ranges, the PubGrub solver with explained failures.
    - `gojo.lock`, the content-addressed cache with SHA-256 (in-tree).

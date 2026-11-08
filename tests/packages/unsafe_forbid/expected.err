@@ -1,0 +1,2 @@
+`app` forbids unsafe code (`forbid = true` in the [unsafe] table of its gojo.toml), and this is an `extern` block
+`app` forbids unsafe code (`forbid = true` in the [unsafe] table of its gojo.toml), and this is an `unsafe` block

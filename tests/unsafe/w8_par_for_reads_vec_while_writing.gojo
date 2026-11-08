@@ -1,0 +1,8 @@
+// iterations write elements while reading another element of the same vector
+fn main() {
+    var v = [1, 2, 3, 4]
+    par for x in &v {
+        x += v[0]
+    }
+    println(v)
+}

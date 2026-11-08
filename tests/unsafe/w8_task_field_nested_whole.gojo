@@ -1,0 +1,22 @@
+// a task writes `s.inner.x`, another reads `s.inner` whole
+struct Inner {
+    x: Vec[int]
+    y: int
+}
+
+struct S {
+    inner: Inner
+    z: int
+}
+
+fn show(i: Inner) {
+    println(i.x.len(), i.y)
+}
+
+fn main() {
+    var s = S{inner: Inner{x: [], y: 1}, z: 0}
+    scope {
+        go () => s.inner.x.push(1)
+        go () => show(s.inner)
+    }
+}

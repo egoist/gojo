@@ -1,0 +1,9 @@
+// changing a package-level value, which every task may be reading
+let names = [String("a")]
+
+fn main() {
+    scope {
+        go () => println(names.len())
+        names.push(String("b"))
+    }
+}

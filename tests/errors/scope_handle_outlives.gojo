@@ -1,0 +1,30 @@
+// Task handles and `Scope` values are views of their scope: they can't leave it.
+fn leak() -> Scope {
+    return scope s {
+        s
+    }
+    // error: returns a task handle or `Scope` value of a scope in this function
+}
+
+fn main() {
+    var keep: ?Task[int] = none
+    scope {
+        let t = go () => 1
+        keep = some(t)
+        // error: `keep` would outlive its scope: a task handle or `Scope` value can't leave the scope it belongs to
+    }
+    var held: ?Scope = none
+    scope s {
+        held = some(s)
+        // error: `held` would outlive the scope `s`
+    }
+    let h = scope {
+        let t = go () => 2
+        t
+    }
+    // error: `h` would outlive its scope
+    _ = keep
+    _ = held
+    _ = h
+    _ = leak()
+}

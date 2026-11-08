@@ -1,0 +1,13 @@
+// a task locks the `MutexRef`, the body writes the borrowed variable directly
+fn main() {
+    var n = 0
+    let m = Mutex(&n)
+    scope {
+        go () => {
+            with v = m.lock() {
+                v += 1
+            }
+        }
+        n += 1
+    }
+}

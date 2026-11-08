@@ -1,0 +1,16 @@
+// tasks from different iterations get overlapping windows
+fn fill(v: inout []int, x: int) {
+    for i in 0..v.len() {
+        v[i] = x
+    }
+}
+
+fn main() {
+    var xs = [0, 0, 0, 0, 0]
+    scope {
+        for i in 0..3 {
+            go fill(&xs[i..i + 2], i)
+        }
+    }
+    println(xs)
+}

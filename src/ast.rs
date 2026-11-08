@@ -93,6 +93,9 @@ pub struct FuncDecl {
     pub wheres: Vec<(String, Vec<TypeExpr>, Span)>,
     pub body: Option<Block>,
     pub is_extern_c: bool,
+    /// `unsafe fn`: callers must uphold preconditions the compiler can't check,
+    /// so every call needs an `unsafe` block.
+    pub is_unsafe: bool,
     /// Associated function (declared in a type body without `self`): the owning type.
     pub owner: Option<TypeExpr>,
     pub span: Span,

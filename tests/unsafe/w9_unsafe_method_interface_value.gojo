@@ -1,0 +1,17 @@
+// an `unsafe` method behind an interface value
+interface At {
+    fn at(self, i: int) -> u8
+}
+
+struct Buf {
+    data: Vec[u8]
+
+    unsafe fn at(self, i: int) -> u8 {
+        return unsafe { *self.data[i..].ptr() }
+    }
+}
+
+fn main() {
+    let a: At = Buf{data: [1]}
+    println(a.at(5))
+}

@@ -1,0 +1,57 @@
+// `unsafe fn`: calls need an `unsafe` block, and nothing reaches one another way.
+extern "C" {
+    fn abs(x: i32) -> i32
+}
+
+// Reads the `n` bytes starting at `p`; `p` must point at that many.
+unsafe fn firstByte(p: *u8) -> u8 {
+    return unsafe { *p }
+}
+
+unsafe fn noBlock(p: *u8) -> u8 {
+    // the body of an `unsafe fn` is not an `unsafe` block
+    return *p
+    // error: dereferencing a raw pointer requires an `unsafe` block
+}
+
+struct Buf {
+    data: Vec[u8]
+
+    unsafe fn at(self, i: int) -> u8 {
+        return unsafe { *self.data[i..].ptr() }
+    }
+}
+
+interface Reader {
+    fn at(self, i: int) -> u8
+}
+
+fn read(r: Reader) -> u8 {
+    return r.at(0)
+}
+
+fn apply(f: fn(i32) -> i32, x: i32) -> i32 {
+    return f(x)
+}
+
+fn main() {
+    let s = "gojo"
+    _ = firstByte(s.ptr())
+    // error: calling the unsafe function `firstByte` requires an `unsafe` block
+    let b = Buf{data: [1, 2]}
+    _ = b.at(0)
+    // error: calling the unsafe function `at` requires an `unsafe` block
+    _ = read(b)
+    // error: method `at` of `Buf` is an `unsafe fn`, so it can't satisfy `Reader`
+    let f = firstByte
+    // error: `firstByte` is an `unsafe fn`: it can't be used as a function value
+    _ = f
+    _ = apply(abs, 1)
+    // error: `abs` is an `extern` function: it can't be used as a function value
+    _ = unsafe { s.len() }
+    // error: this `unsafe` block has nothing that needs it
+    unsafe {
+        // error: this `unsafe` block has nothing that needs it
+        _ = unsafe { abs(-1) }
+    }
+}

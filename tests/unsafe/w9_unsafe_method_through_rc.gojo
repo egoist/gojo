@@ -1,0 +1,13 @@
+// an `unsafe` method called through an `Rc`
+struct Buf {
+    data: Vec[u8]
+
+    unsafe fn at(self, i: int) -> u8 {
+        return unsafe { *self.data[i..].ptr() }
+    }
+}
+
+fn main() {
+    let b = Rc(Buf{data: [1]})
+    println(b.at(0))
+}

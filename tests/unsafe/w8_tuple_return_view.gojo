@@ -1,0 +1,10 @@
+// a view of a local, returned inside a tuple
+fn split() -> (str, int) {
+    let s = String("local")
+    return (s.asStr(), 1)
+}
+
+fn main() {
+    let (a, n) = split()
+    println(a, n)
+}

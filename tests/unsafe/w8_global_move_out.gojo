@@ -1,0 +1,11 @@
+// moving a package-level value out
+let greeting = String("hi")
+
+fn consume(s: sink String) {
+    println(s)
+}
+
+fn main() {
+    consume(greeting)
+    println(greeting)
+}

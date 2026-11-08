@@ -1,0 +1,11 @@
+// the mapped function counts calls in a captured variable, from many tasks
+use std/task
+
+fn main() {
+    var count = 0
+    let out = task.map([1, 2, 3], 0, (x) => {
+        count += 1
+        return x
+    })
+    println(out, count)
+}

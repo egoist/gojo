@@ -963,6 +963,31 @@ fn main() {
 5
 ```
 
+A function whose callers must uphold something the compiler can't check is an
+`unsafe fn`; every call takes an `unsafe` block, and its own body is checked as
+usual. Say in a comment what callers must do:
+
+```gojo
+// `p` must point at a byte that is still there.
+unsafe fn first(p: *u8) -> u8 {
+    return unsafe { *p }
+}
+
+fn main() {
+    let s = "gojo"
+    println(unsafe { first(s.ptr()) })
+}
+```
+
+```text
+103
+```
+
+`gojo unsafe` lists every piece of unsafe code in a program, package by
+package. A dependency that has any builds only once your `gojo.toml` allows it
+(`[unsafe] allow = ["name"]`), and `forbid = true` there keeps your own package
+free of it.
+
 ## Where next
 
 - [Examples](../examples): a JSON API server (`todo`), `grep`, an HTTP server

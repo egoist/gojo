@@ -384,6 +384,19 @@ pub struct Package {
     pub exports: Vec<String>,
 }
 
+/// `[unsafe]`: which packages may contain code the compiler can't check
+/// (`unsafe` blocks, `unsafe fn`, `unsafe send` types, `extern` blocks).
+#[derive(Clone, Debug, Default)]
+pub struct UnsafePolicy {
+    /// Dependencies, anywhere in the tree, that may: by package name. Only the
+    /// manifest of the package being built counts.
+    pub allow: Vec<(String, Span)>,
+    /// This package's own code may not (`forbid = true`).
+    pub forbid: bool,
+    /// Where the table is, when there is one.
+    pub span: Option<Span>,
+}
+
 #[derive(Clone, Debug)]
 pub struct Manifest {
     /// The directory holding `gojo.toml`.
@@ -393,6 +406,7 @@ pub struct Manifest {
     pub dependencies: Vec<Dependency>,
     /// Member directories of a workspace (globs expanded).
     pub members: Vec<PathBuf>,
+    pub unsafe_policy: UnsafePolicy,
 }
 
 impl Manifest {
@@ -458,15 +472,16 @@ pub fn from_text(sm: &mut SourceMap, root: &Path, name: String, text: String) ->
     let file = sm.add(name, text.clone());
     let top = parse_toml(file, &text).map_err(|d| vec![d])?;
     let mut diags = vec![];
-    let mut m = Manifest { root: root.to_path_buf(), file, package: None, dependencies: vec![], members: vec![] };
+    let mut m = Manifest { root: root.to_path_buf(), file, package: None, dependencies: vec![], members: vec![], unsafe_policy: UnsafePolicy::default() };
     let whole = Span::new(file, 0, 0);
     for (k, ksp, v) in &top {
         match (k.as_str(), &v.v) {
             ("package", V::Table(t)) => m.package = check_package(root, t, *ksp, &mut diags),
             ("dependencies", V::Table(t)) => m.dependencies = check_dependencies(root, t, &mut diags),
             ("workspace", V::Table(t)) => m.members = check_workspace(root, t, &mut diags),
-            ("package" | "dependencies" | "workspace", _) => diags.push(Diag::new(*ksp, format!("`{}` must be a table: `[{}]`", k, k))),
-            _ => diags.push(Diag::new(*ksp, format!("unknown section `{}` (gojo.toml has [package], [dependencies] and [workspace])", k))),
+            ("unsafe", V::Table(t)) => m.unsafe_policy = check_unsafe(t, *ksp, &mut diags),
+            ("package" | "dependencies" | "workspace" | "unsafe", _) => diags.push(Diag::new(*ksp, format!("`{}` must be a table: `[{}]`", k, k))),
+            _ => diags.push(Diag::new(*ksp, format!("unknown section `{}` (gojo.toml has [package], [dependencies], [unsafe] and [workspace])", k))),
         }
     }
     if m.package.is_none() && m.members.is_empty() && diags.is_empty() {
@@ -474,6 +489,9 @@ pub fn from_text(sm: &mut SourceMap, root: &Path, name: String, text: String) ->
     }
     if m.package.is_none() && !m.dependencies.is_empty() {
         diags.push(Diag::new(whole, "[dependencies] belong to a [package]"));
+    }
+    if let (None, Some(sp)) = (&m.package, m.unsafe_policy.span) {
+        diags.push(Diag::new(sp, "[unsafe] belongs to a [package]: each member of a workspace has its own"));
     }
     if diags.is_empty() { Ok(m) } else { Err(diags) }
 }
@@ -560,6 +578,31 @@ fn check_package(root: &Path, t: &[(String, Span, Val)], sp: Span, diags: &mut V
             None
         }
     }
+}
+
+fn check_unsafe(t: &[(String, Span, Val)], sp: Span, diags: &mut Vec<Diag>) -> UnsafePolicy {
+    let mut p = UnsafePolicy { span: Some(sp), ..UnsafePolicy::default() };
+    for (k, ksp, v) in t {
+        match (k.as_str(), &v.v) {
+            ("allow", V::Array(items)) => {
+                for it in items {
+                    let Some(s) = string_of(it, "allow", diags) else { continue };
+                    if !valid_package_name(s) {
+                        diags.push(Diag::new(it.span, format!("`{}` is not a package name (`allow` lists the dependencies that may use unsafe code, by the name in their gojo.toml)", s)));
+                    } else if p.allow.iter().any(|(n, _)| n == s) {
+                        diags.push(Diag::new(it.span, format!("`{}` is listed twice", s)));
+                    } else {
+                        p.allow.push((s.to_string(), it.span));
+                    }
+                }
+            }
+            ("allow", _) => diags.push(Diag::new(v.span, "`allow` is a list of package names: `allow = [\"zlib\"]`")),
+            ("forbid", V::Bool(b)) => p.forbid = *b,
+            ("forbid", _) => diags.push(Diag::new(v.span, "`forbid` is `true` or `false`")),
+            _ => diags.push(Diag::new(*ksp, format!("unknown key `{}` in [unsafe] (known: allow, forbid)", k))),
+        }
+    }
+    p
 }
 
 fn check_dependencies(root: &Path, t: &[(String, Span, Val)], diags: &mut Vec<Diag>) -> Vec<Dependency> {

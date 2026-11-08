@@ -1,0 +1,11 @@
+// a package-level `Rc`, cloned from two tasks
+let shared = Rc(1)
+
+fn main() {
+    scope {
+        go () => {
+            _ = shared.clone()
+        }
+        _ = shared.clone()
+    }
+}

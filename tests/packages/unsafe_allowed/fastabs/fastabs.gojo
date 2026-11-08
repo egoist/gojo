@@ -1,0 +1,8 @@
+extern "C" {
+    fn labs(x: int) -> int
+}
+
+// The absolute value, from C.
+pub fn abs(x: int) -> int {
+    return unsafe { labs(x) }
+}

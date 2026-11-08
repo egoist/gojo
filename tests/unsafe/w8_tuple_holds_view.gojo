@@ -1,0 +1,7 @@
+// a tuple holding a view of `s`: `s` is changed while the view lives
+fn main() {
+    var s = String("hello")
+    let t = (s.asStr(), 1)
+    s.push("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+    println(t.0)
+}

@@ -1,0 +1,12 @@
+// a `Scope` returned out of its block: starting a task through it touches a
+// scope that has already ended (a heap use-after-free before this was checked)
+fn leak() -> Scope {
+    return scope s {
+        s
+    }
+}
+
+fn main() {
+    let s = leak()
+    s.go(() => println(1))
+}

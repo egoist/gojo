@@ -1,0 +1,10 @@
+// an `extern` function passed to `task.map` as the function to call
+use std/task
+
+extern "C" {
+    fn labs(x: int) -> int
+}
+
+fn main() {
+    println(task.map([-1, -2], 0, labs))
+}

@@ -1,0 +1,20 @@
+// an `unsafe send` struct made generic: the author vouches for its pointer,
+// not for whatever `T` is, and `T` is an `Rc`
+unsafe send struct Wrap[T] {
+    p: *int
+    val: T
+}
+
+fn main() {
+    let w = Wrap{p: unsafe { calloc(1, 8) }, val: Rc(1)}
+    scope {
+        go () => {
+            _ = w.val.clone()
+        }
+        _ = w.val.clone()
+    }
+}
+
+extern "C" {
+    fn calloc(n: u64, size: u64) -> *int
+}

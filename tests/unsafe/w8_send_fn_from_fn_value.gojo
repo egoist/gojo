@@ -1,0 +1,13 @@
+// a plain `fn` value (which may capture anything) passed as a `send fn`
+fn run(f: send fn() -> int) -> int {
+    scope {
+        go () => println(f())
+    }
+    return f()
+}
+
+fn main() {
+    let c = Cell(1)
+    let g: fn() -> int = () => c.get()
+    println(run(g))
+}

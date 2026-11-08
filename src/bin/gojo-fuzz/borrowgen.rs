@@ -22,13 +22,17 @@ pub struct BorrowGen<'a> {
     /// structs with a String field, maps of strings
     recs: Vec<String>,
     maps: Vec<String>,
+    /// `?Task[String]` and `?Scope` variables, which a scope may try to leave
+    /// its handles or itself in
+    handles: Vec<String>,
+    scopes: Vec<String>,
     n: u32,
     depth: u32,
 }
 
 impl<'a> BorrowGen<'a> {
     pub fn new(rng: &'a mut Rng) -> BorrowGen<'a> {
-        BorrowGen { rng, out: String::new(), ind: 1, strs: vec![], vecs: vec![], svs: vec![], vvs: vec![], lists: vec![], funcs: vec![], recs: vec![], maps: vec![], n: 0, depth: 0 }
+        BorrowGen { rng, out: String::new(), ind: 1, strs: vec![], vecs: vec![], svs: vec![], vvs: vec![], lists: vec![], funcs: vec![], recs: vec![], maps: vec![], handles: vec![], scopes: vec![], n: 0, depth: 0 }
     }
 
     fn fresh(&mut self, p: &str) -> String {
@@ -124,7 +128,7 @@ impl<'a> BorrowGen<'a> {
         let svs = self.svs.clone();
         let vvs = self.vvs.clone();
         let lists = self.lists.clone();
-        match self.rng.below(28) {
+        match self.rng.below(30) {
             0 | 1 => {
                 let n = self.fresh("s");
                 let e = self.str_lit();
@@ -359,6 +363,7 @@ impl<'a> BorrowGen<'a> {
                 self.ind -= 1;
                 self.line("}");
             }
+            28 | 29 if self.depth < 2 => self.handles_stmt(),
             24 if self.depth < 2 => {
                 // tasks read a view while the scope's body changes the owner
                 if let (Some(w), Some(s)) = (self.pick(&svs), self.pick(&strs)) {
@@ -386,10 +391,108 @@ impl<'a> BorrowGen<'a> {
         }
     }
 
+    /// Task handles and `Scope` values, kept where they could outlive their
+    /// scope (most of these must be rejected), or used inside it.
+    fn handles_stmt(&mut self) {
+        match self.rng.below(7) {
+            0 => {
+                let h = self.fresh("h");
+                self.line(&format!("var {}: ?Task[String] = none", h));
+                self.handles.push(h);
+            }
+            1 => {
+                let c = self.fresh("c");
+                self.line(&format!("var {}: ?Scope = none", c));
+                self.scopes.push(c);
+            }
+            2 | 3 => {
+                // a scope that stores its handle or itself somewhere
+                let handles = self.handles.clone();
+                let scopes = self.scopes.clone();
+                let sc = self.fresh("sc");
+                let lit = self.str_lit();
+                let kind = self.rng.below(5);
+                // (named only when the body uses the name)
+                if matches!(kind, 0 | 3) {
+                    self.line("scope {");
+                } else {
+                    self.line(&format!("scope {} {{", sc));
+                }
+                self.ind += 1;
+                match kind {
+                    0 => match self.pick(&handles) {
+                        Some(h) => self.line(&format!("{} = some(go () => {})", h, lit)),
+                        None => self.line(&format!("println((go () => {}).join())", lit)),
+                    },
+                    1 => match self.pick(&scopes) {
+                        Some(c) => self.line(&format!("{} = some({})", c, sc)),
+                        None => self.line(&format!("{}.go(() => println(1))", sc)),
+                    },
+                    2 => match self.pick(&scopes) {
+                        Some(c) => self.line(&format!("{} = some(passScope({}))", c, sc)),
+                        None => self.line(&format!("passScope({}).go(() => println(2))", sc)),
+                    },
+                    3 => {
+                        // legitimate: kept in a variable of the scope, joined there
+                        let k = self.fresh("k");
+                        self.line(&format!("var {}: ?Task[String] = none", k));
+                        self.line(&format!("{} = some(go () => {})", k, lit));
+                        self.line(&format!("if let t = {} {{ println(t.join()) }}", k));
+                    }
+                    _ => {
+                        let s = self.pick(&self.strs.clone());
+                        match s {
+                            Some(s) => self.line(&format!("spawnOn({}, {}.clone())", sc, s)),
+                            None => self.line(&format!("spawnOn({}, {})", sc, lit)),
+                        }
+                    }
+                }
+                if self.rng.chance(1, 3) {
+                    let s = self.pick(&self.strs.clone());
+                    if let Some(s) = s {
+                        self.line(&format!("{}.push(\"grow it while the tasks run\")", s));
+                    }
+                }
+                self.ind -= 1;
+                self.line("}");
+            }
+            4 => {
+                // the scope's value is its handle or itself
+                let x = self.fresh("x");
+                let lit = self.str_lit();
+                if self.rng.chance(1, 2) {
+                    self.line(&format!("let {} = scope {{", x));
+                    self.line(&format!("    let t = go () => {}", lit));
+                    self.line("    t");
+                    self.line("}");
+                    self.line(&format!("println({}.join())", x));
+                } else {
+                    let sc = self.fresh("sc");
+                    self.line(&format!("let {} = scope {} {{ {} }}", x, sc, sc));
+                    self.line(&format!("{}.go(() => println(3))", x));
+                }
+            }
+            _ => {
+                // use what was kept: after its scope, that is the bug
+                let handles = self.handles.clone();
+                let scopes = self.scopes.clone();
+                if self.rng.chance(1, 2) {
+                    if let Some(h) = self.pick(&handles) {
+                        self.line(&format!("if let t = {} {{ println(t.join()) }}", h));
+                        self.line(&format!("{} = none", h));
+                    }
+                } else if let Some(c) = self.pick(&scopes) {
+                    self.line(&format!("if let s = {} {{ s.go(() => println(4)) }}", c));
+                }
+            }
+        }
+    }
+
     fn block(&mut self) {
         // declarations inside stay inside
         let saved = (self.strs.clone(), self.vecs.clone(), self.svs.clone(), self.vvs.clone(), self.lists.clone(), self.funcs.clone());
         let saved2 = (self.recs.clone(), self.maps.clone());
+        let saved3 = (self.handles.clone(), self.scopes.clone());
         self.ind += 1;
         self.depth += 1;
         for _ in 0..1 + self.rng.below(5) {
@@ -407,6 +510,13 @@ impl<'a> BorrowGen<'a> {
             self.line(&format!("println({}.len())", m));
         }
         (self.recs, self.maps) = saved2;
+        for h in self.handles.clone().iter().filter(|h| !saved3.0.contains(h)) {
+            self.line(&format!("if let t = {} {{ println(t.join()) }}", h));
+        }
+        for c in self.scopes.clone().iter().filter(|c| !saved3.1.contains(c)) {
+            self.line(&format!("_ = {}", c));
+        }
+        (self.handles, self.scopes) = saved3;
     }
 
     #[allow(clippy::type_complexity)]
@@ -425,7 +535,7 @@ impl<'a> BorrowGen<'a> {
 
     pub fn program(mut self) -> String {
         let mut head = String::from(
-            "// generated by gojo-fuzz borrow\nuse std/task\n\nstruct P {\n    name: String\n}\n\nfn take(s: sink String) {}\n\nfn grow(s: inout String) {\n    s.push(\"a long piece of text that moves the buffer\")\n}\n\nfn firstOf(l: []String) -> str {\n    if l.len() == 0 {\n        return \"none\"\n    }\n    return l[0].asStr()\n}\n\nfn run(f: fn() -> str) -> str {\n    return f()\n}\n\nstruct Ring {\n    items: Vec[String]\n\n    fn cursor(self) -> int {\n        return 0\n    }\n\n    fn next(self, c: inout int) yield ?&String {\n        if c >= self.items.len() {\n            yield none\n        }\n        c += 1\n        yield self.items[c - 1]\n    }\n}\n\nstruct LendCur {\n    i: int\n    buf: String\n}\n\nstruct Lend {\n    n: int\n\n    fn cursor(self) -> LendCur {\n        return LendCur{i: 0, buf: \"\".toString()}\n    }\n\n    fn next(self, c: inout LendCur) yield ?&String {\n        if c.i >= self.n {\n            yield none\n        }\n        c.i += 1\n        c.buf = \"a line long enough to need its own allocation\".toString()\n        yield c.buf\n    }\n}\n\nstruct Each {\n    items: Vec[String]\n\n    fn each(self, body: fn(&String) -> Flow) {\n        for x in self.items {\n            let t = x.clone()\n            if body(t) == Flow.Break {\n                return\n            }\n        }\n    }\n}\n\nfn pick(s: inout String) -> str {\n",
+            "// generated by gojo-fuzz borrow\nuse std/task\n\nstruct P {\n    name: String\n}\n\nfn take(s: sink String) {}\n\nfn passScope(s: Scope) -> Scope {\n    return s\n}\n\nfn spawnOn(s: Scope, v: sink String) {\n    s.go(() => println(v))\n}\n\nfn grow(s: inout String) {\n    s.push(\"a long piece of text that moves the buffer\")\n}\n\nfn firstOf(l: []String) -> str {\n    if l.len() == 0 {\n        return \"none\"\n    }\n    return l[0].asStr()\n}\n\nfn run(f: fn() -> str) -> str {\n    return f()\n}\n\nstruct Ring {\n    items: Vec[String]\n\n    fn cursor(self) -> int {\n        return 0\n    }\n\n    fn next(self, c: inout int) yield ?&String {\n        if c >= self.items.len() {\n            yield none\n        }\n        c += 1\n        yield self.items[c - 1]\n    }\n}\n\nstruct LendCur {\n    i: int\n    buf: String\n}\n\nstruct Lend {\n    n: int\n\n    fn cursor(self) -> LendCur {\n        return LendCur{i: 0, buf: \"\".toString()}\n    }\n\n    fn next(self, c: inout LendCur) yield ?&String {\n        if c.i >= self.n {\n            yield none\n        }\n        c.i += 1\n        c.buf = \"a line long enough to need its own allocation\".toString()\n        yield c.buf\n    }\n}\n\nstruct Each {\n    items: Vec[String]\n\n    fn each(self, body: fn(&String) -> Flow) {\n        for x in self.items {\n            let t = x.clone()\n            if body(t) == Flow.Break {\n                return\n            }\n        }\n    }\n}\n\nfn pick(s: inout String) -> str {\n",
         );
         // a function returning a view of its parameter, with a defer
         head.push_str(match self.rng.below(12) {
@@ -453,6 +563,12 @@ impl<'a> BorrowGen<'a> {
         }
         for m in self.maps.clone() {
             self.line(&format!("println({}.len())", m));
+        }
+        for h in self.handles.clone() {
+            self.line(&format!("if let t = {} {{ println(t.join()) }}", h));
+        }
+        for c in self.scopes.clone() {
+            self.line(&format!("if let s = {} {{ s.go(() => println(5)) }}", c));
         }
         // `task` must be used
         self.line("_ = task.cancelled()");

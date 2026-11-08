@@ -1,0 +1,7 @@
+// an isolated value can't be a view of something outside
+fn main() {
+    var s = String("abc")
+    let iso = isolate { s.asStr() }
+    s.clear()
+    println(iso.take())
+}

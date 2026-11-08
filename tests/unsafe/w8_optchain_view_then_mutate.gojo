@@ -1,0 +1,15 @@
+// `?.` gives a view of the user's name, which outlives the user
+struct User {
+    name: String
+
+    fn nameView(self) -> str {
+        return self.name.asStr()
+    }
+}
+
+fn main() {
+    var u: ?User = some(User{name: String("ann")})
+    let n = u?.nameView()
+    u = none
+    println(n)
+}

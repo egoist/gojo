@@ -1,0 +1,6 @@
+use fastabs
+
+// The distance between two numbers.
+pub fn dist(a: int, b: int) -> int {
+    return fastabs.abs(a - b)
+}

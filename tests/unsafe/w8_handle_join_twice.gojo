@@ -1,0 +1,9 @@
+// a task joined twice
+fn main() {
+    scope {
+        let t = go () => String("x")
+        let a = t.join()
+        let b = t.join()
+        println(a, b)
+    }
+}

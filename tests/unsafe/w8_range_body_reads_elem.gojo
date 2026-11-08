@@ -1,0 +1,14 @@
+// a task writes the first half; the body reads element 0 meanwhile
+fn fill(v: inout []int, x: int) {
+    for i in 0..v.len() {
+        v[i] = x
+    }
+}
+
+fn main() {
+    var xs = [0, 0, 0, 0]
+    scope {
+        go fill(&xs[..2], 1)
+        println(xs[0])
+    }
+}

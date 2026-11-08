@@ -1,0 +1,8 @@
+// a task handle as the value of its own scope
+fn main() {
+    let t = scope {
+        let h = go () => String("x")
+        h
+    }
+    println(t.join())
+}

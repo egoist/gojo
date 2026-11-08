@@ -1,0 +1,6 @@
+// a raw pointer dereferenced in a constant
+const FIRST = *"x".ptr()
+
+fn main() {
+    println(FIRST)
+}

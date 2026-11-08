@@ -1,0 +1,9 @@
+// a view assigned to an outer variable, of a value in an inner block
+fn main() {
+    var keep = ""
+    {
+        let s = String("inner")
+        keep = s.asStr()
+    }
+    println(keep)
+}

@@ -1,0 +1,22 @@
+// The compiler calls these methods itself, outside any `unsafe` block.
+struct Buf {
+    data: Vec[u8]
+
+    unsafe fn equal(self, other: Buf) -> bool {
+        // error: `equal` can't be `unsafe`: the compiler calls it implicitly
+        return self.data.len() == other.data.len()
+    }
+
+    unsafe fn drop(inout self) {
+        // error: `drop` can't be `unsafe`: the compiler calls it implicitly
+    }
+
+    unsafe fn cursor(self) -> int {
+        // error: `cursor` can't be `unsafe`: the compiler calls it implicitly
+        return 0
+    }
+}
+
+fn main() {
+    _ = Buf{data: [1]} == Buf{data: [2]}
+}

@@ -1,0 +1,12 @@
+// a view of read-locked data kept after the lock is released
+fn main() {
+    let rw = RwLock(String("abc"))
+    var keep = ""
+    with v = rw.read() {
+        keep = v.asStr()
+    }
+    with v = rw.write() {
+        v.clear()
+    }
+    println(keep)
+}

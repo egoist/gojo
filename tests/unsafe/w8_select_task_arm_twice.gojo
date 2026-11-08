@@ -1,0 +1,10 @@
+// a task handle used in a `select` arm, then joined again
+fn main() {
+    scope {
+        let t = go () => String("x")
+        select {
+            let r = <-t => println(r)
+        }
+        println(t.join())
+    }
+}

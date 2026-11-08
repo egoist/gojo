@@ -399,6 +399,9 @@ typedef struct gojo_g {
     uint32_t io_done;
     int32_t io_res;
     int io_inflight;
+    // C was given a pointer into its stack (see gojo_ptr_escape): C may keep it
+    // and use it while the goroutine is parked, so the stack stays where it is
+    int pinned;
 #ifdef GOJO_ASAN
     void *fake_stack;
 #endif
@@ -613,8 +616,12 @@ static bool hibernate(gojo_g *g, int64_t now) {
         // open scopes stay as they are: do their tasks borrow from this stack?
         bool busy = GOJO_SC_LOAD(&g->on_cpu) || GOJO_SC_LOAD(&g->touching);
         bool borrowed = !busy && g_borrowed(g);
-        if (busy || borrowed) {
-            // a worker is about to run it, or its tasks may be reading its stack
+        // (after the borrow check: a task that pinned this stack stored that
+        // before it finished, and finishing is what made the stack free)
+        bool pinned = !busy && !borrowed && GOJO_SC_LOAD(&g->pinned);
+        if (busy || borrowed || pinned) {
+            // a worker is about to run it, its tasks may be reading its stack,
+            // or C may hold a pointer into it
             GOJO_SC_STORE(&g->hib, 0);
         } else {
             uint8_t *top = g->stack + g->stack_size;
@@ -1011,6 +1018,7 @@ static gojo_g *g_alloc(gojo_worker *w, size_t size) {
     g->arg_drop = NULL;
     g->scope = NULL;
     g->group = NULL;
+    GOJO_SET_RELAXED(&g->pinned, 0);
     GOJO_SET_RELAXED(&g->alive, true);
     g->spawn_loc = NULL;
     g->wake = WAKE_NONE;
@@ -2418,6 +2426,27 @@ static bool g_borrowed(gojo_g *g) {
     for (gojo_group *grp = GOJO_LOAD(&g->open_groups); grp; grp = grp->next_open)
         if (group_live(grp) > 0) return true;
     return false;
+}
+
+// `.ptr()`: a raw pointer to Gojo memory, which C may keep after the call it
+// is passed to, and use while the goroutine owning that memory is parked.
+// When the memory is on a goroutine's stack, that goroutine is pinned: its
+// stack is never hibernated, so the pointer keeps reaching the live bytes.
+// Gojo code can only point into its own stack and the stacks of the
+// goroutines that opened the scopes it runs in (what it may borrow from), so
+// the search follows that chain: the current goroutine, the owner of its
+// group, that one's group's owner... (all running or waiting for their
+// scopes while this one runs, so none of them is going away).
+void *gojo_ptr_escape(const void *p) {
+    if (!s_hib_on || !p) return (void *)p;
+    gojo_worker *w = cur_worker();
+    for (gojo_g *g = w ? w->cur : NULL; g; g = g->group ? g->group->owner : NULL) {
+        if ((const uint8_t *)p >= g->stack && (const uint8_t *)p < g->stack + g->stack_size) {
+            if (!GOJO_RELAXED(&g->pinned)) GOJO_SC_STORE(&g->pinned, 1);
+            break;
+        }
+    }
+    return (void *)p;
 }
 
 gojo_group *gojo_group_new(const char *loc) {

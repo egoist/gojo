@@ -348,9 +348,10 @@ struct Bc<'a> {
     /// The holders each holder was borrowed through (`with s = mu.lock()`: `s`
     /// through `mu`); re-borrowing through `s` doesn't conflict with `mu`.
     via_parents: HashMap<LocalId, Vec<LocalId>>,
-    /// `scope` blocks being checked: (id, depth of the body). What a task
-    /// borrows stays borrowed until its scope's body ends.
-    tscopes: Vec<(u32, usize)>,
+    /// `scope` blocks being checked: (id, depth of the body, anchor). What a
+    /// task borrows stays borrowed until its scope's body ends; its handle is
+    /// a view of the anchor (see `TK::Scope`).
+    tscopes: Vec<(u32, usize, LocalId)>,
     /// While checking a task closure: the depth its borrows last until.
     spawn_depth: Option<usize>,
 }
@@ -636,7 +637,8 @@ impl<'a> Bc<'a> {
     fn do_move(&mut self, st: &mut St, e: &TExpr) {
         self.subexprs_of_place(st, e);
         if let Some(p) = place_path(e) {
-            if self.is_holder(p.0) {
+            // (views are copied, but a task handle is a view that is used up)
+            if self.is_holder(p.0) && !matches!(self.tf.locals[p.0 as usize].ty, Ty::Task(_)) {
                 return;
             }
             self.check_moved(st, &p, e.span, "use of");
@@ -736,6 +738,9 @@ impl<'a> Bc<'a> {
                 Some(h) => h.clone(),
                 // a view parameter borrows from the caller: it is its own source
                 None if matches!(self.tf.locals[*l as usize].kind, LocalKind::Param(_)) && self.tf.locals[*l as usize].ty.is_view() => vec![((*l, vec![]), false)],
+                // a scope's handle (`scope s { }`) is its own source too: it
+                // lives in the scope's body
+                None if self.tf.locals[*l as usize].ty == Ty::Scope && matches!(self.tf.locals[*l as usize].kind, LocalKind::Let) => vec![((*l, vec![]), false)],
                 None => vec![],
             }),
             TK::Copy(x) | TK::Move(x) | TK::SomeLit(x) | TK::OkLit(x) | TK::ErrLit(x) | TK::Wrap(x) | TK::Try { e: x, .. } => self.view_sources(x),
@@ -812,7 +817,11 @@ impl<'a> Bc<'a> {
                 Some(v) => self.view_sources(v),
                 None => Ok(vec![]),
             },
-            // the task's own borrows last until its scope ends
+            // A task handle is a view of its scope (the task's own borrows last
+            // until the scope ends): of the anchor of a `scope` block, or of
+            // the `Scope` value it was started through.
+            TK::Spawn { handle: true, target: SpawnTarget::Lexical(id), .. } => Ok(self.tscopes.iter().rev().find(|t| t.0 == *id).map(|t| vec![((t.2, vec![]), false)]).unwrap_or_default()),
+            TK::Spawn { handle: true, target: SpawnTarget::Value(v), .. } => self.view_sources(v),
             TK::Spawn { .. } | TK::Isolate(_) => Ok(vec![]),
             TK::If { then, else_, .. } => {
                 let mut out = vec![];
@@ -885,6 +894,13 @@ impl<'a> Bc<'a> {
                 if o.starts_with("__c") {
                     // the hidden cursor of a `for` loop over a type with `cursor` / `next`
                     self.err(Diag::new(sp, format!("`{}` would still view a loop element after the loop's cursor moved on", h)).note(Some(osp), "this type's `next` yields references into its cursor, which changes with every step").note(None, "store an owned copy (`.toString()` / `.clone()`), or have `next` yield parts of `self`"));
+                    return;
+                }
+                if self.tf.locals[p.0 as usize].ty == Ty::Scope {
+                    // a task handle or a `Scope` value, of a scope that ends first
+                    let h = self.tf.locals[holder as usize].name.clone();
+                    let what = if o.starts_with("__scope") { "its scope".to_string() } else { format!("the scope `{}`", o) };
+                    self.err(Diag::new(sp, format!("`{}` would outlive {}: a task handle or `Scope` value can't leave the scope it belongs to", h, what)).note(Some(osp), "the scope ends here, after waiting for its tasks; a handle or `Scope` kept past that would point at a scope that is gone").note(None, "join the task (or use the scope) inside the scope, and keep its result instead"));
                     return;
                 }
                 if o.starts_with("__h") {
@@ -1356,6 +1372,11 @@ impl<'a> Bc<'a> {
                 self.check_locked(&srcs, sp, None);
                 for (p, _) in srcs {
                     let l = &self.tf.locals[p.0 as usize];
+                    if l.ty == Ty::Scope && matches!(l.kind, LocalKind::Let) {
+                        let lsp = l.span;
+                        self.err(Diag::new(sp, "returns a task handle or `Scope` value of a scope in this function, which has ended by then").note(Some(lsp), "the scope").note(None, "join the task inside the scope and return its result instead"));
+                        continue;
+                    }
                     if matches!(l.kind, LocalKind::Let | LocalKind::Var | LocalKind::Param(Mode::Sink)) {
                         let n = l.name.clone();
                         let lsp = l.span;
@@ -1572,8 +1593,10 @@ impl<'a> Bc<'a> {
             }
             TK::Block(b) | TK::Unsafe(b) => self.block(st, b),
             TK::Isolate(b) => self.block(st, b),
-            TK::Scope { id, body, .. } => {
-                self.tscopes.push((*id, self.depth + 1));
+            TK::Scope { id, body, anchor, .. } => {
+                // the anchor lives in the body: handles can't leave it
+                self.decl_depth.insert(*anchor, self.depth + 1);
+                self.tscopes.push((*id, self.depth + 1, *anchor));
                 self.block(st, body);
                 self.tscopes.pop();
             }

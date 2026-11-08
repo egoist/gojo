@@ -1,0 +1,9 @@
+// the value of a `with` block is a view of the locked data, used after unlock
+fn main() {
+    let m = Mutex(String("secret"))
+    let v = with s = m.lock() { s.asStr() }
+    with s = m.lock() {
+        s.clear()
+    }
+    println(v)
+}

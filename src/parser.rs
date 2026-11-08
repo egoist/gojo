@@ -421,10 +421,15 @@ impl Parser {
             while !self.is_p("}") {
                 let mlo = self.span();
                 let is_pub = self.eat_kw(Kw::Pub);
+                let is_unsafe = self.is_kw(Kw::Unsafe) && matches!(self.peek_at(1), Tok::Kw(Kw::Func));
+                if is_unsafe {
+                    self.bump();
+                }
                 if !self.is_kw(Kw::Func) {
                     return self.err(format!("expected `fn` in `extend` block, found {}", self.describe()));
                 }
-                let f = self.func_decl(Some(&owner))?;
+                let mut f = self.func_decl(Some(&owner))?;
+                f.is_unsafe = is_unsafe;
                 out.push(Item { kind: ItemKind::Func(f), is_pub, span: self.sp_from(mlo) });
                 self.skip_nl();
             }
@@ -435,10 +440,17 @@ impl Parser {
         let is_pub = self.eat_kw(Kw::Pub);
         let mut is_copy = false;
         let mut unsafe_send = false;
+        let mut unsafe_fn = false;
         if self.is_kw(Kw::Unsafe) && matches!(self.peek_at(1), Tok::Ident(s) if s == "send") {
             self.bump();
             self.bump();
             unsafe_send = true;
+        } else if self.is_kw(Kw::Unsafe) && matches!(self.peek_at(1), Tok::Kw(Kw::Func)) {
+            self.bump();
+            unsafe_fn = true;
+        } else if self.is_kw(Kw::Unsafe) {
+            self.bump();
+            return self.err(format!("expected `fn` or `send` after `unsafe` (`unsafe fn name()` or `unsafe send struct T`), found {}", self.describe()));
         }
         if self.is_kw(Kw::Copy) {
             self.bump();
@@ -451,7 +463,11 @@ impl Parser {
             send_iface = true;
         }
         let kind = match self.peek().clone() {
-            Tok::Kw(Kw::Func) => ItemKind::Func(self.func_decl(None)?),
+            Tok::Kw(Kw::Func) => {
+                let mut f = self.func_decl(None)?;
+                f.is_unsafe = unsafe_fn;
+                ItemKind::Func(f)
+            }
             Tok::Kw(Kw::Struct) => {
                 self.bump();
                 let (name, nsp) = self.ident()?;
@@ -541,6 +557,9 @@ impl Parser {
                         lib = Some(if w == "static" { format!("static:{}", s) } else { s });
                     }
                 }
+                if self.is_kw(Kw::Unsafe) {
+                    return self.err("a function exported to C can't be `unsafe`: Gojo code calls it like any other function, and C never sees the marker");
+                }
                 if self.is_kw(Kw::Func) {
                     // `extern "C" fn name(...) {...}`: a Gojo function callable from C.
                     let mut f = self.func_decl(None)?;
@@ -551,6 +570,9 @@ impl Parser {
                     self.skip_nl();
                     let mut funcs = vec![];
                     while !self.is_p("}") {
+                        if self.is_kw(Kw::Unsafe) {
+                            return self.err("functions in an `extern` block are already unsafe to call: write `fn`, not `unsafe fn`");
+                        }
                         let mut f = self.func_decl(None)?;
                         f.is_extern_c = true;
                         funcs.push(f);
@@ -634,13 +656,19 @@ impl Parser {
 
     /// `[pub] func ...` inside a type body.
     fn body_method(&mut self, owner: &TypeExpr, methods: &mut Vec<Item>) -> PResult<bool> {
-        let is_func = self.is_kw(Kw::Func) || (self.is_kw(Kw::Pub) && matches!(self.peek_at(1), Tok::Kw(Kw::Func)));
+        let at = if self.is_kw(Kw::Pub) { 1 } else { 0 };
+        let is_unsafe = matches!(self.peek_at(at), Tok::Kw(Kw::Unsafe)) && matches!(self.peek_at(at + 1), Tok::Kw(Kw::Func));
+        let is_func = matches!(self.peek_at(at), Tok::Kw(Kw::Func)) || is_unsafe;
         if !is_func {
             return Ok(false);
         }
         let lo = self.span();
         let is_pub = self.eat_kw(Kw::Pub);
-        let f = self.func_decl(Some(owner))?;
+        if is_unsafe {
+            self.bump();
+        }
+        let mut f = self.func_decl(Some(owner))?;
+        f.is_unsafe = is_unsafe;
         methods.push(Item { kind: ItemKind::Func(f), is_pub, span: self.sp_from(lo) });
         self.skip_nl();
         Ok(true)
@@ -733,6 +761,9 @@ impl Parser {
         let mut type_set = vec![];
         while !self.is_p("}") {
             let lo = self.span();
+            if self.is_kw(Kw::Unsafe) {
+                return self.err("an interface method can't be `unsafe`: code calling it through the interface doesn't know which implementation it gets");
+            }
             if !self.is_kw(Kw::Func) {
                 // type set or embedded interface
                 let mut elems = vec![];
@@ -816,6 +847,7 @@ impl Parser {
             wheres,
             body,
             is_extern_c: false,
+            is_unsafe: false,
             owner: assoc_owner,
             span: self.sp_from(lo),
         })

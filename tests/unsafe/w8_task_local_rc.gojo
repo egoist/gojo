@@ -1,0 +1,15 @@
+// a task-local `Rc`: every task started inside gets a copy, sharing the count
+use std/task
+
+let shared = task.local[Rc[int]]()
+
+fn main() {
+    task.with(shared, Rc(1), () => {
+        scope {
+            go () => {
+                _ = shared.get()
+            }
+            _ = shared.get()
+        }
+    })
+}

@@ -1,0 +1,12 @@
+// a `Cell` from outside written from inside the isolated value's task
+fn main() {
+    let c = Cell(0)
+    let iso = isolate {
+        c.set(1)
+        5
+    }
+    scope {
+        go () => println(iso.take())
+        c.set(2)
+    }
+}

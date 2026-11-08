@@ -1,0 +1,13 @@
+// an `unsafe fn` as a function value
+unsafe fn peek(p: *u8) -> u8 {
+    return unsafe { *p }
+}
+
+fn apply(f: fn(*u8) -> u8, p: *u8) -> u8 {
+    return f(p)
+}
+
+fn main() {
+    let s = String("x")
+    println(apply(peek, s.ptr()))
+}

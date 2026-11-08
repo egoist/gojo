@@ -1,0 +1,8 @@
+// a `Cell` shared by parallel iterations
+fn main() {
+    let c = Cell(0)
+    par for i in 0..100 {
+        c.set(c.get() + i)
+    }
+    println(c.get())
+}

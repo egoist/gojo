@@ -1,0 +1,8 @@
+// task handles stored in a vector, which outlives nothing but hides them
+fn main() {
+    var hs = Vec[Task[int]]{}
+    scope {
+        hs.push(go () => 1)
+    }
+    println(hs.len())
+}

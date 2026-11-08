@@ -1,0 +1,17 @@
+// a task appends to `s.a`; the body calls a method that reads all of `s`
+struct S {
+    a: Vec[int]
+    b: int
+
+    fn total(self) -> int {
+        return self.a.len() + self.b
+    }
+}
+
+fn main() {
+    var s = S{a: [], b: 1}
+    scope {
+        go () => s.a.push(1)
+        println(s.total())
+    }
+}

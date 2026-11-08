@@ -1,0 +1,3 @@
+`fastabs` is what a dependency is imported as; `allow` lists packages by the name in their own gojo.toml: `@c/fastabs`
+`@c/fastab` is not a dependency of this package, directly or through others
+the dependencies are `mathx`, `@c/fastabs`

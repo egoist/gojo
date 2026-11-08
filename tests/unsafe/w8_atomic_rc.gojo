@@ -1,0 +1,5 @@
+// an `Atomic` of a non-integer
+fn main() {
+    let a = Atomic(Rc(1))
+    _ = a
+}

@@ -1,0 +1,9 @@
+[package]
+name = "app"
+
+[dependencies]
+mathx = { path = "../mathx" }
+
+[unsafe]
+allow = ["@c/fastabs"]
+forbid = true

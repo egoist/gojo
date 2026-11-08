@@ -1,0 +1,8 @@
+// a raw pointer dereferenced in a field's default value
+struct Cfg {
+    first: u8 = *"x".ptr()
+}
+
+fn main() {
+    println(Cfg{}.first)
+}

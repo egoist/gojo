@@ -1,0 +1,10 @@
+fn main() {
+    var keep: ?Task[String] = none
+    scope {
+        let t = go () => String("x")
+        keep = some(t)
+    }
+    if let t = keep {
+        println(t.join())
+    }
+}

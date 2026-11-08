@@ -2125,7 +2125,8 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
                         self.ensure_rcbox(inner);
                         format!("({}->val)", b)
                     }
-                    Ty::Box(inner) => {
+                    // (a struct reached only through a raw pointer is defined here)
+                    Ty::Box(inner) | Ty::Ptr(inner) => {
                         self.ensure(inner);
                         format!("(*{})", b)
                     }
@@ -2490,7 +2491,7 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
                 self.block_into(fs, b, r.as_deref());
                 r.unwrap_or_else(|| "0".into())
             }
-            TK::Scope { id, handle, body, errt } => self.scope_block(fs, *id, *handle, body, errt.as_ref(), &t, e.span),
+            TK::Scope { id, handle, body, errt, .. } => self.scope_block(fs, *id, *handle, body, errt.as_ref(), &t, e.span),
             TK::Spawn { target, task, handle } => self.spawn(fs, target, task, *handle, e.span),
             TK::Try { e: x, wrap } => self.try_expr(fs, x, wrap.as_ref(), &t, e.span),
             TK::Catch { e: x, bind, handler } => {
@@ -4423,7 +4424,8 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
                 let a = self.expr(fs, &args[0].e);
                 let et = elem(&recv_ty);
                 let c = if qn == "str.ptr" { "uint8_t".to_string() } else { self.cty(&et) };
-                format!("(({} *)({}).ptr)", c, a)
+                // (pins the goroutine whose stack it points into, if any)
+                format!("(({} *)gojo_ptr_escape(({}).ptr))", c, a)
             }
             "str.bytes" => {
                 let a = self.expr(fs, &args[0].e);

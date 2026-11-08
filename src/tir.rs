@@ -341,7 +341,10 @@ pub enum TK {
     /// `scope { body }`: tasks started in `body` run until the scope ends.
     /// `errt`: the error a plain `go` task can fail with; the scope's type is
     /// then `T ! E`.
-    Scope { id: u32, handle: Option<LocalId>, body: TBlock, errt: Option<Ty> },
+    /// `anchor`: what the scope's task handles and `Scope` values are views of
+    /// (the handle when the scope is named, else a hidden local), declared in
+    /// the body: they can't leave it.
+    Scope { id: u32, handle: Option<LocalId>, anchor: LocalId, body: TBlock, errt: Option<Ty> },
     /// `go ...`: `task` is a closure literal with no parameters. `handle`:
     /// gives a `Task[R]` (`let t = go f()`), else unit.
     Spawn { target: SpawnTarget, task: Box<TExpr>, handle: bool },

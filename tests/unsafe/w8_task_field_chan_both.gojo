@@ -1,0 +1,11 @@
+// a task receives on `ch.rx`, another takes the whole channel apart
+fn main() {
+    let ch = Chan[int](1)
+    scope {
+        go () => println(<-ch.rx)
+        go () => {
+            let c = ch
+            c.tx <- 1
+        }
+    }
+}

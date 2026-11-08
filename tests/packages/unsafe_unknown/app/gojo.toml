@@ -1,0 +1,9 @@
+[package]
+name = "app"
+
+[dependencies]
+mathx = { path = "../mathx" }
+
+[unsafe]
+# by the package's own name: `@c/fastabs`, not `fastabs`
+allow = ["fastabs", "@c/fastab"]

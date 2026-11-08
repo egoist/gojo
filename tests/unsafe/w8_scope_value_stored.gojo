@@ -1,0 +1,12 @@
+// a `Scope` stored in a struct, used after the scope has ended
+struct Holder {
+    s: Scope
+}
+
+fn main() {
+    var h: ?Holder = none
+    scope s {
+        h = some(Holder{s: s})
+    }
+    _ = h
+}

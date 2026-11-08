@@ -13,6 +13,7 @@ pub mod lexer;
 pub mod parser;
 pub mod tir;
 pub mod types;
+pub mod unsafety;
 
 use diag::{Diag, SourceMap, Span};
 use std::collections::{HashMap, HashSet};
@@ -55,6 +56,31 @@ pub fn report(sm: &SourceMap, diags: &[Diag]) {
 pub struct Loaded {
     pub sm: SourceMap,
     pub units: Vec<check::Unit>,
+    pub unsafe_info: UnsafeInfo,
+}
+
+/// The program's packages (not `std`) with their unsafe code, and the policy
+/// of the package being built (see `unsafety`).
+#[derive(Default)]
+pub struct UnsafeInfo {
+    pub packages: Vec<unsafety::Package>,
+    pub policy: manifest::UnsafePolicy,
+    /// The directory of the package being built, when it has a gojo.toml.
+    pub root: Option<PathBuf>,
+    /// Every package in the dependency tree, imported or not, by the name in
+    /// its own gojo.toml (what `allow` lists)...
+    pub known: Vec<String>,
+    /// ...and the other names packages depending on it call it by.
+    pub aliases: Vec<(String, String)>,
+    /// Packages whose gojo.toml says `forbid = true`.
+    pub forbidding: Vec<String>,
+}
+
+impl UnsafeInfo {
+    /// Errors for unsafe code the policy doesn't allow.
+    pub fn check(&self) -> Vec<Diag> {
+        unsafety::check_policy(self)
+    }
 }
 
 fn parse_source(sm: &mut SourceMap, path: String, text: String) -> Result<ast::File, Diag> {
@@ -80,7 +106,7 @@ fn manifest_of<'m>(root: &Path, sm: &mut SourceMap, diags: &mut Vec<Diag>, manif
 }
 
 /// `to` relative to `from`, for messages (`../store`).
-fn pathdiff(to: &Path, from: &Path) -> Option<String> {
+pub fn pathdiff(to: &Path, from: &Path) -> Option<String> {
     let to: Vec<_> = to.components().collect();
     let from: Vec<_> = from.components().collect();
     let common = to.iter().zip(from.iter()).take_while(|(a, b)| a == b).count();
@@ -176,6 +202,7 @@ pub fn load(input: &str, source: Option<&str>) -> Result<Loaded, (SourceMap, Vec
         names_used: &mut HashSet<String>,
         manifests: &mut HashMap<PathBuf, Option<manifest::Manifest>>,
         pkg: Option<&Path>,
+        owners: &mut HashMap<String, Option<PathBuf>>,
     ) {
         visiting.insert(key.to_string());
         for f in files.iter_mut() {
@@ -307,7 +334,8 @@ pub fn load(input: &str, source: Option<&str>) -> Result<Loaded, (SourceMap, Vec
                 }
                 names_used.insert(name.clone());
                 parsed.insert(tkey.clone(), (name.clone(), vec![]));
-                visit(&tkey, &target, &mut pfs, main_key, sm, diags, order, visiting, parsed, std_needed, names_used, manifests, target_pkg.as_deref());
+                owners.insert(tkey.clone(), target_pkg.clone());
+                visit(&tkey, &target, &mut pfs, main_key, sm, diags, order, visiting, parsed, std_needed, names_used, manifests, target_pkg.as_deref(), owners);
                 parsed.insert(tkey.clone(), (name, pfs));
                 order.push(tkey);
             }
@@ -327,11 +355,16 @@ pub fn load(input: &str, source: Option<&str>) -> Result<Loaded, (SourceMap, Vec
     if !diags.is_empty() {
         return Err((sm, diags));
     }
-    visit("\0main", &root, &mut main_parsed, &main_key, &mut sm, &mut diags, &mut order, &mut visiting, &mut parsed, &mut std_needed, &mut names_used, &mut manifests, main_pkg.as_deref());
+    let mut owners: HashMap<String, Option<PathBuf>> = HashMap::new();
+    visit("\0main", &root, &mut main_parsed, &main_key, &mut sm, &mut diags, &mut order, &mut visiting, &mut parsed, &mut std_needed, &mut names_used, &mut manifests, main_pkg.as_deref(), &mut owners);
     for key in &order {
         let (name, files) = parsed.remove(key).unwrap_or_default();
         user.push((key.clone(), name, files));
     }
+    if !diags.is_empty() {
+        return Err((sm, diags));
+    }
+    let unsafe_info = unsafe_info(&mut sm, &mut diags, &mut manifests, main_pkg.as_deref(), &owners, &user, &main_parsed, input);
     if !diags.is_empty() {
         return Err((sm, diags));
     }
@@ -380,7 +413,73 @@ pub fn load(input: &str, source: Option<&str>) -> Result<Loaded, (SourceMap, Vec
         units.push(check::Unit { name, path: key, is_std: false, files });
     }
     units.push(check::Unit { name: "main".into(), path: "\0main".into(), is_std: false, files: main_parsed });
-    Ok(Loaded { sm, units })
+    Ok(Loaded { sm, units, unsafe_info })
+}
+
+/// The packages of the program (grouped by the gojo.toml they belong to), their
+/// unsafe code, and what the policy of the package being built needs to know.
+#[allow(clippy::too_many_arguments)]
+fn unsafe_info(sm: &mut SourceMap, diags: &mut Vec<Diag>, manifests: &mut HashMap<PathBuf, Option<manifest::Manifest>>, main_pkg: Option<&Path>, owners: &HashMap<String, Option<PathBuf>>, user: &[(String, String, Vec<ast::File>)], main_files: &[ast::File], input: &str) -> UnsafeInfo {
+    let mut info = UnsafeInfo { root: main_pkg.map(|p| p.to_path_buf()), ..UnsafeInfo::default() };
+    let stem = Path::new(input).file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "main".into());
+    let mut add = |root: Option<&Path>, files: &[ast::File], sm: &mut SourceMap, diags: &mut Vec<Diag>, info: &mut UnsafeInfo| {
+        let ids: Vec<u32> = files.iter().map(|f| f.file_id).collect();
+        if let Some(p) = info.packages.iter_mut().find(|p| p.root.as_deref() == root) {
+            p.files.extend(ids);
+            return;
+        }
+        let m = root.and_then(|r| manifest_of(r, sm, diags, manifests)).and_then(|m| m.as_ref());
+        let (name, version) = match m.and_then(|m| m.package.as_ref()) {
+            Some(p) => (p.name.clone(), Some(p.version.clone())),
+            None => (stem.clone(), None),
+        };
+        if m.is_some_and(|m| m.unsafe_policy.forbid) && !info.forbidding.contains(&name) {
+            info.forbidding.push(name.clone());
+        }
+        info.packages.push(unsafety::Package { name, version, root: root.map(|r| r.to_path_buf()), is_root: root == main_pkg, files: ids, sites: vec![] });
+    };
+    add(main_pkg, main_files, sm, diags, &mut info);
+    for (key, _, files) in user {
+        let root = owners.get(key).cloned().flatten();
+        add(root.as_deref(), files, sm, diags, &mut info);
+    }
+    unsafety::collect(sm, &mut info.packages);
+    // the policy, and every name in the dependency tree (imported or not)
+    if let Some(r) = main_pkg {
+        if let Some(Some(m)) = manifest_of(r, sm, diags, manifests) {
+            info.policy = m.unsafe_policy.clone();
+        }
+        let mut todo = vec![r.to_path_buf()];
+        let mut seen: Vec<PathBuf> = vec![];
+        while let Some(dir) = todo.pop() {
+            if seen.contains(&dir) {
+                continue;
+            }
+            seen.push(dir.clone());
+            let Some(Some(m)) = manifest_of(&dir, sm, diags, manifests) else { continue };
+            let deps = m.dependencies.clone();
+            for d in deps {
+                // its own name: in its manifest, or (until it is fetched) what
+                // the dependency says
+                let mut real = d.package.clone().unwrap_or_else(|| d.name.clone());
+                if let manifest::Source::Path(p) = &d.source {
+                    if let Some(Some(dm)) = manifest_of(p, sm, diags, manifests) {
+                        if let Some(pk) = &dm.package {
+                            real = pk.name.clone();
+                        }
+                    }
+                    todo.push(p.clone());
+                }
+                if d.name != real && !info.aliases.iter().any(|(a, r)| *a == d.name && *r == real) {
+                    info.aliases.push((d.name.clone(), real.clone()));
+                }
+                if !info.known.contains(&real) {
+                    info.known.push(real);
+                }
+            }
+        }
+    }
+    info
 }
 
 /// Stack for the compiler's thread. Every phase walks the syntax tree recursively;
@@ -413,6 +512,10 @@ pub struct Checked {
 /// Parse, type check and borrow check.
 pub fn frontend(input: &str, source: Option<&str>) -> Result<Checked, (SourceMap, Vec<Diag>)> {
     let loaded = load(input, source)?;
+    let policy = loaded.unsafe_info.check();
+    if !policy.is_empty() {
+        return Err((loaded.sm, policy));
+    }
     let sm = loaded.sm;
     let (prog, tfuncs, tests) = match check::check_program(loaded.units) {
         Ok(r) => r,

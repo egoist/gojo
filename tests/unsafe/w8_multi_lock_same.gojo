@@ -1,0 +1,8 @@
+// the same mutex taken twice at once gives two mutable references to its data
+fn main() {
+    let m = Mutex(Vec[int]{})
+    with a, b = lock(m, m) {
+        a.push(1)
+        b.clear()
+    }
+}

@@ -1,0 +1,5 @@
+// `unsafe` goes on functions with a body that Gojo calls.
+interface Raw {
+    unsafe fn read(self) -> u8
+    // error: an interface method can't be `unsafe`
+}

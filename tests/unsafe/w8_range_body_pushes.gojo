@@ -1,0 +1,14 @@
+// a task writes part of the vector; the body appends, which may move it
+fn fill(v: inout []int, x: int) {
+    for i in 0..v.len() {
+        v[i] = x
+    }
+}
+
+fn main() {
+    var xs = [0, 0, 0, 0]
+    scope {
+        go fill(&xs[2..], 1)
+        xs.push(5)
+    }
+}

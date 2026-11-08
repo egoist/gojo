@@ -1,0 +1,13 @@
+// one task appends to `s.a`, another reads it
+struct S {
+    a: Vec[int]
+    b: Vec[int]
+}
+
+fn main() {
+    var s = S{a: [], b: []}
+    scope {
+        go () => s.a.push(1)
+        go () => println(s.a.len())
+    }
+}

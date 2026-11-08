@@ -1,0 +1,11 @@
+// an `unsafe fn` called by `defer`, outside any `unsafe` block
+unsafe fn poke(p: *u8) {
+    unsafe {
+        *p = 0
+    }
+}
+
+fn main() {
+    let s = String("x")
+    defer poke(s.ptr())
+}

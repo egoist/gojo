@@ -1,0 +1,7 @@
+// a raw pointer inside a tuple sent to another task
+fn main() {
+    let s = String("x")
+    let ch = Chan[(*u8, int)](1)
+    ch.tx <- (s.ptr(), 1)
+    _ = ch
+}

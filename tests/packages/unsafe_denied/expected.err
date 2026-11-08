@@ -1,0 +1,5 @@
+dependency `@c/fastabs`
+has unsafe code (1 `unsafe` block, 1 `extern` block; 4 lines), and this package's gojo.toml doesn't allow it
+fastabs.gojo:1:1
+`gojo unsafe` lists every site
+allow = ["@c/fastabs"]

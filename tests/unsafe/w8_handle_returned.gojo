@@ -1,0 +1,11 @@
+// a task handle returned out of the scope its task runs in
+fn start() -> Task[String] {
+    return scope {
+        let t = go () => String("x")
+        t
+    }
+}
+
+fn main() {
+    println(start().join())
+}

@@ -1,0 +1,16 @@
+// a clone of an `Rc` made inside is kept outside, while the original crosses tasks
+fn main() {
+    var keep = Vec[Rc[int]]{}
+    let iso = isolate {
+        let r = Rc(1)
+        keep.push(r.clone())
+        r
+    }
+    scope {
+        go () => {
+            let r = iso.take()
+            _ = r.clone()
+        }
+        _ = keep[0].clone()
+    }
+}

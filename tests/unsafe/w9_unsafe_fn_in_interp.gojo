@@ -1,0 +1,9 @@
+// an `unsafe fn` called inside a string interpolation
+unsafe fn peek(p: *u8) -> u8 {
+    return unsafe { *p }
+}
+
+fn main() {
+    let s = String("x")
+    println("${peek(s.ptr())}")
+}

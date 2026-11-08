@@ -1,0 +1,15 @@
+// a `send fn` that changes what it captures, called from many tasks
+fn all(f: send fn()) {
+    scope {
+        go f()
+        go f()
+    }
+}
+
+fn main() {
+    var n = 0
+    all(() => {
+        n += 1
+    })
+    println(n)
+}

@@ -289,6 +289,40 @@ fn cold_cache_parallel() {
     }
 }
 
+/// The C compiler is told the semantics Gojo's C is written for, both for the
+/// program and for the runtime (see `C_SEMANTICS` in main.rs): a wrapper `cc`
+/// records the arguments of every compilation.
+#[test]
+fn c_semantics_flags() {
+    let dir = std::env::temp_dir().join(format!("gojo_ccflags_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let log = dir.join("args.log");
+    let spy = dir.join("cc-spy");
+    std::fs::write(&spy, format!("#!/bin/sh\necho \"$@\" >> {}\nexec cc \"$@\"\n", log.display())).unwrap();
+    std::fs::set_permissions(&spy, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let f = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/run/lastuse.gojo");
+    for release in [false, true] {
+        let mut c = Command::new(gojo());
+        c.arg("build").arg("--cc").arg(&spy).arg(&f).arg("-o").arg(dir.join("prog")).env("GOJO_CACHE", dir.join("cache"));
+        if release {
+            c.arg("--release");
+        }
+        let out = c.output().unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    }
+    let args = std::fs::read_to_string(&log).unwrap();
+    let compiles: Vec<&str> = args.lines().filter(|l| l.contains(".c ") || l.ends_with(".c")).collect();
+    // the runtime and the program, in a debug and a release build
+    assert_eq!(compiles.len(), 4, "{}", args);
+    for l in compiles {
+        for flag in ["-fwrapv", "-fno-strict-aliasing", "-fno-delete-null-pointer-checks"] {
+            assert!(l.split_whitespace().any(|a| a == flag), "`{}` missing from: {}", flag, l);
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// `gojo test`: each test runs in its own process, so a panic fails only that test.
 #[test]
 fn test_blocks() {
@@ -361,6 +395,26 @@ fn stack_hibernation() {
 
 /// SIGINT cancels the program's root scope: tasks wind down, their values are
 /// dropped, and the program exits with 130.
+/// C keeps pointers into parked tasks' stacks and writes through them; those
+/// stacks are never hibernated, while the others still are (tests/ffi_pin).
+#[test]
+fn ffi_pinned_stacks() {
+    let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/ffi_pin");
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("ffi_pin_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let lib = dir.join(if cfg!(target_os = "macos") { "libkeep.dylib" } else { "libkeep.so" });
+    let cc = Command::new("cc").arg("-shared").arg("-fPIC").arg(base.join("keep.c")).arg("-o").arg(&lib).output().unwrap();
+    assert!(cc.status.success(), "{}", String::from_utf8_lossy(&cc.stderr));
+    let src = std::fs::read_to_string(base.join("pinned.gojo")).unwrap().replace("\"LIB\"", &format!("\"{}\"", lib.display()));
+    let prog = dir.join("pinned.gojo");
+    std::fs::write(&prog, src).unwrap();
+    let out = Command::new(gojo()).arg("run").arg(&prog).env("GOJO_HIBERNATE", "2").output().unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{}\n{}", stdout, String::from_utf8_lossy(&out.stderr));
+    assert_eq!(stdout, "control group put away: true\npinned stacks left alone: true\ntasks that saw C's write: 600 of 600\n");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn shutdown_signal() {
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/signals/shutdown.gojo");
@@ -490,7 +544,8 @@ fn unsafe_programs_rejected() {
         let stderr = String::from_utf8_lossy(&out.stderr);
         if out.status.code() != Some(1) || stderr.contains("panicked") || stderr.contains("internal error") {
             failures.push(format!("{}: {:?}\n{}", f.display(), out.status, stderr.lines().take(8).collect::<Vec<_>>().join("\n")));
-        } else if stderr.lines().next().is_some_and(|l| l.starts_with("error: expected")) {
+        } else if String::from_utf8_lossy(&Command::new(gojo()).arg("fmt").arg("--check").arg(&f).output().unwrap().stderr).contains("only files without syntax errors") {
+            // (the formatter only takes files that parse)
             failures.push(format!("{}: rejected only for its syntax:\n{}", f.display(), stderr.lines().next().unwrap_or("")));
         }
     }
@@ -515,7 +570,7 @@ fn formatted() {
     }
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut paths = vec![];
-    for d in ["std", "examples", "bench/gojo", "tests/run", "tests/errors", "tests/panic", "tests/projects", "tests/packages", "tests/testblocks", "tests/unsafe", "tests/stdin", "tests/signals"] {
+    for d in ["std", "examples", "bench/gojo", "tests/run", "tests/errors", "tests/panic", "tests/projects", "tests/packages", "tests/testblocks", "tests/unsafe", "tests/stdin", "tests/signals", "tests/ffi_pin"] {
         walk(&root.join(d), &mut paths);
     }
     let mut bad = vec![];
@@ -691,6 +746,26 @@ fn packages() {
     let test_err = String::from_utf8_lossy(&test.stderr);
     if !check.status.success() || !test.status.success() || !test_err.contains("1 passed, 0 failed") || run.status.success() || !String::from_utf8_lossy(&run.stderr).contains("is a workspace") {
         failures.push(format!("workspace:\ncheck {:?} {}\ntest {:?} {}\nrun {:?} {}", check.status, String::from_utf8_lossy(&check.stderr), test.status, test_err, run.status, String::from_utf8_lossy(&run.stderr)));
+    }
+    // `gojo unsafe` reports by package, and fails when the policy does
+    let denied = Command::new(gojo()).arg("unsafe").arg("unsafe_denied/app").current_dir(&base).output().unwrap();
+    let allowed = Command::new(gojo()).arg("unsafe").arg("--json").arg("unsafe_allowed/app").current_dir(&base).output().unwrap();
+    let (dout, aout) = (String::from_utf8_lossy(&denied.stdout), String::from_utf8_lossy(&allowed.stdout));
+    if denied.status.code() != Some(1)
+        || !dout.contains("@c/fastabs 1.2.0 (unsafe_denied/fastabs): 1 `unsafe` block, 1 `extern` block; 4 lines (NOT ALLOWED")
+        || !dout.contains("unsafe_denied/fastabs/fastabs.gojo:7    unsafe block")
+        || !dout.contains("mathx 0.4.0 (unsafe_denied/mathx): no unsafe code")
+    {
+        failures.push(format!("gojo unsafe (denied): {:?}\n{}{}", denied.status, dout, String::from_utf8_lossy(&denied.stderr)));
+    }
+    if !allowed.status.success() || !aout.contains("\"name\": \"@c/fastabs\", \"version\": \"1.2.0\", \"path\": \"unsafe_allowed/fastabs\", \"root\": false, \"status\": \"allowed\", \"lines\": 4") || !aout.ends_with("\"ok\": true}\n") {
+        failures.push(format!("gojo unsafe --json (allowed): {:?}\n{}{}", allowed.status, aout, String::from_utf8_lossy(&allowed.stderr)));
+    }
+    // ...and in a workspace, member by member
+    let wsu = Command::new(gojo()).arg("unsafe").arg("workspace").current_dir(&base).output().unwrap();
+    let wsout = String::from_utf8_lossy(&wsu.stdout);
+    if !wsu.status.success() || wsout.matches("\n== ").count() + usize::from(wsout.starts_with("== ")) != 3 || !wsout.contains("greet 0.1.0 (workspace/libs/greet): no unsafe code") {
+        failures.push(format!("gojo unsafe (workspace): {:?}\n{}{}", wsu.status, wsout, String::from_utf8_lossy(&wsu.stderr)));
     }
     // `gojo init` writes a manifest that loads
     let dir = std::env::temp_dir().join(format!("gojo_init_{}", std::process::id())).join("my-tool");

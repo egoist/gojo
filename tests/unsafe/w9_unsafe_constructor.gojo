@@ -1,0 +1,19 @@
+// `T(args)` calls an `unsafe` associated `new`
+struct Raw {
+    p: *u8
+
+    unsafe fn new(p: *u8) -> Raw {
+        return Raw{p: p}
+    }
+
+    fn first(self) -> u8 {
+        return unsafe { *self.p }
+    }
+}
+
+fn main() {
+    let s = String("x")
+    let r = Raw(s.ptr())
+    drop(s)
+    println(r.first())
+}

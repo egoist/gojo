@@ -1,0 +1,10 @@
+// an `extern` function called in a package-level value
+extern "C" {
+    fn labs(x: int) -> int
+}
+
+let n = labs(-3)
+
+fn main() {
+    println(n)
+}

@@ -1,0 +1,6 @@
+// two mutable borrows of the same tuple element
+fn main() {
+    var t = (String("a"), String("b"))
+    swap(&t.0, &t.0)
+    println(t.0)
+}

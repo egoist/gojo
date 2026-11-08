@@ -1,0 +1,25 @@
+// `for` calls the iteration methods with no `unsafe` block
+struct Walk {
+    p: *int
+    n: int
+
+    fn cursor(self) -> int {
+        return 0
+    }
+
+    unsafe fn next(self, c: inout int) -> ?int {
+        if c == self.n {
+            return none
+        }
+        c += 1
+        return some(unsafe { *self.p })
+    }
+}
+
+fn main() {
+    let v = [1, 2]
+    let w = Walk{p: v.ptr(), n: 3}
+    for x in w {
+        println(x)
+    }
+}

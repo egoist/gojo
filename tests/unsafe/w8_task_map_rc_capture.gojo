@@ -1,0 +1,11 @@
+// the mapped function clones a captured `Rc` from many tasks
+use std/task
+
+fn main() {
+    let r = Rc(1)
+    let out = task.map([1, 2, 3], 0, (x) => {
+        let c = r.clone()
+        return x + c.value
+    })
+    println(out)
+}

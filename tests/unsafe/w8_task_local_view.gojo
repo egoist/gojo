@@ -1,0 +1,11 @@
+// a task-local view of a local String, seen after the String is gone
+use std/task
+
+let name = task.local[str]()
+
+fn main() {
+    var s = String("abc")
+    task.with(name, s.asStr(), () => {
+        println(name.get())
+    })
+}
