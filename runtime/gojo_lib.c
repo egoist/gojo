@@ -1654,3 +1654,12 @@ void gojo_os___unnotify(gojo_slice codes, int64_t wfd) {
     while (__atomic_load_n(&g_sig_inflight, __ATOMIC_SEQ_CST)) sched_yield();
     close((int)wfd);
 }
+
+// ------------------------------------------------------------------ http
+
+// Whether reading `fd` would not wait: on a kept client connection, that the
+// server closed it or sent something unasked.
+bool gojo_http___readable(int64_t fd) {
+    struct pollfd p = { (int)fd, POLLIN, 0 };
+    return poll(&p, 1, 0) != 0;
+}

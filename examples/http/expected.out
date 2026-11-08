@@ -3,6 +3,6 @@
 /hi: hi kïte lang
 /echo: 200 posted body text/plain; charset=utf-8
 /slow: 504 Gateway Timeout
-in flight at shutdown: connection closed
+in flight at shutdown: 503 Service Unavailable
 served 23 timed out 1 hung up 1 stopped 1
 took less than 1s: true

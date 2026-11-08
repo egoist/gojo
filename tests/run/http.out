@@ -2,6 +2,8 @@
 200 POST /up q= name=- body=1000 agent=-
 413
 HTTP/1.1 200 OK
+HTTP/1.1 200 OK | Connection: keep-alive | POST /k1 q= name=- body=3 agent=-HTTP/1.1 200 OK | Connection: keep-alive | HTTP/1.1 200 OK | Connection: close | GET /k3 q=name=z name=z body=0 agent=-
+HTTP/1.1 200 OK | Connection: close | GET /old q= name=- body=0 agent=-
 HTTP/1.1 501 Not Implemented
 HTTP/1.1 400 Bad Request
 HTTP/1.1 431 Request Header Fields Too Large
@@ -13,3 +15,10 @@ bad header `X-A`: a name is one word without `:`, and neither names nor values m
 bad HTTP method `GET /x HTTP/1.1  `: it is one word
 true
 a%2Fb%20c%26d%3D%C3%A9 € A malformed malformed
+GET /todos/7/ todo 7 some(7)
+HEAD /todos/x todo x none
+POST /todos/7 no route
+GET /todos/7/done no route
+GET /files/a/b%20c.txt file 9 a/b c.txt
+GET /files file 0 
+["ok", "ok", "ok", "ok", "ok"] connections: 2

@@ -16,12 +16,15 @@ fn main() ! io.Error {
 ```
 
 Every connection is a task in the server's scope, so cancelling the task
-that runs `serve` cancels the requests in flight. Every request runs under a
+that runs `serve` cancels the requests in flight (their clients get 503).
+A connection carries requests one after another while the client keeps it
+open (`Options.keepAlive`, `Options.idleTimeout`); the client side reuses
+connections too. `Request.route` matches paths like "/todos/:id". Every request runs under a
 deadline (`Options.deadline`): a handler still running then is cancelled and
 the client gets 504. A client that hangs up cancels its request too: the
 handler's blocking calls return early.
 
-**Types:** [`struct Header`](#struct-header), [`struct Request`](#struct-request), [`struct Response`](#struct-response), [`interface Handler`](#interface-handler), [`struct Options`](#struct-options), [`struct Stats`](#struct-stats)
+**Types:** [`struct Header`](#struct-header), [`struct Request`](#struct-request), [`struct Params`](#struct-params), [`struct Response`](#struct-response), [`interface Handler`](#interface-handler), [`struct Options`](#struct-options), [`struct Stats`](#struct-stats)
 
 **Functions:** [`findHeader`](#findheader), [`text`](#text), [`json`](#json), [`statusText`](#statustext), [`serve`](#serve), [`serveCounting`](#servecounting), [`serveTls`](#servetls), [`serveTlsCounting`](#servetlscounting), [`request`](#request), [`get`](#get), [`post`](#post), [`decode`](#decode), [`encode`](#encode)
 
@@ -87,6 +90,56 @@ pub fn text(self) -> String
 
 The body, as a string.
 
+#### Request.route
+
+```gojo
+pub fn route(self, method: str, pattern: str) -> ?Params
+```
+
+Matches the request against a method ("" for any; "GET" also matches
+HEAD) and a path pattern of literal segments, `:name` for any one
+segment and a final `*name` for the rest of the path (maybe empty).
+Some(params) with the segments captured, decoded; none if it doesn't
+match. Empty segments are ignored, so "/todos/" matches "/todos".
+
+```gojo
+fn serve(self, req: http.Request) -> http.Response {
+    if let p = req.route("GET", "/todos/:id") {
+        return self.show(p.int("id") ?? 0)
+    }
+    if let p = req.route("GET", "/files/*path") {
+        return self.file(p.get("path"))
+    }
+    return http.text(404, "not found\n")
+}
+```
+
+### struct Params
+
+```gojo
+pub struct Params {
+    // and private fields
+}
+```
+
+The segments `Request.route` captured, by name.
+
+#### Params.get
+
+```gojo
+pub fn get(self, name: str) -> str
+```
+
+The value captured as `name`; "" if the pattern has no such name.
+
+#### Params.int
+
+```gojo
+pub fn int(self, name: str) -> ?int
+```
+
+The value captured as `name`, as an integer; none if it isn't one.
+
 ### struct Response
 
 ```gojo
@@ -145,6 +198,10 @@ pub struct Options {
     pub deadline: int = 30 * time.second
     // the largest request body accepted
     pub maxBody: int = 8 * 1024 * 1024
+    // whether a connection may carry more than one request (HTTP keep-alive)
+    pub keepAlive: bool = true
+    // how long a connection may wait for its next request before it is closed
+    pub idleTimeout: int = 60 * time.second
 }
 ```
 
@@ -243,7 +300,9 @@ pub fn request(method: str, url: str, headers: []Header, body: []byte) -> Respon
 
 Sends a request and reads the whole response. `url` is
 "http://host[:port]/path?query" or "https://...", whose server certificate
-is checked against the system's roots.
+is checked against the system's roots. Connections are kept and reused by
+later requests to the same server (for a few seconds); a `Connection: close`
+header opts out.
 
 ### get
 
