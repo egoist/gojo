@@ -690,15 +690,17 @@ fn raise_stack_limit(want: u64) {
 /// the C compiler would otherwise assume:
 /// - `-fwrapv`: signed arithmetic wraps. Gojo checks overflow itself, and `+%`
 ///   relies on wrapping.
-/// - `-fno-strict-aliasing`: memory may be read through a type other than the
-///   one it was written with. The runtime reuses freed blocks for other types
-///   and reads headers and interface layouts through other structs; with type-
-///   based alias analysis, `-O2` could reorder or drop those accesses (clang's
-///   TypeSanitizer reports them). It also gives `extern` declarations that view
-///   C memory as another type a defined meaning.
 /// - `-fno-delete-null-pointer-checks`: a null check is never removed because
 ///   the pointer was used before (say, passed to `memcpy` with a length of 0).
-const C_SEMANTICS: &[&str] = &["-fwrapv", "-fno-strict-aliasing", "-fno-delete-null-pointer-checks"];
+///
+/// Strict aliasing stays on (type-based alias analysis saves `fannkuch` and
+/// `hashmap` 5-8% of their instructions): the generated code and the runtime only access memory
+/// through the type it has. Free-list links are copied with `memcpy`, vtables
+/// embed their common part, and raw pointers are dereferenced through
+/// `may_alias` types, since unsafe code may view memory as another type
+/// (spec 11.1). The `type_sanitizer` test checks this with clang's
+/// TypeSanitizer.
+const C_SEMANTICS: &[&str] = &["-fwrapv", "-fno-delete-null-pointer-checks"];
 
 fn runtime_object(opts: &Options) -> Result<(PathBuf, bool), String> {
     let (cc, pre) = compiler(opts);

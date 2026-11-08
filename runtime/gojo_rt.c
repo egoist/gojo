@@ -136,7 +136,7 @@ void *gojo_box_refill(size_t cls) {
     gojo_box_node *head = lists[cls];
     for (size_t i = count; i-- > 1;) {
         gojo_box_node *f = (gojo_box_node *)(start + i * sz);
-        f->next = head;
+        gojo_box_set_link(f, head);
         head = f;
     }
     lists[cls] = head;

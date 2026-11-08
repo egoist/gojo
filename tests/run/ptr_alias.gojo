@@ -1,0 +1,41 @@
+// Unsafe code may view memory through pointers of different types (spec 11.1):
+// with strict aliasing on, raw pointers are dereferenced through `may_alias`
+// types, so writes through one type are seen by reads through the other.
+extern "C" {
+    fn malloc(n: u64) -> *Pair
+    fn free(p: *u64)
+    // gives back `dst`: here, a way to see the same memory as another type
+    fn memmove(dst: *Pair, src: *Pair, n: u64) -> *u64
+}
+
+copy struct Pair {
+    lo: u32
+    hi: u32
+}
+
+// writes through `p` and reads the same memory through `q`
+fn mix(p: *Pair, q: *u64, lo: u32, hi: u32) -> u64 {
+    unsafe {
+        *q = 0
+        p.lo = lo
+        p.hi = hi
+        return *q
+    }
+}
+
+fn main() {
+    let p = unsafe { malloc(8) }
+    let q = unsafe { memmove(p, p, 0) }
+    println(mix(p, q, 7, 1))
+    var total: u64 = 0
+    for i in 0..1000 {
+        total += mix(p, q, u32(i), 0)
+    }
+    println(total)
+    unsafe {
+        *q = 5
+        let copied = *p
+        println(copied.lo, copied.hi)
+        free(q)
+    }
+}

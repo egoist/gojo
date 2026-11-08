@@ -575,6 +575,16 @@ impl<'a> Gen<'a> {
         true
     }
 
+    /// `T` as a type whose accesses may alias anything.
+    fn may_alias_ty(&mut self, t: &Ty) -> String {
+        let n = format!("MayAlias_{}", self.mangle(t));
+        if self.helpers.insert(n.clone()) {
+            let c = self.cty(t);
+            let _ = writeln!(self.tdefs, "typedef {} __attribute__((may_alias)) {};", c, n);
+        }
+        n
+    }
+
     fn ensure(&mut self, t: &Ty) {
         if self.niche(t) {
             return;
@@ -2125,10 +2135,19 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
                         self.ensure_rcbox(inner);
                         format!("({}->val)", b)
                     }
-                    // (a struct reached only through a raw pointer is defined here)
-                    Ty::Box(inner) | Ty::Ptr(inner) => {
+                    Ty::Box(inner) => {
                         self.ensure(inner);
                         format!("(*{})", b)
+                    }
+                    // Unsafe code may read memory through a pointer of another
+                    // type than it was written with (spec 11.1), so raw pointers
+                    // are dereferenced through a `may_alias` type, which clang and
+                    // gcc treat like `char` for alias analysis. (A struct reached
+                    // only through a raw pointer is defined here.)
+                    Ty::Ptr(inner) => {
+                        self.ensure(inner);
+                        let ma = self.may_alias_ty(inner);
+                        format!("(*({} *){})", ma, b)
                     }
                     _ => format!("(*{})", b),
                 }
@@ -3248,7 +3267,10 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
         };
         let n = format!("VT_{}", self.mangle(it));
         if self.helpers.insert(n.clone()) {
-            let mut body = format!("typedef struct {{ void (*drop)(void *); void (*fmt)(gojo_string *, void *, int); uint64_t tid; size_t size;");
+            // The common part is a `gojo_vt_base` member rather than the same
+            // fields repeated, so code that reads it through a `gojo_vt_base *`
+            // (drops, printing, type tests) accesses an object of that type.
+            let mut body = format!("typedef struct {{ gojo_vt_base base;");
             for (i, m) in methods.iter().enumerate() {
                 let ret = m.ret.subst(&s);
                 let rc = self.ret_cty(&ret);
@@ -3283,7 +3305,7 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
             let wf = format!("{}_fmt", name);
             let _ = writeln!(self.protos, "static void {}(void *p);\nstatic void {}(gojo_string *b, void *p, int n);", wd, wf);
             let _ = writeln!(self.bodies, "static void {}(void *p) {{ {}(({} *)p); }}\nstatic void {}(gojo_string *b, void *p, int n) {{ {}(b, ({} *)p, n); }}", wd, dropf, cc, wf, fmtf, cc);
-            let mut entries = vec![wd.clone(), wf.clone(), format!("{}", tid), format!("sizeof({})", cc)];
+            let mut entries = vec![format!("{{ {}, {}, {}, sizeof({}) }}", wd, wf, tid, cc)];
             for (i, (mname, params, ret)) in ms.methods.iter().enumerate() {
                 // find the concrete method
                 let key = TyKey::of(concrete).unwrap();
@@ -5023,12 +5045,17 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
         let rc = self.ret_cty(&ret);
         let call = format!("(({} (*)(void *))a->f.fn)(a->f.env)", rc);
         if handle {
+            // the thunk reads the block through the same named type that
+            // filled it in (two anonymous structs would be different types)
+            if self.helpers.insert("TaskArgs".into()) {
+                self.tdefs.push_str("typedef struct { gojo_func f; gojo_group *g; gojo_task *t; } TaskArgs;\n");
+            }
             let rt = if ret == Ty::Never { Ty::Unit } else { ret.clone() };
             let rcty = self.cty(&rt);
             let tn = format!("taskhthunk_{}", self.mangle(&rt));
             if self.helpers.insert(tn.clone()) {
                 let _ = writeln!(self.protos, "static void {}(void *p);", tn);
-                let mut b = format!("static void {}(void *p) {{\n    struct {{ gojo_func f; gojo_group *g; gojo_task *t; }} *a = p;\n", tn);
+                let mut b = format!("static void {}(void *p) {{\n    TaskArgs *a = p;\n", tn);
                 if matches!(rt, Ty::Unit) {
                     let _ = writeln!(b, "    {};", call);
                 } else {
@@ -5051,7 +5078,7 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
             let a = self.tmp();
             let tv = self.tmp();
             self.emit(fs, &format!("gojo_task *{} = gojo_task_new(sizeof({}));", tv, rcty));
-            self.emit(fs, &format!("struct {{ gojo_func f; gojo_group *g; gojo_task *t; }} *{} = gojo_alloc(sizeof(gojo_func) + 2 * sizeof(void *));", a));
+            self.emit(fs, &format!("TaskArgs *{} = gojo_alloc(sizeof(TaskArgs));", a));
             self.emit(fs, &format!("{}->f = {}; {}->g = {}; {}->t = {};", a, f, a, g, a, tv));
             self.emit(fs, &format!("gojo_group_go_task({}, {}, {}, {}, {});", g, tv, tn, a, loc));
             return tv;
@@ -5070,10 +5097,14 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
             _ => Ty::Unit,
         };
         let gs = self.scope_state_ty(&et);
+        let ta = format!("TaskArgs_{}", gs);
+        if self.helpers.insert(ta.clone()) {
+            let _ = writeln!(self.tdefs, "typedef struct {{ gojo_func f; {} *st; gojo_group *g; }} {};", gs, ta);
+        }
         let tn = format!("taskthunk_{}_{}", self.mangle(&ret), self.mangle(&et));
         if self.helpers.insert(tn.clone()) {
             let _ = writeln!(self.protos, "static void {}(void *p);", tn);
-            let mut b = format!("static void {}(void *p) {{\n    struct {{ gojo_func f; {} *st; gojo_group *g; }} *a = p;\n", tn, gs);
+            let mut b = format!("static void {}(void *p) {{\n    {} *a = p;\n", tn, ta);
             match &ret {
                 Ty::Unit | Ty::Never => {
                     let _ = writeln!(b, "    {};", call);
@@ -5115,7 +5146,7 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
             self.bodies.push_str(&b);
         }
         let a = self.tmp();
-        self.emit(fs, &format!("struct {{ gojo_func f; {} *st; gojo_group *g; }} *{} = gojo_alloc(sizeof(gojo_func) + 2 * sizeof(void *));", gs, a));
+        self.emit(fs, &format!("{} *{} = gojo_alloc(sizeof({}));", ta, a, ta));
         let stv = match &st {
             Some(x) => format!("({} *){}", gs, x),
             None => "NULL".into(),

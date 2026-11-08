@@ -211,6 +211,60 @@ fn thread_sanitizer() {
     }
 }
 
+/// Runs every program under clang's TypeSanitizer, in a debug and a release
+/// build: `cargo test -- --ignored`. The program and the runtime are compiled
+/// with strict aliasing (no `-fno-strict-aliasing`), so the code they are
+/// generated as must not access memory through a type it doesn't have (spec
+/// 11.1). Needs a clang with `-fsanitize=type` (LLVM 20 or later, not Apple's):
+/// `GOJO_TYSAN_CC`, else `clang`; without one the test says so and passes.
+#[test]
+#[ignore]
+fn type_sanitizer() {
+    let clang = std::env::var("GOJO_TYSAN_CC").unwrap_or_else(|_| "clang".into());
+    let dir = std::env::temp_dir().join("gojo_tysan");
+    let _ = std::fs::create_dir_all(&dir);
+    let probe = dir.join("probe.c");
+    std::fs::write(&probe, "int main(void) { return 0; }\n").unwrap();
+    let ok = Command::new(&clang).arg("-fsanitize=type").arg(&probe).arg("-o").arg(dir.join("probe")).output().map(|o| o.status.success()).unwrap_or(false);
+    if !ok {
+        eprintln!("skipped: `{} -fsanitize=type` doesn't work; set GOJO_TYSAN_CC to an LLVM clang (20 or later)", clang);
+        return;
+    }
+    let cc = format!("{} -fsanitize=type -g", clang);
+    let mut failures = vec![];
+    for f in files("tests/run") {
+        for release in [false, true] {
+            let bin = dir.join(format!("{}{}", f.file_stem().unwrap().to_string_lossy(), if release { "_rel" } else { "" }));
+            let mut c = Command::new(gojo());
+            c.arg("build").arg("--cc").arg(&cc).arg(&f).arg("-o").arg(&bin).env("GOJO_CACHE", dir.join("cache"));
+            if release {
+                c.arg("--release");
+            }
+            let out = c.output().unwrap();
+            if !out.status.success() {
+                failures.push(format!("{}: build failed\n{}", f.display(), String::from_utf8_lossy(&out.stderr)));
+                continue;
+            }
+            let mut run = Command::new(&bin);
+            run.current_dir(f.parent().unwrap());
+            let run = match output_within(&mut run, Duration::from_secs(300)) {
+                Ok(run) => run,
+                Err(e) => {
+                    failures.push(format!("{}: {}", f.display(), e));
+                    continue;
+                }
+            };
+            let stderr = String::from_utf8_lossy(&run.stderr);
+            if stderr.contains("TypeSanitizer") {
+                failures.push(format!("{}{}:\n{}", f.display(), if release { " (release)" } else { "" }, stderr.lines().take(12).collect::<Vec<_>>().join("\n")));
+            }
+        }
+    }
+    if !failures.is_empty() {
+        panic!("{} program(s) failed under TypeSanitizer:\n{}", failures.len(), failures.join("\n"));
+    }
+}
+
 /// Multi-package projects: each directory in tests/projects and examples is built as a whole.
 #[test]
 fn projects() {
@@ -316,9 +370,11 @@ fn c_semantics_flags() {
     // the runtime and the program, in a debug and a release build
     assert_eq!(compiles.len(), 4, "{}", args);
     for l in compiles {
-        for flag in ["-fwrapv", "-fno-strict-aliasing", "-fno-delete-null-pointer-checks"] {
+        for flag in ["-fwrapv", "-fno-delete-null-pointer-checks"] {
             assert!(l.split_whitespace().any(|a| a == flag), "`{}` missing from: {}", flag, l);
         }
+        // strict aliasing stays on: the generated code is written for it (spec 11.1)
+        assert!(!l.split_whitespace().any(|a| a == "-fno-strict-aliasing"), "{}", l);
     }
     let _ = std::fs::remove_dir_all(&dir);
 }

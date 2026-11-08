@@ -98,7 +98,14 @@ static inline void gojo_free(void *p) { free(p); }
 // the compiler the exact size at every free, so blocks go back to a per-thread
 // free list for their size class instead of through malloc.
 #define GOJO_BOX_MAX 256
-typedef struct gojo_box_node { struct gojo_box_node *next; } gojo_box_node;
+// A free block holds the link to the next one in its first bytes. The block
+// held (and will hold) values of other types, so the link is only ever read
+// and written with memcpy, which may alias anything: a typed `node->next`
+// access could be reordered with the accesses of the box's own type around it
+// once these functions are inlined (strict aliasing, see spec 11.1).
+typedef struct gojo_box_node gojo_box_node;
+static inline gojo_box_node *gojo_box_link(const void *f) { gojo_box_node *n; memcpy(&n, f, sizeof n); return n; }
+static inline void gojo_box_set_link(void *f, gojo_box_node *n) { memcpy(f, &n, sizeof n); }
 gojo_box_node **gojo_box_lists(void);
 // The free lists live in thread-local storage. A goroutine can resume on another
 // thread, and a compiler may keep a thread-local's address across calls, so the
@@ -131,6 +138,10 @@ void *gojo_box_refill(size_t cls);
 #if __has_feature(address_sanitizer)
 #define GOJO_NO_BOX_POOL 1
 #endif
+// TypeSanitizer only forgets a block's type when it is freed
+#if __has_feature(type_sanitizer)
+#define GOJO_NO_BOX_POOL 1
+#endif
 #endif
 #if defined(__SANITIZE_ADDRESS__)
 #define GOJO_NO_BOX_POOL 1
@@ -144,7 +155,7 @@ static inline void *gojo_box_alloc(size_t n) {
     gojo_box_node **lists = gojo_box_head();
     gojo_box_node *f = lists[cls];
     if (__builtin_expect(f != NULL, 1)) {
-        lists[cls] = f->next;
+        lists[cls] = gojo_box_link(f);
         return f;
     }
     return gojo_box_refill(cls);
@@ -157,10 +168,9 @@ static inline void gojo_box_free(void *p, size_t n) {
 #endif
     if (n > GOJO_BOX_MAX) { free(p); return; }
     size_t cls = n ? (n + 15) >> 4 : 1;
-    gojo_box_node *f = p;
     gojo_box_node **lists = gojo_box_head();
-    f->next = lists[cls];
-    lists[cls] = f;
+    gojo_box_set_link(p, lists[cls]);
+    lists[cls] = (gojo_box_node *)p;
 }
 
 // ---- strings

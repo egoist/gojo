@@ -456,7 +456,7 @@ A program whose packages contain no `unsafe` code has no undefined behaviour (as
 - **Pointers into task stacks.** C may keep a pointer it is given and use it after the call returns, while the task that owns the memory is parked. A task's stack can be put away while it waits (10.7), so `.ptr()` pins the task whose stack the pointer points into: that stack is never put away, and the pointer keeps reaching the live memory. Nothing else is needed for this.
 - **Accounting and policy.** `gojo unsafe` lists every `unsafe` block, `unsafe fn`, `unsafe send` type and `extern` block of the program, package by package, with locations and line counts (`--json` for tools). A dependency with any of them builds only when the `[unsafe]` table of the manifest being built allows it by name; `forbid = true` there keeps the package's own code free of them (2.1).
 
-Tests: `run/ffi`, `run/unsafe_decls`, `run/unsafe_fn`, `run/ffi_block`, `run/ffi_retained`, `errors/unsafe_extern`, `errors/unsafe_fn`, `errors/unsafe_fn_decls`, `errors/unsafe_fn_protocol`, `errors/unsafe_main`, `errors/unsafe_extern_fn`, `errors/ffi_types`, `errors/send_ptr`, `unsafe/w9_*`, the `ffi_pinned_stacks` test (`tests/ffi_pin`), `packages/unsafe_*`.
+Tests: `run/ffi`, `run/unsafe_decls`, `run/unsafe_fn`, `run/ffi_block`, `run/ffi_retained`, `run/ptr_alias`, `errors/unsafe_extern`, `errors/unsafe_fn`, `errors/unsafe_fn_decls`, `errors/unsafe_fn_protocol`, `errors/unsafe_main`, `errors/unsafe_extern_fn`, `errors/ffi_types`, `errors/send_ptr`, `unsafe/w9_*`, the `ffi_pinned_stacks` test (`tests/ffi_pin`), `packages/unsafe_*`.
 
 ### 11.1 Undefined behaviour
 
@@ -475,7 +475,7 @@ Tests: `run/ffi`, `run/unsafe_decls`, `run/unsafe_fn`, `run/ffi_block`, `run/ffi
 
 Not undefined behaviour, even in `unsafe` code: leaking memory, deadlocks, integer overflow, out-of-bounds indexing and failed `unwrap`s (these still panic), and a panic in an `extern "C" fn` called from C (it aborts the process).
 
-**The C the compiler generates** is compiled, along with the runtime, with `-fwrapv` (signed arithmetic wraps; Gojo checks overflow itself), `-fno-strict-aliasing` (memory may be read through a type other than the one it was written with: the runtime reuses freed blocks for other types and reads interface layouts through other structs, which clang's TypeSanitizer reports as aliasing violations that `-O2` could act on) and `-fno-delete-null-pointer-checks` (a null check is never removed because the pointer was used before). These make the C compiler follow the semantics the code is written for. The cost is all `-fno-strict-aliasing`, on two of the ten benchmarks: `fannkuch` and `hashmap` execute 8% and 6.5% more instructions (`fannkuch` takes 2–4% more cycles; `hashmap`'s cycles vary more than that from run to run); the other eight don't change. The violations are in generated code too (drops of interface values, `Rc` allocation reusing the free lists' blocks), so turning strict aliasing back on would first need code generation that is clean under TypeSanitizer.
+**The C the compiler generates** is compiled, along with the runtime, with `-fwrapv` (signed arithmetic wraps; Gojo checks overflow itself) and `-fno-delete-null-pointer-checks` (a null check is never removed because the pointer was used before). Strict aliasing stays on, so the C compiler may assume that memory is only accessed through the type it holds, and the generated code and the runtime keep to that: the allocator's free lists link blocks with `memcpy`, interface vtables embed their common part as a real member, and a raw pointer is dereferenced through a `may_alias` version of its type, so that `unsafe` code may view the same memory as different types (item 4 above; `run/ptr_alias`). The `type_sanitizer` test runs every program in `tests/run` under clang's TypeSanitizer to check this.
 
 ## 12. Standard library
 
@@ -516,7 +516,7 @@ Tests: `testblocks/blocks`.
 - Tasks are stackful coroutines with M:N scheduling; see 10.7.
 - `Map` keeps insertion order. Floats print in the shortest round-trip representation, without scientific notation when the exponent is in [-4, 21).
 - If a function that returns a value runs off its end (type checking proves this cannot happen), the program panics with an internal error instead of returning an undefined value.
-- The program and the runtime are compiled with `-fwrapv -fno-strict-aliasing -fno-delete-null-pointer-checks`, the C semantics the generated code is written for (11.1).
+- The program and the runtime are compiled with `-fwrapv -fno-delete-null-pointer-checks`, the C semantics the generated code is written for, and with strict aliasing (11.1).
 - Linux targets are compiled with `-fstack-clash-protection`: stack frames larger than the guard page (such as a very large local array) are touched page by page, so a stack overflow always lands on the guard page and panics, and never writes past it into other memory. Compilers on Darwin do this by default.
 - The C compiler runs with a 64 MB stack limit (clang also gets `-fbracket-depth`), so the C generated for programs nested up to the limits also compiles.
 
