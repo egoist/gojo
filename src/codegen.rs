@@ -1025,7 +1025,10 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
         }
         let body = tf.body.clone();
         self.line_directive(&mut fs, body.span);
-        if self.may_recurse.contains(&f) {
+        // the prelude's lazy-chain steps only call the closure they are given,
+        // which polls in its own body if it can recurse
+        let lazy_step = self.prog.func(f).pkg == self.prog.prelude && self.prog.func(f).name.starts_with("__lazy");
+        if self.may_recurse.contains(&f) && !lazy_step {
             self.emit(&mut fs, "GOJO_POLL();");
         }
         self.fn_body(&mut fs, &body);

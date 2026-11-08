@@ -321,6 +321,23 @@ Whether a view of an element can outlive the current iteration: with the cursor 
 
 Tests: `run/iterators`, `run/iterator_views`, `run/constraints`, `run/push_flow`, `errors/iter_misuse`, `errors/iter_mutation`, `errors/iterator_views`.
 
+### 7.2 Lazy chains
+
+`xs.iter()` followed by adapters is a lazy chain, for anything `for` can iterate over by value: lists, slices, arrays, sets, ranges (`(0..n).iter()`), strings (their runes) and types with an iteration protocol. A type with its own `iter` method keeps it.
+
+- **Adapters**: `map(f)`, `filter(p)`, `filterMap(f)` (`f` gives `?U`), `flatMap(f)` (`f` gives something iterable), `take(n)`, `skip(n)`, `takeWhile(p)`, `skipWhile(p)`, `stepBy(n)` (elements 0, n, 2n...; panics unless n > 0).
+- **Consumers**: `for x in chain { }` and `for i, x in chain { }` (`i` counts the elements the chain yields), or a terminal method: `collect()` (a `Vec`), `count()`, `sum()`, `min()`/`max()` (`?T`), `any(p)`, `all(p)`, `find(p)`/`first()`/`last()` (`?T`), `fold(init, f)`, `join(sep)` (for strings).
+
+A chain is not a value: it can't be stored, returned or passed (`let it = xs.iter()` is an error). It is compiled into one loop over `xs`, with each adapter a few statements inside it, so it allocates nothing and runs as fast as the loop written out; only the elements needed are computed: `find` stops at the first match, and `take(n)` ends the loop once it has its nth element, so chains over endless sources end. The closures are ordinary arguments: they borrow what they use, views included, and may modify `var` variables. `xs` stays borrowed for the whole loop. Elements that come from `xs` are borrowed; `collect`, `find`, `first`, `last`, `min` and `max` clone the ones they keep, and take values the chain computed (`map`) as they are. In `flatMap`'s body, `break` leaves the whole chain and `continue label` goes on with the next inner element.
+
+```gojo
+let names = people.iter().filter(p => p.age >= 18).map(p => p.name.asStr()).join(", ")
+for w in lines.iter().flatMap(l => l.split(" ")).take(10) { }
+let total = orders.iter().map(o => o.price * o.qty).sum()
+```
+
+Tests: `run/lazy`, `errors/lazy`, `errors/iter_mutation`.
+
 ## 8. Error handling
 
 - `fn f() -> T ! E`; `return err(e)`, `return x` (wrapped as ok automatically).

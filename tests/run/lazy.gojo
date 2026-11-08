@@ -1,0 +1,128 @@
+// Lazy chains: `xs.iter()` and adapters, compiled into one loop over `xs`;
+// consumed by `for` or a terminal method. Nothing runs past what is used.
+struct Person {
+    name: String
+    age: int
+}
+
+// a cursor-protocol source: generated values
+struct Countdown {
+    from: int
+
+    fn cursor(self) -> int {
+        return self.from
+    }
+
+    fn next(self, c: inout int) -> ?int {
+        if c == 0 {
+            return none
+        }
+        c -= 1
+        return c + 1
+    }
+}
+
+// an endless one, counting how often it is asked
+struct Naturals {
+    asked: Cell[int]
+
+    fn cursor(self) -> int {
+        return 0
+    }
+
+    fn next(self, c: inout int) -> ?int {
+        self.asked.set(self.asked.get() + 1)
+        c += 1
+        return c
+    }
+}
+
+// a type with its own `iter` keeps it
+struct Own {
+    fn iter(self) -> String {
+        return "mine"
+    }
+}
+
+fn words(s: str) -> Vec[String] {
+    return s.split(" ")
+}
+
+fn sumValid(xs: []String) -> int ! String {
+    var t = 0
+    for n in xs.iter().map(s => s.parseInt()) {
+        let v = n else {
+            return err("not a number")
+        }
+        t += v
+    }
+    return t
+}
+
+fn main() {
+    let v = [5, 3, 8, 1, 9, 2]
+
+    // adapters
+    for x in v.iter().filter(x => x % 2 == 1).map(x => x * 10) {
+        print(x, " ")
+    }
+    println()
+    for i, x in v.iter().skip(1).take(3) {
+        print(i, "=", x, " ")
+    }
+    println()
+    println(v.iter().takeWhile(x => x > 2).collect(), v.iter().skipWhile(x => x > 2).collect(), v.iter().stepBy(2).collect(), v.iter().stepBy(4).collect())
+    println(v.iter().filterMap(x => if x > 4 { some(x * 2) } else { none }).collect(), v.iter().take(0).count(), v.iter().skip(10).count())
+
+    // terminals
+    println(v.iter().map(x => x * x).collect(), v.iter().count(), v.iter().sum(), v.iter().map(x => f64(x) / 4.0).sum())
+    println(v.iter().min(), v.iter().max(), v.iter().filter(x => x > 100).max(), v.iter().any(x => x > 8), v.iter().all(x => x > 1))
+    println(v.iter().find(x => x > 5), v.iter().find(x => x > 50), v.iter().first(), v.iter().last(), v.iter().fold(0, (a, x) => a * 10 + x))
+
+    // closures borrow what they use, views included; borrowed elements are
+    // cloned only where they are kept
+    let people = [Person{name: "ann", age: 31}, Person{name: "bob", age: 17}, Person{name: "cyd", age: 45}]
+    let initial = "c"
+    println(people.iter().filter(p => p.age >= 18).map(p => p.name.asStr()).join(", "), people.iter().filter(p => p.name.startsWith(initial)).count())
+    let adults = people.iter().filter(p => p.age >= 18).collect()
+    println(adults.len(), adults[1].name, people.iter().map(p => p.name.toUpper()).collect(), people.iter().map(p => p.name.clone()).max())
+
+    // laziness: the map runs only until find has its answer
+    var calls = 0
+    let big = v.iter().map(x => {
+        calls += 1
+        x
+    }).find(x => x > 6)
+    println(big, calls)
+    // an endless source: take stops the loop once it has its last element
+    let nat = Naturals{asked: Cell(0)}
+    println(nat.iter().filter(n => n % 3 == 0).map(n => n * n).take(3).collect(), nat.asked.get())
+    var flat = 0
+    let firstTwo = ["a b", "c", "d"].iter().flatMap(l => {
+        flat += 1
+        words(l)
+    }).take(2).collect()
+    println(firstTwo, flat)
+
+    // flatMap: `break` leaves the whole chain, `continue label` goes on with
+    // the next inner element
+    let lines = ["a b", "c", "d e f"]
+    println(lines.iter().flatMap(l => words(l)).collect(), lines.iter().flatMap(l => words(l)).take(4).join("-"))
+    outer: for w in lines.iter().flatMap(l => words(l)) {
+        if w == "b" {
+            continue outer
+        }
+        if w == "e" {
+            break
+        }
+        print(w, " ")
+    }
+    println()
+
+    // other sources: ranges, strings (runes), the cursor protocol, nothing
+    println((0..10).iter().filter(i => i % 3 == 0).collect(), (1..=4).iter().map(i => i * i).sum(), "héllo".iter().count())
+    println(Countdown{from: 4}.iter().map(x => x * 100).collect(), Own{}.iter())
+    let none_ = Vec[int]{}
+    println(none_.iter().sum(), none_.iter().min(), none_.iter().collect(), none_.iter().any(x => x > 0), none_.iter().all(x => x > 0))
+    println(sumValid(["1", "2", "39"]), sumValid(["1", "x"]))
+}

@@ -5,6 +5,7 @@
 // functions' checking.
 
 pub mod body;
+pub mod lazy;
 pub mod pattern;
 
 use crate::ast::{self, Mode, TypeExpr, TypeExprKind};

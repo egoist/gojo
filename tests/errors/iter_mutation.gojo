@@ -23,5 +23,11 @@ fn main() {
     for x in b {
         b.add(x)
     }
+    // a lazy chain borrows its source for the whole loop
+    var v = [1, 2]
+    for x in v.iter().map(x => x + 1) {
+        v.push(x)
+    }
 }
 // error: cannot modify `b` while iterating over it
+// error: cannot modify `v` while it is borrowed

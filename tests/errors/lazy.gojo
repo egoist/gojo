@@ -1,0 +1,15 @@
+// Lazy chains are loops, not values; their sources stay borrowed.
+fn main() {
+    var v = [1, 2, 3]
+    // error: `.iter()` starts a lazy chain
+    let it = v.iter()
+    // error: a lazy chain can't be iterated mutably
+    for x in &v.iter() {
+        x += 1
+    }
+    // error: `map` takes one argument, not 2
+    _ = v.iter().map(1, 2).collect()
+    // error: `fold` takes 2 argument(s), not 1
+    _ = v.iter().fold(0)
+    _ = it
+}

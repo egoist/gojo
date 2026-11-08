@@ -116,7 +116,12 @@ fn stored_views(prog: &Program, tf: &TFunc, diags: &mut Vec<Diag>) -> bool {
     let mut found = false;
     for l in &tf.locals {
         if stores_view(&l.ty) {
-            diags.push(Diag::new(l.span, format!("`{}` has type `{}`, which would store a borrowed view", l.name, prog.show(&l.ty))).note(None, help));
+            // a lazy chain's accumulator (check/lazy.rs): the chain is what the user wrote
+            if l.name.starts_with("__lz") {
+                diags.push(Diag::new(l.span, format!("this chain would build a `{}`, which would store borrowed views", prog.show(&l.ty))).note(None, "map the elements to owned values first: `.map(s => s.toString())`"));
+            } else {
+                diags.push(Diag::new(l.span, format!("`{}` has type `{}`, which would store a borrowed view", l.name, prog.show(&l.ty))).note(None, help));
+            }
             found = true;
         }
     }

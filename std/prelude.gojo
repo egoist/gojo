@@ -2277,3 +2277,54 @@ pub struct Tuple6[A, B, C, D, E, F] {
     pub _4: E
     pub _5: F
 }
+
+// ---------------------------------------------------------------- lazy chains
+//
+// `xs.iter().map(f).filter(p)...` is compiled into one loop over `xs`
+// (src/check/lazy.rs); these are its steps. A closure passed to one of them is
+// an ordinary argument, so it may borrow what it uses, views included.
+
+pub fn __lazyApply[A, B](a: A, f: fn(A) -> B) -> B {
+    return f(a)
+}
+
+pub fn __lazyFold[A, T](acc: sink A, x: T, f: fn(sink A, T) -> A) -> A {
+    return f(acc, x)
+}
+
+pub fn __lazyStep(n: int) -> int {
+    if n <= 0 {
+        panic("iter().stepBy: the step must be positive, not ${n}")
+    }
+    return n
+}
+
+pub fn __lazyAdd[T: Number](acc: inout T, x: T) {
+    acc += x
+}
+
+pub fn __lazyMin[T: ordered + clone](acc: inout ?T, x: T) {
+    if let b = acc {
+        if !(x < b) {
+            return
+        }
+    }
+    acc = some(x.clone())
+}
+
+pub fn __lazyMax[T: ordered + clone](acc: inout ?T, x: T) {
+    if let b = acc {
+        if !(b < x) {
+            return
+        }
+    }
+    acc = some(x.clone())
+}
+
+pub fn __lazyJoin(out: inout String, x: str, sep: str, first: inout bool) {
+    if !first {
+        out.push(sep)
+    }
+    first = false
+    out.push(x)
+}
