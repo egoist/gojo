@@ -27,6 +27,14 @@
 //
 // `flatMap` nests a loop. A `break` in the body then leaves the outermost
 // one, and `continue label` goes on with the innermost (`FnCx::lazy_loops`).
+//
+// A `Map`'s entries are pairs: the current element is then a key and a
+// value, the closures take both (`(k, v) => ...`, as `Map.retain` does), and
+// it stays a pair until `map`, `filterMap` or `flatMap` makes one value of it.
+// `collect` builds a `Map` from pairs; `find`, `first` and `last` give
+// `?(K, V)`.
+
+use std::rc::Rc;
 
 use super::body::{Expect, FnCx};
 use super::Checker;
@@ -49,6 +57,15 @@ struct Step<'a> {
 struct Chain<'a> {
     src: &'a Expr,
     steps: Vec<Step<'a>>,
+    /// the source is a `Map`: its elements are (key, value) pairs
+    pair: bool,
+}
+
+impl Chain<'_> {
+    /// Whether the chain still yields pairs at its end.
+    fn ends_in_pairs(&self) -> bool {
+        self.pair && !self.steps.iter().any(|s| matches!(s.name, "map" | "filterMap" | "flatMap"))
+    }
 }
 
 /// `src.iter().a(..).b(..)`, outermost call last.
@@ -60,7 +77,7 @@ fn parse_chain(e: &Expr) -> Option<Chain<'_>> {
         let ExprKind::Field(base, name, nsp) = &f.kind else { return None };
         if name == "iter" && args.is_empty() {
             steps.reverse();
-            return Some(Chain { src: base, steps });
+            return Some(Chain { src: base, steps, pair: false });
         }
         if !ADAPTERS.contains(&name.as_str()) {
             return None;
@@ -155,30 +172,46 @@ impl Gen {
             self.hoist("f", a.clone(), false)
         }
     }
-    fn apply(&mut self, cur: &Expr, f: &Expr) -> Expr {
+    /// `f` applied to the current element: one value, or a key and a value.
+    fn apply(&mut self, cur: &[Expr], f: &Expr, what: &str) -> Expr {
+        if cur.len() == 2 {
+            if let ExprKind::Closure { params, .. } = &f.kind {
+                if params.len() != 2 {
+                    self.errors.push((f.span, format!("a Map's entries are a key and a value: `{}((k, v) => ...)`", what)));
+                }
+            }
+            let f = self.func_arg(f);
+            return self.call("__lazyApply2", vec![cur[0].clone(), cur[1].clone(), f]);
+        }
         let f = self.func_arg(f);
-        self.call("__lazyApply", vec![cur.clone(), f])
+        self.call("__lazyApply", vec![cur[0].clone(), f])
     }
 
     /// `label: for <elem> in iter { stops; steps...; sink; stops }`. A
     /// `take` further on stops every loop around it before it takes its next
     /// element (so that nothing is computed for it), and again after the
     /// element that reached the count.
-    fn loop_over(&mut self, iter: Expr, steps: &[Step], sink: &mut dyn FnMut(&mut Gen, Expr) -> Vec<Stmt>, label: String) -> Stmt {
+    fn loop_over(&mut self, iter: Expr, pair: bool, steps: &[Step], sink: &mut dyn FnMut(&mut Gen, Vec<Expr>) -> Vec<Stmt>, label: String) -> Stmt {
         self.inner = label.clone();
         let el = self.fresh("e");
-        let cur = self.ident(&el);
+        let mut cur = vec![self.ident(&el)];
+        // `for k, v in m`
+        let second = pair.then(|| {
+            let v = self.fresh("e");
+            cur.push(self.ident(&v));
+            (v, self.sp)
+        });
         let start = self.stops.len();
         let rest = self.steps(steps, cur, sink);
         let mut body: Vec<Stmt> = self.stops[start..].to_vec();
         body.extend(rest);
-        let lp = ForLoop::In { first: (el, self.sp), second: None, iter, by_ref: false, body: Block { stmts: body, span: self.sp } };
+        let lp = ForLoop::In { first: (el, self.sp), second, iter, by_ref: false, body: Block { stmts: body, span: self.sp } };
         self.s(StmtKind::For(lp, Some((label, self.sp))))
     }
 
     /// The statements for `steps` applied to the current element `cur`, then
     /// `sink`.
-    fn steps(&mut self, steps: &[Step], cur: Expr, sink: &mut dyn FnMut(&mut Gen, Expr) -> Vec<Stmt>) -> Vec<Stmt> {
+    fn steps(&mut self, steps: &[Step], cur: Vec<Expr>, sink: &mut dyn FnMut(&mut Gen, Vec<Expr>) -> Vec<Stmt>) -> Vec<Stmt> {
         let Some((st, rest)) = steps.split_first() else {
             let mut out = sink(self, cur);
             out.extend(self.stops.iter().cloned());
@@ -193,27 +226,27 @@ impl Gen {
         match st.name {
             "map" => {
                 let v = self.fresh("v");
-                let app = self.apply(&cur, a);
+                let app = self.apply(&cur, a, "map");
                 out.push(self.let_(&v, app, false));
-                let next = self.ident(&v);
+                let next = vec![self.ident(&v)];
                 out.extend(self.steps(rest, next, sink));
             }
             "filter" => {
-                let app = self.apply(&cur, a);
+                let app = self.apply(&cur, a, "filter");
                 out.push(self.if_(self.not(app), vec![self.cont()]));
                 out.extend(self.steps(rest, cur, sink));
             }
             "filterMap" => {
                 let v = self.fresh("v");
-                let app = self.apply(&cur, a);
-                let next = self.ident(&v);
+                let app = self.apply(&cur, a, "filterMap");
+                let next = vec![self.ident(&v)];
                 let then = self.steps(rest, next, sink);
                 out.push(self.s(StmtKind::Expr(self.e(ExprKind::IfLet { pat: Pattern { kind: PatternKind::Ident(v), span: self.sp }, expr: Box::new(app), then: Block { stmts: then, span: self.sp }, else_: None }))));
             }
             "flatMap" => {
-                let app = self.apply(&cur, a);
+                let app = self.apply(&cur, a, "flatMap");
                 let label = self.fresh("in");
-                out.push(self.loop_over(app, rest, sink, label));
+                out.push(self.loop_over(app, false, rest, sink, label));
             }
             "take" => {
                 let n = self.hoist("n", a.clone(), false);
@@ -234,7 +267,7 @@ impl Gen {
                 out.extend(self.steps(rest, cur, sink));
             }
             "takeWhile" => {
-                let app = self.apply(&cur, a);
+                let app = self.apply(&cur, a, "takeWhile");
                 out.push(self.if_(self.not(app), vec![self.brk()]));
                 out.extend(self.steps(rest, cur, sink));
             }
@@ -242,7 +275,7 @@ impl Gen {
                 let d = self.fresh("d");
                 let st0 = self.let_(&d, self.e(ExprKind::Bool(false)), true);
                 self.hoisted.push(st0);
-                let app = self.apply(&cur, a);
+                let app = self.apply(&cur, a, "skipWhile");
                 let inner = vec![self.if_(app, vec![self.cont()]), self.assign(&d, "=", self.e(ExprKind::Bool(true)))];
                 out.push(self.if_(self.not(self.ident(&d)), inner));
                 out.extend(self.steps(rest, cur, sink));
@@ -269,11 +302,12 @@ impl Checker {
     /// Whether `e` is a lazy chain: `.iter()` here is ours only when the
     /// source has no `iter` method of its own.
     fn lazy_chain<'a>(&mut self, cx: &mut FnCx, e: &'a Expr) -> Option<Chain<'a>> {
-        let ch = parse_chain(e)?;
+        let mut ch = parse_chain(e)?;
         let before = self.diags.len();
         let t = self.expr(cx, ch.src, None);
         let ty = self.resolve(cx, &t.ty);
         self.diags.truncate(before);
+        ch.pair = matches!(ty, Ty::Map(..));
         if let Some(k) = TyKey::of(&ty) {
             if self.prog.methods.contains_key(&(k, "iter".to_string())) {
                 return None;
@@ -334,15 +368,26 @@ impl Checker {
             Some(s2) => (Some(first.clone()), s2.clone()),
             None => (None, first.clone()),
         };
-        let counter = index.as_ref().map(|_| {
+        let counter = index.as_ref().filter(|_| !ch.ends_in_pairs()).map(|_| {
             let c = g.fresh("i");
             let st = g.let_(&c, g.int(0), true);
             g.hoisted.push(st);
             c
         });
         let body_stmts = body.stmts.clone();
-        let mut sink = |g: &mut Gen, cur: Expr| {
-            let mut out = vec![Stmt { kind: StmtKind::Let { name: elem.0.clone(), name_span: elem.1, ty: None, init: Some(cur), mutable: false }, span: elem.1 }];
+        let pairs = ch.ends_in_pairs();
+        if pairs && second.is_none() {
+            self.err(first.1, "a Map's entries are a key and a value: `for k, v in ...`");
+            return Some(None);
+        }
+        let mut sink = |g: &mut Gen, cur: Vec<Expr>| {
+            let bind = |name: &(String, Span), init: Expr| Stmt { kind: StmtKind::Let { name: name.0.clone(), name_span: name.1, ty: None, init: Some(init), mutable: false }, span: name.1 };
+            if cur.len() == 2 {
+                let mut out = vec![bind(index.as_ref().unwrap(), cur[0].clone()), bind(&elem, cur[1].clone())];
+                out.extend(body_stmts.iter().cloned());
+                return out;
+            }
+            let mut out = vec![bind(&elem, cur[0].clone())];
             if let (Some((iv, isp)), Some(c)) = (&index, &counter) {
                 out.push(Stmt { kind: StmtKind::Let { name: iv.clone(), name_span: *isp, ty: None, init: Some(g.ident(c)), mutable: false }, span: *isp });
                 out.push(g.assign(c, "+=", g.int(1)));
@@ -351,7 +396,7 @@ impl Checker {
             out
         };
         let outer = g.outer.clone();
-        let lp = g.loop_over(ch.src.clone(), &ch.steps, &mut sink, outer);
+        let lp = g.loop_over(ch.src.clone(), ch.pair, &ch.steps, &mut sink, outer);
         let r = self.lazy_check(cx, g, lp, None, user, None, sp);
         Some(Some(TStmt::Expr(r)))
     }
@@ -373,8 +418,14 @@ impl Checker {
             self.err(sp, format!("`{}` takes {} argument(s), not {}", name, want, args.len()));
             return Some(TExpr::error(sp));
         }
+        let pairs = ch.ends_in_pairs();
+        if pairs && matches!(name, "sum" | "min" | "max" | "join") {
+            self.err(sp, format!("`{}` needs one value per element, and a Map's entries are a key and a value: pick one first, as in `.map((k, v) => v).{}`", name, if name == "join" { "join(sep)".to_string() } else { format!("{}()", name) }));
+            return Some(TExpr::error(sp));
+        }
         let r = g.fresh("r");
         let init = match name {
+            "collect" if pairs => g.call("__lazyMap", vec![]),
             "collect" => g.call("__lazyVec", vec![]),
             "sum" => g.call("__lazyZero", vec![]),
             "count" => g.int(0),
@@ -396,9 +447,21 @@ impl Checker {
         let name = name.to_string();
         let args = args.to_vec();
         let rn = r.clone();
-        let mut sink = move |g: &mut Gen, cur: Expr| -> Vec<Stmt> {
-            let own = |g: &Gen, c: &Expr| g.call("__lazyOwn", vec![c.clone()]);
+        let mut sink = move |g: &mut Gen, cur: Vec<Expr>| -> Vec<Stmt> {
+            // the element as a value of its own: a pair becomes a tuple
+            let own = |g: &Gen, c: &[Expr]| {
+                let o = |x: &Expr| g.call("__lazyOwn", vec![x.clone()]);
+                if c.len() == 2 {
+                    g.e(ExprKind::Tuple(vec![o(&c[0]), o(&c[1])]))
+                } else {
+                    o(&c[0])
+                }
+            };
             match name.as_str() {
+                "collect" if cur.len() == 2 => {
+                    let ins = g.method(g.ident(&rn), "insert", vec![g.call("__lazyOwn", vec![cur[0].clone()]), g.call("__lazyOwn", vec![cur[1].clone()])]);
+                    vec![g.s(StmtKind::Discard(ins))]
+                }
                 "collect" => vec![g.s(StmtKind::Expr(g.method(g.ident(&rn), "push", vec![own(g, &cur)])))],
                 "count" => vec![g.assign(&rn, "+=", g.int(1))],
                 "sum" | "min" | "max" => {
@@ -407,18 +470,18 @@ impl Checker {
                         "min" => "__lazyMin",
                         _ => "__lazyMax",
                     };
-                    vec![g.s(StmtKind::Expr(g.call(f, vec![g.refm(g.ident(&rn)), cur])))]
+                    vec![g.s(StmtKind::Expr(g.call(f, vec![g.refm(g.ident(&rn)), cur[0].clone()])))]
                 }
                 "any" => {
-                    let app = g.apply(&cur, &args[0]);
+                    let app = g.apply(&cur, &args[0], "any");
                     vec![g.if_(app, vec![g.assign(&rn, "=", g.e(ExprKind::Bool(true))), g.brk()])]
                 }
                 "all" => {
-                    let app = g.apply(&cur, &args[0]);
+                    let app = g.apply(&cur, &args[0], "all");
                     vec![g.if_(g.not(app), vec![g.assign(&rn, "=", g.e(ExprKind::Bool(false))), g.brk()])]
                 }
                 "find" => {
-                    let app = g.apply(&cur, &args[0]);
+                    let app = g.apply(&cur, &args[0], "find");
                     let v = g.call("some", vec![own(g, &cur)]);
                     vec![g.if_(app, vec![g.assign(&rn, "=", v), g.brk()])]
                 }
@@ -430,21 +493,31 @@ impl Checker {
                     }
                     out
                 }
+                "fold" if cur.len() == 2 => {
+                    if let ExprKind::Closure { params, .. } = &args[1].kind {
+                        if params.len() != 3 {
+                            g.errors.push((args[1].span, "a Map's entries are a key and a value: `fold(init, (acc, k, v) => ...)`".into()));
+                        }
+                    }
+                    let f = g.func_arg(&args[1]);
+                    vec![g.assign(&rn, "=", g.call("__lazyFold2", vec![g.ident(&rn), cur[0].clone(), cur[1].clone(), f]))]
+                }
                 "fold" => {
                     let f = g.func_arg(&args[1]);
-                    vec![g.assign(&rn, "=", g.call("__lazyFold", vec![g.ident(&rn), cur, f]))]
+                    vec![g.assign(&rn, "=", g.call("__lazyFold", vec![g.ident(&rn), cur[0].clone(), f]))]
                 }
-                "join" => vec![g.s(StmtKind::Expr(g.call("__lazyJoin", vec![g.refm(g.ident(&rn)), cur, sep.clone().unwrap(), g.refm(first.clone().unwrap())])))],
+                "join" => vec![g.s(StmtKind::Expr(g.call("__lazyJoin", vec![g.refm(g.ident(&rn)), cur[0].clone(), sep.clone().unwrap(), g.refm(first.clone().unwrap())])))],
                 _ => unreachable!(),
             }
         };
         let outer = g.outer.clone();
-        let lp = g.loop_over(ch.src.clone(), &ch.steps, &mut sink, outer);
+        let lp = g.loop_over(ch.src.clone(), ch.pair, &ch.steps, &mut sink, outer);
         let tail = g.ident(&r);
         Some(self.lazy_check(cx, g, lp, Some(tail), None, expect, sp))
     }
 
     /// `__lazyVec()`: an empty `Vec` whose element type is inferred.
+    /// `__lazyMap()`: an empty `Map` whose key and value types are inferred.
     /// `__lazyZero()`: zero, of a number type that is inferred.
     /// `__lazyOwn(x)`: `x` itself, or a clone when it is only borrowed.
     pub fn lazy_intrinsic(&mut self, cx: &mut FnCx, name: &str, args: &[Expr], sp: Span, expect: Option<&Ty>) -> Option<TExpr> {
@@ -452,6 +525,10 @@ impl Checker {
             ("__lazyVec", []) => {
                 let t = self.fresh(cx);
                 Some(TExpr::new(TK::VecLit(vec![]), Ty::vec(t), sp))
+            }
+            ("__lazyMap", []) => {
+                let (k, v) = (self.fresh(cx), self.fresh(cx));
+                Some(TExpr::new(TK::MapLit(vec![]), Ty::Map(Rc::new(k), Rc::new(v)), sp))
             }
             ("__lazyZero", []) => {
                 let t = self.fresh(cx);

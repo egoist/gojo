@@ -125,4 +125,20 @@ fn main() {
     let none_ = Vec[int]{}
     println(none_.iter().sum(), none_.iter().min(), none_.iter().collect(), none_.iter().any(x => x > 0), none_.iter().all(x => x > 0))
     println(sumValid(["1", "2", "39"]), sumValid(["1", "x"]))
+
+    // a Map's entries: closures take the key and the value until `map` makes
+    // one value of them; `collect` builds a Map, in the same order
+    let ages = ["ann": 31, "bob": 17, "cyd": 45, "dee": 8]
+    for name, age in ages.iter().filter((name, age) => age >= 18) {
+        print(name, "=", age, " ")
+    }
+    println()
+    println(ages.iter().filter((_name, age) => age >= 18).collect(), ages.iter().skip(1).take(2).collect())
+    println(ages.iter().map((name, age) => "${name}:${age}").join(","), ages.iter().map((_name, age) => age).sum(), ages.iter().count(), ages.iter().any((_name, age) => age < 10))
+    println(ages.iter().find((_name, age) => age > 40), ages.iter().first(), ages.iter().last(), ages.iter().fold(0, (acc, name, age) => acc + age * name.len()))
+    println(ages.iter().flatMap((name, age) => [name.clone(), "${age}"]).take(3).collect())
+    for i, x in ages.iter().map((_name, age) => age * 2).filter(x => x > 20) {
+        print(i, "=", x, " ")
+    }
+    println()
 }

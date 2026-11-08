@@ -323,12 +323,14 @@ Tests: `run/iterators`, `run/iterator_views`, `run/constraints`, `run/push_flow`
 
 ### 7.2 Lazy chains
 
-`xs.iter()` followed by adapters is a lazy chain, for anything `for` can iterate over by value: lists, slices, arrays, sets, ranges (`(0..n).iter()`), strings (their runes) and types with an iteration protocol. A type with its own `iter` method keeps it.
+`xs.iter()` followed by adapters is a lazy chain, for anything `for` can iterate over by value: lists, slices, arrays, sets, maps, ranges (`(0..n).iter()`), strings (their runes) and types with an iteration protocol. A type with its own `iter` method keeps it.
 
 - **Adapters**: `map(f)`, `filter(p)`, `filterMap(f)` (`f` gives `?U`), `flatMap(f)` (`f` gives something iterable), `take(n)`, `skip(n)`, `takeWhile(p)`, `skipWhile(p)`, `stepBy(n)` (elements 0, n, 2n...; panics unless n > 0).
 - **Consumers**: `for x in chain { }` and `for i, x in chain { }` (`i` counts the elements the chain yields), or a terminal method: `collect()` (a `Vec`), `count()`, `sum()`, `min()`/`max()` (`?T`), `any(p)`, `all(p)`, `find(p)`/`first()`/`last()` (`?T`), `fold(init, f)`, `join(sep)` (for strings).
 
 A chain is not a value: it can't be stored, returned or passed (`let it = xs.iter()` is an error). It is compiled into one loop over `xs`, with each adapter a few statements inside it, so it allocates nothing and runs as fast as the loop written out; only the elements needed are computed: `find` stops at the first match, and `take(n)` ends the loop once it has its nth element, so chains over endless sources end. The closures are ordinary arguments: they borrow what they use, views included, and may modify `var` variables. `xs` stays borrowed for the whole loop. Elements that come from `xs` are borrowed; `collect`, `find`, `first`, `last`, `min` and `max` clone the ones they keep, and take values the chain computed (`map`) as they are. In `flatMap`'s body, `break` leaves the whole chain and `continue label` goes on with the next inner element.
+
+Over a `Map`, the elements are entries, a key and a value: the closures take both (`(k, v) => ...`, as in `Map.retain`; `fold`'s takes `(acc, k, v)`), and `for k, v in m.iter()...` binds both. They stay pairs until `map`, `filterMap` or `flatMap` makes one value of each. A chain of pairs `collect`s into a `Map` (keeping the order), `find`/`first`/`last` give `?(K, V)`, and `sum`, `min`, `max` and `join` need one value per element: `m.iter().map((k, v) => v).sum()`.
 
 ```gojo
 let names = people.iter().filter(p => p.age >= 18).map(p => p.name.asStr()).join(", ")

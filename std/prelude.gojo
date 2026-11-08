@@ -2292,6 +2292,14 @@ pub fn __lazyFold[A, T](acc: sink A, x: T, f: fn(sink A, T) -> A) -> A {
     return f(acc, x)
 }
 
+pub fn __lazyApply2[K, V, B](k: K, v: V, f: fn(K, V) -> B) -> B {
+    return f(k, v)
+}
+
+pub fn __lazyFold2[A, K, V](acc: sink A, k: K, v: V, f: fn(sink A, K, V) -> A) -> A {
+    return f(acc, k, v)
+}
+
 pub fn __lazyStep(n: int) -> int {
     if n <= 0 {
         panic("iter().stepBy: the step must be positive, not ${n}")

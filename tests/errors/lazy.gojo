@@ -11,5 +11,14 @@ fn main() {
     _ = v.iter().map(1, 2).collect()
     // error: `fold` takes 2 argument(s), not 1
     _ = v.iter().fold(0)
+    let m = ["a": 1]
+    // error: a Map's entries are a key and a value: `filter((k, v) => ...)`
+    _ = m.iter().filter(x => x > 0).count()
+    // error: a Map's entries are a key and a value: `for k, v in ...`
+    for x in m.iter() {
+        _ = x
+    }
+    // error: `sum` needs one value per element
+    _ = m.iter().sum()
     _ = it
 }
