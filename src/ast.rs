@@ -244,6 +244,17 @@ pub enum ForLoop {
     In { first: (String, Span), second: Option<(String, Span)>, iter: Expr, by_ref: bool, body: Block },
 }
 
+/// An element of a list literal.
+#[derive(Clone, Debug)]
+pub enum ListElem {
+    /// One value, or, for an `if` without `else`, none or one.
+    Expr(Expr),
+    /// `..xs`: every element of the `Vec` `xs` (moved).
+    Spread(Expr),
+    /// `for x in xs { value }`: one value per iteration (`ForLoop::In`).
+    For(ForLoop),
+}
+
 #[derive(Clone, Debug)]
 pub struct Arm {
     pub pat: Pattern,
@@ -326,6 +337,9 @@ pub enum ExprKind {
     DotVariant(String),
     StructLit { ty: Box<Expr>, fields: Vec<(String, Span, Expr)>, positional: Vec<Expr>, kv: Vec<(Expr, Expr)> },
     VecLit(Vec<Expr>),
+    /// A list literal with `if` / `for` / `..` elements:
+    /// `[a, if c { b }, for x in xs { f(x) }, ..rest]`
+    ListComp(Vec<ListElem>),
     /// `[k: v, ...]`, `[:]`: a `Map`
     MapLit(Vec<(Expr, Expr)>),
     /// `scope { }` / `scope s { }`: waits for the tasks started in it.

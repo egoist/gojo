@@ -1,0 +1,47 @@
+// `if`, `for` and `..` elements in list literals.
+fn main() {
+    let xs = [1, 2, 3, 4]
+    let grid = [for r in 0..3 { for c in 0..r { "${r}${c}" } }]
+    let evens = [for x in xs { if x % 2 == 0 { x * 10 } }]
+    let labels = ["start", for x in xs { let y = x * x
+        "sq ${y}" }, if xs.len() > 3 { "many" }, "end"]
+    let more = [0,..evens.clone(),..[7, 8]]
+    let s: Set[int] = [for x in xs { x % 2 }]
+    let skip = [for x in xs { if x == 2 { continue }
+        x }]
+    let ch = [if xs.len() > 9 { 1 } else { 2 }]
+    println(grid, evens, labels, more, s, skip, ch)
+    println(names([Item{name: "a"}, Item{name: "b", hidden: true}]))
+    discard()
+}
+
+struct Item {
+    name: String
+    hidden: bool = false
+}
+
+fn names(items: []Item) -> Vec[String] {
+    [
+        "header",
+        for it in items {
+            if !it.hidden {
+                it.name.clone()
+            }
+        },
+    ]
+}
+
+fn discard() {
+    var v = [1, 2]
+    match v.len() {
+        2 => _ = v.pop()
+        _ => {}
+    }
+    var s: String = ""
+    s.push("built")
+    println(v, s)
+}
+
+test "list elements" {
+    assertEq(names([Item{name: "a"}, Item{name: "b", hidden: true}]), ["header", "a"])
+}

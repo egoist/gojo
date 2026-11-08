@@ -1276,6 +1276,7 @@ impl Checker {
                     let env = cx.env.clone();
                     self.resolve_type(t, &env)
                 });
+
                 match init {
                     Some(init) => {
                         let raw = self.expr(cx, init, decl_ty.as_ref());
@@ -2339,6 +2340,7 @@ impl Checker {
             ExprKind::DotVariant(name) => self.dot_variant(cx, name, &[], false, sp, expect.as_ref()),
             ExprKind::StructLit { ty, fields, positional, kv } => self.struct_lit(cx, ty, fields, positional, kv, sp, expect.as_ref()),
             ExprKind::VecLit(xs) => self.vec_lit(cx, xs, sp, expect.as_ref()),
+            ExprKind::ListComp(elems) => self.list_comp(cx, elems, sp, expect.as_ref()),
             ExprKind::MapLit(kvs) => {
                 let ty = match expect.as_ref().map(|t| self.resolve(cx, t)) {
                     Some(t @ Ty::Map(..)) => t,
@@ -3328,6 +3330,75 @@ impl Checker {
                 TExpr::error(sp)
             }
         }
+    }
+
+    /// `[a, if c { b }, for x in xs { f(x) }, ..rest]`, checked as pushes onto a
+    /// hidden `Vec`:
+    /// `{ var v = Vec[T]{}; v.push(a); if c { v.push(b) }; for x in xs { v.push(f(x)) }; v.extend(rest); v }`.
+    /// An element's block may hold statements before its value, and end in a
+    /// nested `if` (without `else`) or `for`.
+    fn list_comp(&mut self, cx: &mut FnCx, elems: &[ast::ListElem], sp: Span, expect: Option<&Ty>) -> TExpr {
+        let expect = expect.map(|t| self.resolve(cx, t));
+        if let Some(t @ Ty::Adt(..)) = &expect {
+            let Ty::Adt(d, args) = t.clone() else { unreachable!() };
+            if Some(d) == self.prog.prelude_type("Set") {
+                if let Some(Sym::Func(f)) = self.prog.packages[self.prog.prelude as usize].items.get("setOf").cloned() {
+                    let list = Expr { kind: ExprKind::ListComp(elems.to_vec()), span: sp };
+                    return self.call_fn(cx, f, Some(args.to_vec()), None, &[list], sp, Some(t));
+                }
+            }
+        }
+        let elem = match &expect {
+            Some(Ty::Vec(t)) | Some(Ty::Slice(t)) => (**t).clone(),
+            _ => self.fresh(cx),
+        };
+        let first_str = elems.iter().find_map(|e| match e {
+            ast::ListElem::Expr(x) => Some(matches!(x.kind, ExprKind::Str(_) | ExprKind::Interp(_))),
+            _ => None,
+        });
+        if let (Ty::Var(_), Some(true)) = (self.resolve(cx, &elem), first_str) {
+            self.unify(cx, &elem, &Ty::String);
+        }
+        let vt = Ty::vec(elem.clone());
+        let h = self.hidden_local(cx, vt.clone(), LocalKind::Var, sp);
+        let name = cx.locals[h as usize].name.clone();
+        let mut stmts = vec![TStmt::Let { local: h, init: TExpr::new(TK::VecLit(vec![]), vt.clone(), sp) }];
+        let mut missing = vec![];
+        for el in elems {
+            let st = match el {
+                ast::ListElem::Expr(x) => comp_expr(&name, x, &mut missing),
+                ast::ListElem::Spread(x) => comp_call(&name, "extend", x.clone()),
+                ast::ListElem::For(fl) => {
+                    let ast::ForLoop::In { first, second, iter, by_ref, body } = fl else { unreachable!() };
+                    let body = comp_block(&name, body, &mut missing);
+                    Stmt { kind: StmtKind::For(ast::ForLoop::In { first: first.clone(), second: second.clone(), iter: iter.clone(), by_ref: *by_ref, body }, None), span: sp }
+                }
+            };
+            if let Some(ts) = self.stmt(cx, &st) {
+                stmts.push(ts);
+            }
+        }
+        let incomplete = !missing.is_empty();
+        for m in missing {
+            self.err(m, "this `if` / `for` element gives no value: end its block with the element to add");
+        }
+        let elem = self.resolve(cx, &elem);
+        if incomplete && elem.has_vars() {
+            return TExpr::error(sp);
+        }
+        if elem.has_vars() {
+            self.err(sp, "cannot infer the element type of this list; give it a type: `let xs: Vec[T] = [...]`");
+            return TExpr::error(sp);
+        }
+        if elem.contains_view() {
+            let s = self.prog.show(&elem);
+            self.err(sp, format!("a list cannot hold borrowed views (`{}`); use owned values such as String", s));
+            return TExpr::error(sp);
+        }
+        let vt = Ty::vec(elem);
+        cx.locals[h as usize].ty = vt.clone();
+        let v = self.value(cx, TExpr::new(TK::Local(h), vt.clone(), sp));
+        TExpr::new(TK::Block(TBlock { stmts, value: Some(Box::new(v)), span: sp }), vt, sp)
     }
 
     fn vec_lit(&mut self, cx: &mut FnCx, xs: &[Expr], sp: Span, expect: Option<&Ty>) -> TExpr {
@@ -4611,6 +4682,9 @@ impl Checker {
             d = d.note(None, "use `.len` or `.len()`");
         }
         let is_chan = matches!(bty, Ty::Sender(_) | Ty::Receiver(_)) || matches!(&bty, Ty::Adt(dd, _) if Some(*dd) == self.prog.prelude_type("Chan"));
+        if bty == Ty::Str && self.prog.methods.contains_key(&(TyKey::String, name.to_string())) {
+            d = d.note(None, format!("`{}` changes a `String`; this is a `str` view (a string literal without an expected type is one): declare it `var s: String = \"\"`, or `.toString()` it", name));
+        }
         if is_chan && name == "close" {
             d = d.note(None, "a channel closes when its last sender is dropped: `drop(ch.tx)` (and every clone of it); there is no `close`");
         }
@@ -5372,4 +5446,42 @@ fn literal_like(e: &Expr) -> bool {
         ExprKind::Block(b) => block(b),
         _ => false,
     }
+}
+
+// ---------- list literals with `if` / `for` / `..` elements ----------
+
+fn comp_call(list: &str, method: &str, arg: Expr) -> Stmt {
+    let sp = arg.span;
+    let recv = Expr { kind: ExprKind::Ident(list.to_string()), span: sp };
+    let callee = Expr { kind: ExprKind::Field(Box::new(recv), method.to_string(), sp), span: sp };
+    Stmt { kind: StmtKind::Expr(Expr { kind: ExprKind::Call(Box::new(callee), vec![arg]), span: sp }), span: sp }
+}
+
+/// An element: an `if` without `else` adds its value only when it holds.
+fn comp_expr(list: &str, e: &Expr, missing: &mut Vec<Span>) -> Stmt {
+    let sp = e.span;
+    let kind = match &e.kind {
+        ExprKind::If { cond, then, else_: None } => ExprKind::If { cond: cond.clone(), then: comp_block(list, then, missing), else_: None },
+        ExprKind::IfLet { pat, expr, then, else_: None } => ExprKind::IfLet { pat: pat.clone(), expr: expr.clone(), then: comp_block(list, then, missing), else_: None },
+        _ => return comp_call(list, "push", e.clone()),
+    };
+    Stmt { kind: StmtKind::Expr(Expr { kind, span: sp }), span: sp }
+}
+
+/// The body of an `if` / `for` element: its statements, then the element.
+fn comp_block(list: &str, b: &ast::Block, missing: &mut Vec<Span>) -> ast::Block {
+    let mut stmts = b.stmts.clone();
+    match stmts.pop() {
+        Some(Stmt { kind: StmtKind::Expr(e), .. }) => stmts.push(comp_expr(list, &e, missing)),
+        Some(Stmt { kind: StmtKind::For(ast::ForLoop::In { first, second, iter, by_ref, body }, label), span }) => {
+            let body = comp_block(list, &body, missing);
+            stmts.push(Stmt { kind: StmtKind::For(ast::ForLoop::In { first, second, iter, by_ref, body }, label), span });
+        }
+        Some(other) => {
+            missing.push(other.span);
+            stmts.push(other);
+        }
+        None => missing.push(b.span),
+    }
+    ast::Block { stmts, span: b.span }
 }

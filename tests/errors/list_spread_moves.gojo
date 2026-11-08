@@ -1,0 +1,6 @@
+fn main() {
+    let a = ["x".toString()]
+    let b = [..a]
+    println(a, b)
+    // error: use of `a` after it was moved
+}

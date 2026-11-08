@@ -1827,15 +1827,37 @@ impl Parser {
                     self.skip_nl();
                     let mut xs = vec![];
                     let mut kvs = vec![];
+                    // `if` / `for` / `..` elements make it a ListComp
+                    let mut elems: Vec<ListElem> = vec![];
+                    let mut comp = false;
                     while !self.is_p("]") {
+                        if kvs.is_empty() && (self.is_p("..") || self.is_kw(Kw::For)) {
+                            if self.eat_p("..") {
+                                elems.push(ListElem::Spread(self.expr()?));
+                            } else {
+                                self.bump();
+                                elems.push(ListElem::For(self.for_loop()?));
+                            }
+                            comp = true;
+                            self.skip_nl();
+                            if !self.eat_p(",") {
+                                break;
+                            }
+                            self.skip_nl();
+                            continue;
+                        }
                         let x = self.expr()?;
-                        if (xs.is_empty() && kvs.is_empty() || !kvs.is_empty()) && self.eat_p(":") {
+                        if matches!(x.kind, ExprKind::If { else_: None, .. } | ExprKind::IfLet { else_: None, .. }) {
+                            comp = true;
+                        }
+                        if !comp && (xs.is_empty() && kvs.is_empty() || !kvs.is_empty()) && self.eat_p(":") {
                             // `["a": 1]`
                             self.skip_nl();
                             kvs.push((x, self.expr()?));
                         } else if !kvs.is_empty() {
                             return self.err("every entry of a map literal is `key: value`");
                         } else {
+                            elems.push(ListElem::Expr(x.clone()));
                             xs.push(x);
                         }
                         self.skip_nl();
@@ -1848,6 +1870,9 @@ impl Parser {
                     self.expect_p("]")?;
                     if !kvs.is_empty() {
                         return Ok(Expr { kind: ExprKind::MapLit(kvs), span: self.sp_from(lo) });
+                    }
+                    if comp {
+                        return Ok(Expr { kind: ExprKind::ListComp(elems), span: self.sp_from(lo) });
                     }
                     // `[N]T` array type
                     if xs.len() == 1 && !self.toks[self.pos].nl_before && matches!(self.peek(), Tok::Ident(_) | Tok::P("?") | Tok::Kw(Kw::Func)) {
@@ -2000,7 +2025,11 @@ impl Parser {
                 self.bump();
                 let value = self.expr()?;
                 let span = self.sp_from(blo);
-                let st = Stmt { kind: StmtKind::Assign { place: body, op: p, value }, span };
+                let st = if p == "=" && matches!(&body.kind, ExprKind::Ident(n) if n == "_") {
+                    Stmt { kind: StmtKind::Discard(value), span }
+                } else {
+                    Stmt { kind: StmtKind::Assign { place: body, op: p, value }, span }
+                };
                 body = Expr { kind: ExprKind::Block(Block { stmts: vec![st], span }), span };
             }
         }

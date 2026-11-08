@@ -1,0 +1,104 @@
+// What view code looks like in Gojo: a toy UI kit where views are values and
+// events are messages (the Elm architecture). `view` builds the whole tree in
+// one expression: `if` elements appear only when they hold, `for` elements
+// repeat, and `..xs` splices in a list.
+interface View {
+    fn render(self, depth: int) -> String
+}
+
+struct Text {
+    text: String
+    bold: bool = false
+
+    fn render(self, depth: int) -> String {
+        "${pad(depth)}Text(${self.text})"
+    }
+}
+
+struct Button {
+    label: String
+    onClick: Msg
+    disabled: bool = false
+
+    fn render(self, depth: int) -> String {
+        "${pad(depth)}Button(${self.label} -> ${self.onClick})"
+    }
+}
+
+struct Column {
+    gap: int = 0
+    children: Vec[View] = []
+
+    fn render(self, depth: int) -> String {
+        var out = "${pad(depth)}Column(gap ${self.gap})"
+        for c in self.children {
+            out.push("\n")
+            out.push(c.render(depth + 1))
+        }
+        out
+    }
+}
+
+fn pad(n: int) -> String {
+    var s: String = ""
+    for _ in 0..n {
+        s.push("  ")
+    }
+    s
+}
+
+enum Msg {
+    Add
+    Remove(i: int)
+    Clear
+}
+
+struct Todo {
+    title: String
+    done: bool = false
+}
+
+struct App {
+    todos: Vec[Todo] = []
+    error: ?String
+
+    fn view(self) -> Column {
+        Column{gap: 8, children: [
+            Text{text: "Todos (${self.todos.len()})", bold: true},
+            if let e = self.error {
+                Text{text: "error: ${e}"}
+            },
+            for i, t in self.todos {
+                Column{gap: 4, children: [
+                    Text{text: t.title.clone()},
+                    if !t.done {
+                        Button{label: "remove", onClick: .Remove(i)}
+                    },
+                ]}
+            },
+            ..self.footer(),
+        ]}
+    }
+
+    fn footer(self) -> Vec[View] {
+        [
+            Button{label: "add", onClick: .Add},
+            Button{label: "clear", onClick: .Clear, disabled: self.todos.isEmpty()},
+        ]
+    }
+
+    fn update(inout self, m: Msg) {
+        match m {
+            .Add => self.todos.push(.{title: "item ${self.todos.len()}"})
+            .Remove(i) => _ = self.todos.remove(i)
+            .Clear => self.todos.clear()
+        }
+    }
+}
+
+fn main() {
+    var app = App{error: "offline"}
+    app.update(.Add)
+    app.update(.Add)
+    println(app.view().render(0))
+}

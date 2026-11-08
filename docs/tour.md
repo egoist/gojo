@@ -525,7 +525,33 @@ fn main() {
 
 `Vec[T]`, `Map[K, V]` and `Set[T]` are in the prelude, with the usual methods.
 A list literal builds a `Set` where one is expected, and `["a": 1]` (or `[:]`)
-is a map.
+is a map. Inside a list, `if c { x }` adds `x` only when `c` holds, `for`
+adds one element per iteration and `..v` splices in a whole `Vec`, so a
+list keeps the shape of what it builds (see [`examples/ui`](../examples/ui)
+for a UI tree written this way):
+
+```zig
+fn main() {
+    let xs = [3, 8, 1, 6]
+    let verbose = true
+    let report = [
+        "values:",
+        for x in xs {
+            if x > 2 {
+                "${x}"
+            }
+        },
+        if verbose {
+            "(${xs.len()} in all)"
+        },
+    ]
+    println(report)
+}
+```
+
+```text
+["values:", "3", "8", "6", "(4 in all)"]
+```
 Closures are written `x => expr`, `(a, b) => expr` or `x => { ... }`:
 
 ```zig

@@ -71,7 +71,7 @@ Tests: `projects/app`, `projects/cycle`, `projects/private`, `projects/groups`, 
 
 ### 3.1 Variables and constants
 
-- `let x = e` is immutable; `var x = e` is mutable. A type annotation follows a colon: `let n: u8 = 1`. `var x: T` requires `T` to satisfy `default` (section 4.6); its value is the default value.
+- `let x = e` is immutable; `var x = e` is mutable. A type annotation follows a colon: `let n: u8 = 1`. A string literal is a `str` view unless a `String` is expected, so a string to build on is declared `var s: String = ""`. `var x: T` requires `T` to satisfy `default` (section 4.6); its value is the default value.
 - Assigning to a `let` binding is a compile error.
 - **No shadowing within a function**: an inner block cannot declare a variable with the same name as a local variable of an outer block.
 - A local variable that is declared but never used is a compile error. Names that start with `_`, and `_` itself, are exempt.
@@ -283,6 +283,7 @@ Tests: `run/basics`, `run/concurrency`, `errors/escaping_view`, `errors/go_closu
 - `if`, `match` and blocks are expressions; their value is the last expression.
 - Operations on `?T`: `if let v = x { }` (and `if let x { }`, which unwraps the variable `x` under the same name inside the block), `x ?? d`, `x?.field` (the result is still optional, and `field` must be a copy type; otherwise use `if let`), `x?.method(args)` (`none` when `x` is `none`; a method that returns `?U` gives `?U`, not `??U`; the method may only read its receiver, and a view it returns borrows `x`, so `x` must be a variable to keep it), `x.unwrap()` (panics on `none`), `match`.
 - `[a, b]` is a `Vec` literal, or a `Set` where a `Set` is expected (`let s: Set[String] = ["a", "b"]`, a field, a parameter). `["a": 1, "b": 2]` is a `Map` literal and `[:]` an empty one, typed by the context or by the entries. `Map[K, V]{k: v}` and `Vec[T]{}` are typed literals. String literals in a list or map are `String`s.
+- **List elements**: besides values, a list literal can hold `if cond { x }` (no `else`: `x` is added when `cond` holds; also `if let`), `for x in xs { f(x) }` (one element per iteration) and `..v` (every element of the `Vec` `v`, which is moved; `..v.clone()` keeps it). The block of an `if` / `for` element may have statements before its value, `continue` skips an iteration, and the value may itself be an `if` without `else` or a `for`: `[for r in rows { for c in r.cells { if c.shown { c.label.clone() } } }]`. It costs what the pushes would: the list is built in a hidden `Vec`. `if c { a } else { b }` is an ordinary element.
 - `a..b` is a half-open range and `a..=b` a closed range; `s[a..b]` takes a view of a string or slice.
 - A `T ! E` result must be handled; discard it with `_ = f()`.
 

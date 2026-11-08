@@ -1,0 +1,8 @@
+fn main() {
+    let xs = [1, 2]
+    let ys = [for x in xs { let y = x }]
+    // error: this `if` / `for` element gives no value
+    let a = ["x".toString()]
+    let b = [..a]
+    println(a, ys, b)
+}
