@@ -6,3 +6,4 @@ fuzz-out/
 dist/
 node_modules/
 .amp/portals/*
+_build/

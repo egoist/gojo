@@ -2,6 +2,8 @@
 
 8 common benchmarks (most from the Benchmarks Game). Each one is written in all three languages with exactly the same algorithm and input. `run.sh` first checks that the output of every version is byte-for-byte identical, then measures with hyperfine.
 
+A separate **MoonBit / Go / Gojo** native comparison (same eight workloads, medians, raw CSV/JSON) is in [`compare-moonbit/`](compare-moonbit/README.md).
+
 ```sh
 ./run.sh            # RUNS=10, results are written to results.md
 ```
