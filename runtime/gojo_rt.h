@@ -425,6 +425,11 @@ int64_t gojo_net___write(int64_t fd, gojo_slice data);
 void gojo_net___close(int64_t fd);
 void gojo_net___shutdownWrite(int64_t fd);
 int64_t gojo_net___port(int64_t fd);
+int64_t gojo_net___udpListen(gojo_str addr);
+int64_t gojo_net___udpDial(gojo_str addr);
+int64_t gojo_net___sendTo(int64_t fd, gojo_slice data, gojo_str addr);
+int64_t gojo_net___recvFrom(int64_t fd, gojo_vec *buf, int64_t max, gojo_string *from);
+int64_t gojo_net___lookup(gojo_str host, gojo_vec *out);
 
 // ---- os / time / ffi
 void gojo_rt_init(int argc, char **argv);

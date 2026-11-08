@@ -1523,6 +1523,18 @@ int64_t gojo_os___wait(int64_t pid) {
         }
     }
 #endif
+    if (!gojo_sim_on) {
+        // no pidfd (macOS, old kernels): poll, sleeping a little longer each
+        // time, so that the wait can be cancelled
+        int64_t nap = 500000;
+        for (;;) {
+            pid_t r = waitpid((pid_t)pid, &st, WNOHANG);
+            if (r == (pid_t)pid) return exit_status(st);
+            if (r < 0 && errno != EINTR) return -errno;
+            if (r == 0 && !gojo_time___sleep(nap)) return -ECANCELED;
+            if (nap < 20000000) nap *= 2;
+        }
+    }
     gojo_blocking_enter();
     pid_t r;
     while ((r = waitpid((pid_t)pid, &st, 0)) < 0 && errno == EINTR) {
@@ -1565,12 +1577,17 @@ void gojo_os___environ(gojo_vec *out) {
 #define SIG_LISTENERS 8
 static int g_sig_fds[65][SIG_LISTENERS];  // write fd + 1; 0 for none
 static pthread_mutex_t g_sig_lock = PTHREAD_MUTEX_INITIALIZER;
+// handlers between reading a write fd and being done with it: a listener
+// closes its pipe only when none is, so a handler never writes to a closed
+// (or reused) descriptor
+static int g_sig_inflight;
 
 static void on_notify(int sig) {
     int saved = errno;
+    __atomic_add_fetch(&g_sig_inflight, 1, __ATOMIC_SEQ_CST);
     if (sig > 0 && sig < 65) {
         for (int k = 0; k < SIG_LISTENERS; k++) {
-            int f = __atomic_load_n(&g_sig_fds[sig][k], __ATOMIC_ACQUIRE);
+            int f = __atomic_load_n(&g_sig_fds[sig][k], __ATOMIC_SEQ_CST);
             if (f) {
                 uint8_t b = (uint8_t)sig;
                 ssize_t n = write(f - 1, &b, 1);
@@ -1578,6 +1595,7 @@ static void on_notify(int sig) {
             }
         }
     }
+    __atomic_sub_fetch(&g_sig_inflight, 1, __ATOMIC_SEQ_CST);
     errno = saved;
 }
 
@@ -1626,11 +1644,13 @@ void gojo_os___unnotify(gojo_slice codes, int64_t wfd) {
         if (s < 0 || s >= 65) continue;
         bool any = false;
         for (int k = 0; k < SIG_LISTENERS; k++) {
-            if (g_sig_fds[s][k] == (int)wfd + 1) __atomic_store_n(&g_sig_fds[s][k], 0, __ATOMIC_RELEASE);
+            if (g_sig_fds[s][k] == (int)wfd + 1) __atomic_store_n(&g_sig_fds[s][k], 0, __ATOMIC_SEQ_CST);
             any = any || g_sig_fds[s][k];
         }
         if (!any) signal(s, s == SIGQUIT ? on_quit : (s == SIGINT || s == SIGTERM) && !gojo_sim_on ? on_shutdown : SIG_DFL);
     }
     pthread_mutex_unlock(&g_sig_lock);
+    // a handler that read the fd before it was cleared may still write to it
+    while (__atomic_load_n(&g_sig_inflight, __ATOMIC_SEQ_CST)) sched_yield();
     close((int)wfd);
 }
