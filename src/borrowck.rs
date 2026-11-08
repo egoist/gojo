@@ -338,6 +338,8 @@ struct Bc<'a> {
     defers: Vec<Vec<(TBlock, bool)>>,
     /// Block depth each local was declared at (parameters: 0).
     decl_depth: HashMap<LocalId, usize>,
+    /// Locals already reported as viewed by the value of the block that drops them.
+    escaped: Vec<LocalId>,
     /// Active `with x = mu.lock()` blocks: the body's depth, the locked paths
     /// and the `with` statement's span. Views into locked data can't leave them.
     locked: Vec<(usize, Vec<Path>, Span, String)>,
@@ -390,7 +392,7 @@ fn place_path(e: &TExpr) -> Option<Path> {
 
 impl<'a> Bc<'a> {
     fn new(prog: &'a Program, tf: &'a TFunc, proj: &'a HashMap<FuncId, Vec<usize>>, view_ret: bool) -> Bc<'a> {
-        Bc { prog, tf, proj, diags: vec![], loans: vec![], holders: HashMap::new(), depth: 0, suppress: 0, loops: vec![], view_ret, defers: vec![vec![]], decl_depth: HashMap::new(), locked: vec![], in_closure: false, in_each_body: false, via_parents: HashMap::new(), tscopes: vec![], spawn_depth: None }
+        Bc { prog, tf, proj, diags: vec![], loans: vec![], holders: HashMap::new(), depth: 0, suppress: 0, loops: vec![], view_ret, defers: vec![vec![]], decl_depth: HashMap::new(), escaped: vec![], locked: vec![], in_closure: false, in_each_body: false, via_parents: HashMap::new(), tscopes: vec![], spawn_depth: None }
     }
 
     fn err(&mut self, d: Diag) {
@@ -889,6 +891,10 @@ impl<'a> Bc<'a> {
             // would run after the owner is gone (locals are numbered in
             // declaration order).
             if od > depth || (od == depth && od > 0 && p.0 > holder) {
+                if self.escaped.contains(&p.0) {
+                    // reported where its block's value took the view
+                    return;
+                }
                 let (o, osp) = (self.tf.locals[p.0 as usize].name.clone(), self.tf.locals[p.0 as usize].span);
                 let h = self.tf.locals[holder as usize].name.clone();
                 if o.starts_with("__c") {
@@ -1024,6 +1030,19 @@ impl<'a> Bc<'a> {
         }
         if let Some(v) = &b.value {
             self.expr(st, v);
+            // the value is used after the block, where its own locals are gone
+            // (`f(if c { let s = ...; s.asStr() } else { "" })`)
+            if v.ty.is_view() {
+                if let Ok(srcs) = self.view_sources(v) {
+                    if let Some((p, _)) = srcs.iter().find(|(p, _)| declared.contains(&p.0) && !self.escaped.contains(&p.0)) {
+                        let (o, osp) = (self.tf.locals[p.0 as usize].name.clone(), self.tf.locals[p.0 as usize].span);
+                        if self.suppress == 0 {
+                            self.escaped.push(p.0);
+                        }
+                        self.err(Diag::new(v.span, format!("`{}` does not live long enough: the block's value views it, but it is dropped where the block ends", o)).note(Some(osp), format!("`{}` is declared in the block", o)).note(None, format!("declare `{}` before the block, or make the value an owned copy (`.toString()` / `.toVec()`)", o)));
+                    }
+                }
+            }
         }
         // a task handle must be joined or cancelled where the block ends
         // normally (leaving early cancels the scope's tasks anyway)
@@ -1377,7 +1396,7 @@ impl<'a> Bc<'a> {
                         self.err(Diag::new(sp, "returns a task handle or `Scope` value of a scope in this function, which has ended by then").note(Some(lsp), "the scope").note(None, "join the task inside the scope and return its result instead"));
                         continue;
                     }
-                    if matches!(l.kind, LocalKind::Let | LocalKind::Var | LocalKind::Param(Mode::Sink)) {
+                    if matches!(l.kind, LocalKind::Let | LocalKind::Var | LocalKind::Param(Mode::Sink)) && !self.escaped.contains(&p.0) {
                         let n = l.name.clone();
                         let lsp = l.span;
                         self.err(Diag::new(sp, format!("returns a view of `{}`, which is dropped when the function returns", n)).note(Some(lsp), "declared here"));
@@ -1685,7 +1704,7 @@ impl<'a> Bc<'a> {
             }
         }
         // the body is checked on its own
-        let mut inner = Bc { prog: self.prog, tf: self.tf, proj: self.proj, diags: vec![], loans: vec![], holders: self.holders.clone(), depth: 0, suppress: self.suppress, loops: vec![], view_ret: false, defers: vec![vec![]], decl_depth: c.params.iter().map(|p| (*p, 0)).collect(), locked: self.locked.iter().map(|(_, ps, sp, n)| (0, ps.clone(), *sp, n.clone())).collect(), in_closure: true, in_each_body: c.loop_body.is_some(), via_parents: self.via_parents.clone(), tscopes: vec![], spawn_depth: None };
+        let mut inner = Bc { prog: self.prog, tf: self.tf, proj: self.proj, diags: vec![], loans: vec![], holders: self.holders.clone(), depth: 0, suppress: self.suppress, loops: vec![], view_ret: false, defers: vec![vec![]], decl_depth: c.params.iter().map(|p| (*p, 0)).collect(), escaped: vec![], locked: self.locked.iter().map(|(_, ps, sp, n)| (0, ps.clone(), *sp, n.clone())).collect(), in_closure: true, in_each_body: c.loop_body.is_some(), via_parents: self.via_parents.clone(), tscopes: vec![], spawn_depth: None };
         let mut s = St::new();
         inner.block(&mut s, &c.body);
         inner.end_scope_defers(&mut s);

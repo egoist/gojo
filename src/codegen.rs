@@ -174,6 +174,10 @@ enum Cl {
     DropTemp(String, Ty),
     /// drop guarded by a flag variable
     DropFlag(String, Ty, String),
+    /// A temporary of a branch's value (see `SK::Tail`): declared at the top of
+    /// the function with a flag, so the enclosing statement can drop it after
+    /// the branch's C block has closed.
+    DropLater(String, Ty, String),
     Defer(TBlock),
     /// Runs only on error returns.
     ErrDefer(TBlock),
@@ -188,6 +192,11 @@ enum SK {
     /// A loop body with its loop id.
     Loop(u32),
     Stmt,
+    /// The value of a branch (a block's last expression, a match arm, the right
+    /// side of `??`) whose type may hold a view: the view may point into the
+    /// branch's temporaries, so they live until the enclosing statement is done
+    /// (`out.push(if c { "${x}" } else { "" })`).
+    Tail,
     Func,
 }
 
@@ -204,6 +213,8 @@ struct Fs<'a> {
     tf: &'a TFunc,
     subst: HashMap<TParamId, Ty>,
     out: String,
+    /// Declarations emitted at the top of the body, before `out`.
+    decls: String,
     ind: usize,
     scopes: Vec<Scope>,
     repr: HashMap<LocalId, Repr>,
@@ -977,7 +988,7 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
         let (sig, ps) = self.fn_signature(f, &subst, &name);
         let _ = writeln!(self.protos, "{};", sig);
         let ret = if fd.yields.is_some() { fd.ret.subst(&subst) } else { fd.ret.subst(&subst) };
-        let mut fs = Fs { tf, subst, out: String::new(), ind: 1, scopes: vec![], repr: HashMap::new(), flagged: HashSet::new(), flags: HashMap::new(), ret, yields: fd.yields.is_some(), err_mode: None, loop_labels: vec![], lb: None, line: (u32::MAX, 0), tscopes: HashMap::new() };
+        let mut fs = Fs { tf, subst, out: String::new(), decls: String::new(), ind: 1, scopes: vec![], repr: HashMap::new(), flagged: HashSet::new(), flags: HashMap::new(), ret, yields: fd.yields.is_some(), err_mode: None, loop_labels: vec![], lb: None, line: (u32::MAX, 0), tscopes: HashMap::new() };
         collect_moves_block(&tf.body, &mut fs.flagged, tf);
         fs.scopes.push(Scope { kind: SK::Func, items: vec![], wait: None });
         let mut lids = vec![];
@@ -1006,7 +1017,7 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
             self.emit(&mut fs, "GOJO_POLL();");
         }
         self.fn_body(&mut fs, &body);
-        let _ = writeln!(self.bodies, "{} {{\n{}}}\n{}", sig, fs.out, C_LINE_MARK);
+        let _ = writeln!(self.bodies, "{} {{\n{}{}}}\n{}", sig, fs.decls, fs.out, C_LINE_MARK);
     }
 
     fn fn_body(&mut self, fs: &mut Fs, body: &TBlock) {
@@ -1107,6 +1118,21 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
         fs.scopes.pop();
     }
 
+    /// The scope for the value of a branch of type `t`.
+    fn push_value_scope(&mut self, fs: &mut Fs, t: &Ty) {
+        self.push_scope(fs, if t.contains_view() { SK::Tail } else { SK::Stmt });
+    }
+
+    /// Like `pop_scope`, but returns the branch-value temporaries (`DropLater`)
+    /// instead of dropping them; the caller hands them to the enclosing scope.
+    fn pop_scope_keeping_later(&mut self, fs: &mut Fs) -> Vec<Cl> {
+        let items = std::mem::take(&mut fs.scopes.last_mut().unwrap().items);
+        let (later, now) = items.into_iter().partition(|c| matches!(c, Cl::DropLater(..)));
+        fs.scopes.last_mut().unwrap().items = now;
+        self.pop_scope(fs);
+        later
+    }
+
     fn emit_scope_cleanups(&mut self, fs: &mut Fs, idx: usize) {
         self.emit_scope_cleanups_at(fs, idx, false)
     }
@@ -1146,6 +1172,12 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
             Cl::DropFlag(n, t, flag) => {
                 let d = self.drop_fn(t);
                 self.emit(fs, &format!("if ({}) {}(&{});", flag, d, n));
+            }
+            Cl::DropLater(n, t, flag) => {
+                // the flag lives as long as the function: clear it for the next
+                // time the statement runs (in a loop) and takes another branch
+                let d = self.drop_fn(t);
+                self.emit(fs, &format!("if ({}) {{ {}(&{}); {} = 0; }}", flag, d, n, flag));
             }
             Cl::Defer(b) => {
                 self.emit(fs, "{");
@@ -1273,6 +1305,13 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
     fn materialize(&mut self, fs: &mut Fs, s: &str, t: &Ty, owned: bool) -> String {
         let c = self.cty(t);
         let n = self.tmp();
+        if owned && self.needs_drop(t) && fs.scopes.last().unwrap().kind == SK::Tail {
+            let f = self.tmp();
+            let _ = writeln!(fs.decls, "    {} {}; bool {} = 0;", c, n, f);
+            self.emit(fs, &format!("{} = {}; {} = 1;", n, s, f));
+            self.register(fs, Cl::DropLater(n.clone(), t.clone(), f));
+            return n;
+        }
         self.emit(fs, &format!("{} {} = {};", c, n, s));
         if owned && self.needs_drop(t) {
             self.register_stmt(fs, Cl::DropTemp(n.clone(), t.clone()));
@@ -1757,19 +1796,21 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
         for s in &b.stmts {
             self.stmt(fs, s);
         }
+        let mut later = vec![];
         if let Some(v) = &b.value {
-            self.push_scope(fs, SK::Stmt);
-            let s = self.expr(fs, v);
             let t = self.sub(fs, &v.ty);
+            self.push_value_scope(fs, &t);
+            let s = self.expr(fs, v);
             match dest {
                 Some(d) if v.ty != Ty::Never && t != Ty::Unit => self.emit(fs, &format!("{} = {};", d, s)),
                 _ => self.discard(fs, &s, &t, v.is_place()),
             }
-            self.pop_scope(fs);
+            later = self.pop_scope_keeping_later(fs);
         }
         self.pop_scope(fs);
         fs.ind -= 1;
         self.emit(fs, "}");
+        fs.scopes.last_mut().unwrap().items.extend(later);
     }
 
     fn assign(&mut self, fs: &mut Fs, place: &TExpr, op: Option<BinOp>, value: &TExpr, span: Span) {
@@ -2560,9 +2601,10 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
                     }
                 }
                 self.block_into(fs, handler, r.as_deref());
-                self.pop_scope(fs);
+                let later = self.pop_scope_keeping_later(fs);
                 fs.ind -= 1;
                 self.emit(fs, "}");
+                fs.scopes.last_mut().unwrap().items.extend(later);
                 r.unwrap_or_else(|| "0".into())
             }
             TK::Coalesce { l, r } => {
@@ -2579,14 +2621,15 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
                 let val = if flat { tv.clone() } else { self.oval(&lt, &tv) };
                 self.emit(fs, &format!("if ({}) {} = {}; else {{", cond, res, val));
                 fs.ind += 1;
-                self.push_scope(fs, SK::Stmt);
+                self.push_value_scope(fs, &t);
                 let rv = self.expr(fs, r);
                 if r.ty != Ty::Never {
                     self.emit(fs, &format!("{} = {};", res, rv));
                 }
-                self.pop_scope(fs);
+                let later = self.pop_scope_keeping_later(fs);
                 fs.ind -= 1;
                 self.emit(fs, "}");
+                fs.scopes.last_mut().unwrap().items.extend(later);
                 res
             }
             TK::OptField { base, index } => {
@@ -3389,7 +3432,7 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
         let ret = fty.ret.clone();
         let rc = self.ret_cty(&ret);
         let mut ps = vec!["void *envp".to_string()];
-        let mut nfs = Fs { tf: fs.tf, subst: fs.subst.clone(), out: String::new(), ind: 1, scopes: vec![], repr: HashMap::new(), flagged: fs.flagged.clone(), flags: HashMap::new(), ret: ret.clone(), yields: false, err_mode: None, loop_labels: vec![], lb: None, line: (u32::MAX, 0), tscopes: HashMap::new() };
+        let mut nfs = Fs { tf: fs.tf, subst: fs.subst.clone(), out: String::new(), decls: String::new(), ind: 1, scopes: vec![], repr: HashMap::new(), flagged: fs.flagged.clone(), flags: HashMap::new(), ret: ret.clone(), yields: false, err_mode: None, loop_labels: vec![], lb: None, line: (u32::MAX, 0), tscopes: HashMap::new() };
         if let (Some(lid), Some(_)) = (c.loop_body, &lbp) {
             // `return` / `try` in the body act on the enclosing function
             nfs.ret = fs.ret.clone();
@@ -3450,7 +3493,7 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
         } else {
             self.fn_body(&mut nfs, &body);
         }
-        let _ = writeln!(self.bodies, "{} {{\n{}}}\n{}", sig, nfs.out, C_LINE_MARK);
+        let _ = writeln!(self.bodies, "{} {{\n{}{}}}\n{}", sig, nfs.decls, nfs.out, C_LINE_MARK);
         // environment value
         if let Some((ctlp, retp)) = &lbp {
             let mut inits = vec![];
@@ -3623,15 +3666,16 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
                     }
                 }
             }
-            self.push_scope(fs, SK::Stmt);
-            let bv = self.expr(fs, &arm.body);
             let bt = self.sub(fs, &arm.body.ty);
+            self.push_value_scope(fs, &bt);
+            let bv = self.expr(fs, &arm.body);
             match &res {
                 Some(r) if arm.body.ty != Ty::Never => self.emit(fs, &format!("{} = {};", r, bv)),
                 _ => self.discard(fs, &bv, &bt, arm.body.is_place()),
             }
+            let later = self.pop_scope_keeping_later(fs);
             self.pop_scope(fs);
-            self.pop_scope(fs);
+            fs.scopes.last_mut().unwrap().items.extend(later);
             self.emit(fs, &format!("goto {};", end));
             if guard_open {
                 fs.ind -= 1;

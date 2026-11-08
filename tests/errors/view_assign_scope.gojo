@@ -38,9 +38,29 @@ fn block_value() {
     let v = {
         let s = "abc".toString()
         s.asStr()
+        // error: `s` does not live long enough: the block's value views it, but it is dropped where the block ends
     }
-    // error: `s` does not live long enough: `v` would still view it after it is dropped
     println(v)
+}
+
+// The value of a branch is used after the branch, where its locals are gone.
+fn branch_argument(x: int) -> String {
+    var out = "".toString()
+    out.push(if x > 0 {
+        let s = "${x}"
+        s.asStr()
+        // error: `s` does not live long enough: the block's value views it, but it is dropped where the block ends
+    } else { "none" })
+    return out
+}
+
+fn branch_result(x: int) -> str {
+    if x > 0 {
+        let s = "${x}"
+        let w = s.asStr()
+        w
+        // error: `s` does not live long enough: the block's value views it, but it is dropped where the block ends
+    } else { "none" }
 }
 
 fn longest() {
@@ -94,6 +114,7 @@ fn main() {
     optional()
     slices()
     block_value()
+    println(branch_argument(1), branch_result(1))
     longest()
     var o = "abc"
     into_inout(&o, "def")
