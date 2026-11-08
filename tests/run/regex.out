@@ -1,0 +1,45 @@
+true some(Span{lo: 5, hi: 15}) some("2026-11-08") 3 some(2)
+some(Span{lo: 19, hi: 29}) [Span{lo: 5, hi: 15}, Span{lo: 19, hi: 29}] ["2026-11-08", "2027-01-31"]
+["2026-11-08", "2026", "11", "08"] 4 2026-11-08 some("2026") some("08") none some(Span{lo: 5, hi: 9})
+08.11.2026 $  
+some("08")
+some("31")
+from 08/11/2026 to 31/01/2027 from [2026-11-08] to 2027-01-31 from 2026-11-08 to 2027-01-31
+home_ann work_bob
+HELLO BIG WORLD
+-b-c-
+["a", "b", "c", "", "d"]
+["a", "b,c,d"] ["", "a", "b", "c", ""]
+[Span{lo: 0, hi: 0}, Span{lo: 1, hi: 4}] [Span{lo: 0, hi: 0}, Span{lo: 1, hi: 1}, Span{lo: 3, hi: 3}, Span{lo: 5, hi: 5}]
+some("a") ["<a>", "<b>"]
+some(["abcd", "a", "bcd", ""])
+some(["", ""]) some(["abab", "b"])
+["one"] ["one", "two", "three"]
+true false
+[Span{lo: 0, hi: 3}, Span{lo: 11, hi: 14}] [Span{lo: 7, hi: 10}]
+["it", "s", "a", "dog", "eat", "dog", "world"] ["ab", "c"]
+["héllo", "wörld", "日本"] ["Ünïcode", "Ελλάδα"]
+true [Span{lo: 0, hi: 1}, Span{lo: 2, hi: 3}, Span{lo: 4, hi: 7}] some("ΑΒΓ")
+false ["éd", "é"] ["é", "ÿ", "a"]
+["ab1", "cd!"] ["é", "A", "\x00"]
+["aa", "Aa"] ["aB", "C"] some("a")
+some("1.5**") 1\.5\*\[x\] true
+["xx", "xxx", "xxx", "xxx"] some("a{,2}")
+regex: a group has no closing ) at offset 1 in `a(b`
+regex: a ) without a matching ( at offset 1 in `a)b`
+regex: a class has no closing ] at offset 0 in `[a-`
+regex: the range `z-a` is backwards at offset 1 in `[z-a]`
+regex: nothing to repeat before `*` at offset 0 in `*a`
+regex: a repetition of a repetition (write a group around the first: `(?:x*)*`) at offset 2 in `a**`
+regex: a repetition of a repetition (write a group around the first: `(?:x*)*`) at offset 4 in `x{2}{3}`
+regex: a repeat count is larger than 1000 at offset 1 in `a{1001}`
+regex: backreferences aren't supported at offset 0 in `\1`
+regex: lookaround isn't supported at offset 0 in `(?=a)`
+regex: two groups are named `n` at offset 12 in `(?P<n>a)(?P<n>b)`
+regex: unknown Unicode class `Greek` (known: L, Lu, Ll, N, Nd, P, S, Cc, White_Space) at offset 0 in `\p{Greek}`
+regex: unknown escape `\k` at offset 0 in `\k`
+regex: unknown flag `y` in a group (flags are i, m, s and U) at offset 2 in `(?y)`
+regex: the pattern is too large: it compiles to more than 100000 instructions at offset 0 in `((((x){1000}){1000}){1000})`
+ok(true) true
+false some(Span{lo: 0, hi: 100000})
+[2, 1, 3] (?P<y>\d{4})-(?P<m>\d\d)-(?P<d>\d\d)

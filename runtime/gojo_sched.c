@@ -929,6 +929,10 @@ static gojo_g *g_new_slot(void) {
     return g;
 }
 
+#ifdef GOJO_TYSAN_ON
+void *(*volatile gojo_tysan_memset)(void *, int, size_t) = memset;
+#endif
+
 // TypeSanitizer's mmap interceptor clears the shadow of the whole mapping,
 // eight bytes of it per byte mapped, so every 2 MB goroutine stack would cost
 // 16 MB of memory at once (and the main goroutine's 1 GB stack 8 GB). A stack
@@ -988,11 +992,13 @@ static void g_prepare(gojo_g *g) {
 #if defined(__aarch64__)
     uint8_t *sp = top - GOJO_CTX_FRAME;
     memset(sp, 0, GOJO_CTX_FRAME);
+    GOJO_UNTYPE(sp, GOJO_CTX_FRAME);
     ((void **)sp)[GOJO_CTX_RET_SLOT] = (void *)g_entry;
 #else
     // on entry to g_entry: (rsp + 8) must be 16-byte aligned
     uint8_t *sp = top - 8 - GOJO_CTX_FRAME;
     memset(sp, 0, GOJO_CTX_FRAME);
+    GOJO_UNTYPE(sp, GOJO_CTX_FRAME);
     ((void **)sp)[GOJO_CTX_RET_SLOT] = (void *)g_entry;
     unsigned int mxcsr = 0;
     unsigned short fcw = 0;
@@ -1515,6 +1521,10 @@ static void g_entry(void) {
 
 static void worker_init(gojo_worker *w) {
     pthread_cond_init(&w->cv, NULL);
+    // a new thread's TLS can sit where an earlier mapping held other types
+    // (glibc maps thread stacks behind TypeSanitizer's back)
+    GOJO_UNTYPE(&t_worker, sizeof t_worker);
+    GOJO_UNTYPE(&t_alt_stack, sizeof t_alt_stack);
     t_worker = w;
     w->rng = ((uint64_t)w->id + 1) * 0x9E3779B97F4A7C15ULL ^ (uint64_t)gojo_time_now();
     if (!w->rng) w->rng = 1;
@@ -3594,8 +3604,9 @@ static void sock_setup(int fd) {
 #endif
 }
 
-// "host:port" or ":port"; an empty host means all interfaces when listening.
-static int resolve(gojo_str addr, bool passive, struct addrinfo **out) {
+// Splits "host:port", "[v6]:port" or ":port" into C strings.
+static bool split_hostport(gojo_str addr, char *host, size_t hcap, char *port, size_t pcap) {
+    if (addr.len && memchr(addr.ptr, 0, (size_t)addr.len)) return false;
     int64_t colon = -1;
     for (int64_t i = addr.len - 1; i >= 0; i--) {
         if (addr.ptr[i] == ':') {
@@ -3603,27 +3614,44 @@ static int resolve(gojo_str addr, bool passive, struct addrinfo **out) {
             break;
         }
     }
-    if (colon < 0) return EINVAL;
-    char host[256], port[32];
-    if (colon >= (int64_t)sizeof host || addr.len - colon - 1 >= (int64_t)sizeof port) return EINVAL;
-    memcpy(host, addr.ptr, (size_t)colon);
-    host[colon] = 0;
+    if (colon < 0) return false;
+    int64_t h0 = 0, h1 = colon;
+    if (colon >= 2 && addr.ptr[0] == '[' && addr.ptr[colon - 1] == ']') {
+        h0 = 1;
+        h1 = colon - 1;
+    }
+    if (h1 - h0 >= (int64_t)hcap || addr.len - colon - 1 >= (int64_t)pcap) return false;
+    memcpy(host, addr.ptr + h0, (size_t)(h1 - h0));
+    host[h1 - h0] = 0;
     memcpy(port, addr.ptr + colon + 1, (size_t)(addr.len - colon - 1));
     port[addr.len - colon - 1] = 0;
+    return true;
+}
+
+// "host:port" or ":port"; an empty host means all interfaces when listening.
+static int resolve_as(gojo_str addr, int socktype, int family, bool passive, struct addrinfo **out) {
+    char host[256], port[32];
+    if (!split_hostport(addr, host, sizeof host, port, sizeof port)) return EINVAL;
     struct addrinfo hints;
     memset(&hints, 0, sizeof hints);
-    hints.ai_family = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_family = family;
+    hints.ai_socktype = socktype;
     if (passive) hints.ai_flags = AI_PASSIVE;
+#if defined(AI_V4MAPPED)
+    if (family == AF_INET6) hints.ai_flags |= AI_V4MAPPED;
+#endif
     // name lookups can take seconds: give the CPU slot away meanwhile
     gojo_blocking_enter();
-    int r = getaddrinfo(colon ? host : NULL, port, &hints, out);
+    int r = getaddrinfo(host[0] ? host : NULL, port, &hints, out);
     gojo_ffi_exit();
     return r == 0 ? 0 : EHOSTUNREACH;
 }
 
+static int resolve(gojo_str addr, bool passive, struct addrinfo **out) {
+    return resolve_as(addr, SOCK_STREAM, AF_UNSPEC, passive, out);
+}
+
 int64_t gojo_net___listen(gojo_str addr) {
-    if (addr.len && memchr(addr.ptr, 0, (size_t)addr.len)) return -EINVAL;
     struct addrinfo *ai;
     int r = resolve(addr, true, &ai);
     if (r) return -r;
@@ -3649,7 +3677,6 @@ int64_t gojo_net___listen(gojo_str addr) {
 }
 
 int64_t gojo_net___connect(gojo_str addr) {
-    if (addr.len && memchr(addr.ptr, 0, (size_t)addr.len)) return -EINVAL;
     struct addrinfo *ai;
     int r = resolve(addr, false, &ai);
     if (r) return -r;
@@ -3737,6 +3764,240 @@ int64_t gojo_net___port(int64_t fd) {
     if (ss.ss_family == AF_INET) return ntohs(((struct sockaddr_in *)&ss)->sin_port);
     if (ss.ss_family == AF_INET6) return ntohs(((struct sockaddr_in6 *)&ss)->sin6_port);
     return -EINVAL;
+}
+
+
+// ------------------------------------------------------------------ UDP and DNS
+
+static int udp_open(int family) {
+    int fd = socket(family, SOCK_DGRAM, 0);
+    if (fd < 0) return -errno;
+    fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0) | O_NONBLOCK);
+    fcntl(fd, F_SETFD, FD_CLOEXEC);
+    return fd;
+}
+
+// Binds a datagram socket. ":port" is dual-stack where IPv6 is available.
+int64_t gojo_net___udpListen(gojo_str addr) {
+    char host[256], port[32];
+    if (!split_hostport(addr, host, sizeof host, port, sizeof port)) return -EINVAL;
+    struct addrinfo *ai;
+    int r = resolve_as(addr, SOCK_DGRAM, host[0] ? AF_UNSPEC : AF_INET6, true, &ai);
+    if (r && !host[0]) r = resolve_as(addr, SOCK_DGRAM, AF_INET, true, &ai);
+    if (r) return -r;
+    int err = EADDRNOTAVAIL;
+    for (struct addrinfo *a = ai; a; a = a->ai_next) {
+        int fd = udp_open(a->ai_family);
+        if (fd < 0) {
+            err = -fd;
+            continue;
+        }
+        if (a->ai_family == AF_INET6 && !host[0]) {
+            int zero = 0;
+            setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &zero, sizeof zero);
+        }
+        if (bind(fd, a->ai_addr, a->ai_addrlen) == 0) {
+            freeaddrinfo(ai);
+            return fd;
+        }
+        err = errno;
+        close(fd);
+    }
+    freeaddrinfo(ai);
+    // no IPv6 here: fall back to IPv4 for ":port"
+    if (!host[0] && err == EAFNOSUPPORT && resolve_as(addr, SOCK_DGRAM, AF_INET, true, &ai) == 0) {
+        for (struct addrinfo *a = ai; a; a = a->ai_next) {
+            int fd = udp_open(a->ai_family);
+            if (fd >= 0 && bind(fd, a->ai_addr, a->ai_addrlen) == 0) {
+                freeaddrinfo(ai);
+                return fd;
+            }
+            err = fd < 0 ? -fd : errno;
+            if (fd >= 0) close(fd);
+        }
+        freeaddrinfo(ai);
+    }
+    return -err;
+}
+
+// A datagram socket whose peer is fixed: `send` and `recv` talk to it alone.
+int64_t gojo_net___udpDial(gojo_str addr) {
+    struct addrinfo *ai;
+    int r = resolve_as(addr, SOCK_DGRAM, AF_UNSPEC, false, &ai);
+    if (r) return -r;
+    int err = EHOSTUNREACH;
+    for (struct addrinfo *a = ai; a; a = a->ai_next) {
+        int fd = udp_open(a->ai_family);
+        if (fd < 0) {
+            err = -fd;
+            continue;
+        }
+        if (connect(fd, a->ai_addr, a->ai_addrlen) == 0) {
+            freeaddrinfo(ai);
+            return fd;
+        }
+        err = errno;
+        close(fd);
+    }
+    freeaddrinfo(ai);
+    return -err;
+}
+
+static int sock_family(int fd) {
+    struct sockaddr_storage ss;
+    socklen_t len = sizeof ss;
+    if (getsockname(fd, (struct sockaddr *)&ss, &len) != 0) return AF_INET;
+    return ss.ss_family;
+}
+
+// The destination for a datagram in the socket's own family. Literal
+// addresses skip the resolver, so a hot `sendTo` loop costs no lookups.
+static int dest_addr(int fd, gojo_str addr, struct sockaddr_storage *ss, socklen_t *len) {
+    char host[256], port[32];
+    if (!split_hostport(addr, host, sizeof host, port, sizeof port) || !host[0]) return EINVAL;
+    int family = sock_family(fd);
+    char *end;
+    long pn = strtol(port, &end, 10);
+    if (*port && !*end && pn >= 0 && pn <= 65535) {
+        memset(ss, 0, sizeof *ss);
+        struct in_addr v4;
+        if (family == AF_INET6) {
+            struct sockaddr_in6 *s6 = (struct sockaddr_in6 *)ss;
+            s6->sin6_family = AF_INET6;
+            s6->sin6_port = htons((uint16_t)pn);
+            *len = sizeof *s6;
+            if (inet_pton(AF_INET6, host, &s6->sin6_addr) == 1) return 0;
+            if (inet_pton(AF_INET, host, &v4) == 1) {
+                s6->sin6_addr.s6_addr[10] = s6->sin6_addr.s6_addr[11] = 0xff;
+                memcpy(&s6->sin6_addr.s6_addr[12], &v4, 4);
+                return 0;
+            }
+        } else if (inet_pton(AF_INET, host, &v4) == 1) {
+            struct sockaddr_in *s4 = (struct sockaddr_in *)ss;
+            s4->sin_family = AF_INET;
+            s4->sin_port = htons((uint16_t)pn);
+            s4->sin_addr = v4;
+            *len = sizeof *s4;
+            return 0;
+        }
+    }
+    struct addrinfo *ai;
+    int r = resolve_as(addr, SOCK_DGRAM, family, false, &ai);
+    if (r) return r == EHOSTUNREACH && family == AF_INET ? EAFNOSUPPORT : r;
+    memcpy(ss, ai->ai_addr, ai->ai_addrlen);
+    *len = ai->ai_addrlen;
+    freeaddrinfo(ai);
+    return 0;
+}
+
+#if defined(MSG_NOSIGNAL)
+#define GOJO_SEND_FLAGS MSG_NOSIGNAL
+#else
+#define GOJO_SEND_FLAGS 0
+#endif
+
+// Sends one datagram; `addr` empty means the socket's fixed peer.
+int64_t gojo_net___sendTo(int64_t fd, gojo_slice data, gojo_str addr) {
+    struct sockaddr_storage ss;
+    socklen_t len = 0;
+    if (addr.len) {
+        int r = dest_addr((int)fd, addr, &ss, &len);
+        if (r) return -r;
+    }
+    for (;;) {
+        ssize_t n = addr.len ? sendto((int)fd, data.ptr, (size_t)data.len, GOJO_SEND_FLAGS, (struct sockaddr *)&ss, len)
+                             : send((int)fd, data.ptr, (size_t)data.len, GOJO_SEND_FLAGS);
+        if (n >= 0) return n;
+        if (errno == EINTR) continue;
+        if (errno != EAGAIN && errno != EWOULDBLOCK) return -errno;
+        if (!wait_fd((int)fd, true)) return -ECANCELED;
+    }
+}
+
+// "1.2.3.4:53" or "[::1]:53"; IPv4 peers of a dual-stack socket read as IPv4.
+static void format_addr(const struct sockaddr_storage *ss, gojo_string *out) {
+    char buf[INET6_ADDRSTRLEN + 16], ip[INET6_ADDRSTRLEN];
+    int n = 0;
+    if (ss->ss_family == AF_INET6) {
+        const struct sockaddr_in6 *s6 = (const struct sockaddr_in6 *)ss;
+        int port = ntohs(s6->sin6_port);
+        if (IN6_IS_ADDR_V4MAPPED(&s6->sin6_addr)) {
+            inet_ntop(AF_INET, &s6->sin6_addr.s6_addr[12], ip, sizeof ip);
+            n = snprintf(buf, sizeof buf, "%s:%d", ip, port);
+        } else {
+            inet_ntop(AF_INET6, &s6->sin6_addr, ip, sizeof ip);
+            n = snprintf(buf, sizeof buf, "[%s]:%d", ip, port);
+        }
+    } else if (ss->ss_family == AF_INET) {
+        const struct sockaddr_in *s4 = (const struct sockaddr_in *)ss;
+        inet_ntop(AF_INET, &s4->sin_addr, ip, sizeof ip);
+        n = snprintf(buf, sizeof buf, "%s:%d", ip, ntohs(s4->sin_port));
+    }
+    out->len = 0;
+    gojo_str s = { (const uint8_t *)buf, n };
+    gojo_string_drop(out);
+    *out = gojo_string_from(s);
+}
+
+// Receives one datagram into `buf` (at most `max` bytes; the rest of a longer
+// one is dropped) and its sender into `from` when non-null.
+int64_t gojo_net___recvFrom(int64_t fd, gojo_vec *buf, int64_t max, gojo_string *from) {
+    if (max <= 0) max = 1;
+    gojo_vec_reserve(buf, max, 1);
+    for (;;) {
+        struct sockaddr_storage ss;
+        socklen_t len = sizeof ss;
+        ssize_t n = recvfrom((int)fd, (uint8_t *)buf->ptr + buf->len, (size_t)max, 0, (struct sockaddr *)&ss, &len);
+        if (n >= 0) {
+            buf->len += n;
+            if (from) format_addr(&ss, from);
+            return n;
+        }
+        if (errno == EINTR) continue;
+        if (errno != EAGAIN && errno != EWOULDBLOCK) return -errno;
+        if (!wait_fd((int)fd, false)) return -ECANCELED;
+    }
+}
+
+// The addresses of `host`, IPv4 first. Returns 0, or 1 when there is no such
+// host, 2 when the resolver failed for now, 3 for anything else.
+int64_t gojo_net___lookup(gojo_str host, gojo_vec *out) {
+    char h[256];
+    if (host.len == 0 || host.len >= (int64_t)sizeof h || memchr(host.ptr, 0, (size_t)host.len)) return 1;
+    memcpy(h, host.ptr, (size_t)host.len);
+    h[host.len] = 0;
+    struct addrinfo hints, *ai;
+    memset(&hints, 0, sizeof hints);
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    gojo_blocking_enter();
+    int r = getaddrinfo(h, NULL, &hints, &ai);
+    gojo_ffi_exit();
+    if (r) return r == EAI_AGAIN ? 2 : (r == EAI_NONAME || r == EAI_FAIL
+#if defined(EAI_NODATA)
+                                        || r == EAI_NODATA
+#endif
+                                        ) ? 1 : 3;
+    for (int pass = 0; pass < 2; pass++) {
+        for (struct addrinfo *a = ai; a; a = a->ai_next) {
+            if (a->ai_family != (pass ? AF_INET6 : AF_INET)) continue;
+            char ip[INET6_ADDRSTRLEN];
+            const void *src = pass ? (const void *)&((struct sockaddr_in6 *)a->ai_addr)->sin6_addr
+                                   : (const void *)&((struct sockaddr_in *)a->ai_addr)->sin_addr;
+            inet_ntop(a->ai_family, src, ip, sizeof ip);
+            gojo_str s = { (const uint8_t *)ip, (int64_t)strlen(ip) };
+            bool dup = false;
+            for (int64_t i = 0; i < out->len && !dup; i++) {
+                gojo_string *e = &((gojo_string *)out->ptr)[i];
+                dup = e->len == s.len && memcmp(e->ptr, s.ptr, (size_t)s.len) == 0;
+            }
+            if (dup) continue;
+            gojo_vec_reserve(out, 1, sizeof(gojo_string));
+            ((gojo_string *)out->ptr)[out->len++] = gojo_string_from(s);
+        }
+    }
+    freeaddrinfo(ai);
+    return 0;
 }
 
 

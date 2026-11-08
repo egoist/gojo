@@ -1,0 +1,10 @@
+// The functions and constants of std/math.
+use std/math
+
+fn main() {
+    println(math.MaxI8, math.MinI32, math.MaxU64, math.MaxU8 + 0, math.EpsilonF64, math.MaxF64 > 1e308)
+    println(math.trunc(-2.7), math.hypot(3.0, 4.0), math.fmod(-7.0, 3.0), math.asin(1.0) * 2.0 == math.Pi, math.atan(1.0) * 4.0 == math.Pi, math.tanh(0.0))
+    println(math.log2(8.0), math.log10(0.001), math.log1p(0.0), math.expm1(0.0), math.isInf(-math.inf()), math.isFinite(1.0), math.isNaN(math.nan()))
+    println(math.toDegrees(math.Pi), math.toRadians(180.0) == math.Pi, math.lerp(10.0, 20.0, 0.25))
+    println(math.gcd(12, -18), math.gcd(0, 0), math.gcd(0, 7), math.lcm(4, 6), math.lcm(-4, 6), math.lcm(0, 5))
+}

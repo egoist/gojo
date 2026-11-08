@@ -1,0 +1,93 @@
+// json.encode / json.decode of any type, generated per type by the compiler.
+use std/json
+
+struct Address {
+    city: String
+    zip: ?String
+}
+
+copy enum Color { Red, Green }
+
+enum Shape {
+    Circle(r: f64)
+    Rect(w: f64, h: f64)
+    Dot
+}
+
+struct User {
+    name: String
+    age: int
+    tags: Vec[String] = ["new"]
+    address: ?Address
+    scores: Map[String, int] = [:]
+    color: Color = .Green
+    shapes: Vec[Shape] = []
+    pair: (int, String) = (1, "one")
+    extra: ?json.Value
+    small: u8 = 0
+}
+
+enum Tree {
+    Leaf
+    Node(left: Box[Tree], value: int, right: Box[Tree])
+}
+
+struct Page[T] {
+    items: Vec[T]
+    next: ?int
+}
+
+type Meters f64
+
+fn roundTrip[T](v: T) -> String {
+    return json.encode(json.decode[T](json.encode(v)).unwrap())
+}
+
+fn main() {
+    let u = User{name: "Ann \"A\"", age: 30, address: some(Address{city: "Oslo"}), shapes: [.Circle(1.5), .Dot, .Rect(2.0, 3.0)]}
+    let text = json.encode(u)
+    println(text)
+    println(roundTrip(u) == text)
+    println(json.encodePretty(Address{city: "Rome", zip: "00100"}), json.encodePretty(Vec[int]{}))
+
+    // left out: defaults, and none for optional fields; unknown keys skipped
+    match json.decode[User](`{"name": "Bo", "age": 7, "unknown": [1, {"x": 2}], "extra": {"any": [true, null]}, "color": "Red"}`) {
+        ok(v) => println(v.name, v.age, v.tags, v.color, v.extra, v.pair, v.address?.city)
+        err(e) => println(e)
+    }
+
+    // errors: what, in which value, and where
+    for bad in [`{"name": "Bo"}`, `{"name": "Bo", "age": "7"}`, `{"name": "Bo", "age": 7, "shapes": [{"Circle": {"r": "x"}}]}`, `{"name": "Bo", "age": 7, "color": "Blue"}`, `{"name": "Bo", "age": 7, "small": 300}`, `[1]`, `{"name": "Bo", "age": 7.5}`, `{"name": "Bo",
+  "age": 7} x`, `{"name": "Bo", "age": 7, "scores": {"a": 1, "b": null}}`, `{"name": "Bo", "age": 7, "shapes": ["Circle"]}`, `{"name": "Bo", "age": 7, "shapes": [{"Dot": null, "x": 1}]}`] {
+        match json.decode[User](bad) {
+            ok(_) => println("decoded?")
+            err(e) => println(e)
+        }
+    }
+
+    // recursive and generic types, newtypes, sets, arrays, tuples, maps
+    let t = Tree.Node(Box(Tree.Leaf), 1, Box(Tree.Node(Box(Tree.Leaf), 2, Box(Tree.Leaf))))
+    println(roundTrip(t), json.decode[Tree](`{"Leaf": {}}`), json.decode[Tree](`{"Leaf": null}`))
+    println(roundTrip(Page[Meters]{items: [Meters(1.5), Meters(2.0)], next: some(2)}), json.decode[Page[int]](`{"items": []}`))
+    let s: Set[String] = ["b", "a", "b"]
+    let arr: [3]int = [1, 2, 3]
+    println(json.encode(s), json.decode[Set[String]](`["x", "y", "x"]`), json.encode(arr), json.decode[[3]int](`[1,2]`), json.decode[(int, bool)](`[1, true]`))
+    let m: Map[int, Vec[?bool]] = [1: [some(true), none], 20: []]
+    let byColor: Map[Color, int] = [.Red: 1]
+    println(json.encode(m), json.decode[Map[int, Vec[?bool]]](json.encode(m)), json.encode(byColor), json.decode[Map[Color, int]](`{"Green": 2}`), json.decode[Map[int, int]](`{"x": 1}`))
+
+    // numbers and strings
+    println(json.decode[Vec[u64]](`[18446744073709551615, 0, -0]`), json.decode[i8](`-129`), json.decode[f64](`1e400`), json.decode[f32](`1e39`), json.decode[int](`1e3`))
+    println(json.decode[String](`"aé😀\n\\\u00e9\ud83d\ude00"`), json.decode[String](`"x\ud800"`), json.encode("é😀\u{1}\t"), json.encode([0.1 + 0.2, 1.0 / 0.0, -0.0, 1e300, 5e-324]))
+    println(json.decode[Vec[int]](`[1,]`), json.decode[Map[String, int]](`{"a":1,}`), json.decode[String](`"a`), json.decode[int](``), json.decode[Map[String, int]](`{"a": 1, "a": 2}`))
+    var deep: String = ""
+    for _ in 0..600 {
+        deep.push("[")
+    }
+    println(json.decode[json.Value](deep))
+
+    // to and from a Value tree
+    var tree = json.toValue(Address{city: "Oslo"})
+    tree.set("zip", json.string("0150"))
+    println(tree.encode(), json.fromValue[Address](tree), json.fromValue[Address](json.integer(1)))
+}

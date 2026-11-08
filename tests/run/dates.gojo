@@ -38,4 +38,27 @@ fn main() {
     }
     println()
     println(time.unix() > 1700000000, time.local(time.unixNanos()).year >= 2025)
+
+    // durations back from text; formatDuration's output reads back exactly
+    for s in ["1.5s", "2h45m", "-250ms", "0", "1h2m3.5s", "1µs", "3us", ".5s", "1.0000000005s", "", "5", "1x", "9999999999h"] {
+        match time.parseDuration(s) {
+            ok(n) => print(n, " ")
+            err(e) => print("[", e, "] ")
+        }
+    }
+    println()
+    println([1, 999, 1500, 61 * time.second, 3 * time.hour + 5 * time.minute].all(x => time.parseDuration(time.formatDuration(x)).ok() == some(x)))
+
+    // a ticker keeps to its schedule, and skips the ticks it missed
+    var tick = time.ticker(20 * time.millisecond)
+    let t0 = time.now()
+    var ticks = 0
+    for _ in 0..5 {
+        ticks += tick.wait()
+    }
+    let took = time.since(t0)
+    println(ticks, took >= 100 * time.millisecond, took < 400 * time.millisecond)
+    time.sleep(65 * time.millisecond)
+    let missed = tick.advance()
+    println(missed >= 3, tick.advance(), tick.deadline() > time.now())
 }

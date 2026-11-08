@@ -1,0 +1,190 @@
+// TLS: encrypted, authenticated connections (what HTTPS runs on), through
+// the system's OpenSSL 1.1 or 3. It is loaded the first time TLS is used, so
+// programs without TLS don't need it; `GOJO_LIBSSL` names the library when
+// it isn't in a standard place.
+//
+//   var c = try tls.dial("example.com:443")       // checks the certificate
+//   try c.writeText("GET / HTTP/1.1\r\nHost: example.com\r\n\r\n")
+//
+//   let ln = try tls.listen(":8443", "cert.pem", "key.pem")
+//   let c = try ln.accept()
+//
+// Like `net`, calls block only the calling task. One task may read from a
+// connection while another writes to it. TLS 1.2 is the oldest version
+// accepted.
+use std/{io, net}
+
+// Errors here are io.Error: TLS failures (a certificate that doesn't verify,
+// a failed handshake) are of kind `Other`, with OpenSSL's reason.
+pub type Error = io.Error
+
+fn __client(fd: int, name: str, ca: str, verify: bool, msg: inout String) -> int
+fn __serverCtx(cert: str, key: str, msg: inout String) -> int
+fn __freeCtx(ctx: int)
+fn __server(ctx: int, fd: int, msg: inout String) -> int
+fn __handshake(h: int, msg: inout String) -> int
+fn __read(h: int, buf: inout Vec[byte], max: int, msg: inout String) -> int
+fn __write(h: int, data: []byte, msg: inout String) -> int
+fn __close(h: int)
+
+fn fail(what: str, code: int, msg: str) -> Error {
+    if code < -1 {
+        return io.fromCode(what, -code)
+    }
+    return io.newError(.Other, "${what}: ${msg}")
+}
+
+// How a client checks the server it connects to.
+pub struct ClientConfig {
+    // the name the server's certificate must be for (and the one sent in the
+    // handshake, SNI); by default the host of the address
+    pub serverName: ?String
+    // a PEM file of CA certificates to trust instead of the system's
+    pub caFile: ?String
+    // don't check the certificate at all, which lets anyone in the middle
+    // read and change the traffic: only for tests
+    pub insecureSkipVerify: bool = false
+}
+
+// A TLS connection, from `dial` or `Listener.accept`. Closed when dropped
+// (with a close_notify). It is an `io.Reader` and an `io.Writer`.
+pub struct Conn {
+    tcp: net.Conn
+    h: int
+
+    // Appends up to `max` bytes to `buf`, waiting until at least one arrives.
+    // Returns how many were read; 0 means the peer closed the connection.
+    pub fn read(self, buf: inout Vec[byte], max: int) -> int ! Error {
+        var msg: String = ""
+        let n = __read(self.h, &buf, max, &msg)
+        if n < 0 {
+            return err(fail("tls read", n, msg))
+        }
+        return n
+    }
+
+    // Writes all of `data`.
+    pub fn write(self, data: []byte) ! Error {
+        var msg: String = ""
+        let r = __write(self.h, data, &msg)
+        if r < 0 {
+            return err(fail("tls write", r, msg))
+        }
+    }
+
+    // Writes the bytes of `s`.
+    pub fn writeText(self, s: str) ! Error {
+        return self.write(s.bytes())
+    }
+
+    // Reads until the peer closes the connection.
+    pub fn readAll(self) -> Vec[byte] ! Error {
+        var buf = Vec[byte]{}
+        loop {
+            let n = try self.read(&buf, 65536)
+            if n == 0 {
+                return buf
+            }
+        }
+    }
+
+    // Completes the handshake now. A server connection does it on its first
+    // read or write; call this to see a client's handshake errors there.
+    pub fn handshake(self) ! Error {
+        var msg: String = ""
+        let r = __handshake(self.h, &msg)
+        if r < 0 {
+            return err(fail("tls handshake", r, msg))
+        }
+    }
+
+    // The underlying TCP connection's file descriptor.
+    pub fn rawFd(self) -> int {
+        return self.tcp.rawFd()
+    }
+
+    fn drop(inout self) {
+        __close(self.h)
+    }
+}
+
+// The host part of "host:port" or "[v6]:port".
+fn hostOf(addr: str) -> str {
+    if addr.startsWith("[") {
+        if let i = addr.find("]") {
+            return addr[1..i]
+        }
+    }
+    if let i = addr.rfind(":") {
+        return addr[..i]
+    }
+    return addr
+}
+
+// TLS over an established TCP connection `tcp` (for protocols that start in
+// plain text, like SMTP's STARTTLS); `host` is the name to check.
+pub fn client(tcp: sink net.Conn, host: str, cfg: ClientConfig) -> Conn ! Error {
+    var msg: String = ""
+    let name = cfg.serverName.clone() ?? host.toString()
+    let ca = cfg.caFile.clone() ?? ""
+    let h = __client(tcp.rawFd(), name, ca, !cfg.insecureSkipVerify, &msg)
+    if h <= 0 {
+        return err(fail("tls handshake with ${name}", h, msg))
+    }
+    return Conn{tcp: tcp, h: h}
+}
+
+// Connects to `addr` ("host:port") and checks that its certificate is valid
+// for the host, against the system's root certificates.
+pub fn dial(addr: str) -> Conn ! Error {
+    return dialWith(addr, ClientConfig{})
+}
+
+// Like `dial`, checking the server as `cfg` says.
+pub fn dialWith(addr: str, cfg: ClientConfig) -> Conn ! Error {
+    let tcp = try net.dial(addr)
+    return client(tcp, hostOf(addr), cfg)
+}
+
+// A listening socket that serves TLS, from `listen`.
+pub struct Listener {
+    tcp: net.Listener
+    ctx: int
+
+    // Waits for the next connection. The handshake happens on the
+    // connection's first read or write, in whichever task uses it, so a slow
+    // client doesn't hold up the others.
+    pub fn accept(self) -> Conn ! Error {
+        let c = try self.tcp.accept()
+        var msg: String = ""
+        let h = __server(self.ctx, c.rawFd(), &msg)
+        if h == 0 {
+            return err(fail("tls accept", 0, msg))
+        }
+        return Conn{tcp: c, h: h}
+    }
+
+    // The port it listens on; useful after `listen(":0")`.
+    pub fn port(self) -> int {
+        return self.tcp.port()
+    }
+
+    fn drop(inout self) {
+        __freeCtx(self.ctx)
+    }
+}
+
+// Listens on `addr` (as `net.listen`) and serves TLS with the certificate
+// chain in the PEM file `certFile` and the private key in `keyFile`.
+pub fn listen(addr: str, certFile: str, keyFile: str) -> Listener ! Error {
+    var msg: String = ""
+    let ctx = __serverCtx(certFile, keyFile, &msg)
+    if ctx == 0 {
+        return err(fail("tls listen", 0, msg))
+    }
+    let tcp = net.listen(addr) catch e {
+        __freeCtx(ctx)
+        return err(e)
+    }
+    return Listener{tcp: tcp, ctx: ctx}
+}

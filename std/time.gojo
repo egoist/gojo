@@ -69,6 +69,136 @@ pub fn formatDuration(d: int) -> String {
     return fmt.format("{}m{}s", m, s)
 }
 
+// A duration written as `formatDuration` writes one, or as Go does: a
+// sequence of numbers (decimals allowed) each with a unit, ns, us (or µs),
+// ms, s, m or h, and an optional sign: "1.5s", "2h45m", "-250ms", "0".
+pub fn parseDuration(s: str) -> int ! ParseError {
+    var rest = s
+    var neg = false
+    if rest.startsWith("-") || rest.startsWith("+") {
+        neg = rest.startsWith("-")
+        rest = rest[1..]
+    }
+    if rest == "0" {
+        return 0
+    }
+    if rest.isEmpty() {
+        return err(durationFail(s, "it is empty"))
+    }
+    var total = 0
+    while !rest.isEmpty() {
+        let b = rest.bytes()
+        var i = 0
+        var whole = 0
+        var digits = 0
+        while i < b.len() && b[i] >= '0' && b[i] <= '9' {
+            whole = whole.checkedMul(10)?.checkedAdd(int(b[i] - '0')) ?? return err(durationFail(s, "it is too long"))
+            i += 1
+            digits += 1
+        }
+        // up to 9 decimals: nanoseconds of a second is the finest it gets
+        var frac = 0
+        var scale = 1
+        if i < b.len() && b[i] == '.' {
+            i += 1
+            while i < b.len() && b[i] >= '0' && b[i] <= '9' {
+                if scale < 1000000000 {
+                    frac = frac * 10 + int(b[i] - '0')
+                    scale *= 10
+                }
+                i += 1
+                digits += 1
+            }
+        }
+        if digits == 0 {
+            return err(durationFail(s, "expected a number"))
+        }
+        var j = i
+        while j < b.len() && (b[j] < '0' || b[j] > '9') && b[j] != '.' {
+            j += 1
+        }
+        let unitName = rest[i..j]
+        let unit = if unitName == "ns" {
+            nanosecond
+        } else if unitName == "us" || unitName == "µs" {
+            microsecond
+        } else if unitName == "ms" {
+            millisecond
+        } else if unitName == "s" {
+            second
+        } else if unitName == "m" {
+            minute
+        } else if unitName == "h" {
+            hour
+        } else if unitName.isEmpty() {
+            return err(durationFail(s, "a number needs a unit (ns, us, ms, s, m or h)"))
+        } else {
+            return err(durationFail(s, "unknown unit `${unitName}`"))
+        }
+        let part = whole.checkedMul(unit)?.checkedAdd(frac * unit / scale) ?? return err(durationFail(s, "it is too long"))
+        total = total.checkedAdd(part) ?? return err(durationFail(s, "it is too long"))
+        rest = rest[j..]
+    }
+    return if neg { -total } else { total }
+}
+
+fn durationFail(s: str, why: str) -> ParseError {
+    return ParseError{msg: fmt.format("cannot read `{}` as a duration: {}", s, why)}
+}
+
+// Ticks every `period` at fixed instants, `start + n * period`, so a slow
+// tick doesn't push the later ones back; ticks that are missed are skipped.
+//
+//   var tick = time.ticker(time.second)
+//   loop {
+//       tick.wait()                  // or, among other things to wait for:
+//       ...                          // select { time.at(tick.deadline()) => { tick.advance(); ... } }
+//   }
+pub struct Ticker {
+    period: int
+    next: int
+
+    // The instant (on the `now()` scale) of the next tick.
+    pub fn deadline(self) -> int {
+        return self.next
+    }
+
+    // Moves on to the first tick after now: how many ticks have passed (0
+    // when the next one hasn't come yet, more than 1 when some were missed).
+    pub fn advance(inout self) -> int {
+        let t = now()
+        if t < self.next {
+            return 0
+        }
+        let n = (t - self.next) / self.period + 1
+        self.next += n * self.period
+        return n
+    }
+
+    // Waits for the next tick, then `advance`s: how many ticks passed. 0
+    // when the task was cancelled while waiting.
+    pub fn wait(inout self) -> int {
+        let d = self.next - now()
+        if d > 0 {
+            sleep(d)
+        }
+        return self.advance()
+    }
+
+    // Starts again: the next tick is one period from now.
+    pub fn reset(inout self) {
+        self.next = now() + self.period
+    }
+}
+
+// A ticker whose first tick is one `period` from now.
+pub fn ticker(period: int) -> Ticker {
+    if period <= 0 {
+        panic("time.ticker: the period must be positive, not ${period}")
+    }
+    return Ticker{period, next: now() + period}
+}
+
 // `d / unit` with up to three decimals, without trailing zeros.
 fn trimmed(d: int, unit: int) -> String {
     let whole = d / unit

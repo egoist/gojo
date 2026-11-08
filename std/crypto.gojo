@@ -1,0 +1,214 @@
+// Cryptographic hashes (SHA-2, and SHA-1 and MD5 for old formats), HMAC,
+// PBKDF2, and comparison in constant time.
+//
+//   let sum = hex.encode(crypto.sha256("hello".bytes()))
+//   let mac = crypto.hmac(.Sha256, key, body)
+//   if !crypto.equal(mac, sent) { ... }       // never `==` for secrets
+//
+//   var d = crypto.Digest.new(.Sha256)       // streamed, e.g. a whole file:
+//   _ = try io.copy(&d, &file)                 // a Digest is an io.Writer
+//   let sum = d.finish()
+//
+// Random keys and nonces: `rand.secureBytes`.
+use std/io
+
+// The hash functions. MD5 and SHA-1 are broken for security: use them only
+// where a format requires them.
+pub copy enum Hash { Md5, Sha1, Sha256, Sha384, Sha512 }
+
+fn __init(st: inout Vec[byte], algo: int)
+fn __update(st: inout Vec[byte], data: []byte)
+fn __finish(st: inout Vec[byte], out: inout Vec[byte])
+fn __equal(a: []byte, b: []byte) -> bool
+
+fn algoId(h: Hash) -> int {
+    return match h {
+        Md5 => 0
+        Sha1 => 1
+        Sha256 => 2
+        Sha384 => 3
+        Sha512 => 4
+    }
+}
+
+// The length of a hash's digest, in bytes: 16, 20, 32, 48 or 64.
+pub fn size(h: Hash) -> int {
+    return match h {
+        Md5 => 16
+        Sha1 => 20
+        Sha256 => 32
+        Sha384 => 48
+        Sha512 => 64
+    }
+}
+
+// The input block size of a hash, in bytes (64, or 128 for SHA-384/512).
+pub fn blockSize(h: Hash) -> int {
+    return match h {
+        Sha384 | Sha512 => 128
+        _ => 64
+    }
+}
+
+// A hash computed piece by piece. It is an `io.Writer`, so `io.copy` can
+// stream a file or a connection into it.
+pub struct Digest {
+    st: Vec[byte] = Vec[byte]{}
+    algo: Hash
+
+    // A digest with nothing hashed yet.
+    pub fn new(h: Hash) -> Digest {
+        var d = Digest{algo: h}
+        __init(&d.st, algoId(h))
+        return d
+    }
+
+    // Adds `data` to what is hashed.
+    pub fn update(inout self, data: []byte) {
+        __update(&self.st, data)
+    }
+
+    // Adds the bytes of `s`.
+    pub fn updateText(inout self, s: str) {
+        __update(&self.st, s.bytes())
+    }
+
+    // For `io.Writer`: the same as `update`, and never fails.
+    pub fn write(inout self, data: []byte) ! io.Error {
+        __update(&self.st, data)
+    }
+
+    // The hash of everything added (the digest is used up).
+    pub fn finish(sink self) -> Vec[byte] {
+        var d = self
+        var out = Vec[byte]{}
+        __finish(&d.st, &out)
+        return out
+    }
+
+    // The hash of everything added so far; more can be added afterwards.
+    pub fn sum(self) -> Vec[byte] {
+        var c = Digest{st: self.st.clone(), algo: self.algo}
+        var out = Vec[byte]{}
+        __finish(&c.st, &out)
+        return out
+    }
+}
+
+// The hash of `data`.
+pub fn hash(h: Hash, data: []byte) -> Vec[byte] {
+    var d = Digest.new(h)
+    d.update(data)
+    return d.finish()
+}
+
+// SHA-256 of `data`, the usual choice.
+pub fn sha256(data: []byte) -> Vec[byte] {
+    return hash(.Sha256, data)
+}
+
+// SHA-512 of `data`.
+pub fn sha512(data: []byte) -> Vec[byte] {
+    return hash(.Sha512, data)
+}
+
+// SHA-1 of `data` (broken for security; for formats like WebSocket handshakes
+// and git).
+pub fn sha1(data: []byte) -> Vec[byte] {
+    return hash(.Sha1, data)
+}
+
+// MD5 of `data` (broken for security; for checksums old formats require).
+pub fn md5(data: []byte) -> Vec[byte] {
+    return hash(.Md5, data)
+}
+
+// An HMAC (RFC 2104) computed piece by piece: the hash keyed with `key`.
+pub struct Hmac {
+    inner: Digest
+    outer: Digest
+
+    // An HMAC with hash `h` and secret `key` (any length).
+    pub fn new(h: Hash, key: []byte) -> Hmac {
+        let bs = blockSize(h)
+        var k = if key.len() > bs { hash(h, key) } else { key.toVec() }
+        k.resize(bs, 0)
+        var ipad = Vec[byte]{}
+        var opad = Vec[byte]{}
+        ipad.reserve(bs)
+        opad.reserve(bs)
+        for b in k {
+            ipad.push(b ^ 0x36)
+            opad.push(b ^ 0x5c)
+        }
+        var inner = Digest.new(h)
+        inner.update(ipad)
+        var outer = Digest.new(h)
+        outer.update(opad)
+        return Hmac{inner: inner, outer: outer}
+    }
+
+    // Adds `data` to what is authenticated.
+    pub fn update(inout self, data: []byte) {
+        self.inner.update(data)
+    }
+
+    // For `io.Writer`: the same as `update`.
+    pub fn write(inout self, data: []byte) ! io.Error {
+        self.inner.update(data)
+    }
+
+    // The MAC of everything added (the HMAC is used up).
+    pub fn finish(sink self) -> Vec[byte] {
+        var h = self
+        let ih = h.inner.sum()
+        h.outer.update(ih)
+        return h.outer.sum()
+    }
+}
+
+// The HMAC of `data` with hash `h` and `key`. Compare MACs with `equal`.
+pub fn hmac(h: Hash, key: []byte, data: []byte) -> Vec[byte] {
+    var m = Hmac.new(h, key)
+    m.update(data)
+    return m.finish()
+}
+
+// A key of `keyLen` bytes derived from a password (PBKDF2, RFC 8018, with
+// HMAC-`h`). Use a random `salt` of 16 bytes or more, and as many
+// `iterations` as you can afford (600000 for SHA-256, as of 2023).
+pub fn pbkdf2(h: Hash, password: []byte, salt: []byte, iterations: int, keyLen: int) -> Vec[byte] {
+    if iterations < 1 || keyLen < 1 {
+        panic("pbkdf2: iterations and keyLen must be at least 1")
+    }
+    // the keyed state once; each step clones it instead of rehashing the key
+    let base = Hmac.new(h, password)
+    var out = Vec[byte]{}
+    var block: u32 = 1
+    while out.len() < keyLen{
+        var m = Hmac{inner: Digest{st: base.inner.st.clone(), algo: h}, outer: Digest{st: base.outer.st.clone(), algo: h}}
+        m.update(salt)
+        m.update([u8(block >> 24), u8((block >> 16) & 255), u8((block >> 8) & 255), u8(block & 255)])
+        var u = m.finish()
+        var t = u.clone()
+        for _ in 1..iterations {
+            var m2 = Hmac{inner: Digest{st: base.inner.st.clone(), algo: h}, outer: Digest{st: base.outer.st.clone(), algo: h}}
+            m2.update(u)
+            u = m2.finish()
+            for i in 0..t.len() {
+                t[i] ^= u[i]
+            }
+        }
+        out.extend(t)
+        block += 1
+    }
+    out.truncate(keyLen)
+    return out
+}
+
+// Whether `a` and `b` are equal, taking the same time wherever they differ:
+// for comparing MACs, tokens and password hashes, where `==` would leak how
+// much of a guess was right.
+pub fn equal(a: []byte, b: []byte) -> bool {
+    return __equal(a, b)
+}

@@ -1,0 +1,200 @@
+// Fixed-size numbers as bytes, in either byte order, and variable-length
+// integers (varints, as in Protocol Buffers and Go's encoding/binary).
+//
+//   var out = Vec[byte]{}
+//   binary.big.appendU32(&out, 0xCAFEBABE)
+//   binary.appendUvarint(&out, 300)
+//   let magic = binary.big.u32(out)               // 0xCAFEBABE
+//   let (n, size) = binary.uvarint(out[4..]) ?? (0, 0)
+//
+// Readers take the first bytes of a slice (slice it to read further on) and
+// panic when it is too short, like indexing.
+
+// The order of a number's bytes: most significant first (network order) or
+// least significant first (x86, ARM, most file formats).
+pub copy enum Order {
+    Big
+    Little
+
+    // The u16 in the first 2 bytes of `b`.
+    pub fn u16(self, b: []byte) -> u16 {
+        return u16(load(self, b, 2))
+    }
+    // The u32 in the first 4 bytes of `b`.
+    pub fn u32(self, b: []byte) -> u32 {
+        return u32(load(self, b, 4))
+    }
+    // The u64 in the first 8 bytes of `b`.
+    pub fn u64(self, b: []byte) -> u64 {
+        return load(self, b, 8)
+    }
+    // The i16 in the first 2 bytes of `b`.
+    pub fn i16(self, b: []byte) -> i16 {
+        return i16(__signed(load(self, b, 2), 2))
+    }
+    // The i32 in the first 4 bytes of `b`.
+    pub fn i32(self, b: []byte) -> i32 {
+        return i32(__signed(load(self, b, 4), 4))
+    }
+    // The i64 in the first 8 bytes of `b`.
+    pub fn i64(self, b: []byte) -> i64 {
+        return __signed(load(self, b, 8), 8)
+    }
+    // The f32 in the first 4 bytes of `b`.
+    pub fn f32(self, b: []byte) -> f32 {
+        return f32.fromBits(u32(load(self, b, 4)))
+    }
+    // The f64 in the first 8 bytes of `b`.
+    pub fn f64(self, b: []byte) -> f64 {
+        return f64.fromBits(load(self, b, 8))
+    }
+    // Writes `v` into the first 2 bytes of `b`.
+    pub fn putU16(self, b: inout []byte, v: u16) {
+        store(self, &b, u64(v), 2)
+    }
+    // Writes `v` into the first 4 bytes of `b`.
+    pub fn putU32(self, b: inout []byte, v: u32) {
+        store(self, &b, u64(v), 4)
+    }
+    // Writes `v` into the first 8 bytes of `b`.
+    pub fn putU64(self, b: inout []byte, v: u64) {
+        store(self, &b, u64(v), 8)
+    }
+    // Writes `v` into the first 2 bytes of `b`.
+    pub fn putI16(self, b: inout []byte, v: i16) {
+        store(self, &b, __bits(i64(v)), 2)
+    }
+    // Writes `v` into the first 4 bytes of `b`.
+    pub fn putI32(self, b: inout []byte, v: i32) {
+        store(self, &b, __bits(i64(v)), 4)
+    }
+    // Writes `v` into the first 8 bytes of `b`.
+    pub fn putI64(self, b: inout []byte, v: i64) {
+        store(self, &b, __bits(i64(v)), 8)
+    }
+    // Writes `v` into the first 4 bytes of `b`.
+    pub fn putF32(self, b: inout []byte, v: f32) {
+        store(self, &b, u64(v.toBits()), 4)
+    }
+    // Writes `v` into the first 8 bytes of `b`.
+    pub fn putF64(self, b: inout []byte, v: f64) {
+        store(self, &b, v.toBits(), 8)
+    }
+    // Appends the 2 bytes of `v` to `out`.
+    pub fn appendU16(self, out: inout Vec[byte], v: u16) {
+        __append(&out, u64(v), 2, self == .Big)
+    }
+    // Appends the 4 bytes of `v` to `out`.
+    pub fn appendU32(self, out: inout Vec[byte], v: u32) {
+        __append(&out, u64(v), 4, self == .Big)
+    }
+    // Appends the 8 bytes of `v` to `out`.
+    pub fn appendU64(self, out: inout Vec[byte], v: u64) {
+        __append(&out, u64(v), 8, self == .Big)
+    }
+    // Appends the 2 bytes of `v` to `out`.
+    pub fn appendI16(self, out: inout Vec[byte], v: i16) {
+        __append(&out, __bits(i64(v)), 2, self == .Big)
+    }
+    // Appends the 4 bytes of `v` to `out`.
+    pub fn appendI32(self, out: inout Vec[byte], v: i32) {
+        __append(&out, __bits(i64(v)), 4, self == .Big)
+    }
+    // Appends the 8 bytes of `v` to `out`.
+    pub fn appendI64(self, out: inout Vec[byte], v: i64) {
+        __append(&out, __bits(i64(v)), 8, self == .Big)
+    }
+    // Appends the 4 bytes of `v` to `out`.
+    pub fn appendF32(self, out: inout Vec[byte], v: f32) {
+        __append(&out, u64(v.toBits()), 4, self == .Big)
+    }
+    // Appends the 8 bytes of `v` to `out`.
+    pub fn appendF64(self, out: inout Vec[byte], v: f64) {
+        __append(&out, v.toBits(), 8, self == .Big)
+    }
+}
+
+// Shorthands: `binary.big.u32(b)`, `binary.little.appendU16(&out, v)`.
+pub let big = Order.Big
+pub let little = Order.Little
+
+fn __load(b: []byte, n: int, big: bool) -> u64
+// the low `n` bytes of `u` as a two's-complement number, sign-extended
+fn __signed(u: u64, n: int) -> i64
+// the two's-complement bits of `v`
+fn __bits(v: i64) -> u64
+fn __append(out: inout Vec[byte], v: u64, n: int, big: bool)
+
+fn short(n: int, have: int) -> String {
+    return "binary: need ${n} bytes, have ${have}"
+}
+
+fn load(o: Order, b: []byte, n: int) -> u64 {
+    if b.len() < n {
+        panic(short(n, b.len()))
+    }
+    return __load(b, n, o == .Big)
+}
+
+fn store(o: Order, b: inout []byte, v: u64, n: int) {
+    if b.len() < n {
+        panic(short(n, b.len()))
+    }
+    for i in 0..n {
+        let shift = if o == .Big { (n - 1 - i) * 8 } else { i * 8 }
+        b[i] = u8((v >> u64(shift)) & 255)
+    }
+}
+
+// The most bytes a 64-bit varint takes.
+pub const maxVarintLen = 10
+
+// Appends `v` as an unsigned varint: 7 bits per byte, low bits first, the
+// top bit set on every byte but the last. 1 byte below 128, 10 at most.
+pub fn appendUvarint(out: inout Vec[byte], v: u64) {
+    var x = v
+    while x >= 128 {
+        out.push(u8(x & 127 | 128))
+        x >>= 7
+    }
+    out.push(u8(x))
+}
+
+// Appends `v` as a signed varint, zig-zag encoded so that numbers near zero
+// either side are short: 0, -1, 1, -2 become 0, 1, 2, 3.
+pub fn appendVarint(out: inout Vec[byte], v: i64) {
+    let u = __bits(v) << 1
+    appendUvarint(&out, if v < 0 { u ^ 18446744073709551615 } else { u })
+}
+
+// The unsigned varint at the start of `b` and how many bytes it took; none
+// if `b` ends inside it or it doesn't fit in 64 bits.
+pub fn uvarint(b: []byte) -> ?(u64, int) {
+    var x: u64 = 0
+    var shift: u64 = 0
+    for i in 0..b.len() {
+        let c = b[i]
+        if i == maxVarintLen - 1 && c > 1 {
+            return none
+        }
+        if c < 128 {
+            return (x | u64(c) << shift, i + 1)
+        }
+        if i == maxVarintLen - 1 {
+            return none
+        }
+        x |= u64(c & 127) << shift
+        shift += 7
+    }
+    return none
+}
+
+// The signed (zig-zag) varint at the start of `b` and how many bytes it
+// took; none as for `uvarint`.
+pub fn varint(b: []byte) -> ?(i64, int) {
+    let some((u, n)) = uvarint(b) else {
+        return none
+    }
+    let s = __signed(u >> 1, 8)
+    return (if u & 1 != 0 { -s - 1 } else { s }, n)
+}

@@ -1,0 +1,24 @@
+50  30  10  90  
+0 = 3  1 = 8  2 = 1  
+[5, 3, 8] [1, 9, 2] [5, 8, 9] [5, 9]
+[10, 16, 18] 0 0
+[25, 9, 64, 1, 81, 4] 6 28 7
+some(1) some(9) none true false
+some(8) none some(5) some(2) 538192
+ann, cyd 1
+2 cyd ["ANN", "BOB", "CYD"] some("cyd")
+some(8) 3
+[9, 36, 81] 9
+["a", "b"] 1
+["a", "b", "c", "d", "e", "f"] a-b-c-d
+a  c  d  
+[0, 3, 6, 9] 30 5
+[400, 300, 200, 100] mine
+0 none [] false true
+ok(42) err("not a number")
+ann = 31  cyd = 45  
+{"ann": 31, "cyd": 45} {"bob": 17, "cyd": 45}
+ann:31,bob:17,cyd:45,dee:8 101 4 true
+some(("cyd", 45)) some(("ann", 31)) some(("dee", 8)) 303
+["ann", "31", "bob"]
+0 = 62  1 = 34  2 = 90  

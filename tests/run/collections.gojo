@@ -1,0 +1,123 @@
+// The searching, sorting and reshaping methods of slices and `Vec`, and the
+// extra methods of `Map`, `Set`, `?T` and `T ! E`.
+struct P {
+    name: String
+    age: int
+}
+
+// a key with its own hash: equal keys must hash the same
+struct Key {
+    id: int
+    name: String
+
+    fn hash(self, h: inout Hasher) {
+        h.write(self.name)
+        h.writeU64(u64(self.id))
+    }
+
+    fn equal(self, o: Key) -> bool {
+        return self.id == o.id && self.name == o.name
+    }
+}
+
+fn half(n: int) -> ?int {
+    if n % 2 == 0 {
+        return n / 2
+    }
+    return none
+}
+
+fn checked(n: int) -> int ! String {
+    if n < 0 {
+        return err("negative")
+    }
+    return n
+}
+
+fn main() {
+    let xs = [5, 3, 8, 3, 9, 1]
+    println(xs.find(x => x > 6), xs.find(x => x > 100), xs.findIndex(x => x == 3), xs.lastIndexOf(3), xs.lastIndexOf(7))
+    var sorted = xs.toVec()
+    sorted.sort()
+    println(sorted, sorted.isSorted(), xs.isSorted(), sorted.binarySearch(8), sorted.binarySearch(4), sorted.binarySearch(1), sorted.binarySearch(9))
+    println(sorted.partitionPoint(x => x < 4), sorted.partitionPoint(x => x < 0), sorted.partitionPoint(x => x < 100))
+    let empty = Vec[int]{}
+    println(empty.binarySearch(1), empty.isSorted(), empty.partitionPoint(x => x < 1), empty.minBy(x => x), empty.windows(2), empty.chunks(3))
+
+    var people = [P{name: "cy", age: 30}, P{name: "al", age: 25}, P{name: "bo", age: 30}]
+    people.sortByKey(p => p.age)
+    println(people.map(p => p.name.clone()))
+    people.sortByKey(p => p.name.clone())
+    println(people.map(p => p.name.clone()), people.minBy(p => p.age)?.name, people.maxBy(p => p.age)?.name)
+
+    println(xs.startsWith([5, 3]), xs.startsWith([3]), xs.endsWith([9, 1]), xs.endsWith(xs.toVec()), xs.startsWith([5, 3, 8, 3, 9, 1, 0]))
+    var r = [1, 2, 3, 4, 5]
+    r.rotateLeft(2)
+    print(r, "")
+    r.rotateRight(2)
+    print(r, "")
+    r.rotateLeft(-1)
+    print(r, "")
+    r.rotateLeft(12)
+    println(r)
+    r[1..4].fill(0)
+    println(r)
+
+    println(["1", "x", "3"].filterMap(s => s.parseInt()), [1, 2, 3].flatMap(n => [n, n * 10]), [1, 2, 3, 4, 5].partition(n => n % 2 == 1))
+    let words = ["apple", "avocado", "banana", "blueberry", "cherry"]
+    println(words.groupBy(w => w[..1].toString()))
+    println([1, 2, 3].zip(["a", "b"]), [1, 2, 3, 4, 5].chunks(2), [1, 2, 3, 4].windows(3), [[1, 2], [], [3]].flatten())
+
+    var v = [1, 2, 3, 4, 5, 6, 7, 8]
+    v.retain(n => n % 3 != 0)
+    println(v)
+    var d = [1, 1, 2, 2, 2, 1, 3, 3]
+    d.dedup()
+    println(d)
+    var e = [0, 1, 2, 3, 4, 5, 6]
+    let mid = e.drain(2, 5)
+    println(mid, e)
+    let tail = e.splitOff(2)
+    println(e, tail)
+    e.resize(5, 9)
+    print(e, "")
+    e.resize(1, 0)
+    println(e)
+    e.extendFromSlice([7, 8])
+    println(e)
+    var names = ["b", "a", "c"].map(s => s.toString())
+    names.retain(s => s != "a")
+    println(names)
+
+    var m = Map[String, int]{}
+    m["a"] = 1
+    m["b"] = 2
+    m["c"] = 3
+    println(m.getOr("b", 0), m.getOr("z", -1))
+    m.retain((_, n) => n != 2)
+    println(m, m.entries())
+
+    var s1 = setOf([1, 2, 3])
+    let s2 = setOf([3, 4])
+    println(s1.symmetricDifference(s2).toVec(), setOf([1, 2]).isSubset(s1), s1.isSubset(setOf([1, 2])), s1.isSuperset(setOf([2])), s1.isDisjoint(s2), s1.isDisjoint(setOf([9])))
+    s1.extend([3, 4, 5])
+    s1.retain(x => x != 2)
+    println(s1.toVec())
+
+    let some5: ?int = 5
+    let no: ?int = none
+    println(some5.andThen(half), (some5 ?? 0 + 1).toString(), no.andThen(half), some5.filter(n => n > 3), some5.filter(n => n > 9))
+    println(no.or(some(7)), some5.or(some(7)), no.orElse(() => some(1)), no.unwrapOrElse(() => 42), some5.okOr("missing"), no.okOr("missing"))
+    println(checked(2).map(n => n * 2), checked(-1).map(n => n * 2), checked(-1).mapErr(msg => msg.len()), checked(3).andThen(n => checked(n - 5)))
+    println(checked(-1).unwrapOrElse(msg => msg.len()), checked(-1).orElse(_ => checked(0)), checked(1).orElse(_ => checked(0)))
+
+    var keyed = Map[Key, int]{}
+    keyed[Key{id: 1, name: "a"}] = 1
+    keyed[Key{id: 2, name: "a"}] = 2
+    keyed[Key{id: 1, name: "a"}] = 3
+    var h1 = Hasher{}
+    var h2 = Hasher{}
+    h1.write("same")
+    h2.write("same")
+    println(keyed.len(), keyed[Key{id: 1, name: "a"}], "${h1}" == "${h2}")
+}

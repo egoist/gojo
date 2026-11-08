@@ -1,0 +1,81 @@
+// std/regex: RE2 syntax, leftmost-first matches, captures, replacement and
+// splitting, in linear time.
+use std/regex
+
+// compiled once, on first use, and shared by every task
+let word = regex.mustCompile(`\b\w+\b`)
+
+fn main() {
+    let date = regex.mustCompile(`(?P<y>\d{4})-(?P<m>\d\d)-(?P<d>\d\d)`)
+    let s = "from 2026-11-08 to 2027-01-31"
+    println(date.isMatch(s), date.find(s), date.findText(s), date.groupCount(), date.groupIndex("m"))
+    println(date.findAt(s, 6), date.findAll(s), date.findAllText(s))
+    if let c = date.captures(s) {
+        println(c, c.len(), c.text(), c.name("y"), c.get(3), c.get(9), c.span(1))
+        println(c.expand(`$d.$m.${y} $$ $9 ${nope}`))
+    }
+    for c in date.capturesAll(s) {
+        println(c.name("d"))
+    }
+
+    // replacement
+    println(date.replaceAll(s, "$d/$m/$y"), date.replace(s, "[$0]"), date.replaceN(s, "X", 0))
+    println(regex.mustCompile(`(\w+)@(\w+)`).replaceAll("ann@home bob@work", `${2}_$1`))
+    println(word.replaceAllWith("hello big world", c => c.text().toUpper()))
+    println(regex.mustCompile(`a*`).replaceAll("baaac", "-"))
+
+    // splitting
+    println(regex.mustCompile(`\s*[,;]\s*`).split("a , b;c,, d"))
+    println(regex.mustCompile(`,`).splitN("a,b,c,d", 2), regex.mustCompile(`x*`).split("abc"))
+
+    // empty matches never come right after another match
+    println(regex.mustCompile(`a*`).findAll("baaa"), regex.mustCompile(``).findAll("héé"))
+
+    // leftmost-first: the first alternative that matches wins; lazy repeats
+    println(regex.mustCompile(`a|ab`).findText("ab"), regex.mustCompile(`<.+?>`).findAllText("<a><b>"))
+    println(regex.mustCompile(`(a|ab)(c|bcd)(d*)`).captures("abcd"))
+    // an empty iteration still counts, as in Go
+    println(regex.mustCompile(`(a*)*`).captures("b"), regex.mustCompile(`(a|b)*`).captures("abab"))
+
+    // anchors, lines and word boundaries
+    let lines = "one\ntwo\nthree"
+    println(regex.mustCompile(`^\w+`).findAllText(lines), regex.mustCompile(`(?m)^\w+$`).findAllText(lines))
+    println(regex.mustCompile(`(?s)o.t`).isMatch("o\nt"), regex.mustCompile(`o.t`).isMatch("o\nt"))
+    println(regex.mustCompile(`\bcat\b`).findAll("cat concat cat."), regex.mustCompile(`\Bcat`).findAll("cat concat"))
+    println(word.findAllText("it's a dog-eat-dog world"), regex.mustCompile(`\Aab|c\z`).findAllText("abcabc"))
+
+    // Unicode: classes, properties and case folding
+    println(regex.mustCompile(`\pL+`).findAllText("héllo wörld 42 日本"), regex.mustCompile(`\p{Lu}\p{Ll}*`).findAllText("Ünïcode Ελλάδα"))
+    println(regex.mustCompile(`(?i)straße`).isMatch("STRAẞE"), regex.mustCompile(`(?i)k`).findAll("k K \u{212A}"), regex.mustCompile(`(?i)[α-ω]+`).findText("ΑΒΓ"))
+    println(regex.mustCompile(`(?i)\W`).isMatch("\u{212A}"), regex.mustCompile(`[^a-c]+`).findAllText("abédcé"), regex.mustCompile(`.`).findAllText("é\xffa"))
+    println(regex.mustCompile(`[[:alpha:]]+[[:^alpha:]]`).findAllText("ab1 cd!"), regex.mustCompile(`\x{e9}|\x41|\101|\0`).findAllText("éA\u{0}"))
+    println(regex.mustCompile(`(?i:A)a`).findAllText("aa Aa aA AA"), regex.mustCompile(`a(?i)b|c`).findAllText("aB C"), regex.mustCompile(`(?U)a+`).findText("aaa"))
+    println(regex.mustCompile(`\Q1.5*\E+`).findText("1.5**"), regex.escape("1.5*[x]"), regex.mustCompile(regex.escape("a.b(c)")).isMatch("xa.b(c)"))
+    println(regex.mustCompile(`x{2,3}`).findAllText("x xx xxxx xxxxxxx"), regex.mustCompile(`a{,2}`).findText("a{,2}"))
+
+    // errors say what and where
+    for p in [`a(b`, `a)b`, `[a-`, `[z-a]`, `*a`, `a**`, `x{2}{3}`, `a{1001}`, `\1`, `(?=a)`, `(?P<n>a)(?P<n>b)`, `\p{Greek}`, `\k`, `(?y)`, `((((x){1000}){1000}){1000})`] {
+        match regex.compile(p) {
+            ok(_) => println("compiled", p)
+            err(e) => println(e)
+        }
+    }
+    println(regex.isMatch(`^\d+$`, "123"), regex.isMatch(`(`, "x").isErr())
+
+    // linear time: no catastrophic backtracking
+    let many = "a".repeat(100000)
+    println(regex.mustCompile(`(a*)*b`).isMatch(many), regex.mustCompile(`(a|aa)+$`).find(many))
+
+    // shared by tasks
+    var counts = Vec[int]{}
+    scope {
+        let texts = ["one two", "three", "four five six"]
+        let t0 = go () => word.findAll(texts[0]).len()
+        let t1 = go () => word.findAll(texts[1]).len()
+        let t2 = go () => word.findAll(texts[2]).len()
+        counts.push(t0.join())
+        counts.push(t1.join())
+        counts.push(t2.join())
+    }
+    println(counts, date)
+}

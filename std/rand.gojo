@@ -1,0 +1,215 @@
+// Random numbers: fast pseudo-random values for simulations, sampling and
+// shuffling, a seeded generator for reproducible sequences, and
+// cryptographically secure bytes from the operating system.
+//
+//   let roll = rand.range(1, 7)            // 1 to 6
+//   rand.shuffle(&deck)
+//   let token = hex.encode(rand.secureBytes(16))
+//
+//   var r = rand.Rng.new(42)               // the same numbers every run
+//   let x = r.float()
+//
+// The functions without a generator use one per thread, seeded from the
+// operating system, so tasks don't contend for it. They are not for secrets
+// (keys, tokens, passwords): use `secureBytes` / `secureU64` for those.
+// Under `GOJO_SEED` (and in `gojo test`), they are seeded from it, so a
+// run can be replayed.
+
+// What the sampling functions draw from: 64 random bits at a time.
+pub interface Source {
+    fn u64(inout self) -> u64
+}
+
+// A seeded pseudo-random generator (xoshiro256**, 256 bits of state): fast,
+// and the same seed always gives the same sequence. Not for secrets.
+pub struct Rng {
+    s0: u64
+    s1: u64
+    s2: u64
+    s3: u64
+
+    // A generator seeded with `seed` (the state is spread from it with
+    // SplitMix64, so nearby seeds give unrelated sequences).
+    pub fn new(seed: u64) -> Rng {
+        var x = seed
+        let a = splitMix(&x)
+        let b = splitMix(&x)
+        let c = splitMix(&x)
+        let d = splitMix(&x)
+        return Rng{s0: a, s1: b, s2: c, s3: d}
+    }
+
+    // 64 random bits.
+    pub fn u64(inout self) -> u64 {
+        let r = (self.s1 *% 5).rotateLeft(7) *% 9
+        let t = self.s1 << 17
+        self.s2 ^= self.s0
+        self.s3 ^= self.s1
+        self.s1 ^= self.s2
+        self.s0 ^= self.s3
+        self.s2 ^= t
+        self.s3 = self.s3.rotateLeft(45)
+        return r
+    }
+
+    // A uniformly random integer in `lo` up to (not including) `hi`; panics
+    // unless `lo` < `hi`.
+    pub fn range(inout self, lo: int, hi: int) -> int {
+        return rangeOf(&self, lo, hi)
+    }
+
+    // A uniformly random integer from 0 up to (not including) `n`; panics
+    // unless `n` > 0.
+    pub fn below(inout self, n: int) -> int {
+        return rangeOf(&self, 0, n)
+    }
+
+    // A uniformly random float in [0, 1).
+    pub fn float(inout self) -> f64 {
+        return floatOf(&self)
+    }
+
+    // true or false, with equal chances.
+    pub fn bool(inout self) -> bool {
+        return self.u64() >> 63 == 1
+    }
+
+    // Puts the elements in a uniformly random order (Fisher-Yates).
+    pub fn shuffle[T](inout self, xs: inout []T) {
+        shuffleOf(&self, &xs)
+    }
+
+    // A uniformly random element, or none for no elements.
+    pub fn choice[T](inout self, xs: []T) yield ?&T {
+        if xs.len() == 0 {
+            yield none
+        }
+        yield xs[rangeOf(&self, 0, xs.len())]
+    }
+}
+
+fn splitMix(x: inout u64) -> u64 {
+    x = x +% 0x9E3779B97F4A7C15
+    var z = x
+    z = (z ^ (z >> 30)) *% 0xBF58476D1CE4E5B9
+    z = (z ^ (z >> 27)) *% 0x94D049BB133111EB
+    return z ^ (z >> 31)
+}
+
+// the per-thread generator in the runtime
+struct Thread {
+    fn u64(inout self) -> u64 {
+        return __next()
+    }
+}
+
+fn __next() -> u64
+fn __secureFill(buf: inout Vec[byte], n: int) -> int
+
+fn rangeOf[S: Source](src: inout S, lo: int, hi: int) -> int {
+    if lo >= hi {
+        panic("rand: empty range (lo >= hi)")
+    }
+    // the width fits in a u64 even when hi - lo overflows an int
+    let d = hi -% lo
+    var n: u64 = 0
+    if d > 0 {
+        n = u64(d)
+    } else {
+        n = u64(d - -9223372036854775808) + 9223372036854775808
+    }
+    // reject the few values that would make some results more likely
+    let threshold = (0 -% n) % n
+    loop {
+        let x = src.u64()
+        if x >= threshold {
+            // lo + off < hi, in two steps when off doesn't fit in an int
+            let off = x % n
+            if off <= 9223372036854775807 {
+                return lo + int(off)
+            }
+            return lo + 9223372036854775807 + int(off - 9223372036854775807)
+        }
+    }
+}
+
+fn floatOf[S: Source](src: inout S) -> f64 {
+    return f64(src.u64() >> 11) * (1.0 / 9007199254740992.0)
+}
+
+fn shuffleOf[S: Source, T](src: inout S, xs: inout []T) {
+    var i = xs.len() - 1
+    while i > 0 {
+        let j = rangeOf(&src, 0, i + 1)
+        xs.swap(i, j)
+        i -= 1
+    }
+}
+
+// 64 random bits.
+pub fn u64() -> u64 {
+    return __next()
+}
+
+// A uniformly random integer in `lo` up to (not including) `hi`; panics
+// unless `lo` < `hi`.
+pub fn range(lo: int, hi: int) -> int {
+    var t = Thread{}
+    return rangeOf(&t, lo, hi)
+}
+
+// A uniformly random integer from 0 up to (not including) `n`; panics unless
+// `n` > 0.
+pub fn below(n: int) -> int {
+    var t = Thread{}
+    return rangeOf(&t, 0, n)
+}
+
+// A uniformly random float in [0, 1).
+pub fn float() -> f64 {
+    var t = Thread{}
+    return floatOf(&t)
+}
+
+// true or false, with equal chances.
+pub fn bool() -> bool {
+    return __next() >> 63 == 1
+}
+
+// Puts the elements in a uniformly random order (Fisher-Yates).
+pub fn shuffle[T](xs: inout []T) {
+    var t = Thread{}
+    shuffleOf(&t, &xs)
+}
+
+// A uniformly random element, or none for no elements.
+pub fn choice[T](xs: []T) yield ?&T {
+    if xs.len() == 0 {
+        yield none
+    }
+    yield xs[below(xs.len())]
+}
+
+// `n` cryptographically secure random bytes from the operating system
+// (`getrandom` / `getentropy`): for keys, tokens, nonces and salts. Panics
+// if the system can't provide them, which modern systems always can.
+pub fn secureBytes(n: int) -> Vec[byte] {
+    var out = Vec[byte]{}
+    if n <= 0 {
+        return out
+    }
+    if __secureFill(&out, n) != 0 {
+        panic("rand: the operating system's random source failed")
+    }
+    return out
+}
+
+// 64 cryptographically secure random bits.
+pub fn secureU64() -> u64 {
+    let b = secureBytes(8)
+    var x: u64 = 0
+    for v in b {
+        x = x << 8 | u64(v)
+    }
+    return x
+}

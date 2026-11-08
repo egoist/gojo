@@ -1,0 +1,51 @@
+// Methods of the integer and float types, and of `rune`.
+fn main() {
+    // abs, signum, pow, clamp across widths
+    let a: i32 = -5
+    let b: u8 = 200
+    println(a.abs(), b.abs(), (-3).abs(), a.signum(), b.signum(), 0.signum())
+    println(2.pow(10), 3.pow(0), (-2).pow(3), u8(2).pow(7))
+    println(15.clamp(0, 10), (-3).clamp(0, 10), 7.clamp(0, 10))
+
+    // checked and saturating arithmetic at the edges of the type
+    let big: i8 = 120
+    println(big.checkedAdd(7), big.checkedAdd(8), i8(-120).checkedSub(9), i8(-120).checkedSub(8))
+    println(i16(200).checkedMul(163), i16(200).checkedMul(164), 7.checkedDiv(0), i8(-128).checkedDiv(-1), (-7).checkedDiv(2))
+    println(big.saturatingAdd(100), i8(-100).saturatingAdd(-100), u8(10).saturatingSub(20), i8(100).saturatingSub(-100))
+    println(i8(-100).saturatingMul(2), i8(-100).saturatingMul(-2), u32(70000).saturatingMul(70000))
+
+    // Euclidean division: the remainder is never negative
+    println((-7).divEuclid(2), (-7).remEuclid(2), 7.divEuclid(-2), 7.remEuclid(-2), (-7).divEuclid(-2), (-7).remEuclid(-2), (-7) % 2)
+
+    // bits
+    println(0.isPowerOfTwo(), 1.isPowerOfTwo(), 64.isPowerOfTwo(), 96.isPowerOfTwo(), (-8).isPowerOfTwo())
+    println(u8(0b1011_0000).countOnes(), (-1).countOnes(), u8(1).leadingZeros(), 1.leadingZeros(), u16(0).leadingZeros())
+    println(u8(0b1000).trailingZeros(), u32(0).trailingZeros(), 0.bitLen(), 5.bitLen(), u64(18446744073709551615).bitLen())
+    println(u8(0b1000_0001).rotateLeft(1), u8(0b1000_0001).rotateRight(1), u8(1).rotateLeft(9), u8(1).rotateLeft(-1))
+    println(u16(0x1234).swapBytes().toStringRadix(16), u32(0x11223344).swapBytes().toStringRadix(16), i8(-2).swapBytes())
+
+    // text
+    println(255.toStringRadix(16), (-255).toStringRadix(2), 35.toStringRadix(36), u64(18446744073709551615).toStringRadix(16))
+    println(42.toString().len(), i8(-128).toString())
+    println(int.parse("-9223372036854775808"), int.parse("9223372036854775808"), u8.parse("255"), u8.parse("256"), u8.parse("-0"), u8.parse("-1"))
+    println(i8.parse("-128"), i8.parse("-129"), i32.parse("+12"), i32.parse(""), i32.parse("1 "), i32.parse("+"))
+    println(u32.parseRadix("ff", 16), u32.parseRadix("FF", 16), i64.parseRadix("-zz", 36), u8.parseRadix("102", 2), u64.parseRadix("ffffffffffffffff", 16))
+
+    // floats
+    let x = -2.5
+    println(x.abs(), x.floor(), x.ceil(), x.round(), x.trunc(), x.fract(), 2.5.round())
+    println(9.0.sqrt(), (27.0.cbrt() - 3.0).abs() < 1e-12, 2.0.pow(10.0), 1.0.exp().ln(), 1024.0.log2(), 1000.0.log10())
+    let nan = 0.0 / 0.0
+    let inf = 1.0 / 0.0
+    println(nan.isNaN(), inf.isInf(), inf.isFinite(), 1.5.isFinite(), nan.signum().isNaN(), (-0.0).signum(), 3.0.copySign(-1.0))
+    println(5.5.clamp(0.0, 1.0), (-1.0).clamp(0.0, 1.0), 1.5.toString(), f64.parse("1e3"), f64.parse("x"))
+    let h: f32 = 2.25
+    println(h.sqrt(), h.floor(), h.toBits(), f32.fromBits(h.toBits()), 1.0.toBits().toStringRadix(16), f64.fromBits(4611686018427387904))
+
+    // runes
+    println('a'.isLetter(), 'é'.isLetter(), 'Ж'.isUpper(), 'ж'.isLower(), '7'.isDigit(), '٧'.isDigit(), '½'.isDigit(), '½'.isNumber())
+    println(' '.isWhitespace(), '\u{3000}'.isWhitespace(), 'x'.isWhitespace(), '!'.isPunct(), '+'.isSymbol(), '\n'.isControl(), 'Ⅻ'.isAlphanumeric())
+    println(String('ß'.toUpper()), String('Σ'.toLower()), String('ǅ'.toUpper()), String('ǅ'.toLower()), String('1'.toUpper()))
+    println('f'.toDigit(16), 'F'.toDigit(16), 'g'.toDigit(16), '9'.toDigit(8), 'z'.toDigit(36))
+    println('a'.utf8Len(), 'é'.utf8Len(), '€'.utf8Len(), '😀'.utf8Len(), rune(0xD800).isValid(), rune(0x10FFFF).isValid(), 'é'.isAscii())
+}

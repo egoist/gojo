@@ -1,0 +1,55 @@
+// std/log: leveled, structured lines, as text or JSON.
+use std/{log, io}
+
+fn main() {
+    // the default logger, made deterministic: stdout, no time
+    var base = log.Logger{}
+    base.out = .Stdout
+    base.time = false
+    log.setDefault(base)
+
+    log.info("server started")
+    log.debug("not shown: below the level")
+    log.fields([log.string("addr", ":8080"), log.integer("workers", 8)]).info("listening")
+    let req = log.fields([log.string("id", "r1"), log.string("path", "/a b"), log.string("empty", "")])
+    req.warn("slow")
+    let e = io.newError(.NotFound, "no such file")
+    req.fields([log.cause(e), log.duration("took", 1500000000), log.number("ratio", 0.25), log.boolean("retry", false)]).error("failed")
+    log.fields([log.string("quote", "say \"hi\""), log.string("tab", "a\tb"), log.string("k=v", "x=y")]).info("escapes")
+    println(log.enabled(.Debug), log.enabled(.Info))
+
+    log.setLevel(.Debug)
+    log.debug("now shown")
+    log.setLevel(.Error)
+    log.warn("not shown")
+    log.setLevel(.Info)
+
+    log.setFormat(.Json)
+    req.info("still text: req copied the default before")
+    log.fields([log.number("ratio", 0.5), log.number("inf", 1.0 / 0.0), log.duration("took", 250000000), log.boolean("ok", true)]).warn("as \"json\"")
+    log.setFormat(.Text)
+
+    // a logger of its own, and lines for writing elsewhere
+    var l = log.Logger{}
+    l.level = .Warn
+    print(l.line(.Info, "at the epoch", 0))
+    print(l.fields([log.integer("n", 1)]).line(.Error, "later", 1793724896123456789))
+    l.format = .Json
+    print(l.line(.Warn, "json", 951782400999000000))
+    println(l.enabled(.Info), l.enabled(.Error))
+
+    // levels
+    println(log.Level.parse("WARNING"), log.Level.parse("err"), log.Level.parse("loud"), log.Level.Debug < log.Level.Warn)
+
+    // tasks share the default logger; each line is written whole
+    scope {
+        for i in 0..4 {
+            go () => {
+                for _ in 0..50 {
+                    log.fields([log.integer("task", i)]).debug("hidden")
+                }
+            }
+        }
+    }
+    log.info("done")
+}

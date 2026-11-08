@@ -1,0 +1,73 @@
+// std/hex, std/base64, std/url and std/csv. Expected values are the RFC 4648
+// test vectors and hand-checked cases.
+use std/{hex, base64, url, csv, io}
+
+fn main() {
+    // hex
+    println(hex.encode("hi".bytes()), hex.encodeUpper([0, 15, 255]), hex.encode([]).len())
+    println(hex.decode("DEADbeef"), hex.decode("abc"), hex.decode("zz"), hex.decode(""))
+    println(hex.decode("0g").err()?.message())
+
+    // base64: the RFC 4648 vectors
+    for s in ["", "f", "fo", "foo", "foob", "fooba", "foobar"] {
+        print(base64.encode(s.bytes()), "")
+    }
+    println()
+    for s in ["Zg==", "Zg", "Zm8=", "Zm9vYg", "Zm9vYmFy"] {
+        print(String(base64.decode(s) catch _ { [] }), "")
+    }
+    println()
+    let bin: Vec[byte] = [251, 255, 191]
+    println(base64.encode(bin), base64.encodeUrl(bin), base64.decodeUrl("-_-_") == ok(bin), base64.decode("-_-_").isErr())
+    // bad length, bad padding, bad character, leftover bits
+    println(base64.decode("Z").err()?.offset, base64.decode("Zg=").err()?.offset, base64.decode("Zm9v=").err()?.offset, base64.decode("Zm9v!").err()?.offset, base64.decode("Zh==").err()?.offset)
+
+    // url
+    let u = url.parse("HTTPS://ann:pw@Example.com:8080/a%20b/c?q=1&q=2&x=a+b#top%21") catch e { panic(e.message()) }
+    println(u.scheme, u.user, u.host, u.port, u.path, u.rawQuery, u.fragment)
+    println(u.query().getAll("q"), u.query().get("x"), u.query().get("nope"), u.query().has("q"))
+    println(u.toString())
+    let v6 = url.parse("http://[::1]:80/") catch e { panic(e.message()) }
+    println(v6.host, v6.port, v6.toString())
+    let rel = url.parse("../x?y#z") catch e { panic(e.message()) }
+    println(rel.scheme == "", rel.host == "", rel.path, rel.rawQuery, rel.fragment)
+    let mail = url.parse("mailto:ann@example.com") catch e { panic(e.message()) }
+    println(mail.scheme, mail.path, mail.host == "")
+    println(url.parse("http://h:99999/").err()?.message(), url.parse("http://h/%zz").err()?.message(), url.parse("http://[::1/").isErr())
+    let base = url.parse("http://a/b/c/d;p?q") catch e { panic(e.message()) }
+    // RFC 3986 section 5.4.1
+    for r in ["g", "./g", "g/", "/g", "//g", "?y", "g?y", "#s", "..", "../g", "../..", "../../g", "../../../g", "g;x=1/../y", ""] {
+        print((base.resolve(r) catch e { panic(e.message()) }).toString(), "")
+    }
+    println()
+    var q = url.Query{}
+    q.add("name", "Ann Lee")
+    q.add("tag", "a&b")
+    q.add("tag", "c")
+    q.set("tag", "d")
+    println(q.encode(), q.len())
+    q.remove("tag")
+    println(q, url.parseQuery("?a=1&b&c=%41%zz+x&&").entries())
+    println(url.escape("a b&c/é"), url.pathEscape("a b/c:d"), url.unescape("a+b%26c"), url.unescape("%4"), url.pathUnescape("a+b%20c"))
+
+    // csv
+    let text = "name,age\r\n\"Lee, Ann\",30\n\n\"say \"\"hi\"\"\",\"two\nlines\"\nlast,\n"
+    let rows = csv.parse(text) catch e { panic(e.message()) }
+    println(rows)
+    println(csv.format(rows) == "name,age\n\"Lee, Ann\",30\n\"say \"\"hi\"\"\",\"two\nlines\"\nlast,\n")
+    println(csv.parse("a,b\nc,\"d\ne\"x\n").err()?.message())
+    println(csv.parse("a,b\"c\n").err()?.message(), csv.parse("\"open").err()?.message())
+    println(csv.parse(""), csv.parse("x"), csv.parse(",\n"), csv.parseSep("a\tb c\t\"d\"\n", '\t'))
+    println(csv.formatRow([" pad", "a,b", "plain", ""]), csv.formatSep([["a;b", "c"]], ';'))
+    var r = csv.reader(io.textReader(text))
+    var n = 0
+    loop {
+        let next = r.readRow() catch e { panic(e.message()) }
+        let row = next ?? break
+        n += 1
+        print(row, "")
+    }
+    println(n)
+    var bad = csv.reader(io.textReader("a\nb\"\n"))
+    println(bad.readRow(), bad.readRow().err()?.message())
+}

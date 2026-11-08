@@ -1,0 +1,55 @@
+// std/rand: a seeded generator gives the same numbers every run (checked
+// against a reference implementation of xoshiro256** with SplitMix64
+// seeding); the per-thread functions are checked statistically.
+use std/rand
+
+fn main() {
+    var r = rand.Rng.new(42)
+    println(r.u64(), r.u64(), r.range(1, 7), r.below(10), r.float(), r.bool())
+    var again = rand.Rng.new(42)
+    _ = again.u64()
+    println(again.u64())
+    var a = [1, 2, 3, 4, 5, 6, 7, 8]
+    var b = a.toVec()
+    var r1 = rand.Rng.new(7)
+    var r2 = rand.Rng.new(7)
+    r1.shuffle(&a)
+    r2.shuffle(&b)
+    println(a == b, r1.choice(a) == r2.choice(b))
+
+    // every face of a die, about equally often
+    var counts = [0, 0, 0, 0, 0, 0]
+    for _ in 0..60000 {
+        counts[rand.range(1, 7) - 1] += 1
+    }
+    println(counts.all(c => c > 9400 && c < 10600))
+    var trues = 0
+    var sum = 0.0
+    for _ in 0..10000 {
+        if rand.bool() {
+            trues += 1
+        }
+        let f = rand.float()
+        assert(f >= 0.0 && f < 1.0)
+        sum += f
+    }
+    println(trues > 4700 && trues < 5300, sum > 4800.0 && sum < 5200.0)
+    // the whole int range, and negative bounds
+    var neg = 0
+    for _ in 0..1000 {
+        if rand.range(-9223372036854775808, 9223372036854775807) < 0 {
+            neg += 1
+        }
+        let x = rand.range(-5, -2)
+        assert(x >= -5 && x < -2)
+    }
+    println(neg > 400 && neg < 600)
+    var deck = [1, 2, 3, 4, 5, 6, 7, 8]
+    rand.shuffle(&deck)
+    deck.sort()
+    println(deck)
+    let none_: Vec[int] = []
+    println(rand.choice(deck).isSome(), rand.choice(none_), rand.secureBytes(16).len(), rand.secureBytes(0).len())
+    // 64 secure bits: two draws are (all but certainly) different
+    println(rand.secureU64() != rand.secureU64())
+}

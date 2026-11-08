@@ -15,6 +15,12 @@ struct Echo {
 
 // sends raw bytes and returns the status line
 fn raw(port: int, text: str) -> String {
+    return rawLines(port, text).split(" | ")[0].clone()
+}
+
+// sends raw bytes and returns the request and status lines and the
+// Connection headers of the reply
+fn rawLines(port: int, text: str) -> String {
     let c = net.dial(fmt.format("127.0.0.1:{}", port)) catch e {
         return e.message()
     }
@@ -22,7 +28,13 @@ fn raw(port: int, text: str) -> String {
         return e.message()
     }
     let reply = String(c.readAll() catch _e { Vec[byte]{} })
-    return reply.split("\r\n")[0].clone()
+    var out = Vec[String]{}
+    for l in reply.split("\r\n") {
+        if l.startsWith("HTTP/") || l.startsWith("Connection:") || l.startsWith("POST") || l.startsWith("GET") || l.startsWith("HEAD") {
+            out.push(l.clone())
+        }
+    }
+    return out.join(" | ")
 }
 
 fn main() ! io.Error {
@@ -37,12 +49,17 @@ fn main() ! io.Error {
         println(p.status, p.text())
         let big = http.post(base + "/up", "text/plain", "x".repeat(1001).bytes()) catch e { http.text(0, e.message()) }
         println(big.status)
-        println(raw(port, "POST /c HTTP/1.1\r\nTransfer-Encoding: chunked\r\nUser-Agent: test\r\n\r\n5\r\nhello\r\n6;ext=1\r\n world\r\n0\r\n\r\n"))
+        println(raw(port, "POST /c HTTP/1.1\r\nTransfer-Encoding: chunked\r\nUser-Agent: test\r\nConnection: close\r\n\r\n5\r\nhello\r\n6;ext=1\r\n world\r\n0\r\n\r\n"))
+        // keep-alive: three requests on one connection, the last two sent at
+        // once (pipelined), the first chunked with a trailer
+        println(rawLines(port, "POST /k1 HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n0\r\nX-Trailer: 1\r\n\r\nHEAD /k2 HTTP/1.1\r\n\r\nGET /k3?name=z HTTP/1.1\r\nConnection: close\r\n\r\n"))
+        // HTTP/1.0 closes unless asked to keep the connection
+        println(rawLines(port, "GET /old HTTP/1.0\r\n\r\n"))
         println(raw(port, "GET / HTTP/1.1\r\nTransfer-Encoding: gzip\r\n\r\n"))
         println(raw(port, "NONSENSE\r\n\r\n"))
         println(raw(port, "GET / HTTP/1.1\r\nX: " + "y".repeat(70000) + "\r\n\r\n"))
         println(raw(port, "POST / HTTP/1.1\r\nContent-Length: nope\r\n\r\n"))
-        let tls = http.get("https://example.com/") catch er { http.text(0, er.message()) }
+        let tls = http.get("ftp://example.com/") catch er { http.text(0, er.message()) }
         println(tls.text())
         let e2 = http.get(fmt.format("http://127.0.0.1:{}", port)) catch er { http.text(0, er.message()) }
         println(e2.status, e2.text())
@@ -58,5 +75,63 @@ fn main() ! io.Error {
         server.cancel()
     }
     println(http.encode("a/b c&d=é"), http.decode("%E2%82%AC+%41") ?? "?", http.decode("%zz") ?? "malformed", http.decode("%4") ?? "malformed")
+
+    // routing: `:name` takes one segment, `*name` the rest
+    for mp in [("GET", "/todos/7/"), ("HEAD", "/todos/x"), ("POST", "/todos/7"), ("GET", "/todos/7/done"), ("GET", "/files/a/b%20c.txt"), ("GET", "/files")] {
+        let req = http.Request{method: mp.0.clone(), path: mp.1.clone()}
+        if let p = req.route("GET", "/todos/:id") {
+            println(req.method, req.path, "todo", p.get("id"), p.int("id"))
+        } else if let p = req.route("", "/files/*rest") {
+            println(req.method, req.path, "file", p.get("rest").len(), p.get("rest"))
+        } else {
+            println(req.method, req.path, "no route")
+        }
+    }
+
+    // the client keeps connections: three requests, one connection, until
+    // the server closes it unasked; then a new one
+    let ln2 = try net.listen("127.0.0.1:0")
+    let url = fmt.format("http://127.0.0.1:{}/", ln2.port())
+    let accepted = Atomic(0)
+    scope server {
+        go () => {
+            scope {
+                loop {
+                    let c = ln2.accept() catch _e {
+                        break
+                    }
+                    _ = accepted.add(1)
+                    go answerThree(c)
+                }
+            }
+        }
+        var got = Vec[String]{}
+        for _ in 0..5 {
+            let r = http.get(url) catch e { http.text(0, e.message()) }
+            got.push(r.text())
+        }
+        println(got, "connections:", accepted.load())
+        server.cancel()
+    }
     return
+}
+
+// answers three requests with "ok", then closes the connection without
+// saying so
+fn answerThree(c: net.Conn) {
+    var buf = Vec[byte]{}
+    var answered = 0
+    while answered < 3 {
+        let n = c.read(&buf, 4096) catch _e { 0 }
+        if n == 0 {
+            return
+        }
+        if String(buf.clone()).contains("\r\n\r\n") {
+            buf.clear()
+            c.writeText("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok") catch _e {
+                return
+            }
+            answered += 1
+        }
+    }
 }

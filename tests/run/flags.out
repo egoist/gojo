@@ -1,0 +1,65 @@
+false false 4 0.5  []
+   in.txt  false [] false false
+true true 8 0.25 out []
+   in.txt fast true ["a", "b"] true true
+false false 16 0.5  ["x", "y", "z"]
+   in -dash true ["--also"] true false
+false false 4 0.5  []
+   - m true [] false true
+error: tool: missing argument <input> true
+error: tool: unknown option --job (did you mean --jobs?) true
+error: tool: unknown option --outptu (did you mean --output?) true
+error: tool: unknown option -x true
+error: tool: -j needs an integer, not `many` true
+error: tool: --ratio needs a number, not `half` true
+error: tool: -j needs a value (N) true
+error: tool: --verbose takes no value (or true or false), not `maybe` true
+true tool 0.3.0
+Does things to files.
+
+Usage: tool [options] <input> [mode] [extra...]
+
+Arguments:
+  <input>            the file to read
+  [mode]             how to read it
+  [extra...]         more files
+
+Options:
+  -v, --verbose      say more
+  -q                 say less
+  -j, --jobs N       run N jobs at once (default: 4)
+      --ratio X      keep this much (default: 0.5)
+  -o, --output FILE  write to FILE
+  -I, --include DIR  search DIR too
+  -h, --help         show this help
+      --version      show the version
+remote add true origin https://x true
+commit fix false
+error: git: unknown command `comit` (did you mean commit?)
+error: git remote: missing command (one of add)
+error: git: missing command (one of remote, commit)
+Add a remote.
+
+Usage: git remote add [options] <name> <url>
+
+Arguments:
+  <name>         what to call it
+  <url>          where it is
+
+Options:
+  -f, --fetch    fetch it right away
+  -v, --verbose  say more
+  -h, --help     show this help
+A version control system.
+
+Usage: git [options] <command>
+
+Options:
+  -v, --verbose  say more
+  -h, --help     show this help
+
+Commands:
+  remote         Manage remotes.
+  commit         Record changes.
+
+Run 'git <command> --help' for the options of a command.

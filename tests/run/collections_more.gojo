@@ -1,0 +1,170 @@
+// std/collections, checked against simple models over thousands of random
+// operations (a fixed seed, so the run is the same every time).
+use std/collections.{Deque, Heap, SortedMap, SortedSet, BitSet}
+use std/rand
+
+struct Job {
+    name: String
+    due: int
+}
+
+// The model: a Vec of keys kept sorted, values by key in a Map.
+fn checkMap(m: SortedMap[int, int], keys: []int, vals: Map[int, int]) {
+    assertEq(m.len(), keys.len())
+    var i = 0
+    for e in m {
+        assertEq(e.key, keys[i])
+        assertEq(e.value, vals[e.key])
+        i += 1
+    }
+    assertEq(i, keys.len())
+}
+
+fn main() {
+    // Deque against a Vec
+    var r = rand.Rng.new(1)
+    var d = Deque[int].new()
+    var model = Vec[int]{}
+    for step in 0..20000 {
+        let op = r.below(5)
+        if op == 0 {
+            d.pushBack(step)
+            model.push(step)
+        } else if op == 1 {
+            d.pushFront(step)
+            model.insert(0, step)
+        } else if op == 2 {
+            assertEq(d.popBack(), model.pop())
+        } else if op == 3 {
+            let want: ?int = if model.isEmpty() { none } else { some(model.remove(0)) }
+            assertEq(d.popFront(), want)
+        } else if !model.isEmpty() {
+            let k = r.below(model.len())
+            assertEq(d.get(k).map(x => x), some(model[k]))
+        }
+        assertEq(d.len(), model.len())
+    }
+    assertEq(d.toVec(), model)
+    if let x = d.getMut(0) {
+        x += 1000000
+    }
+    println("deque", d.len(), d.front().map(x => x) == model.first().map(x => x + 1000000), d.back().map(x => x) == model.last().map(x => x), d.get(-1).isNone(), d.get(d.len()).isNone())
+    d.clear()
+    println(d.isEmpty(), d.popFront(), d.front().isNone())
+
+    // Heap: pops come out in order, for min, max and a custom order
+    var h = Heap[int].min()
+    var hm = Heap[int].max()
+    var all = Vec[int]{}
+    for _ in 0..5000 {
+        let x = r.range(-1000, 1000)
+        h.push(x)
+        hm.push(x)
+        all.push(x)
+    }
+    all.sort()
+    let mins = h.intoSorted()
+    var maxs = Vec[int]{}
+    loop {
+        let x = hm.pop() ?? break
+        maxs.push(x)
+    }
+    maxs.reverse()
+    println("heap", mins == all, maxs == all, hm.pop(), hm.peek().isNone())
+    var tasks = Heap[Job].by((a, b) => a.due < b.due)
+    tasks.push(Job{name: "c", due: 30})
+    tasks.push(Job{name: "a", due: 10})
+    tasks.push(Job{name: "b", due: 20})
+    println(tasks.peek()?.name, tasks.pop()?.name, tasks.pop()?.name, tasks.len())
+
+    // SortedMap against the model, with removals that exercise borrowing
+    // from siblings, merging and the root shrinking
+    var m = SortedMap[int, int].new()
+    var keys = Vec[int]{}
+    var vals = Map[int, int]{}
+    for step in 0..30000 {
+        let k = r.below(600)
+        if r.below(3) < 2 {
+            let old = m.insert(k, step)
+            assertEq(old, vals.insert(k, step))
+            if old == none {
+                let at = keys.partitionPoint(x => x < k)
+                keys.insert(at, k)
+            }
+        } else {
+            let got = m.remove(k)
+            assertEq(got, vals.remove(k))
+            if got != none {
+                _ = keys.remove(keys.binarySearch(k).unwrap())
+            }
+        }
+        if step % 1000 == 0 {
+            checkMap(m, keys, vals)
+        }
+        assertEq(m.contains(k), vals.contains(k))
+    }
+    checkMap(m, keys, vals)
+    // nearest keys
+    for q in -2..603 {
+        let at = keys.partitionPoint(x => x < q)
+        let wantCeil: ?int = if at < keys.len() { some(keys[at]) } else { none }
+        let below = keys.partitionPoint(x => x <= q)
+        let wantFloor: ?int = if below > 0 { some(keys[below - 1]) } else { none }
+        assertEq(m.ceil(q).map(e => e.key), wantCeil)
+        assertEq(m.floor(q).map(e => e.key), wantFloor)
+    }
+    let inRange = m.range(100, 110).map(e => e.key)
+    assertEq(inRange, keys.filter(k => k >= 100 && k < 110))
+    println("sorted map", m.len() == keys.len(), m.first().map(e => e.key) == keys.first().map(k => k), m.last().map(e => e.key) == keys.last().map(k => k))
+    // empty it from both ends
+    var n = 0
+    var prev = -1
+    loop {
+        let e = (if n % 2 == 0 { m.popFirst() } else { m.popLast() }) ?? break
+        assert(e.key != prev)
+        prev = e.key
+        n += 1
+    }
+    println(n == keys.len(), m.isEmpty(), m.first().isNone(), m.remove(1), m.popLast().isNone())
+    _ = m.insert(1, 1)
+    if let v = m.getMut(1) {
+        v += 41
+    }
+    println(m.get(1), m.get(2), m.keys(), m.values())
+
+    var names = SortedMap[String, int].new()
+    for w in ["pear", "apple", "fig", "apple"] {
+        if let c = names.getMut(w) {
+            c += 1
+        } else {
+            _ = names.insert(w.toString(), 0)
+        }
+    }
+    println(names.keys(), names.values(), names.ceil("b")?.key, names.floor("b")?.key)
+
+    var s = SortedSet[int].new()
+    for x in [5, 1, 9, 1, 3] {
+        _ = s.insert(x)
+    }
+    var seen = Vec[int]{}
+    for x in s {
+        seen.push(x)
+    }
+    println(seen, s.len(), s.contains(9), s.remove(9), s.remove(9), s.first(), s.last(), s.ceil(4), s.floor(4), s.popFirst(), s.toVec())
+
+    var b = BitSet.new()
+    for i in [0, 63, 64, 200, 5, 64] {
+        _ = b.insert(i)
+    }
+    println(b.toVec(), b.len(), b.contains(200), b.contains(199), b.contains(-1), b.remove(63), b.remove(63))
+    var c = BitSet.new()
+    _ = c.insert(5)
+    _ = c.insert(300)
+    var u = b.toVec()
+    b.unionWith(c)
+    print(b.toVec(), "")
+    b.intersectWith(c)
+    print(b.toVec(), "")
+    b.differenceWith(c)
+    println(b.toVec(), b.isEmpty(), u.len())
+}

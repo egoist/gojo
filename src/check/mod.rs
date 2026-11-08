@@ -5,6 +5,7 @@
 // functions' checking.
 
 pub mod body;
+pub mod lazy;
 pub mod pattern;
 
 use crate::ast::{self, Mode, TypeExpr, TypeExprKind};
@@ -588,6 +589,40 @@ impl Checker {
         let mut recv = None;
         let mut recv_key = None;
         let mut owner_ty = None;
+        // `extend T: Integer`: the method goes on every built-in type in the
+        // bound's type set, and `T` is bound to the one it's called on
+        let mut ext_keys: Vec<TyKey> = vec![];
+        if !f.ext_tparams.is_empty() {
+            if !self.prog.packages[pkg as usize].is_std {
+                self.err(f.name_span, "only the standard library can extend every type of a type set");
+            }
+            for tp in &f.ext_tparams {
+                let id = self.new_tparam(&tp.name, false);
+                env.tparams.insert(tp.name.clone(), Ty::Param(id));
+                tparams.push(id);
+            }
+            for tp in &f.ext_tparams {
+                let Some(Ty::Param(id)) = env.tparams.get(&tp.name).cloned() else { continue };
+                let bounds: Vec<Bound> = tp.bounds.iter().filter_map(|b| self.resolve_bound(b, &env)).collect();
+                for b in &bounds {
+                    if let Bound::Iface(d, _) = b {
+                        if let TypeDefKind::Iface { type_set: Some(ts), .. } = &self.prog.def(*d).kind {
+                            for (_, t) in ts {
+                                if let Some(k) = TyKey::of(t) {
+                                    if !ext_keys.contains(&k) {
+                                        ext_keys.push(k);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                self.prog.tparams[id as usize].bounds.extend(bounds);
+            }
+            if ext_keys.is_empty() {
+                self.err(f.name_span, "`extend T: ...` needs a bound with a type set, like `Integer`");
+            }
+        }
         if let Some(o) = &f.owner {
             let mut intro = vec![];
             self.collect_recv_params(o, &env, &mut intro, true);
@@ -599,7 +634,9 @@ impl Checker {
             let ty = self.resolve_type(o, &env);
             self.inherit_bounds(&ty, &tparams);
             recv_key = TyKey::of(&ty);
-            if let Some(TyKey::Adt(d)) = recv_key {
+            if let Some(&k) = ext_keys.first() {
+                recv_key = Some(k);
+            } else if let Some(TyKey::Adt(d)) = recv_key {
                 if self.prog.def(d).pkg != pkg {
                     self.err(o.span, "functions can only be added to a type in the package that defines it");
                 }
@@ -619,7 +656,11 @@ impl Checker {
             let ty = self.resolve_type(&r.ty, &env);
             self.inherit_bounds(&ty, &tparams);
             recv_key = TyKey::of(&ty);
+            if let Some(&k) = ext_keys.first() {
+                recv_key = Some(k);
+            }
             match recv_key {
+                _ if !ext_keys.is_empty() => {}
                 Some(TyKey::Adt(d)) => {
                     if self.prog.def(d).pkg != pkg {
                         self.err(r.ty.span, "methods can only be declared in the package that defines the type");
@@ -719,12 +760,16 @@ impl Checker {
             owner_ty: owner_ty.clone(),
         });
         if owner_ty.is_some() {
-            if let Some(k) = recv_key {
+            let keys: Vec<TyKey> = if ext_keys.is_empty() { recv_key.into_iter().collect() } else { ext_keys };
+            for k in keys {
                 if self.prog.assoc.insert((k, f.name.clone()), id).is_some() || self.prog.methods.contains_key(&(k, f.name.clone())) {
                     self.err(f.name_span, format!("`{}` is declared twice for this type", f.name));
                 }
             }
             return;
+        }
+        for &k in ext_keys.iter().skip(1) {
+            self.prog.methods.entry((k, f.name.clone())).or_default().push(id);
         }
         match recv_key {
             Some(k) => {

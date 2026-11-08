@@ -1,0 +1,13 @@
+src/main.gojo /etc x a a/c
+a/b/c /r/s .
+. a/c /x ../.. .. / .
+c.txt b / . x
+a/b . / a b
+.gz   . b.tar .bashrc
+a/b.md a/b.md a/b noext.c
+true false ["usr", "lib"] []
+some("../c/d") some(".") some("c") none none some("../../y")
+true true /a/b
+true false true true true
+true false true false true true false
+true false true true true true
