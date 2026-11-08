@@ -1,0 +1,86 @@
+// std/flag: options and arguments declared once, read back typed by name.
+use std/flag
+
+fn tool() -> flag.Command {
+    var cli = flag.command("tool", "Does things to files.")
+    cli.version("0.3.0")
+    cli.bool("-v, --verbose", "say more")
+    cli.bool("-q", "say less")
+    cli.int("-j, --jobs N", 4, "run N jobs at once")
+    cli.float("--ratio X", 0.5, "keep this much")
+    cli.string("-o, --output FILE", "", "write to FILE")
+    cli.strings("-I, --include DIR", "search DIR too")
+    cli.arg("input", "the file to read")
+    cli.optionalArg("mode", "how to read it")
+    cli.rest("extra", "more files")
+    return cli
+}
+
+fn show(cli: flag.Command, args: Vec[String]) {
+    match cli.parse(args) {
+        ok(m) => {
+            println(m.bool("verbose"), m.bool("q"), m.int("jobs"), m.float("ratio"), m.string("output"), m.list("include"))
+            println("  ", m.string("input"), m.string("mode"), m.given("mode"), m.list("extra"), m.given("jobs"), m.given("verbose"))
+        }
+        err(e) => println("error:", e, e.kind == flag.ErrorKind.Usage)
+    }
+}
+
+fn main() {
+    let cli = tool()
+    show(cli, ["in.txt"])
+    show(cli, ["-vq", "-j8", "--ratio=0.25", "-o", "out", "in.txt", "fast", "a", "b"])
+    show(cli, ["--jobs", "16", "-I", "x", "--include=y", "-Iz", "in", "--", "-dash", "--also"])
+    show(cli, ["--verbose=false", "-", "--output=", "m"])
+
+    // mistakes
+    show(cli, [])
+    show(cli, ["--job", "3", "in"])
+    show(cli, ["--outptu", "f", "in"])
+    show(cli, ["-x", "in"])
+    show(cli, ["-j", "many", "in"])
+    show(cli, ["--ratio", "half", "in"])
+    show(cli, ["in", "-j"])
+    show(cli, ["--verbose=maybe", "in"])
+
+    // --help and --version are errors of their own kinds, with the text
+    match cli.parse(["--version"]) {
+        err(e) => print(e.kind == flag.ErrorKind.Version, e.message())
+        ok(_) => println("?")
+    }
+    match cli.parse(["-h"]) {
+        err(e) => print(e.message())
+        ok(_) => println("?")
+    }
+
+    // subcommands see the options above them
+    var git = flag.command("git", "A version control system.")
+    git.bool("-v, --verbose", "say more")
+    var remote = flag.command("remote", "Manage remotes.")
+    var add = flag.command("add", "Add a remote.")
+    add.bool("-f, --fetch", "fetch it right away")
+    add.arg("name", "what to call it")
+    add.arg("url", "where it is")
+    remote.subcommand(add)
+    var commit = flag.command("commit", "Record changes.")
+    commit.string("-m, --message TEXT", "", "the message")
+    git.subcommand(remote)
+    git.subcommand(commit)
+    for args in [["remote", "add", "-f", "origin", "https://x", "-v"], ["commit", "-m", "fix"], ["comit"], ["remote"], []] {
+        match git.parse(args) {
+            ok(m) => {
+                if m.command() == "remote add" {
+                    println(m.command(), m.bool("fetch"), m.string("name"), m.string("url"), m.bool("verbose"))
+                } else {
+                    println(m.command(), m.string("message"), m.bool("verbose"))
+                }
+            }
+            err(e) => println("error:", e)
+        }
+    }
+    match git.parse(["remote", "add", "--help"]) {
+        err(e) => print(e.message())
+        ok(_) => println("?")
+    }
+    print(git.help())
+}

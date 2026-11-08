@@ -42,7 +42,7 @@ fn main() ! io.Error {
         println(raw(port, "NONSENSE\r\n\r\n"))
         println(raw(port, "GET / HTTP/1.1\r\nX: " + "y".repeat(70000) + "\r\n\r\n"))
         println(raw(port, "POST / HTTP/1.1\r\nContent-Length: nope\r\n\r\n"))
-        let tls = http.get("https://example.com/") catch er { http.text(0, er.message()) }
+        let tls = http.get("ftp://example.com/") catch er { http.text(0, er.message()) }
         println(tls.text())
         let e2 = http.get(fmt.format("http://127.0.0.1:{}", port)) catch er { http.text(0, er.message()) }
         println(e2.status, e2.text())

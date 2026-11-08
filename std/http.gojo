@@ -1,5 +1,5 @@
 // HTTP/1.1: a server built on tasks, scopes and cancellation, and a
-// small client. Plain HTTP only (no TLS).
+// small client, over plain TCP or TLS (`serveTls`, `https://` URLs).
 //
 //   struct Hello {
 //       fn serve(self, req: http.Request) -> http.Response {
@@ -16,7 +16,31 @@
 // deadline (`Options.deadline`): a handler still running then is cancelled and
 // the client gets 504. A client that hangs up cancels its request too: the
 // handler's blocking calls return early.
-use std/{fmt, io, net, task, time}
+use std/{fmt, io, net, task, time, tls}
+
+// A connection, plain or encrypted.
+enum Stream {
+    Plain(net.Conn)
+    Secure(tls.Conn)
+
+    fn read(self, buf: inout Vec[byte], max: int) -> int ! io.Error {
+        return match self {
+            Plain(c) => c.read(&buf, max)
+            Secure(c) => c.read(&buf, max)
+        }
+    }
+
+    fn write(self, data: []byte) ! io.Error {
+        return match self {
+            Plain(c) => c.write(data)
+            Secure(c) => c.write(data)
+        }
+    }
+
+    fn writeText(self, s: str) ! io.Error {
+        return self.write(s.bytes())
+    }
+}
 
 // A header line. Names are matched without regard to case.
 pub struct Header {
@@ -212,7 +236,7 @@ fn hexValue(s: str) -> int {
 }
 
 // Reads from `c` into `buf` until it holds `n` bytes; false if the peer closed first.
-fn fillTo(c: net.Conn, buf: inout Vec[byte], n: int) -> bool {
+fn fillTo(c: Stream, buf: inout Vec[byte], n: int) -> bool {
     while buf.len() < n{
         let got = c.read(&buf, 65536) catch _e { 0 }
         if got == 0 {
@@ -224,7 +248,7 @@ fn fillTo(c: net.Conn, buf: inout Vec[byte], n: int) -> bool {
 
 // The head ("METHOD /path HTTP/1.1" or "HTTP/1.1 200 OK", then headers) up to
 // the blank line, and where the body starts. -1: closed; -2: too big.
-fn readHead(c: net.Conn, buf: inout Vec[byte]) -> int {
+fn readHead(c: Stream, buf: inout Vec[byte]) -> int {
     var from = 0
     loop {
         let at = findBytes(buf, "\r\n\r\n", from)
@@ -256,7 +280,7 @@ fn parseHeaders(lines: []String) -> Vec[Header] {
 }
 
 // The body after the head at `start`. Err: the status to answer with.
-fn readBody(c: net.Conn, buf: inout Vec[byte], start: int, hs: []Header, max: int) -> Vec[byte] ! int {
+fn readBody(c: Stream, buf: inout Vec[byte], start: int, hs: []Header, max: int) -> Vec[byte] ! int {
     if let te = findHeader(hs, "Transfer-Encoding") {
         if te.toLower() != "chunked" {
             return err(501)
@@ -306,7 +330,7 @@ fn readBody(c: net.Conn, buf: inout Vec[byte], start: int, hs: []Header, max: in
 }
 
 // Err: the status to answer with, or 0 when the client went away.
-fn readRequest(c: net.Conn, max: int) -> Request ! int {
+fn readRequest(c: Stream, max: int) -> Request ! int {
     var buf = Vec[byte]{}
     let start = readHead(c, &buf)
     if start == -1 {
@@ -352,7 +376,7 @@ fn safeInHead(s: str) -> bool {
     return true
 }
 
-fn writeResponse(c: net.Conn, r: Response) {
+fn writeResponse(c: Stream, r: Response) {
     var head = fmt.format("HTTP/1.1 {} {}\r\n", r.status, statusText(r.status))
     for h in r.headers {
         if h.name.toLower() != "content-length" && h.name.toLower() != "connection" {
@@ -368,7 +392,7 @@ fn writeResponse(c: net.Conn, r: Response) {
 
 // ---------------------------------------------------------------- serving
 
-fn handleConn[H: Handler + send](c: net.Conn, h: H, opts: Options) -> Outcome {
+fn handleConn[H: Handler + send](c: Stream, h: H, opts: Options) -> Outcome {
     let req = readRequest(c, opts.maxBody) catch status {
         if task.cancelled() {
             return .Stopped
@@ -433,18 +457,39 @@ pub fn serveCounting[H: Handler + send](ln: net.Listener, h: H, opts: Options, s
                 break
             }
             // `c` moves into the task; `h`, `opts` and `stats` are borrowed
-            go () => {
-                let o = handleConn(c, h, opts)
-                with s = stats.lock() {
-                    match o {
-                        .Served => s.served += 1
-                        .TimedOut => s.timedOut += 1
-                        .HungUp => s.hungUp += 1
-                        .Stopped => s.stopped += 1
-                        .Rejected => s.rejected += 1
-                    }
-                }
+            go () => count(stats, handleConn(Stream.Plain(c), h, opts))
+        }
+    }
+}
+
+// Serves HTTPS, as `serve` serves HTTP: `ln` from
+// `tls.listen(":8443", "cert.pem", "key.pem")`. Each connection's TLS
+// handshake runs in its own task.
+pub fn serveTls[H: Handler + send](ln: tls.Listener, h: H, opts: Options) {
+    let stats = Mutex(Stats{})
+    serveTlsCounting(ln, h, opts, stats)
+}
+
+// Like `serveTls`, counting what happened to the requests in `stats`.
+pub fn serveTlsCounting[H: Handler + send](ln: tls.Listener, h: H, opts: Options, stats: Mutex[Stats]) {
+    scope {
+        loop {
+            let c = ln.accept() catch _e {
+                break
             }
+            go () => count(stats, handleConn(Stream.Secure(c), h, opts))
+        }
+    }
+}
+
+fn count(stats: Mutex[Stats], o: Outcome) {
+    with s = stats.lock() {
+        match o {
+            .Served => s.served += 1
+            .TimedOut => s.timedOut += 1
+            .HungUp => s.hungUp += 1
+            .Stopped => s.stopped += 1
+            .Rejected => s.rejected += 1
         }
     }
 }
@@ -456,15 +501,14 @@ fn badUrl(url: str, why: str) -> io.Error {
 }
 
 // Sends a request and reads the whole response. `url` is
-// "http://host[:port]/path?query".
+// "http://host[:port]/path?query" or "https://...", whose server certificate
+// is checked against the system's roots.
 pub fn request(method: str, url: str, headers: []Header, body: []byte) -> Response ! io.Error {
-    if url.startsWith("https://") {
-        return err(badUrl(url, "https is not supported (there is no TLS yet)"))
+    let secure = url.startsWith("https://")
+    if !secure && !url.startsWith("http://") {
+        return err(badUrl(url, "expected http:// or https://"))
     }
-    if !url.startsWith("http://") {
-        return err(badUrl(url, "expected http://"))
-    }
-    let rest = url[7..]
+    let rest = url[if secure { 8 } else { 7 }..]
     let slash = rest.find("/") ?? rest.len()
     let hostPort = rest[0..slash]
     let target = if slash < rest.len() { rest[slash..].toString() } else { "/" }
@@ -482,8 +526,9 @@ pub fn request(method: str, url: str, headers: []Header, body: []byte) -> Respon
             return err(io.newError(.InvalidInput, fmt.format("bad header `{}`: a name is one word without `:`, and neither names nor values may hold line breaks", oneLine(h.name))))
         }
     }
-    let addr = if hostPort.contains(":") { hostPort.toString() } else { hostPort + ":80" }
-    let c = try net.dial(addr)
+    let hasPort = if hostPort.startsWith("[") { hostPort.contains("]:") } else { hostPort.contains(":") }
+    let addr = if hasPort { hostPort.toString() } else { hostPort + if secure { ":443" } else { ":80" } }
+    let c = if secure { Stream.Secure(try tls.dial(addr)) } else { Stream.Plain(try net.dial(addr)) }
     var head = fmt.format("{} {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\nContent-Length: {}\r\n", method, target, hostPort, body.len())
     for h in headers {
         head.push(fmt.format("{}: {}\r\n", h.name, h.value))

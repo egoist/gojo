@@ -769,8 +769,17 @@ fn drive(cmd: &str, input: &str, opts: &Options, prog_args: &[String]) -> Result
     }
     let t_borrow = t0.elapsed();
     if cmd == "check" {
+        // some errors only show when generic code is instantiated (a type
+        // `json.encode` can't handle, a generic type that grows without
+        // end): generate the C of a program too, and throw it away
+        if prog.packages[prog.main_pkg as usize].items.contains_key("main") {
+            if let Err(e) = codegen::generate(&prog, &tfuncs, &sm, None, opts.release) {
+                eprintln!("error: {}", e);
+                return Err(());
+            }
+        }
         if opts.verbose {
-            eprintln!("parse {:?}, check {:?}, borrowck {:?}", t_parse, t_check - t_parse, t_borrow - t_check);
+            eprintln!("parse {:?}, check {:?}, borrowck {:?}, codegen {:?}", t_parse, t_check - t_parse, t_borrow - t_check, t0.elapsed() - t_borrow);
         }
         eprintln!("ok");
         return Ok(ExitCode::SUCCESS);

@@ -1,0 +1,50 @@
+// Base64 (RFC 4648): bytes as text, in the standard alphabet (with `+`, `/`
+// and `=` padding) or the URL-safe one (with `-`, `_` and no padding, as in
+// JWTs).
+//
+//   let s = base64.encode("hello".bytes())   // "aGVsbG8="
+//   let b = try base64.decode(s)
+
+// Text that isn't valid base64.
+pub struct Error {
+    // the byte offset of the problem in the text
+    pub offset: int
+
+    pub fn message(self) -> String {
+        return "base64: invalid input at offset ${self.offset}"
+    }
+}
+
+fn __encode(data: []byte, url: bool, pad: bool) -> String
+fn __decode(s: str, url: bool, out: inout Vec[byte]) -> int
+
+// The bytes in the standard alphabet, padded with `=`.
+pub fn encode(data: []byte) -> String {
+    return __encode(data, false, true)
+}
+
+// The bytes in the URL-safe alphabet, without padding.
+pub fn encodeUrl(data: []byte) -> String {
+    return __encode(data, true, false)
+}
+
+// The bytes of standard base64 text. Padding may be left out; if it is
+// there it must be right. Line breaks and other characters are errors.
+pub fn decode(s: str) -> Vec[byte] ! Error {
+    var out = Vec[byte]{}
+    let at = __decode(s, false, &out)
+    if at >= 0 {
+        return err(Error{offset: at})
+    }
+    return out
+}
+
+// The bytes of URL-safe base64 text (padded or not).
+pub fn decodeUrl(s: str) -> Vec[byte] ! Error {
+    var out = Vec[byte]{}
+    let at = __decode(s, true, &out)
+    if at >= 0 {
+        return err(Error{offset: at})
+    }
+    return out
+}

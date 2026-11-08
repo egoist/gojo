@@ -1,0 +1,33 @@
+// std/crypto and std/crc32. The expected digests come from Python's hashlib,
+// hmac and zlib (and RFC 6070's PBKDF2 vectors).
+use std/{crypto, crc32, hex, io}
+
+fn main() {
+    println(hex.encode(crypto.sha256("hello world".bytes())))
+    println(hex.encode(crypto.md5([])), hex.encode(crypto.sha1("abc".bytes())))
+    println(hex.encode(crypto.hmac(.Sha256, "key".bytes(), "The quick brown fox jumps over the lazy dog".bytes())))
+    println(crc32.checksum("123456789".bytes()), crc32.update(crc32.update(0, "hello ".bytes()), "world".bytes()))
+    println(crypto.size(.Sha384), crypto.blockSize(.Sha512), crypto.hash(.Sha384, []).len())
+
+    // streamed, and `sum` leaves the digest usable
+    var d = crypto.Digest.new(.Sha256)
+    d.updateText("hello")
+    let early = d.sum()
+    d.updateText(" world")
+    println(hex.encode(early), hex.encode(d.finish()) == hex.encode(crypto.sha256("hello world".bytes())))
+    // a Digest is an io.Writer
+    var w = crypto.Digest.new(.Sha256)
+    var src = io.textReader("hello world")
+    let n = io.copy(&w, &src) catch e { panic(e.message()) }
+    println(n, crypto.equal(w.finish(), crypto.sha256("hello world".bytes())))
+    var m = crypto.Hmac.new(.Sha256, "key".bytes())
+    m.update("The quick brown fox ".bytes())
+    m.update("jumps over the lazy dog".bytes())
+    println(hex.encode(m.finish()))
+
+    println(hex.encode(crypto.pbkdf2(.Sha256, "password".bytes(), "salt".bytes(), 1, 32)))
+    println(hex.encode(crypto.pbkdf2(.Sha256, "password".bytes(), "salt".bytes(), 4096, 20)))
+    println(hex.encode(crypto.pbkdf2(.Sha512, "passwordPASSWORDpassword".bytes(), "saltSALTsaltSALTsaltSALTsaltSALTsalt".bytes(), 4096, 80)))
+
+    println(crypto.equal([1, 2, 3], [1, 2, 3]), crypto.equal([1, 2, 3], [1, 2, 4]), crypto.equal([1], [1, 2]), crypto.equal([], []))
+}

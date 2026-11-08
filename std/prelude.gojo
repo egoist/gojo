@@ -20,9 +20,16 @@ pub interface Number {
     ~int | ~i8 | ~i16 | ~i32 | ~u8 | ~u16 | ~u32 | ~u64 | ~f32 | ~f64
 }
 
-// Integer types, for `Atomic`.
+// Integer types: their methods (`abs`, `pow`, `checkedAdd`...) are below,
+// under `extend T: Integer`.
 pub interface Integer {
     ~int | ~i8 | ~i16 | ~i32 | ~u8 | ~u16 | ~u32 | ~u64
+}
+
+// Floating-point types: their methods (`sqrt`, `floor`, `isNaN`...) are
+// below, under `extend T: Float`.
+pub interface Float {
+    ~f32 | ~f64
 }
 
 // An integer that tasks share and change without a lock: each operation is
@@ -103,6 +110,50 @@ fn __panicErr[E](msg: str, e: E) -> never
 fn __strFind(s: str, sub: str) -> int
 fn __parseInt(s: str, out: inout int) -> bool
 fn __parseFloat(s: str, out: inout f64) -> bool
+fn __strRFind(s: str, sub: str) -> int
+fn __strFindFrom(s: str, sub: str, from: int) -> int
+fn __decodeAt(s: str, i: int) -> int
+fn __toString[T](x: T) -> String
+fn __countOnes[T: Integer](x: T) -> int
+fn __leadingZeros[T: Integer](x: T) -> int
+fn __trailingZeros[T: Integer](x: T) -> int
+fn __bitsOf[T: Integer](x: T) -> int
+fn __rotateLeft[T: Integer](x: T, n: int) -> T
+fn __swapBytes[T: Integer](x: T) -> T
+fn __minOf[T: Integer](x: T) -> T
+fn __maxOf[T: Integer](x: T) -> T
+fn __addOverflows[T: Integer](a: T, b: T, out: inout T) -> bool
+fn __subOverflows[T: Integer](a: T, b: T, out: inout T) -> bool
+fn __mulOverflows[T: Integer](a: T, b: T, out: inout T) -> bool
+fn __parseRadix[T: Integer](s: str, radix: int, out: inout T) -> bool
+fn __formatRadix[T: Integer](x: T, radix: int) -> String
+fn __f_sqrt[T: Float](x: T) -> T
+fn __f_cbrt[T: Float](x: T) -> T
+fn __f_floor[T: Float](x: T) -> T
+fn __f_ceil[T: Float](x: T) -> T
+fn __f_round[T: Float](x: T) -> T
+fn __f_trunc[T: Float](x: T) -> T
+fn __f_fabs[T: Float](x: T) -> T
+fn __f_exp[T: Float](x: T) -> T
+fn __f_log[T: Float](x: T) -> T
+fn __f_log2[T: Float](x: T) -> T
+fn __f_log10[T: Float](x: T) -> T
+fn __f_pow[T: Float](x: T, y: T) -> T
+fn __f_copysign[T: Float](x: T, y: T) -> T
+fn __f_isnan[T: Float](x: T) -> bool
+fn __f_isinf[T: Float](x: T) -> bool
+fn __f_parse[T: Float](s: str, out: inout T) -> bool
+fn __f64Bits(x: f64) -> u64
+fn __f64FromBits(b: u64) -> f64
+fn __f32Bits(x: f32) -> u32
+fn __f32FromBits(b: u32) -> f32
+fn __runeBits(r: rune) -> int
+fn __runeUpper(r: rune) -> rune
+fn __runeLower(r: rune) -> rune
+fn __stringInsert(s: inout String, at: int, t: str)
+fn __stringPopRune(s: inout String) -> int
+fn __stringSetLen(s: inout String, n: int)
+fn __hashMix(h: u64, x: u64) -> u64
 
 // Ends the program with `msg` and the caller's location (exit code 2). Panics
 // cannot be caught; deferred code does not run.
@@ -192,6 +243,58 @@ extend ?T {
             none => none
         }
     }
+
+    // The value, or what `f` makes (called only when there is none).
+    pub fn unwrapOrElse(sink self, f: fn() -> T) -> T {
+        return match self {
+            some(v) => v
+            none => f()
+        }
+    }
+
+    // `f` applied to the value, which may itself give none: chains steps that
+    // can each find nothing.
+    pub fn andThen[U](self, f: fn(T) -> ?U) -> ?U {
+        return match self {
+            some(v) => f(v)
+            none => none
+        }
+    }
+
+    // The value if `keep` is true for it, otherwise none.
+    pub fn filter(sink self, keep: fn(T) -> bool) -> ?T {
+        return match self {
+            some(v) => if keep(v) { some(v) } else { none }
+            none => none
+        }
+    }
+
+    // This one if it has a value, otherwise `other`.
+    pub fn or(sink self, other: sink ?T) -> ?T {
+        return match self {
+            some(v) => some(v)
+            none => other
+        }
+    }
+
+    // This one if it has a value, otherwise what `f` gives (called only then).
+    pub fn orElse(sink self, f: fn() -> ?T) -> ?T {
+        return match self {
+            some(v) => some(v)
+            none => f()
+        }
+    }
+
+    // The value, or the error `e`: turns a missing value into a failure that
+    // `try` passes on.
+    //
+    //   let port = try env.get("PORT").okOr(ConfigError.Missing("PORT"))
+    pub fn okOr[E](sink self, e: sink E) -> T ! E {
+        return match self {
+            some(v) => ok(v)
+            none => err(e)
+        }
+    }
 }
 
 // ---------------------------------------------------------------- T ! E
@@ -248,6 +351,544 @@ extend T ! E {
             ok(_) => none
             err(e) => some(e)
         }
+    }
+
+    // The value, or what `f` makes from the error.
+    pub fn unwrapOrElse(sink self, f: fn(sink E) -> T) -> T {
+        return match self {
+            ok(v) => v
+            err(e) => f(e)
+        }
+    }
+
+    // `f` applied to the value; an error passes through.
+    pub fn map[U](sink self, f: fn(T) -> U) -> U ! E {
+        return match self {
+            ok(v) => ok(f(v))
+            err(e) => err(e)
+        }
+    }
+
+    // `f` applied to the error, to turn it into another error type; a value
+    // passes through.
+    //
+    //   let n = try text.parse().mapErr(e => AppError.BadConfig(e))
+    pub fn mapErr[F](sink self, f: fn(sink E) -> F) -> T ! F {
+        return match self {
+            ok(v) => ok(v)
+            err(e) => err(f(e))
+        }
+    }
+
+    // `f` applied to the value, which may itself fail: chains steps that can
+    // each fail with the same error type.
+    pub fn andThen[U](sink self, f: fn(T) -> U ! E) -> U ! E {
+        return match self {
+            ok(v) => f(v)
+            err(e) => err(e)
+        }
+    }
+
+    // This one if it is a value, otherwise what `f` makes of the error: a
+    // fallback that may fail too.
+    pub fn orElse[F](sink self, f: fn(sink E) -> T ! F) -> T ! F {
+        return match self {
+            ok(v) => ok(v)
+            err(e) => f(e)
+        }
+    }
+}
+
+// ---------------------------------------------------------------- numbers
+
+extend T: Integer {
+    // The absolute value. Panics for the smallest value of a signed type
+    // (`i8(-128)`), which has no positive counterpart.
+    pub fn abs(self) -> T {
+        if self < 0 {
+            return 0 - self
+        }
+        return self
+    }
+
+    // -1, 0 or 1, by the sign of the value.
+    pub fn signum(self) -> T {
+        var r: T = 0
+        if self > 0 {
+            r = 1
+        } else if self < 0 {
+            r -= 1
+        }
+        return r
+    }
+
+    // The value to the power `exp` (>= 0); panics when the result overflows,
+    // as `*` does. O(log exp).
+    pub fn pow(self, exp: int) -> T {
+        if exp < 0 {
+            panic("pow: negative exponent")
+        }
+        var r: T = 1
+        var b = self
+        var e = exp
+        while e > 0 {
+            if e & 1 == 1 {
+                r *= b
+            }
+            e >>= 1
+            if e > 0 {
+                b *= b
+            }
+        }
+        return r
+    }
+
+    // The value kept within `lo`..=`hi`; panics when `lo` > `hi`.
+    pub fn clamp(self, lo: T, hi: T) -> T {
+        if lo > hi {
+            panic("clamp: lo > hi")
+        }
+        if self < lo {
+            return lo
+        }
+        if self > hi {
+            return hi
+        }
+        return self
+    }
+
+    // `self + other`, or none when it overflows.
+    pub fn checkedAdd(self, other: T) -> ?T {
+        var r: T = 0
+        if __addOverflows(self, other, &r) {
+            return none
+        }
+        return r
+    }
+
+    // `self - other`, or none when it overflows.
+    pub fn checkedSub(self, other: T) -> ?T {
+        var r: T = 0
+        if __subOverflows(self, other, &r) {
+            return none
+        }
+        return r
+    }
+
+    // `self * other`, or none when it overflows.
+    pub fn checkedMul(self, other: T) -> ?T {
+        var r: T = 0
+        if __mulOverflows(self, other, &r) {
+            return none
+        }
+        return r
+    }
+
+    // `self / other`, or none when `other` is 0 or the result overflows
+    // (the smallest signed value divided by -1).
+    pub fn checkedDiv(self, other: T) -> ?T {
+        if other == 0 || (self == __minOf(self) && other < 0 && other + 1 == 0) {
+            return none
+        }
+        return self / other
+    }
+
+    // `self + other`, stopping at the type's largest or smallest value instead
+    // of overflowing.
+    pub fn saturatingAdd(self, other: T) -> T {
+        var r: T = 0
+        if __addOverflows(self, other, &r) {
+            return if other > 0 { __maxOf(self) } else { __minOf(self) }
+        }
+        return r
+    }
+
+    // `self - other`, stopping at the type's largest or smallest value.
+    pub fn saturatingSub(self, other: T) -> T {
+        var r: T = 0
+        if __subOverflows(self, other, &r) {
+            return if other > 0 { __minOf(self) } else { __maxOf(self) }
+        }
+        return r
+    }
+
+    // `self * other`, stopping at the type's largest or smallest value.
+    pub fn saturatingMul(self, other: T) -> T {
+        var r: T = 0
+        if __mulOverflows(self, other, &r) {
+            return if (self < 0) == (other < 0) { __maxOf(self) } else { __minOf(self) }
+        }
+        return r
+    }
+
+    // The quotient rounded so that `remEuclid` is never negative:
+    // `(-7).divEuclid(2)` is -4. Panics when `other` is 0.
+    pub fn divEuclid(self, other: T) -> T {
+        var q = self / other
+        if self % other < 0 {
+            if other > 0 {
+                q -= 1
+            } else {
+                q += 1
+            }
+        }
+        return q
+    }
+
+    // The remainder that is never negative: `(-7).remEuclid(2)` is 1, where
+    // `%` gives -1. For wrapping indexes and clock arithmetic. Panics when
+    // `other` is 0.
+    pub fn remEuclid(self, other: T) -> T {
+        let r = self % other
+        if r < 0 {
+            if other < 0 {
+                return r - other
+            }
+            return r + other
+        }
+        return r
+    }
+
+    // Whether the value is a power of two (1, 2, 4...).
+    pub fn isPowerOfTwo(self) -> bool {
+        return self > 0 && __countOnes(self) == 1
+    }
+
+    // The number of 1 bits.
+    pub fn countOnes(self) -> int {
+        return __countOnes(self)
+    }
+
+    // The number of 0 bits before the highest 1 bit (all of them for 0).
+    pub fn leadingZeros(self) -> int {
+        return __leadingZeros(self)
+    }
+
+    // The number of 0 bits after the lowest 1 bit (all of them for 0).
+    pub fn trailingZeros(self) -> int {
+        return __trailingZeros(self)
+    }
+
+    // The number of bits needed for the value: 0 for 0, 3 for 5. (For a
+    // negative value, the type's width.)
+    pub fn bitLen(self) -> int {
+        return __bitsOf(self) - __leadingZeros(self)
+    }
+
+    // The bits shifted left by `n` (any `n`), those that fall off the top
+    // coming back in at the bottom.
+    pub fn rotateLeft(self, n: int) -> T {
+        return __rotateLeft(self, n)
+    }
+
+    // The bits shifted right by `n`, those that fall off the bottom coming
+    // back in at the top.
+    pub fn rotateRight(self, n: int) -> T {
+        return __rotateLeft(self, 0 - n)
+    }
+
+    // The bytes in the opposite order: converts between little- and big-endian.
+    pub fn swapBytes(self) -> T {
+        return __swapBytes(self)
+    }
+
+    // The value in decimal: what `print` shows.
+    pub fn toString(self) -> String {
+        return __toString(self)
+    }
+
+    // The value in base `radix` (2 to 36), with lower-case letters for digits
+    // over 9 and a `-` for negative values: `255.toStringRadix(16)` is `"ff"`.
+    pub fn toStringRadix(self, radix: int) -> String {
+        if radix < 2 || radix > 36 {
+            panic("toStringRadix: radix must be 2 to 36")
+        }
+        return __formatRadix(self, radix)
+    }
+
+    // The integer that is the whole of `s` in decimal (an optional `+` or `-`,
+    // then digits), or none: no spaces, nothing out of the type's range.
+    //
+    //   let port = u16.parse(text) ?? 8080
+    pub fn parse(s: str) -> ?T {
+        var r: T = 0
+        if __parseRadix(s, 10, &r) {
+            return r
+        }
+        return none
+    }
+
+    // Like `parse`, in base `radix` (2 to 36; letters in either case for
+    // digits over 9), without a prefix: `u32.parseRadix("ff", 16)` is 255.
+    pub fn parseRadix(s: str, radix: int) -> ?T {
+        if radix < 2 || radix > 36 {
+            panic("parseRadix: radix must be 2 to 36")
+        }
+        var r: T = 0
+        if __parseRadix(s, radix, &r) {
+            return r
+        }
+        return none
+    }
+}
+
+extend T: Float {
+    // The absolute value.
+    pub fn abs(self) -> T {
+        return __f_fabs(self)
+    }
+
+    // The square root (NaN for negative values).
+    pub fn sqrt(self) -> T {
+        return __f_sqrt(self)
+    }
+
+    // The cube root.
+    pub fn cbrt(self) -> T {
+        return __f_cbrt(self)
+    }
+
+    // The value to the power `y`.
+    pub fn pow(self, y: T) -> T {
+        return __f_pow(self, y)
+    }
+
+    // e to the power of the value.
+    pub fn exp(self) -> T {
+        return __f_exp(self)
+    }
+
+    // The natural logarithm.
+    pub fn ln(self) -> T {
+        return __f_log(self)
+    }
+
+    // The base-2 logarithm.
+    pub fn log2(self) -> T {
+        return __f_log2(self)
+    }
+
+    // The base-10 logarithm.
+    pub fn log10(self) -> T {
+        return __f_log10(self)
+    }
+
+    // The largest whole number not above the value.
+    pub fn floor(self) -> T {
+        return __f_floor(self)
+    }
+
+    // The smallest whole number not below the value.
+    pub fn ceil(self) -> T {
+        return __f_ceil(self)
+    }
+
+    // The nearest whole number, halves away from zero (2.5 to 3, -2.5 to -3).
+    pub fn round(self) -> T {
+        return __f_round(self)
+    }
+
+    // The whole-number part, towards zero (-2.7 to -2).
+    pub fn trunc(self) -> T {
+        return __f_trunc(self)
+    }
+
+    // The fractional part: `self - self.trunc()`, with the value's sign.
+    pub fn fract(self) -> T {
+        return self - __f_trunc(self)
+    }
+
+    // 1 for positive values (and +0), -1 for negative ones (and -0), NaN for NaN.
+    pub fn signum(self) -> T {
+        if __f_isnan(self) {
+            return self
+        }
+        var one: T = 1
+        return __f_copysign(one, self)
+    }
+
+    // The value with the sign of `sign`.
+    pub fn copySign(self, sign: T) -> T {
+        return __f_copysign(self, sign)
+    }
+
+    // Whether the value is NaN ("not a number").
+    pub fn isNaN(self) -> bool {
+        return __f_isnan(self)
+    }
+
+    // Whether the value is +Inf or -Inf.
+    pub fn isInf(self) -> bool {
+        return __f_isinf(self)
+    }
+
+    // Whether the value is neither infinite nor NaN.
+    pub fn isFinite(self) -> bool {
+        return !__f_isnan(self) && !__f_isinf(self)
+    }
+
+    // The value kept within `lo`..=`hi` (NaN stays NaN); panics when `lo` > `hi`.
+    pub fn clamp(self, lo: T, hi: T) -> T {
+        if !(lo <= hi) {
+            panic("clamp: lo > hi")
+        }
+        if self < lo {
+            return lo
+        }
+        if self > hi {
+            return hi
+        }
+        return self
+    }
+
+    // The value as `print` shows it: the shortest form that reads back the same.
+    pub fn toString(self) -> String {
+        return __toString(self)
+    }
+
+    // The number that is the whole of `s`, or none. Accepts what C's `strtod`
+    // does: `1.5`, `-2e10`, `inf`, `nan`, `0x1p3`.
+    pub fn parse(s: str) -> ?T {
+        var r: T = 0
+        if __f_parse(s, &r) {
+            return r
+        }
+        return none
+    }
+}
+
+extend f64 {
+    // The IEEE 754 bits of the value.
+    pub fn toBits(self) -> u64 {
+        return __f64Bits(self)
+    }
+
+    // The value with the IEEE 754 bits `b`.
+    pub fn fromBits(b: u64) -> f64 {
+        return __f64FromBits(b)
+    }
+}
+
+extend f32 {
+    // The IEEE 754 bits of the value.
+    pub fn toBits(self) -> u32 {
+        return __f32Bits(self)
+    }
+
+    // The value with the IEEE 754 bits `b`.
+    pub fn fromBits(b: u32) -> f32 {
+        return __f32FromBits(b)
+    }
+}
+
+// A `rune` is an `i32` holding a Unicode code point. Its classification and
+// case mapping follow the Unicode Character Database (version 16.0).
+extend rune {
+    // Whether it is a letter (Unicode category L).
+    pub fn isLetter(self) -> bool {
+        return __runeBits(self) & 1 != 0
+    }
+
+    // Whether it is an upper-case letter (Lu).
+    pub fn isUpper(self) -> bool {
+        return __runeBits(self) & 2 != 0
+    }
+
+    // Whether it is a lower-case letter (Ll).
+    pub fn isLower(self) -> bool {
+        return __runeBits(self) & 4 != 0
+    }
+
+    // Whether it is a decimal digit in any script (Nd): `'7'`, `'٧'`. For the
+    // value of an ASCII digit, `toDigit`.
+    pub fn isDigit(self) -> bool {
+        return __runeBits(self) & 8 != 0
+    }
+
+    // Whether it is a number of any kind (N: digits, `'½'`, `'Ⅻ'`...).
+    pub fn isNumber(self) -> bool {
+        return __runeBits(self) & 16 != 0
+    }
+
+    // Whether it is a letter or a number.
+    pub fn isAlphanumeric(self) -> bool {
+        return __runeBits(self) & 17 != 0
+    }
+
+    // Whether it is punctuation (P).
+    pub fn isPunct(self) -> bool {
+        return __runeBits(self) & 32 != 0
+    }
+
+    // Whether it is white space (the White_Space property: space, tab,
+    // newlines, no-break space...).
+    pub fn isWhitespace(self) -> bool {
+        return __runeBits(self) & 64 != 0
+    }
+
+    // Whether it is a control character (Cc).
+    pub fn isControl(self) -> bool {
+        return __runeBits(self) & 128 != 0
+    }
+
+    // Whether it is a symbol (S: `'+'`, `'$'`, `'©'`...).
+    pub fn isSymbol(self) -> bool {
+        return __runeBits(self) & 256 != 0
+    }
+
+    // Whether it is ASCII (0 to 127).
+    pub fn isAscii(self) -> bool {
+        return self >= 0 && self < 128
+    }
+
+    // Whether it is a Unicode scalar value: 0 to 0x10FFFF, not a surrogate.
+    pub fn isValid(self) -> bool {
+        return self >= 0 && self <= 0x10FFFF && (self < 0xD800 || self > 0xDFFF)
+    }
+
+    // The upper-case form (simple case mapping), or the rune itself.
+    pub fn toUpper(self) -> rune {
+        return __runeUpper(self)
+    }
+
+    // The lower-case form (simple case mapping), or the rune itself.
+    pub fn toLower(self) -> rune {
+        return __runeLower(self)
+    }
+
+    // The value of the rune as a digit in base `radix` (2 to 36: `'0'`-`'9'`,
+    // then `'a'`-`'z'` in either case), or none: `'f'.toDigit(16)` is 15.
+    pub fn toDigit(self, radix: int) -> ?int {
+        var d = 99
+        if self >= '0' && self <= '9' {
+            d = int(self - '0')
+        } else if self >= 'a' && self <= 'z' {
+            d = int(self - 'a') + 10
+        } else if self >= 'A' && self <= 'Z' {
+            d = int(self - 'A') + 10
+        }
+        if d < radix {
+            return d
+        }
+        return none
+    }
+
+    // The number of bytes of its UTF-8 encoding (3 for one that isn't valid,
+    // which encodes as U+FFFD).
+    pub fn utf8Len(self) -> int {
+        if !self.isValid() {
+            return 3
+        }
+        if self < 0x80 {
+            return 1
+        }
+        if self < 0x800 {
+            return 2
+        }
+        if self < 0x10000 {
+            return 3
+        }
+        return 4
     }
 }
 
@@ -306,10 +947,11 @@ extend str {
     // `["a", "b", "c"]`.
     pub fn fields(self) -> Vec[String]
 
-    // A copy with ASCII letters in upper case (other characters unchanged).
+    // A copy in upper case, by Unicode simple case mapping (one character to
+    // one: `"straße"` becomes `"STRAßE"`).
     pub fn toUpper(self) -> String
 
-    // A copy with ASCII letters in lower case (other characters unchanged).
+    // A copy in lower case, by Unicode simple case mapping.
     pub fn toLower(self) -> String
 
     // An owned copy.
@@ -360,6 +1002,94 @@ extend str {
         }
         return none
     }
+
+    // The byte index of the first occurrence of `sub` at or after byte `from`;
+    // none when `from` is past the end.
+    pub fn findFrom(self, sub: str, from: int) -> ?int {
+        if from < 0 || from > self.len() {
+            return none
+        }
+        let i = __strFindFrom(self, sub, from)
+        if i < 0 {
+            return none
+        }
+        return i
+    }
+
+    // The rune that starts at byte `i` and its length in bytes, to walk a
+    // string with byte offsets: an invalid byte reads as U+FFFD, 1 byte long.
+    //
+    //   var i = 0
+    //   while i < s.len() { let (r, n) = s.runeAt(i); ...; i += n }
+    pub fn runeAt(self, i: int) -> (rune, int) {
+        if i < 0 || i >= self.len() {
+            panic("runeAt: index ${i} is out of range for a string of length ${self.len()}")
+        }
+        let d = __decodeAt(self, i)
+        return (rune(d >> 8), d & 255)
+    }
+
+    // The byte index of the last occurrence of `sub`.
+    pub fn rfind(self, sub: str) -> ?int {
+        let i = __strRFind(self, sub)
+        if i < 0 {
+            return none
+        }
+        return i
+    }
+
+    // How many times `sub` occurs, without overlaps: `"aaaa".count("aa")` is 2.
+    // For an empty `sub`, the number of characters plus one.
+    pub fn count(self, sub: str) -> int
+
+    // Like `split`, but into at most `n` pieces, the last holding the rest:
+    // `"a=b=c".splitN("=", 2)` is `["a", "b=c"]`. Nothing for `n` <= 0.
+    pub fn splitN(self, sep: str, n: int) -> Vec[String]
+
+    // The parts before and after the first `sep`, or none when it doesn't
+    // occur: `"key=value".splitOnce("=")` is `("key", "value")`. (For views
+    // without copies, slice at `find`: `s[..i]`, `s[i + sep.len()..]`.)
+    pub fn splitOnce(self, sep: str) -> ?(String, String) {
+        let i = self.find(sep) ?? return none
+        return (self[..i].toString(), self[i + sep.len()..].toString())
+    }
+
+    // The string without `prefix` at the start (unchanged when it doesn't start
+    // with it). A view: no copy.
+    pub fn trimPrefix(self, prefix: str) -> str {
+        if self.startsWith(prefix) {
+            return self[prefix.len()..]
+        }
+        return self
+    }
+
+    // The string without `suffix` at the end (unchanged when it doesn't end
+    // with it). A view: no copy.
+    pub fn trimSuffix(self, suffix: str) -> str {
+        if self.endsWith(suffix) {
+            return self[..self.len() - suffix.len()]
+        }
+        return self
+    }
+
+    // The string without the characters in `chars` at either end:
+    // `"--a-b--".trimChars("-")` is `"a-b"`. A view: no copy.
+    pub fn trimChars(self, chars: str) -> str
+
+    // Whether the strings are equal ignoring case, under Unicode simple case
+    // folding: `"Straße".equalFold("STRASSE")` is false (ß folds to itself),
+    // `"Σίσυφος".equalFold("ΣΊΣΥΦΟΣ")` is true. No copies.
+    pub fn equalFold(self, other: str) -> bool
+
+    // The number of Unicode code points (`runes().len()` without the copy).
+    pub fn runeCount(self) -> int
+
+    // Whether every byte is ASCII (below 0x80).
+    pub fn isAscii(self) -> bool
+
+    // Whether the bytes are valid UTF-8. Strings made with `String(bytes)` or
+    // read from files aren't checked.
+    pub fn isValidUtf8(self) -> bool
 }
 
 extend String {
@@ -375,6 +1105,37 @@ extend String {
 
     // The string as a view.
     pub fn asStr(self) -> str
+
+    // Inserts `t` at byte index `at`; panics when `at` is out of range or not
+    // at a character boundary.
+    pub fn insert(inout self, at: int, t: str) {
+        _ = self.asStr()[..at]
+        __stringInsert(&self, at, t)
+    }
+
+    // Keeps the first `n` bytes; nothing happens when `n` >= `len()`. Panics
+    // when `n` is negative or not at a character boundary.
+    pub fn truncate(inout self, n: int) {
+        if n < self.len() {
+            _ = self.asStr()[..n]
+            __stringSetLen(&self, n)
+        }
+    }
+
+    // Removes and returns the last character, or none when empty.
+    pub fn pop(inout self) -> ?rune {
+        let r = __stringPopRune(&self)
+        if r < 0 {
+            return none
+        }
+        return rune(r)
+    }
+
+    // Makes room for `n` more bytes without reallocating.
+    pub fn reserve(inout self, n: int)
+
+    // The number of bytes there is room for.
+    pub fn cap(self) -> int
 }
 
 // ---------------------------------------------------------------- []T / Vec[T]
@@ -556,8 +1317,302 @@ extend []T {
     // An owned copy.
     pub fn toVec(self) -> Vec[T] where T: clone {
         var out = Vec[T]{}
+        out.reserve(self.len())
         for x in self {
             out.push(x.clone())
+        }
+        return out
+    }
+
+    // The first element `pred` is true for.
+    pub fn find(self, pred: fn(T) -> bool) yield ?&T {
+        for i in 0..self.len() {
+            if pred(self[i]) {
+                yield self[i]
+            }
+        }
+        yield none
+    }
+
+    // The index of the first element `pred` is true for.
+    pub fn findIndex(self, pred: fn(T) -> bool) -> ?int {
+        for i, x in self {
+            if pred(x) {
+                return i
+            }
+        }
+        return none
+    }
+
+    // The index of the last element equal to `x`.
+    pub fn lastIndexOf(self, x: T) -> ?int where T: comparable {
+        var i = self.len() - 1
+        while i >= 0 {
+            if self[i] == x {
+                return i
+            }
+            i -= 1
+        }
+        return none
+    }
+
+    // The index of an element equal to `x` in a sorted slice, found in
+    // O(log n), or none. (With duplicates, any of them.)
+    pub fn binarySearch(self, x: T) -> ?int where T: ordered {
+        var lo = 0
+        var hi = self.len()
+        while lo < hi{
+            let mid = lo + (hi - lo) / 2
+            if self[mid] < x {
+                lo = mid + 1
+            } else if self[mid] > x {
+                hi = mid
+            } else {
+                return mid
+            }
+        }
+        return none
+    }
+
+    // The index of the first element `pred` is false for, in a slice where
+    // `pred` is true for a prefix and false after it; O(log n). With
+    // `x => x < v` on a sorted slice, where `v` would be inserted.
+    pub fn partitionPoint(self, pred: fn(T) -> bool) -> int {
+        var lo = 0
+        var hi = self.len()
+        while lo < hi{
+            let mid = lo + (hi - lo) / 2
+            if pred(self[mid]) {
+                lo = mid + 1
+            } else {
+                hi = mid
+            }
+        }
+        return lo
+    }
+
+    // Whether the elements are in ascending order.
+    pub fn isSorted(self) -> bool where T: ordered {
+        for i in 1..self.len() {
+            if self[i] < self[i - 1] {
+                return false
+            }
+        }
+        return true
+    }
+
+    // Sorts by the key `key` gives for each element, ascending. Stable.
+    pub fn sortByKey[K: ordered](inout self, key: fn(T) -> K) {
+        self.sortBy((a, b) => key(a) < key(b))
+    }
+
+    // The element with the smallest key (the first of equal ones), or none
+    // for no elements.
+    pub fn minBy[K: ordered](self, key: fn(T) -> K) yield ?&T {
+        if self.len() == 0 {
+            yield none
+        }
+        var best = 0
+        var bk = key(self[0])
+        for i in 1..self.len() {
+            let k = key(self[i])
+            if k < bk {
+                best = i
+                bk = k
+            }
+        }
+        yield self[best]
+    }
+
+    // The element with the largest key (the first of equal ones), or none
+    // for no elements.
+    pub fn maxBy[K: ordered](self, key: fn(T) -> K) yield ?&T {
+        if self.len() == 0 {
+            yield none
+        }
+        var best = 0
+        var bk = key(self[0])
+        for i in 1..self.len() {
+            let k = key(self[i])
+            if k > bk {
+                best = i
+                bk = k
+            }
+        }
+        yield self[best]
+    }
+
+    // Whether the slice begins with the elements of `prefix`.
+    pub fn startsWith(self, prefix: []T) -> bool where T: comparable {
+        if prefix.len() > self.len() {
+            return false
+        }
+        for i, x in prefix {
+            if self[i] != x {
+                return false
+            }
+        }
+        return true
+    }
+
+    // Whether the slice ends with the elements of `suffix`.
+    pub fn endsWith(self, suffix: []T) -> bool where T: comparable {
+        let off = self.len() - suffix.len()
+        if off < 0 {
+            return false
+        }
+        for i, x in suffix {
+            if self[off + i] != x {
+                return false
+            }
+        }
+        return true
+    }
+
+    // Sets every element to a copy of `x`.
+    pub fn fill(inout self, x: T) where T: clone {
+        for i in 0..self.len() {
+            self[i] = x.clone()
+        }
+    }
+
+    // Moves every element `n` places towards the front, the first `n` going
+    // to the end: `[1, 2, 3, 4]` becomes `[3, 4, 1, 2]` for `n` = 2. Any `n`
+    // works (negative rotates the other way).
+    pub fn rotateLeft(inout self, n: int) {
+        let len = self.len()
+        if len < 2 {
+            return
+        }
+        var k = n % len
+        if k < 0 {
+            k += len
+        }
+        if k == 0 {
+            return
+        }
+        self[..k].reverse()
+        self[k..].reverse()
+        self.reverse()
+    }
+
+    // Moves every element `n` places towards the end, the last `n` going to
+    // the front.
+    pub fn rotateRight(inout self, n: int) {
+        let len = self.len()
+        if len < 2 {
+            return
+        }
+        self.rotateLeft(len - n % len)
+    }
+
+    // The results of `f` for each element that gives one, in order: a map and
+    // a filter in one pass.
+    //
+    //   let ports = fields.filterMap(f => f.parseInt())
+    pub fn filterMap[U](self, f: fn(T) -> ?U) -> Vec[U] {
+        var out = Vec[U]{}
+        for x in self {
+            if let y = f(x) {
+                out.push(y)
+            }
+        }
+        return out
+    }
+
+    // The elements of all the `Vec`s `f` gives, in order.
+    pub fn flatMap[U](self, f: fn(T) -> Vec[U]) -> Vec[U] {
+        var out = Vec[U]{}
+        for x in self {
+            out.extend(f(x))
+        }
+        return out
+    }
+
+    // Copies of the elements split in two: those `pred` is true for, and the
+    // rest. Both keep their order.
+    pub fn partition(self, pred: fn(T) -> bool) -> (Vec[T], Vec[T]) where T: clone {
+        var yes = Vec[T]{}
+        var no = Vec[T]{}
+        for x in self {
+            if pred(x) {
+                yes.push(x.clone())
+            } else {
+                no.push(x.clone())
+            }
+        }
+        return (yes, no)
+    }
+
+    // Copies of the elements grouped by the key `key` gives; groups are in the
+    // order their keys first appear, and keep the elements' order.
+    pub fn groupBy[K: hash](self, key: fn(T) -> K) -> Map[K, Vec[T]] where T: clone {
+        var out = Map[K, Vec[T]]{}
+        for x in self {
+            with g = out.entry(key(x)) {
+                g.push(x.clone())
+            }
+        }
+        return out
+    }
+
+    // Pairs of copies of the elements at the same index, as many as the
+    // shorter slice has.
+    pub fn zip[U](self, other: []U) -> Vec[(T, U)] where T: clone, U: clone {
+        let n = min(self.len(), other.len())
+        var out = Vec[(T, U)]{}
+        out.reserve(n)
+        for i in 0..n {
+            out.push((self[i].clone(), other[i].clone()))
+        }
+        return out
+    }
+
+    // Copies of the elements in pieces of `size` (the last may be shorter):
+    // `[1, 2, 3, 4, 5].chunks(2)` is `[[1, 2], [3, 4], [5]]`. Panics when
+    // `size` < 1. (To work on the pieces in place, slice them:
+    // `xs[i..min(i + size, xs.len())]`.)
+    pub fn chunks(self, size: int) -> Vec[Vec[T]] where T: clone {
+        if size < 1 {
+            panic("chunks: size must be at least 1")
+        }
+        var out = Vec[Vec[T]]{}
+        var i = 0
+        while i < self.len() {
+            out.push(self[i..min(i + size, self.len())].toVec())
+            i += size
+        }
+        return out
+    }
+
+    // Copies of every run of `size` neighbouring elements:
+    // `[1, 2, 3, 4].windows(3)` is `[[1, 2, 3], [2, 3, 4]]`. Panics when
+    // `size` < 1.
+    pub fn windows(self, size: int) -> Vec[Vec[T]] where T: clone {
+        if size < 1 {
+            panic("windows: size must be at least 1")
+        }
+        var out = Vec[Vec[T]]{}
+        for i in 0..self.len() - size + 1 {
+            out.push(self[i..i + size].toVec())
+        }
+        return out
+    }
+}
+
+extend []Vec[T] {
+    // Copies of the elements of every `Vec`, one after the other.
+    pub fn flatten(self) -> Vec[T] where T: clone {
+        var n = 0
+        for v in self {
+            n += v.len()
+        }
+        var out = Vec[T]{}
+        out.reserve(n)
+        for v in self {
+            for x in v {
+                out.push(x.clone())
+            }
         }
         return out
     }
@@ -625,6 +1680,83 @@ extend Vec[T] {
 
     // The number of elements there is room for.
     pub fn cap(self) -> int
+
+    // Keeps the elements `keep` is true for, in order, and drops the rest; in
+    // place, O(n), no copies.
+    pub fn retain(inout self, keep: fn(T) -> bool) {
+        var j = 0
+        for i in 0..self.len() {
+            if keep(self[i]) {
+                if i != j {
+                    self.swap(i, j)
+                }
+                j += 1
+            }
+        }
+        self.truncate(j)
+    }
+
+    // Removes consecutive repeated elements, keeping the first of each run:
+    // `[1, 1, 2, 1, 1]` becomes `[1, 2, 1]` (sort first to remove every
+    // duplicate).
+    pub fn dedup(inout self) where T: comparable {
+        if self.len() < 2 {
+            return
+        }
+        var j = 1
+        for i in 1..self.len() {
+            if self[i] != self[j - 1] {
+                if i != j {
+                    self.swap(i, j)
+                }
+                j += 1
+            }
+        }
+        self.truncate(j)
+    }
+
+    // Removes the elements from index `lo` up to (not including) `hi` and
+    // returns them, in order; panics unless 0 <= `lo` <= `hi` <= `len()`.
+    pub fn drain(inout self, lo: int, hi: int) -> Vec[T] {
+        if lo < 0 || hi > self.len() || lo > hi {
+            panic("drain: range out of bounds")
+        }
+        // move the range to the end, then pop it off
+        self[lo..].rotateLeft(hi - lo)
+        var out = Vec[T]{}
+        out.reserve(hi - lo)
+        for _ in lo..hi {
+            out.push(self.pop().unwrap())
+        }
+        out.reverse()
+        return out
+    }
+
+    // Splits in two at index `at`: keeps the elements before it and returns
+    // the rest. Panics unless 0 <= `at` <= `len()`.
+    pub fn splitOff(inout self, at: int) -> Vec[T] {
+        return self.drain(at, self.len())
+    }
+
+    // Grows to `n` elements with copies of `x`, or shrinks to `n`.
+    pub fn resize(inout self, n: int, x: T) where T: clone {
+        if n <= self.len() {
+            self.truncate(n)
+            return
+        }
+        self.reserve(n - self.len())
+        while self.len() < n{
+            self.push(x.clone())
+        }
+    }
+
+    // Appends copies of the elements of `xs`.
+    pub fn extendFromSlice(inout self, xs: []T) where T: clone {
+        self.reserve(xs.len())
+        for x in xs {
+            self.push(x.clone())
+        }
+    }
 }
 
 // ---------------------------------------------------------------- Map[K, V]
@@ -675,6 +1807,38 @@ extend Map[K, V] {
         var out = Vec[V]{}
         for _, v in self {
             out.push(v.clone())
+        }
+        return out
+    }
+
+    // A copy of the value for `k`, or `d` when there is none.
+    pub fn getOr(self, k: K, d: sink V) -> V where V: clone {
+        if let v = self.get(k) {
+            return v.clone()
+        }
+        return d
+    }
+
+    // Keeps the entries `keep` is true for and removes the rest; the kept
+    // ones keep their order.
+    pub fn retain(inout self, keep: fn(K, V) -> bool) where K: clone {
+        var gone = Vec[K]{}
+        for k, v in self {
+            if !keep(k, v) {
+                gone.push(k.clone())
+            }
+        }
+        for k in gone {
+            _ = self.remove(k)
+        }
+    }
+
+    // Copies of the entries as (key, value) pairs, in insertion order.
+    pub fn entries(self) -> Vec[(K, V)] where K: clone, V: clone {
+        var out = Vec[(K, V)]{}
+        out.reserve(self.len())
+        for k, v in self {
+            out.push((k.clone(), v.clone()))
         }
         return out
     }
@@ -781,14 +1945,15 @@ extend Scope {
 
 // ---------------------------------------------------------------- hashing
 
-// Computes the hash of values (FNV-1a over `u64` words), for writing a
-// custom `hash` method.
+// Computes the hash of values, for writing a custom `hash` method. Hashes
+// are keyed with a random value chosen when the program starts, so keys
+// can't be chosen to collide (and hashes differ from run to run).
 pub struct Hasher {
     state: u64 = 14695981039346656037
 
     // Mixes `x` into the hash.
     pub fn writeU64(inout self, x: u64) {
-        self.state = (self.state ^ x) *% 1099511628211
+        self.state = __hashMix(self.state, x)
     }
 
     // Mixes in the hash of any hashable value.
@@ -1007,6 +2172,60 @@ pub struct Set[T: hash] {
             }
         }
         return out
+    }
+
+    // What is in exactly one of the two.
+    pub fn symmetricDifference(self, other: Set[T]) -> Set[T] where T: clone {
+        var out = self.difference(other)
+        for k, _ in other.m {
+            if !self.contains(k) {
+                _ = out.insert(k.clone())
+            }
+        }
+        return out
+    }
+
+    // Whether every value is also in `other`.
+    pub fn isSubset(self, other: Set[T]) -> bool {
+        if self.len() > other.len() {
+            return false
+        }
+        for k, _ in self.m {
+            if !other.contains(k) {
+                return false
+            }
+        }
+        return true
+    }
+
+    // Whether every value of `other` is also in this one.
+    pub fn isSuperset(self, other: Set[T]) -> bool {
+        return other.isSubset(self)
+    }
+
+    // Whether the two have no value in common.
+    pub fn isDisjoint(self, other: Set[T]) -> bool {
+        for k, _ in self.m {
+            if other.contains(k) {
+                return false
+            }
+        }
+        return true
+    }
+
+    // Adds the values of `xs`.
+    pub fn extend(inout self, xs: sink Vec[T]) {
+        var v = xs
+        v.reverse()
+        loop {
+            let x = v.pop() ?? break
+            _ = self.m.insert(x, true)
+        }
+    }
+
+    // Keeps the values `keep` is true for and removes the rest.
+    pub fn retain(inout self, keep: fn(T) -> bool) where T: clone {
+        self.m.retain((k, _) => keep(k))
     }
 }
 

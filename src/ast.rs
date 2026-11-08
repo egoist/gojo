@@ -98,6 +98,9 @@ pub struct FuncDecl {
     pub is_unsafe: bool,
     /// Associated function (declared in a type body without `self`): the owning type.
     pub owner: Option<TypeExpr>,
+    /// `extend T: Integer { ... }`: the block's type parameter. The
+    /// methods are added to every built-in type in the bound's type set.
+    pub ext_tparams: Vec<TParam>,
     pub span: Span,
 }
 

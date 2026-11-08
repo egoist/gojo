@@ -1,7 +1,7 @@
 # http
 
 HTTP/1.1: a server built on tasks, scopes and cancellation, and a
-small client. Plain HTTP only (no TLS).
+small client, over plain TCP or TLS (`serveTls`, `https://` URLs).
 
 ```gojo
 struct Hello {
@@ -23,7 +23,7 @@ handler's blocking calls return early.
 
 **Types:** [`struct Header`](#struct-header), [`struct Request`](#struct-request), [`struct Response`](#struct-response), [`interface Handler`](#interface-handler), [`struct Options`](#struct-options), [`struct Stats`](#struct-stats)
 
-**Functions:** [`findHeader`](#findheader), [`text`](#text), [`json`](#json), [`statusText`](#statustext), [`serve`](#serve), [`serveCounting`](#servecounting), [`request`](#request), [`get`](#get), [`post`](#post), [`decode`](#decode), [`encode`](#encode)
+**Functions:** [`findHeader`](#findheader), [`text`](#text), [`json`](#json), [`statusText`](#statustext), [`serve`](#serve), [`serveCounting`](#servecounting), [`serveTls`](#servetls), [`serveTlsCounting`](#servetlscounting), [`request`](#request), [`get`](#get), [`post`](#post), [`decode`](#decode), [`encode`](#encode)
 
 ## Types
 
@@ -217,6 +217,24 @@ pub fn serveCounting[H: Handler + send](ln: net.Listener, h: H, opts: Options, s
 
 Like `serve`, counting what happened to the requests in `stats`.
 
+### serveTls
+
+```gojo
+pub fn serveTls[H: Handler + send](ln: tls.Listener, h: H, opts: Options)
+```
+
+Serves HTTPS, as `serve` serves HTTP: `ln` from
+`tls.listen(":8443", "cert.pem", "key.pem")`. Each connection's TLS
+handshake runs in its own task.
+
+### serveTlsCounting
+
+```gojo
+pub fn serveTlsCounting[H: Handler + send](ln: tls.Listener, h: H, opts: Options, stats: Mutex[Stats])
+```
+
+Like `serveTls`, counting what happened to the requests in `stats`.
+
 ### request
 
 ```gojo
@@ -224,7 +242,8 @@ pub fn request(method: str, url: str, headers: []Header, body: []byte) -> Respon
 ```
 
 Sends a request and reads the whole response. `url` is
-"http://host[:port]/path?query".
+"http://host[:port]/path?query" or "https://...", whose server certificate
+is checked against the system's roots.
 
 ### get
 

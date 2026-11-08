@@ -14,3 +14,7 @@ err cannot read `2026-13-06T00:00:00Z` as an RFC 3339 date: a field is out of ra
 err cannot read `2026-11-06T14:41:31+08` as an RFC 3339 date: expected `Z` or an offset like +08:00
 0ns  999ns  1.5µs  2.5ms  1.5s  1m1s  3h5m0s  -250ms  
 true true
+1500000000  9900000000000  -250000000  0  3723500000000  1000  3000  500000000  1000000000  [ cannot read `` as a duration: it is empty ] [ cannot read `5` as a duration: a number needs a unit (ns, us, ms, s, m or h) ] [ cannot read `1x` as a duration: unknown unit `x` ] [ cannot read `9999999999h` as a duration: it is too long ] 
+true
+5 true true
+true 0 true

@@ -1,0 +1,27 @@
+6869 000FFF 0
+ok([222, 173, 190, 239]) err(hex: odd number of digits at offset 3) err(hex: not a hex digit at offset 0) ok([])
+some("hex: not a hex digit at offset 1")
+ Zg== Zm8= Zm9v Zm9vYg== Zm9vYmE= Zm9vYmFy 
+f f fo foob foobar 
++/+/ -_-_ true true
+some(1) some(2) some(4) some(5) some(1)
+https some("ann:pw") Example.com some(8080) /a b/c q=1&q=2&x=a+b top!
+["1", "2"] some("a b") none true
+https://ann:pw@Example.com:8080/a%20b/c?q=1&q=2&x=a+b#top!
+::1 some(80) http://[::1]:80/
+true true ../x y z
+mailto ann@example.com true
+some("url: invalid port `99999`") some("url: invalid escape in the path") true
+http://a/b/c/g http://a/b/c/g http://a/b/c/g/ http://a/g http://g http://a/b/c/d;p?y http://a/b/c/g?y http://a/b/c/d;p?q#s http://a/b/ http://a/b/g http://a/ http://a/g http://a/g http://a/b/c/y http://a/b/c/d;p?q 
+name=Ann+Lee&tag=d 2
+name=Ann+Lee [("a", "1"), ("b", ""), ("c", "A%zz x")]
+a+b%26c%2F%C3%A9 a%20b%2Fc:d some("a b&c") none some("a+b c")
+[["name", "age"], ["Lee, Ann", "30"], ["say \"hi\"", "two\nlines"], ["last", ""]]
+true
+some("csv: unexpected character after a quoted field at line 3, column 3")
+some("csv: a quote in an unquoted field (quote the whole field and write it as \"\") at line 1, column 4") some("csv: a quoted field never ends at line 1, column 1")
+ok([]) ok([["x"]]) ok([["", ""]]) ok([["a", "b c", "d"]])
+" pad","a,b",plain, "a;b";c
+
+["name", "age"] ["Lee, Ann", "30"] ["say \"hi\"", "two\nlines"] ["last", ""] 4
+ok(some(["a"])) some("csv: a quote in an unquoted field (quote the whole field and write it as \"\") at line 2, column 2")

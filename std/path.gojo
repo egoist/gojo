@@ -1,0 +1,298 @@
+// Slash-separated file paths: joining, cleaning and taking them apart, and
+// matching them against glob patterns. Only the text is looked at, except in
+// `abs` (which reads the working directory).
+//
+//   path.join("src", "main.gojo")          // "src/main.gojo"
+//   path.ext("archive.tar.gz")             // ".gz"
+//   path.clean("a/./b/../c//")             // "a/c"
+//   path.match("*.gojo", "main.gojo")      // true
+use std/os
+
+// `a` and `b` joined with one `/` and cleaned; `b` alone when it is absolute.
+// An empty part is skipped.
+pub fn join(a: str, b: str) -> String {
+    if b.startsWith("/") || a.len() == 0 {
+        return clean(b)
+    }
+    if b.len() == 0 {
+        return clean(a)
+    }
+    return clean(a + "/" + b)
+}
+
+// The parts joined in order, as with `join`.
+pub fn joinAll(parts: []String) -> String {
+    var out: String = ""
+    for p in parts {
+        if p.len() == 0 {
+            continue
+        }
+        if p.startsWith("/") || out.len() == 0 {
+            out = p.clone()
+        } else {
+            out.push("/")
+            out.push(p)
+        }
+    }
+    return clean(out)
+}
+
+// The shortest path naming the same file, by text alone: repeated slashes
+// become one, `.` parts go, a `..` removes the part before it (but not at the
+// root, `/..` is `/`), and there is no trailing slash. "" becomes ".".
+pub fn clean(p: str) -> String {
+    if p.len() == 0 {
+        return "."
+    }
+    let rooted = p.startsWith("/")
+    var parts = Vec[String]{}
+    // how many leading `..` a relative path keeps
+    var up = 0
+    for part in p.split("/") {
+        if part == "" || part == "." {
+            continue
+        }
+        if part == ".." {
+            if parts.len() > up {
+                _ = parts.pop()
+            } else if !rooted {
+                parts.push(part.clone())
+                up += 1
+            }
+            continue
+        }
+        parts.push(part.clone())
+    }
+    let body = parts.join("/")
+    if rooted {
+        return "/" + body
+    }
+    if body.len() == 0 {
+        return "."
+    }
+    return body
+}
+
+// The last part: "a/b/c.txt" -> "c.txt", "a/b/" -> "b", "/" -> "/", "" -> ".".
+pub fn base(p: str) -> String {
+    if p.len() == 0 {
+        return "."
+    }
+    var end = p.len()
+    while end > 1 && p[end - 1..end] == "/" {
+        end -= 1
+    }
+    if end == 1 && p.startsWith("/") {
+        return "/"
+    }
+    let i = p[..end].rfind("/") ?? -1
+    return p[i + 1..end].toString()
+}
+
+// Everything but the last part, cleaned: "a/b/c" -> "a/b", "c" -> ".",
+// "/c" -> "/".
+pub fn dir(p: str) -> String {
+    let i = p.rfind("/") ?? return "."
+    if i == 0 {
+        return "/"
+    }
+    return clean(p[..i])
+}
+
+// The extension of the last part, with its dot: "a/b.tar.gz" -> ".gz";
+// "" when there is none. A leading dot is not an extension (".bashrc" -> "").
+pub fn ext(p: str) -> String {
+    let b = base(p)
+    let i = b.rfind(".") ?? return ""
+    if i == 0 {
+        return ""
+    }
+    return b[i..].toString()
+}
+
+// The last part without its extension: "a/b.tar.gz" -> "b.tar".
+pub fn stem(p: str) -> String {
+    let b = base(p)
+    let e = ext(b)
+    return b[..b.len() - e.len()].toString()
+}
+
+// The path with its extension replaced by `e` (with or without its dot; ""
+// removes it): `withExt("a/b.txt", "md")` is "a/b.md".
+pub fn withExt(p: str, e: str) -> String {
+    let old = ext(p)
+    var out = p[..p.len() - old.len()].toString()
+    if e.len() > 0 {
+        if !e.startsWith(".") {
+            out.push(".")
+        }
+        out.push(e)
+    }
+    return out
+}
+
+// Whether the path starts at the root.
+pub fn isAbsolute(p: str) -> bool {
+    return p.startsWith("/")
+}
+
+// The parts between slashes, without empty ones and without cleaning:
+// "/usr//lib/" -> ["usr", "lib"]. (`isAbsolute` tells whether it was rooted.)
+pub fn components(p: str) -> Vec[String] {
+    var out = p.split("/")
+    out.retain(s => s.len() > 0)
+    return out
+}
+
+// An absolute, cleaned path: relative ones are taken from the working
+// directory.
+pub fn abs(p: str) -> String ! os.Error {
+    if isAbsolute(p) {
+        return clean(p)
+    }
+    let wd = try os.cwd()
+    return join(wd, p)
+}
+
+// A path to `target` relative to `from`, so that `join(from, rel)` names
+// `target`: `relative("/a/b", "/a/c/d")` is "../c/d". Both are cleaned first
+// and must be both absolute or both relative; none otherwise, or when `from`
+// has `..` parts that `target` lacks.
+pub fn relative(from: str, target: str) -> ?String {
+    if isAbsolute(from) != isAbsolute(target) {
+        return none
+    }
+    let f = components(clean(from))
+    let t = components(clean(target))
+    let fs = f.filter(s => s != ".")
+    let ts = t.filter(s => s != ".")
+    var i = 0
+    while i < fs.len() && i < ts.len() && fs[i] == ts[i]{
+        i += 1
+    }
+    var out = Vec[String]{}
+    for j in i..fs.len() {
+        if fs[j] == ".." {
+            return none
+        }
+        out.push("..")
+    }
+    for j in i..ts.len() {
+        out.push(ts[j].clone())
+    }
+    if out.isEmpty() {
+        return "."
+    }
+    return out.join("/")
+}
+
+// Whether `name` matches the glob `pattern` as a whole: `*` is any run of
+// characters but `/`, `?` any one character but `/`, `[abc]` / `[a-z]` /
+// `[!a-z]` a character in (or not in) a set, `\` takes the next character
+// literally; `**` as a whole part matches any number of parts:
+// `match("src/**/*.gojo", "src/a/b/c.gojo")`.
+pub fn match(pattern: str, name: str) -> bool {
+    let ps = pattern.split("/")
+    let ns = name.split("/")
+    return matchParts(ps, 0, ns, 0)
+}
+
+fn matchParts(ps: []String, i: int, ns: []String, j: int) -> bool {
+    if i == ps.len() {
+        return j == ns.len()
+    }
+    if ps[i] == "**" {
+        // zero or more whole parts
+        var k = j
+        while k <= ns.len() {
+            if matchParts(ps, i + 1, ns, k) {
+                return true
+            }
+            k += 1
+        }
+        return false
+    }
+    if j == ns.len() {
+        return false
+    }
+    return matchPart(ps[i].runes(), ns[j].runes()) && matchParts(ps, i + 1, ns, j + 1)
+}
+
+// One part, with `*` matched by backtracking to the last star: linear in
+// practice, never exponential.
+fn matchPart(p: []rune, s: []rune) -> bool {
+    var pi = 0
+    var si = 0
+    var star = -1
+    var mark = 0
+    while si < s.len() {
+        if pi < p.len() && p[pi] == '*' {
+            star = pi
+            mark = si
+            pi += 1
+            continue
+        }
+        if pi < p.len() {
+            let (ok, next) = matchOne(p, pi, s[si])
+            if ok {
+                pi = next
+                si += 1
+                continue
+            }
+        }
+        if star < 0 {
+            return false
+        }
+        pi = star + 1
+        mark += 1
+        si = mark
+    }
+    while pi < p.len() && p[pi] == '*' {
+        pi += 1
+    }
+    return pi == p.len()
+}
+
+// Whether pattern element at `pi` matches `c`, and the index after it.
+fn matchOne(p: []rune, pi: int, c: rune) -> (bool, int) {
+    let r = p[pi]
+    if r == '?' {
+        return (true, pi + 1)
+    }
+    if r == '\\' && pi + 1 < p.len() {
+        return (p[pi + 1] == c, pi + 2)
+    }
+    if r != '[' {
+        return (r == c, pi + 1)
+    }
+    var k = pi + 1
+    var negate = false
+    if k < p.len() && (p[k] == '!' || p[k] == '^') {
+        negate = true
+        k += 1
+    }
+    var found = false
+    var first = true
+    while k < p.len() && (first || p[k] != ']') {
+        first = false
+        var lo = p[k]
+        if lo == '\\' && k + 1 < p.len() {
+            k += 1
+            lo = p[k]
+        }
+        var hi = lo
+        if k + 2 < p.len() && p[k + 1] == '-' && p[k + 2] != ']' {
+            hi = p[k + 2]
+            k += 2
+        }
+        if c >= lo && c <= hi {
+            found = true
+        }
+        k += 1
+    }
+    if k >= p.len() {
+        // no closing `]`: a literal `[`
+        return (c == '[', pi + 1)
+    }
+    return (found != negate, k + 1)
+}

@@ -1,4 +1,5 @@
-// TCP: an echo server and its clients, all goroutines in one process.
+// TCP and UDP: echo servers and their clients, all goroutines in one process;
+// name lookups.
 use std/{fmt, net, task, time}
 
 fn serve(c: net.Conn) {
@@ -75,5 +76,50 @@ fn main() {
     match net.dial("127.0.0.1:1") {
         err(e) => println("dial failed:", e.message().contains("refused"))
         ok(_) => println("connected?")
+    }
+
+    // UDP: one datagram per call, the sender's address comes with it
+    let udp = net.listenUdp(":0").unwrap()
+    let up = udp.port()
+    scope {
+        go () => {
+            var buf = Vec[byte]{}
+            for _ in 0..2 {
+                buf.clear()
+                let (n, from) = udp.recvFrom(&buf, 1500) catch _e {
+                    return
+                }
+                udp.sendTo(buf[..n], from) catch _e {
+                    return
+                }
+            }
+        }
+        let peer = net.dialUdp("127.0.0.1:${up}").unwrap()
+        var buf = Vec[byte]{}
+        peer.send("hello".bytes()).unwrap()
+        println("udp echo", peer.recv(&buf, 1500).unwrap(), String(buf))
+        let other = net.listenUdp("127.0.0.1:0").unwrap()
+        other.sendTo("ping".bytes(), "localhost:${up}").unwrap()
+        buf.clear()
+        let (n, from) = other.recvFrom(&buf, 2).unwrap()
+        // a longer datagram is cut to `max`; the reply comes from the server's port
+        println("udp from", n, String(buf), from == "127.0.0.1:${up}")
+    }
+    let silent = net.listenUdp("127.0.0.1:0").unwrap()
+    let waited = task.timeout(10 * time.millisecond, () => {
+        var buf = Vec[byte]{}
+        return silent.recv(&buf, 10)
+    })
+    println("udp recv timed out", waited.isNone())
+    match udp.sendTo("x".bytes(), "no port") {
+        err(e) => println(e)
+        ok(_) => println("sent?")
+    }
+
+    // lookups go through /etc/hosts and DNS; literals come back as they are
+    println(net.lookup("localhost").unwrap().contains("127.0.0.1"), net.lookup("::1").unwrap())
+    match net.lookup("no-such-host.invalid") {
+        err(e) => println(e, e.isNotFound())
+        ok(v) => println("found?", v)
     }
 }

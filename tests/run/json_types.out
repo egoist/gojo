@@ -1,0 +1,27 @@
+{"name":"Ann \"A\"","age":30,"tags":["new"],"address":{"city":"Oslo","zip":null},"scores":{},"color":"Green","shapes":[{"Circle":{"r":1.5}},"Dot",{"Rect":{"w":2,"h":3}}],"pair":[1,"one"],"extra":null,"small":0}
+true
+{
+  "city": "Rome",
+  "zip": "00100"
+} []
+Bo 7 ["new"] Red some(Obj({"any": Arr([Bool(true), Null])})) (1, "one") none
+json: missing field `age` of `User` at line 1, column 15
+json: expected an integer, found a string (in .age) at line 1, column 23
+json: expected a number, found a string (in .shapes[0].Circle.r) at line 1, column 54
+json: unknown variant "Blue" (a `Color`: one of Red, Green) (in .color) at line 1, column 41
+json: the number 300 doesn't fit in u8 (in .small) at line 1, column 35
+json: expected an object, found an array at line 1, column 1
+json: expected an integer, found 7.5 (in .age) at line 1, column 23
+json: more text after the value at line 2, column 13
+json: expected an integer, found null (in .scores.b) at line 1, column 50
+json: the variant `Circle` of `Shape` has fields: write {"Circle": {...}} (in .shapes[0]) at line 1, column 45
+json: an object holding a `Shape` has a single key, the variant (in .shapes[0]) at line 1, column 55
+{"Node":{"left":"Leaf","value":1,"right":{"Node":{"left":"Leaf","value":2,"right":"Leaf"}}}} ok(Leaf) ok(Leaf)
+{"items":[1.5,2],"next":2} ok(Page{items: [], next: none})
+["b","a"] ok({"x", "y"}) [1,2,3] err(json: fewer than 3 elements at line 1, column 6) ok((1, true))
+{"1":[true,null],"20":[]} ok({1: [some(true), none], 20: []}) {"Red":1} ok({Green: 2}) err(json: the key "x" isn't a valid `int` at line 1, column 6)
+ok([18446744073709551615, 0, 0]) err(json: the number -129 doesn't fit in i8 at line 1, column 1) err(json: the number 1e400 doesn't fit in f64 at line 1, column 1) err(json: the number 1e39 doesn't fit in f32 at line 1, column 1) err(json: expected an integer, found 1e3 at line 1, column 1)
+ok("aé😀\n\\é😀") err(json: lone surrogate in \u escape at line 1, column 3) "é😀\u0001\t" [0.30000000000000004,null,-0,1e+300,5e-324]
+err(json: a `,` before `]` at line 1, column 4) err(json: a `,` before `}` at line 1, column 8) err(json: a string has no closing quote at line 1, column 3) err(json: expected an integer, found the end of the text at line 1, column 1) ok({"a": 2})
+err(json: values are nested more than 500 deep at line 1, column 501)
+{"city":"Oslo","zip":"0150"} ok(Address{city: "Oslo", zip: some("0150")}) err(json: expected an object, found a number at line 1, column 1)

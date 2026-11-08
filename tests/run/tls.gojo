@@ -1,0 +1,146 @@
+// std/tls on localhost: a server with a self-signed certificate (for
+// "localhost" and 127.0.0.1, valid for 100 years) and clients that trust it,
+// don't, or check the wrong name. Needs the system's OpenSSL.
+use std/{tls, os, path, io, http}
+
+// the error's message, or "ok"
+fn msgOf[T](r: T ! io.Error) -> String {
+    return match r {
+        ok(_) => "ok"
+        err(e) => e.message()
+    }
+}
+
+const cert = `-----BEGIN CERTIFICATE-----
+MIIBmzCCAUGgAwIBAgIUcjBCImDzHCXXC7PDeWckGV8RX3EwCgYIKoZIzj0EAwIw
+FDESMBAGA1UEAwwJbG9jYWxob3N0MCAXDTI2MTEwODE1NDYxNFoYDzIxMjYxMDE1
+MTU0NjE0WjAUMRIwEAYDVQQDDAlsb2NhbGhvc3QwWTATBgcqhkjOPQIBBggqhkjO
+PQMBBwNCAAQnm/IN3sMVxaNtOMRtZRkABwdHGoK373GMT5RM+mwtf4+47UtK0YXl
+30aRxHF9NYlTQ7J/ZSraM+LY3+ebsc+8o28wbTAdBgNVHQ4EFgQUehg1UznixC/f
+uA7Vo4kRmkLkP9YwHwYDVR0jBBgwFoAUehg1UznixC/fuA7Vo4kRmkLkP9YwDwYD
+VR0TAQH/BAUwAwEB/zAaBgNVHREEEzARgglsb2NhbGhvc3SHBH8AAAEwCgYIKoZI
+zj0EAwIDSAAwRQIhALDMvPC6BDerBwzM3Sdwdy55HM2vx3YgQHFWHNTpZWeDAiB7
+Y5cCokxXRfUd+YUmQXK9EtKL/gKNfZsBJ2wPI0w5lQ==
+-----END CERTIFICATE-----
+`
+
+const key = `-----BEGIN PRIVATE KEY-----
+MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgwCmPzkSajXMzNLLh
+aD35LfKZnFRTP7uiurTYV3b0WI+hRANCAAQnm/IN3sMVxaNtOMRtZRkABwdHGoK3
+73GMT5RM+mwtf4+47UtK0YXl30aRxHF9NYlTQ7J/ZSraM+LY3+ebsc+8
+-----END PRIVATE KEY-----
+`
+
+struct Hello {
+    fn serve(self, req: http.Request) -> http.Response {
+        return http.text(200, "hello ${req.param("name") ?? "world"} over ${req.method}")
+    }
+}
+
+fn echo(c: tls.Conn) {
+    // echoes until the client closes its side
+    var buf = Vec[byte]{}
+    loop {
+        buf.clear()
+        // (a client that rejected the certificate makes this fail)
+        let n = c.read(&buf, 65536) catch _ {
+            return
+        }
+        if n == 0 {
+            return
+        }
+        c.write(buf) catch _ {
+            return
+        }
+    }
+}
+
+fn main() {
+    let dir = path.join(os.tempDir(), "gojo_tls_test_" + rand())
+    os.mkdirAll(dir) catch e { panic(e.message()) }
+    defer {
+        os.removeAll(dir) catch _ {}
+    }
+    let certFile = path.join(dir, "cert.pem")
+    let keyFile = path.join(dir, "key.pem")
+    os.writeText(certFile, cert) catch e { panic(e.message()) }
+    os.writeText(keyFile, key) catch e { panic(e.message()) }
+
+    let ln = tls.listen("127.0.0.1:0", certFile, keyFile) catch e { panic(e.message()) }
+    let addr = "localhost:${ln.port()}"
+    scope s {
+        go () => {
+            loop {
+                let c = ln.accept() catch _ { return }
+                s.go(() => echo(c))
+            }
+        }
+
+        // trusted: a round trip, and a big write that needs many records
+        let c = tls.dialWith(addr, tls.ClientConfig{caFile: certFile.clone()}) catch e { panic(e.message()) }
+        c.writeText("hello over tls") catch e { panic(e.message()) }
+        var got = Vec[byte]{}
+        _ = c.read(&got, 100) catch e { panic(e.message()) }
+        println(String(got))
+        var big = Vec[byte]{}
+        for i in 0..1000000 {
+            big.push(u8(i % 251))
+        }
+        // one task writes while this one reads back
+        scope {
+            go () => {
+                c.write(big) catch e { panic(e.message()) }
+            }
+            var back = Vec[byte]{}
+            while back.len() < big.len() {
+                let n = c.read(&back, 65536) catch e { panic(e.message()) }
+                if n == 0 {
+                    break
+                }
+            }
+            println("echoed", back.len(), back == big)
+        }
+        // by IP address, which the certificate also names
+        let byIp = tls.dialWith("127.0.0.1:${ln.port()}", tls.ClientConfig{caFile: certFile.clone()}) catch e { panic(e.message()) }
+        byIp.writeText("ip") catch e { panic(e.message()) }
+        var ipGot = Vec[byte]{}
+        _ = byIp.read(&ipGot, 10) catch e { panic(e.message()) }
+        println(String(ipGot))
+
+        // not trusted: the system roots don't know this certificate
+        let e1 = tls.dial(addr)
+        println(msgOf(e1).contains("certificate verify failed"), e1.err()?.kind == some(io.ErrorKind.Other))
+        // trusted, but for another name
+        let e2 = tls.dialWith(addr, tls.ClientConfig{caFile: certFile.clone(), serverName: "example.com"})
+        println(msgOf(e2).contains("certificate verify failed"))
+        // no checks at all
+        let c3 = tls.dialWith(addr, tls.ClientConfig{insecureSkipVerify: true}) catch e { panic(e.message()) }
+        c3.writeText("x") catch e { panic(e.message()) }
+        var g3 = Vec[byte]{}
+        _ = c3.read(&g3, 10) catch e { panic(e.message()) }
+        println(String(g3))
+        // a missing CA file, and a server without a certificate
+        println(msgOf(tls.dialWith(addr, tls.ClientConfig{caFile: path.join(dir, "nope.pem")})).contains("CA file"))
+        println(msgOf(tls.listen(":0", path.join(dir, "nope.pem"), keyFile)).contains("certificate"))
+        s.cancel()
+    }
+
+    // HTTPS: http.serveTls, and a client that trusts the certificate
+    let hl = tls.listen("127.0.0.1:0", certFile, keyFile) catch e { panic(e.message()) }
+    let port = hl.port()
+    scope web {
+        go () => http.serveTls(hl, Hello{}, http.Options{})
+        let c = tls.dialWith("localhost:${port}", tls.ClientConfig{caFile: certFile.clone()}) catch e { panic(e.message()) }
+        c.writeText("GET /?name=ann HTTP/1.1\r\nHost: localhost\r\n\r\n") catch e { panic(e.message()) }
+        let resp = String(c.readAll() catch e { panic(e.message()) })
+        println(resp.lines()[0], resp.endsWith("hello ann over GET"))
+        // http's own client checks against the system roots, which don't
+        // know this certificate
+        println(msgOf(http.get("https://localhost:${port}/")).contains("certificate verify failed"))
+        web.cancel()
+    }
+}
+
+fn rand() -> String {
+    return "${os.getenv("USER") ?? "u"}_${os.args().len()}"
+}

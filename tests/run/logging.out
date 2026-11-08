@@ -1,0 +1,15 @@
+INFO  server started
+INFO  listening addr=:8080 workers=8
+WARN  slow id=r1 path="/a b" empty=""
+ERROR failed id=r1 path="/a b" empty="" error="no such file" took=1.5s ratio=0.25 retry=false
+INFO  escapes quote="say \"hi\"" tab="a\tb" "k=v"="x=y"
+false true
+DEBUG now shown
+INFO  still text: req copied the default before id=r1 path="/a b" empty=""
+{"level":"warn","msg":"as \"json\"","ratio":0.5,"inf":null,"took":0.25,"ok":true}
+1970-01-01T00:00:00.000Z INFO  at the epoch
+2026-11-03T16:54:56.123Z ERROR later n=1
+{"time":"2000-02-29T00:00:00.999Z","level":"warn","msg":"json"}
+false true
+ok(warn) ok(error) err(log: unknown level `loud` (use debug, info, warn or error)) true
+INFO  done

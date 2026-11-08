@@ -6,7 +6,7 @@ HTTP/1.1 501 Not Implemented
 HTTP/1.1 400 Bad Request
 HTTP/1.1 431 Request Header Fields Too Large
 HTTP/1.1 400 Bad Request
-bad URL `https://example.com/`: https is not supported (there is no TLS yet)
+bad URL `ftp://example.com/`: expected http:// or https://
 200 GET / q= name=- body=0 agent=-
 200 a  X-Evil: 1 no x-evil
 bad header `X-A`: a name is one word without `:`, and neither names nor values may hold line breaks

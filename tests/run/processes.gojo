@@ -1,0 +1,82 @@
+// os.command: child processes with pipes, environment, directory and
+// signals; os.notify; os.walk.
+use std/{os, time, task}
+
+fn main() ! os.Error {
+    let dir = os.joinPath(os.tempDir(), "gojo-processes-${os.pid()}")
+    try os.mkdirAll(os.joinPath(dir, "a/b"))
+    defer {
+        _ = os.removeAll(dir)
+    }
+    try os.writeText(os.joinPath(dir, "note.txt"), "in the directory\n")
+
+    // stdin and stdout as pipes
+    var sort = os.command("sort", [])
+    sort.stdin = .Pipe
+    sort.stdout = .Pipe
+    var p = try sort.start()
+    if let w = p.stdin {
+        try w.writeText("pear\napple\nfig\n")
+    }
+    p.stdin = none
+    if let r = p.stdout {
+        print(try r.readText())
+    }
+    println("sort:", try p.wait(), p.tryWait())
+
+    // environment, directory, both outputs, the exit status
+    var sh = os.command("sh", ["-c", "echo out; echo err >&2; echo $GREETING; cat note.txt; exit 3"])
+    sh.env("GREETING", "hello there")
+    sh.dir(dir)
+    let o = try sh.output()
+    println(o.status, o.ok(), o.stdout, o.stderr)
+    sh.stderr = .Stdout
+    print((try sh.output()).stdout)
+    var clean = os.command("sh", ["-c", "echo [$HOME] [$X] [$GREETING]"])
+    clean.clearEnv()
+    clean.env("X", "1")
+    print((try clean.output()).stdout)
+    println(try os.command("true", []).run(), try os.command("false", []).run())
+    match os.command("no-such-program-gojo", []).start() {
+        ok(_) => println("started?")
+        err(e) => println("not started:", e.kind == .NotFound)
+    }
+
+    // signals end a child: 128 + the signal
+    var s = try os.command("sleep", ["10"]).start()
+    try s.signal(.Term)
+    println("terminated:", try s.wait())
+    // cancelling a wait leaves the child running
+    var s2 = try os.command("sleep", ["10"]).start()
+    let t0 = time.now()
+    println("timed out:", task.timeout(50 * time.millisecond, () => s2.wait()) == none, time.since(t0) < 5 * time.second)
+    try s2.kill()
+    println("killed:", try s2.wait())
+
+    // signals to this process
+    var sigs = try os.notify([.Usr1, .Hup])
+    _ = try os.command("kill", ["-USR1", "${os.pid()}"]).run()
+    _ = try os.command("kill", ["-HUP", "${os.pid()}"]).run()
+    println("got", try sigs.next(), try sigs.next())
+    drop(sigs)
+
+    // walking a tree
+    try os.writeText(os.joinPath(dir, "a/b/x.txt"), "x")
+    try os.mkdirAll(os.joinPath(dir, "skip/me"))
+    var seen = Vec[String]{}
+    try os.walk(dir, (path, info) => {
+        if os.baseName(path) == "skip" {
+            return .SkipDir
+        }
+        let rel = path[dir.len()..]
+        seen.push(if info.isDir() { "${rel}/" } else { rel.toString() })
+        return .Continue
+    })
+    println(seen)
+    var first = Vec[String]{}
+    try os.walk(dir, (path, _info) => {
+        first.push(os.baseName(path))
+        return if first.len() == 2 { .Stop } else { .Continue }
+    })
+    println(first.len(), os.environ().any(kv => kv.0 == "PATH"))
+}

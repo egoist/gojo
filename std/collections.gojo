@@ -1,0 +1,981 @@
+// Collections beyond the prelude's `Vec`, `Map` and `Set`: a double-ended
+// queue, a priority queue, maps and sets kept in key order, and a set of
+// small integers.
+//
+//   var q = Deque[Job].new()            // O(1) at both ends
+//   var pq = Heap[Task].by((a, b) => a.due < b.due)
+//   var m = SortedMap[String, int].new()
+//   for e in m { println(e.key, e.value) }   // in key order
+
+// ---------------------------------------------------------------- Deque
+
+// A double-ended queue: a growable ring buffer, with O(1) pushes and pops at
+// both ends and O(1) indexing. `for x in d` goes from front to back.
+pub struct Deque[T] {
+    buf: Vec[?T] = Vec[?T]{}
+    head: int = 0
+    n: int = 0
+
+    // An empty deque.
+    pub fn new() -> Deque[T] {
+        return Deque[T]{}
+    }
+
+    // The number of elements.
+    pub fn len(self) -> int {
+        return self.n
+    }
+
+    // Whether there are no elements.
+    pub fn isEmpty(self) -> bool {
+        return self.n == 0
+    }
+
+    fn slot(self, i: int) -> int {
+        let j = self.head + i
+        if j >= self.buf.len() {
+            return j - self.buf.len()
+        }
+        return j
+    }
+
+    fn grow(inout self) {
+        let cap = max(8, self.buf.len() * 2)
+        var nb = Vec[?T]{}
+        nb.reserve(cap)
+        for i in 0..self.n {
+            let j = self.slot(i)
+            nb.push(take(&self.buf[j]))
+        }
+        while nb.len() < cap{
+            nb.push(none)
+        }
+        self.buf = nb
+        self.head = 0
+    }
+
+    // Adds `x` at the back.
+    pub fn pushBack(inout self, x: sink T) {
+        if self.n == self.buf.len() {
+            self.grow()
+        }
+        let j = self.slot(self.n)
+        self.buf[j] = some(x)
+        self.n += 1
+    }
+
+    // Adds `x` at the front.
+    pub fn pushFront(inout self, x: sink T) {
+        if self.n == self.buf.len() {
+            self.grow()
+        }
+        self.head = if self.head == 0 { self.buf.len() - 1 } else { self.head - 1 }
+        self.buf[self.head] = some(x)
+        self.n += 1
+    }
+
+    // Removes and returns the back element, or none when empty.
+    pub fn popBack(inout self) -> ?T {
+        if self.n == 0 {
+            return none
+        }
+        self.n -= 1
+        let j = self.slot(self.n)
+        return take(&self.buf[j])
+    }
+
+    // Removes and returns the front element, or none when empty.
+    pub fn popFront(inout self) -> ?T {
+        if self.n == 0 {
+            return none
+        }
+        let x = take(&self.buf[self.head])
+        self.head = self.slot(1)
+        self.n -= 1
+        return x
+    }
+
+    // Element `i` from the front, or none when out of range.
+    pub fn get(self, i: int) yield ?&T {
+        if i < 0 || i >= self.n {
+            yield none
+        }
+        if let v = self.buf[self.slot(i)] {
+            yield v
+        }
+        yield none
+    }
+
+    // Element `i` from the front, to change in place.
+    pub fn getMut(inout self, i: int) yield ?inout T {
+        if i < 0 || i >= self.n {
+            yield none
+        }
+        var s = self.buf[self.slot(i)]
+        if let v = s {
+            yield v
+        }
+        yield none
+    }
+
+    // The front element, if any.
+    pub fn front(self) yield ?&T {
+        if self.n == 0 {
+            yield none
+        }
+        if let v = self.buf[self.head] {
+            yield v
+        }
+        yield none
+    }
+
+    // The back element, if any.
+    pub fn back(self) yield ?&T {
+        if self.n == 0 {
+            yield none
+        }
+        if let v = self.buf[self.slot(self.n - 1)] {
+            yield v
+        }
+        yield none
+    }
+
+    // Removes every element, keeping the buffer.
+    pub fn clear(inout self) {
+        for i in 0..self.n {
+            let j = self.slot(i)
+            self.buf[j] = none
+        }
+        self.head = 0
+        self.n = 0
+    }
+
+    // Copies of the elements, front to back.
+    pub fn toVec(self) -> Vec[T] where T: clone {
+        var out = Vec[T]{}
+        out.reserve(self.n)
+        for x in self {
+            out.push(x.clone())
+        }
+        return out
+    }
+
+    // `for x in d`
+    pub fn cursor(self) -> int {
+        return 0
+    }
+
+    pub fn next(self, c: inout int) yield ?&T {
+        if c >= self.n {
+            yield none
+        }
+        let j = self.slot(c)
+        c += 1
+        if let v = self.buf[j] {
+            yield v
+        }
+        yield none
+    }
+}
+
+// ---------------------------------------------------------------- Heap
+
+// A priority queue (a binary heap): `pop` takes the element that goes first,
+// in O(log n); `push` is O(log n); `peek` O(1).
+//
+//   var h = Heap[int].min()                 // smallest first
+//   var tasks = Heap[Task].by((a, b) => a.priority > b.priority)
+pub struct Heap[T] {
+    items: Vec[T] = Vec[T]{}
+    // whether the first argument goes before the second
+    first: fn(T, T) -> bool
+
+    // A heap that pops the smallest element first.
+    pub fn min() -> Heap[T] where T: ordered {
+        return Heap[T]{first: (a, b) => a < b}
+    }
+
+    // A heap that pops the largest element first.
+    pub fn max() -> Heap[T] where T: ordered {
+        return Heap[T]{first: (a, b) => a > b}
+    }
+
+    // A heap that pops first an element `first(a, b)` puts before the others.
+    pub fn by(first: sink fn(T, T) -> bool) -> Heap[T] {
+        return Heap[T]{first: first}
+    }
+
+    // The number of elements.
+    pub fn len(self) -> int {
+        return self.items.len()
+    }
+
+    // Whether there are no elements.
+    pub fn isEmpty(self) -> bool {
+        return self.items.len() == 0
+    }
+
+    // Adds `x`.
+    pub fn push(inout self, x: sink T) {
+        self.items.push(x)
+        var i = self.items.len() - 1
+        while i > 0 {
+            let p = (i - 1) / 2
+            if !self.first(self.items[i], self.items[p]) {
+                break
+            }
+            self.items.swap(i, p)
+            i = p
+        }
+    }
+
+    // The element that goes first, without removing it.
+    pub fn peek(self) yield ?&T {
+        if self.items.len() == 0 {
+            yield none
+        }
+        yield self.items[0]
+    }
+
+    // Removes and returns the element that goes first, or none when empty.
+    pub fn pop(inout self) -> ?T {
+        let n = self.items.len()
+        if n == 0 {
+            return none
+        }
+        self.items.swap(0, n - 1)
+        let top = self.items.pop()
+        let m = n - 1
+        var i = 0
+        loop {
+            let l = 2 * i + 1
+            if l >= m {
+                break
+            }
+            var c = l
+            if l + 1 < m && self.first(self.items[l + 1], self.items[l]) {
+                c = l + 1
+            }
+            if !self.first(self.items[c], self.items[i]) {
+                break
+            }
+            self.items.swap(i, c)
+            i = c
+        }
+        return top
+    }
+
+    // Removes every element.
+    pub fn clear(inout self) {
+        self.items.clear()
+    }
+
+    // The elements in the order `pop` would give them (the heap is used up).
+    pub fn intoSorted(sink self) -> Vec[T] {
+        var h = self
+        var out = Vec[T]{}
+        out.reserve(h.len())
+        loop {
+            let x = h.pop() ?? break
+            out.push(x)
+        }
+        return out
+    }
+}
+
+// ---------------------------------------------------------------- SortedMap
+
+// A key and its value, as a sorted map holds them.
+pub struct Entry[K, V] {
+    pub key: K
+    pub value: V
+}
+
+// B-tree nodes hold between B - 1 and 2B - 1 entries (the root may hold
+// fewer); they live in one Vec and refer to each other by index.
+const B = 6
+
+struct BNode[K, V] {
+    es: Vec[Entry[K, V]] = Vec[Entry[K, V]]{}
+    kids: Vec[int] = Vec[int]{}
+}
+
+// A map that keeps its keys in order (a B-tree): lookups, inserts and
+// removals in O(log n), iteration in key order, and the nearest key above or
+// below any value. `for e in m` gives each `Entry` (`e.key`, `e.value`).
+//
+//   var scores = SortedMap[String, int].new()
+//   _ = scores.insert("bo", 7)
+//   if let e = scores.ceil("b") { ... }      // the first key >= "b"
+pub struct SortedMap[K: ordered, V] {
+    nodes: Vec[BNode[K, V]] = Vec[BNode[K, V]]{}
+    free: Vec[int] = Vec[int]{}
+    root: int = -1
+    n: int = 0
+
+    // An empty map.
+    pub fn new() -> SortedMap[K, V] {
+        return SortedMap[K, V]{}
+    }
+
+    // The number of entries.
+    pub fn len(self) -> int {
+        return self.n
+    }
+
+    // Whether there are no entries.
+    pub fn isEmpty(self) -> bool {
+        return self.n == 0
+    }
+
+    fn alloc(inout self) -> int {
+        if let i = self.free.pop() {
+            return i
+        }
+        self.nodes.push(BNode[K, V]{})
+        return self.nodes.len() - 1
+    }
+
+    fn release(inout self, i: int) {
+        self.nodes[i].es.clear()
+        self.nodes[i].kids.clear()
+        self.free.push(i)
+    }
+
+    // The first index in node `x` whose key is >= `k`.
+    fn lower(self, x: int, k: K) -> int {
+        let es = self.nodes[x].es
+        var lo = 0
+        var hi = es.len()
+        while lo < hi{
+            let mid = (lo + hi) / 2
+            if es[mid].key < k {
+                lo = mid + 1
+            } else {
+                hi = mid
+            }
+        }
+        return lo
+    }
+
+    fn leaf(self, x: int) -> bool {
+        return self.nodes[x].kids.len() == 0
+    }
+
+    // Where `k` is: (node, index), or none.
+    fn find(self, k: K) -> ?(int, int) {
+        var x = self.root
+        while x >= 0 {
+            let i = self.lower(x, k)
+            if i < self.nodes[x].es.len() && self.nodes[x].es[i].key == k {
+                return (x, i)
+            }
+            if self.leaf(x) {
+                return none
+            }
+            x = self.nodes[x].kids[i]
+        }
+        return none
+    }
+
+    // The value for `k`, if any.
+    pub fn get(self, k: K) yield ?&V {
+        if let (x, i) = self.find(k) {
+            yield self.nodes[x].es[i].value
+        }
+        yield none
+    }
+
+    // The value for `k`, to change in place.
+    pub fn getMut(inout self, k: K) yield ?inout V {
+        if let (x, i) = self.find(k) {
+            yield self.nodes[x].es[i].value
+        }
+        yield none
+    }
+
+    // Whether there is an entry for `k`.
+    pub fn contains(self, k: K) -> bool {
+        return self.find(k) != none
+    }
+
+    // Splits the full child `i` of `p` in two around its middle entry, which
+    // moves up into `p`.
+    fn splitChild(inout self, p: int, i: int) {
+        let c = self.nodes[p].kids[i]
+        let r = self.alloc()
+        let es = self.nodes[c].es.splitOff(B)
+        self.nodes[r].es = es
+        if !self.leaf(c) {
+            let ks = self.nodes[c].kids.splitOff(B)
+            self.nodes[r].kids = ks
+        }
+        let mid = self.nodes[c].es.pop().unwrap()
+        self.nodes[p].es.insert(i, mid)
+        self.nodes[p].kids.insert(i + 1, r)
+    }
+
+    // Sets the value for `k`, returning the old one.
+    pub fn insert(inout self, k: sink K, v: sink V) -> ?V {
+        if self.root < 0 {
+            self.root = self.alloc()
+        }
+        if self.nodes[self.root].es.len() == 2 * B - 1 {
+            let old = self.root
+            self.root = self.alloc()
+            self.nodes[self.root].kids.push(old)
+            self.splitChild(self.root, 0)
+        }
+        var x = self.root
+        loop {
+            var i = self.lower(x, k)
+            if i < self.nodes[x].es.len() && self.nodes[x].es[i].key == k {
+                return some(replace(&self.nodes[x].es[i].value, v))
+            }
+            if self.leaf(x) {
+                self.nodes[x].es.insert(i, Entry[K, V]{key: k, value: v})
+                self.n += 1
+                return none
+            }
+            let c = self.nodes[x].kids[i]
+            if self.nodes[c].es.len() == 2 * B - 1 {
+                self.splitChild(x, i)
+                if self.nodes[x].es[i].key == k {
+                    return some(replace(&self.nodes[x].es[i].value, v))
+                }
+                if self.nodes[x].es[i].key < k {
+                    i += 1
+                }
+            }
+            x = self.nodes[x].kids[i]
+        }
+    }
+
+    // Child `i` of `p` and child `i + 1` become one, with the entry between
+    // them in the middle.
+    fn merge(inout self, p: int, i: int) {
+        let y = self.nodes[p].kids[i]
+        let z = self.nodes[p].kids.remove(i + 1)
+        let e = self.nodes[p].es.remove(i)
+        self.nodes[y].es.push(e)
+        let zes = take(&self.nodes[z].es)
+        self.nodes[y].es.extend(zes)
+        let zks = take(&self.nodes[z].kids)
+        self.nodes[y].kids.extend(zks)
+        self.release(z)
+    }
+
+    // Makes child `i` of `p` hold at least B entries (so one can be removed
+    // below it), borrowing from a sibling or merging with one; returns the
+    // child's index then.
+    fn fill(inout self, p: int, i: int) -> int {
+        let c = self.nodes[p].kids[i]
+        if self.nodes[c].es.len() >= B {
+            return i
+        }
+        if i > 0 {
+            let l = self.nodes[p].kids[i - 1]
+            if self.nodes[l].es.len() >= B {
+                let le = self.nodes[l].es.pop().unwrap()
+                let pe = replace(&self.nodes[p].es[i - 1], le)
+                self.nodes[c].es.insert(0, pe)
+                if !self.leaf(l) {
+                    let k = self.nodes[l].kids.pop().unwrap()
+                    self.nodes[c].kids.insert(0, k)
+                }
+                return i
+            }
+        }
+        if i < self.nodes[p].kids.len() - 1 {
+            let r = self.nodes[p].kids[i + 1]
+            if self.nodes[r].es.len() >= B {
+                let re = self.nodes[r].es.remove(0)
+                let pe = replace(&self.nodes[p].es[i], re)
+                self.nodes[c].es.push(pe)
+                if !self.leaf(r) {
+                    let k = self.nodes[r].kids.remove(0)
+                    self.nodes[c].kids.push(k)
+                }
+                return i
+            }
+            self.merge(p, i)
+            return i
+        }
+        self.merge(p, i - 1)
+        return i - 1
+    }
+
+    // Removes the largest (or smallest) entry below node `x`, which holds at
+    // least B entries or is the root.
+    fn takeEnd(inout self, x0: int, last: bool) -> Entry[K, V] {
+        var x = x0
+        while !self.leaf(x) {
+            let i = if last { self.nodes[x].kids.len() - 1 } else { 0 }
+            let j = self.fill(x, i)
+            x = self.nodes[x].kids[j]
+        }
+        if last {
+            return self.nodes[x].es.pop().unwrap()
+        }
+        return self.nodes[x].es.remove(0)
+    }
+
+    fn shrink(inout self) {
+        if self.root >= 0 && self.nodes[self.root].es.len() == 0 {
+            let old = self.root
+            self.root = if self.leaf(old) { -1 } else { self.nodes[old].kids[0] }
+            self.release(old)
+        }
+    }
+
+    // Removes the entry for `k`, returning its value.
+    pub fn remove(inout self, k: K) -> ?V {
+        if self.root < 0 {
+            return none
+        }
+        var x = self.root
+        var out: ?V = none
+        loop {
+            let i = self.lower(x, k)
+            let found = i < self.nodes[x].es.len() && self.nodes[x].es[i].key == k
+            if self.leaf(x) {
+                if found {
+                    out = some(self.nodes[x].es.remove(i).value)
+                }
+                break
+            }
+            if found {
+                let y = self.nodes[x].kids[i]
+                let z = self.nodes[x].kids[i + 1]
+                if self.nodes[y].es.len() >= B {
+                    let pred = self.takeEnd(y, true)
+                    out = some(replace(&self.nodes[x].es[i], pred).value)
+                    break
+                }
+                if self.nodes[z].es.len() >= B {
+                    let succ = self.takeEnd(z, false)
+                    out = some(replace(&self.nodes[x].es[i], succ).value)
+                    break
+                }
+                self.merge(x, i)
+                x = y
+                continue
+            }
+            let j = self.fill(x, i)
+            x = self.nodes[x].kids[j]
+        }
+        if out.isSome() {
+            self.n -= 1
+        }
+        self.shrink()
+        return out
+    }
+
+    // Removes and returns the entry with the smallest key.
+    pub fn popFirst(inout self) -> ?Entry[K, V] {
+        if self.n == 0 {
+            return none
+        }
+        let e = self.takeEnd(self.root, false)
+        self.n -= 1
+        self.shrink()
+        return e
+    }
+
+    // Removes and returns the entry with the largest key.
+    pub fn popLast(inout self) -> ?Entry[K, V] {
+        if self.n == 0 {
+            return none
+        }
+        let e = self.takeEnd(self.root, true)
+        self.n -= 1
+        self.shrink()
+        return e
+    }
+
+    // The entry with the smallest key.
+    pub fn first(self) yield ?&Entry[K, V] {
+        if self.n == 0 {
+            yield none
+        }
+        var x = self.root
+        while !self.leaf(x) {
+            x = self.nodes[x].kids[0]
+        }
+        yield self.nodes[x].es[0]
+    }
+
+    // The entry with the largest key.
+    pub fn last(self) yield ?&Entry[K, V] {
+        if self.n == 0 {
+            yield none
+        }
+        var x = self.root
+        while !self.leaf(x) {
+            x = self.nodes[x].kids[self.nodes[x].kids.len() - 1]
+        }
+        yield self.nodes[x].es[self.nodes[x].es.len() - 1]
+    }
+
+    // Where the nearest key on one side of `k` is: the smallest >= `k`
+    // (`above`), or the largest <= `k`.
+    fn near(self, k: K, above: bool) -> ?(int, int) {
+        var x = self.root
+        var best: ?(int, int) = none
+        while x >= 0 {
+            let i = self.lower(x, k)
+            let es = self.nodes[x].es
+            if i < es.len() && es[i].key == k {
+                return (x, i)
+            }
+            if above && i < es.len() {
+                best = (x, i)
+            }
+            if !above && i > 0 {
+                best = (x, i - 1)
+            }
+            if self.leaf(x) {
+                break
+            }
+            x = self.nodes[x].kids[i]
+        }
+        return best
+    }
+
+    // The entry with the smallest key >= `k`.
+    pub fn ceil(self, k: K) yield ?&Entry[K, V] {
+        if let (x, i) = self.near(k, true) {
+            yield self.nodes[x].es[i]
+        }
+        yield none
+    }
+
+    // The entry with the largest key <= `k`.
+    pub fn floor(self, k: K) yield ?&Entry[K, V] {
+        if let (x, i) = self.near(k, false) {
+            yield self.nodes[x].es[i]
+        }
+        yield none
+    }
+
+    // Removes every entry.
+    pub fn clear(inout self) {
+        self.nodes.clear()
+        self.free.clear()
+        self.root = -1
+        self.n = 0
+    }
+
+    // Copies of the keys, in order.
+    pub fn keys(self) -> Vec[K] where K: clone {
+        var out = Vec[K]{}
+        out.reserve(self.n)
+        for e in self {
+            out.push(e.key.clone())
+        }
+        return out
+    }
+
+    // Copies of the values, in key order.
+    pub fn values(self) -> Vec[V] where V: clone {
+        var out = Vec[V]{}
+        out.reserve(self.n)
+        for e in self {
+            out.push(e.value.clone())
+        }
+        return out
+    }
+
+    // Copies of the entries with keys from `lo` up to (not including) `hi`,
+    // in order; O(log n) to find the start.
+    pub fn range(self, lo: K, hi: K) -> Vec[Entry[K, V]] where K: clone, V: clone {
+        var out = Vec[Entry[K, V]]{}
+        var c = self.cursorAt(lo)
+        loop {
+            if let e = self.next(&c) {
+                if !(e.key < hi) {
+                    break
+                }
+                out.push(Entry[K, V]{key: e.key.clone(), value: e.value.clone()})
+            } else {
+                break
+            }
+        }
+        return out
+    }
+
+    // A cursor at the first key >= `k`: a stack of (node, next index) pairs.
+    fn cursorAt(self, k: K) -> Vec[int] {
+        var c = Vec[int]{}
+        var x = self.root
+        while x >= 0 {
+            let i = self.lower(x, k)
+            c.push(x)
+            c.push(i)
+            if self.leaf(x) {
+                break
+            }
+            x = self.nodes[x].kids[i]
+        }
+        return c
+    }
+
+    // `for e in m`, in key order
+    pub fn cursor(self) -> Vec[int] {
+        var c = Vec[int]{}
+        var x = self.root
+        while x >= 0 {
+            c.push(x)
+            c.push(0)
+            if self.leaf(x) {
+                break
+            }
+            x = self.nodes[x].kids[0]
+        }
+        return c
+    }
+
+    pub fn next(self, c: inout Vec[int]) yield ?&Entry[K, V] {
+        while c.len() > 0 {
+            let x = c[c.len() - 2]
+            let i = c[c.len() - 1]
+            if i < self.nodes[x].es.len() {
+                c[c.len() - 1] = i + 1
+                if !self.leaf(x) {
+                    // down to the leftmost leaf of the subtree after entry i
+                    var y = self.nodes[x].kids[i + 1]
+                    loop {
+                        c.push(y)
+                        c.push(0)
+                        if self.leaf(y) {
+                            break
+                        }
+                        y = self.nodes[y].kids[0]
+                    }
+                }
+                yield self.nodes[x].es[i]
+            }
+            c.truncate(c.len() - 2)
+        }
+        yield none
+    }
+}
+
+// A set that keeps its values in order (a B-tree): `for x in s` goes from
+// smallest to largest.
+pub struct SortedSet[T: ordered] {
+    m: SortedMap[T, bool] = SortedMap[T, bool]{}
+
+    // An empty set.
+    pub fn new() -> SortedSet[T] {
+        return SortedSet[T]{}
+    }
+
+    // Adds `x`; false if it was there already.
+    pub fn insert(inout self, x: sink T) -> bool {
+        return self.m.insert(x, true) == none
+    }
+
+    // Takes `x` out; false if it wasn't there.
+    pub fn remove(inout self, x: T) -> bool {
+        return self.m.remove(x) != none
+    }
+
+    // Whether `x` is in the set.
+    pub fn contains(self, x: T) -> bool {
+        return self.m.contains(x)
+    }
+
+    // The number of values.
+    pub fn len(self) -> int {
+        return self.m.len()
+    }
+
+    // Whether the set is empty.
+    pub fn isEmpty(self) -> bool {
+        return self.m.len() == 0
+    }
+
+    // The smallest value.
+    pub fn first(self) yield ?&T {
+        if let e = self.m.first() {
+            yield e.key
+        }
+        yield none
+    }
+
+    // The largest value.
+    pub fn last(self) yield ?&T {
+        if let e = self.m.last() {
+            yield e.key
+        }
+        yield none
+    }
+
+    // The smallest value >= `x`.
+    pub fn ceil(self, x: T) yield ?&T {
+        if let e = self.m.ceil(x) {
+            yield e.key
+        }
+        yield none
+    }
+
+    // The largest value <= `x`.
+    pub fn floor(self, x: T) yield ?&T {
+        if let e = self.m.floor(x) {
+            yield e.key
+        }
+        yield none
+    }
+
+    // Removes and returns the smallest value.
+    pub fn popFirst(inout self) -> ?T {
+        let e = self.m.popFirst() ?? return none
+        return e.key
+    }
+
+    // Removes and returns the largest value.
+    pub fn popLast(inout self) -> ?T {
+        let e = self.m.popLast() ?? return none
+        return e.key
+    }
+
+    // Removes every value.
+    pub fn clear(inout self) {
+        self.m.clear()
+    }
+
+    // Copies of the values, in order.
+    pub fn toVec(self) -> Vec[T] where T: clone {
+        return self.m.keys()
+    }
+
+    // `for x in s`
+    pub fn cursor(self) -> Vec[int] {
+        return self.m.cursor()
+    }
+
+    pub fn next(self, c: inout Vec[int]) yield ?&T {
+        if let e = self.m.next(&c) {
+            yield e.key
+        }
+        yield none
+    }
+}
+
+// ---------------------------------------------------------------- BitSet
+
+// A set of small non-negative integers, one bit each: membership in O(1),
+// and set operations a word (64 values) at a time. `for i in s` goes in
+// increasing order.
+pub struct BitSet {
+    words: Vec[u64] = Vec[u64]{}
+
+    // An empty set.
+    pub fn new() -> BitSet {
+        return BitSet{}
+    }
+
+    // Adds `i` (>= 0); false if it was there already.
+    pub fn insert(inout self, i: int) -> bool {
+        if i < 0 {
+            panic("BitSet: negative value")
+        }
+        let w = i >> 6
+        while self.words.len() <= w{
+            self.words.push(0)
+        }
+        let bit = u64(1) << u64(i & 63)
+        let had = self.words[w] & bit != 0
+        self.words[w] |= bit
+        return !had
+    }
+
+    // Takes `i` out; false if it wasn't there.
+    pub fn remove(inout self, i: int) -> bool {
+        if !self.contains(i) {
+            return false
+        }
+        self.words[i >> 6] &= ~(u64(1) << u64(i & 63))
+        return true
+    }
+
+    // Whether `i` is in the set.
+    pub fn contains(self, i: int) -> bool {
+        let w = i >> 6
+        return i >= 0 && w < self.words.len() && self.words[w] & (u64(1) << u64(i & 63)) != 0
+    }
+
+    // The number of values.
+    pub fn len(self) -> int {
+        var n = 0
+        for w in self.words {
+            n += w.countOnes()
+        }
+        return n
+    }
+
+    // Whether the set is empty.
+    pub fn isEmpty(self) -> bool {
+        return self.words.all(w => w == 0)
+    }
+
+    // Removes every value.
+    pub fn clear(inout self) {
+        self.words.clear()
+    }
+
+    // Adds every value of `other`.
+    pub fn unionWith(inout self, other: BitSet) {
+        while self.words.len() < other.words.len() {
+            self.words.push(0)
+        }
+        for i, w in other.words {
+            self.words[i] |= w
+        }
+    }
+
+    // Keeps only the values also in `other`.
+    pub fn intersectWith(inout self, other: BitSet) {
+        for i in 0..self.words.len() {
+            self.words[i] &= if i < other.words.len() { other.words[i] } else { 0 }
+        }
+    }
+
+    // Removes the values in `other`.
+    pub fn differenceWith(inout self, other: BitSet) {
+        for i in 0..min(self.words.len(), other.words.len()) {
+            self.words[i] &= ~other.words[i]
+        }
+    }
+
+    // The values, in increasing order.
+    pub fn toVec(self) -> Vec[int] {
+        var out = Vec[int]{}
+        for i in self {
+            out.push(i)
+        }
+        return out
+    }
+
+    // `for i in s`: the cursor is the next value to look at
+    pub fn cursor(self) -> int {
+        return 0
+    }
+
+    pub fn next(self, c: inout int) -> ?int {
+        var w = c >> 6
+        while w < self.words.len() {
+            // the bits at and after c in this word
+            let rest = self.words[w] >> u64(c & 63)
+            if rest != 0 {
+                let i = c + rest.trailingZeros()
+                c = i + 1
+                return i
+            }
+            w += 1
+            c = w << 6
+        }
+        return none
+    }
+}

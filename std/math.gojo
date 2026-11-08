@@ -7,6 +7,26 @@ pub const E = 2.718281828459045
 // The largest and smallest `int`.
 pub const MaxInt = 9223372036854775807
 pub const MinInt = -9223372036854775808
+// The limits of the sized integer types.
+pub const MaxI8: i8 = 127
+pub const MinI8: i8 = -128
+pub const MaxI16: i16 = 32767
+pub const MinI16: i16 = -32768
+pub const MaxI32: i32 = 2147483647
+pub const MinI32: i32 = -2147483648
+pub const MaxU8: u8 = 255
+pub const MaxU16: u16 = 65535
+pub const MaxU32: u32 = 4294967295
+pub const MaxU64: u64 = 18446744073709551615
+// The largest finite `f64`, the smallest positive normal one, and the gap
+// between 1.0 and the next `f64` up.
+pub const MaxF64 = 1.7976931348623157e308
+pub const MinPositiveF64 = 2.2250738585072014e-308
+pub const EpsilonF64 = 2.220446049250313e-16
+// The square root of 2, and the natural logarithms of 2 and 10.
+pub const Sqrt2 = 1.4142135623730951
+pub const Ln2 = 0.6931471805599453
+pub const Ln10 = 2.302585092994046
 
 // The square root; NaN for negative numbers.
 pub fn sqrt(x: f64) -> f64
@@ -18,16 +38,77 @@ pub fn abs(x: f64) -> f64
 pub fn floor(x: f64) -> f64
 pub fn ceil(x: f64) -> f64
 pub fn round(x: f64) -> f64
+// Rounds towards zero.
+pub fn trunc(x: f64) -> f64
+// The cube root.
+pub fn cbrt(x: f64) -> f64
+// `sqrt(x*x + y*y)`, without overflow or underflow in between.
+pub fn hypot(x: f64, y: f64) -> f64
+// The remainder of `x / y`, with the sign of `x` (C's `fmod`).
+pub fn fmod(x: f64, y: f64) -> f64
 // Trigonometric functions, in radians.
 pub fn sin(x: f64) -> f64
 pub fn cos(x: f64) -> f64
 pub fn tan(x: f64) -> f64
+// Their inverses: `asin` and `acos` take [-1, 1], `atan` gives (-π/2, π/2).
+pub fn asin(x: f64) -> f64
+pub fn acos(x: f64) -> f64
+pub fn atan(x: f64) -> f64
 // The angle of the point (x, y) from the x axis, in (-π, π].
 pub fn atan2(y: f64, x: f64) -> f64
+// Hyperbolic functions.
+pub fn sinh(x: f64) -> f64
+pub fn cosh(x: f64) -> f64
+pub fn tanh(x: f64) -> f64
 // The natural logarithm, and e to the power `x`.
 pub fn log(x: f64) -> f64
 pub fn exp(x: f64) -> f64
+// Base-2 and base-10 logarithms.
+pub fn log2(x: f64) -> f64
+pub fn log10(x: f64) -> f64
+// `log(1 + x)` and `exp(x) - 1`, accurate for `x` near 0.
+pub fn log1p(x: f64) -> f64
+pub fn expm1(x: f64) -> f64
 // Whether `x` is not a number (the result of `0.0 / 0.0`, `sqrt(-1.0)`).
 pub fn isNaN(x: f64) -> bool
-// Positive infinity.
+// Whether `x` is +Inf or -Inf; whether it is neither infinite nor NaN.
+pub fn isInf(x: f64) -> bool
+pub fn isFinite(x: f64) -> bool
+// Positive infinity, and a NaN.
 pub fn inf() -> f64
+pub fn nan() -> f64
+
+// Converts degrees to radians, and radians to degrees.
+pub fn toRadians(deg: f64) -> f64 {
+    return deg * Pi / 180.0
+}
+
+pub fn toDegrees(rad: f64) -> f64 {
+    return rad * 180.0 / Pi
+}
+
+// `a + (b - a) * t`: the point a fraction `t` of the way from `a` to `b`.
+pub fn lerp(a: f64, b: f64, t: f64) -> f64 {
+    return a + (b - a) * t
+}
+
+// The greatest common divisor of `a` and `b` (never negative; 0 when both are 0).
+pub fn gcd(a: int, b: int) -> int {
+    var x = a.abs()
+    var y = b.abs()
+    while y != 0 {
+        let t = x % y
+        x = y
+        y = t
+    }
+    return x
+}
+
+// The least common multiple of `a` and `b` (never negative; 0 when either is 0).
+// Panics when it doesn't fit in an `int`.
+pub fn lcm(a: int, b: int) -> int {
+    if a == 0 || b == 0 {
+        return 0
+    }
+    return (a / gcd(a, b) * b).abs()
+}

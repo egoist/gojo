@@ -1,0 +1,378 @@
+// Leveled, structured logging: one line per event, with key=value fields,
+// to standard error.
+//
+//   log.info("server started")
+//   log.fields([log.string("addr", addr), log.integer("workers", 8)]).info("listening")
+//   // 2026-11-08T16:40:00.123Z INFO  listening addr=:8080 workers=8
+//
+//   let req = log.fields([log.string("id", id)])   // a logger that adds fields
+//   req.warn("slow")
+//   req.fields([log.cause(e)]).error("failed")
+//
+//   log.setLevel(.Debug)        // also: log.setLevel(try log.Level.parse(s))
+//   log.setFormat(.Json)        // {"time":"...","level":"info","msg":"...",...}
+//
+// A line is written with a single write, so lines from different tasks never
+// mix. A message below the level costs one atomic load. A `Logger` is a
+// plain value: set it up once (`var l = log.Logger{}`; `l.level = .Debug`)
+// and pass it around, or change the one the package functions use with
+// `log.setDefault`.
+use std/{json, time}
+
+// How severe an event is. Events below a logger's level are dropped.
+pub copy enum Level {
+    Debug
+    Info
+    Warn
+    Error
+
+    // "debug", "info", "warn" or "error".
+    pub fn toString(self) -> String {
+        return match self {
+            .Debug => "debug"
+            .Info => "info"
+            .Warn => "warn"
+            .Error => "error"
+        }
+    }
+
+    // The level named `s`, in any case; "warning" and "err" work too.
+    pub fn parse(s: str) -> Level ! ParseError {
+        let l = s.toLower()
+        if l == "debug" {
+            return .Debug
+        }
+        if l == "info" {
+            return .Info
+        }
+        if l == "warn" || l == "warning" {
+            return .Warn
+        }
+        if l == "error" || l == "err" {
+            return .Error
+        }
+        return err(ParseError{text: s.toString()})
+    }
+}
+
+// A level name that `Level.parse` doesn't know.
+pub struct ParseError {
+    pub text: String
+
+    pub fn message(self) -> String {
+        return "log: unknown level `${self.text}` (use debug, info, warn or error)"
+    }
+}
+
+// How lines are written.
+pub copy enum Format {
+    // `2026-11-08T16:40:00.123Z INFO  message key=value`, for people
+    Text
+    // one JSON object per line, for programs
+    Json
+}
+
+// Where lines go.
+pub copy enum Output {
+    Stderr
+    Stdout
+}
+
+// Anything with a `message`, as every error has; for `cause`.
+pub interface Message {
+    fn message(self) -> String
+}
+
+enum Value {
+    Str(s: String)
+    Int(i: int)
+    Num(f: f64)
+    Bool(b: bool)
+    Dur(ns: int)
+}
+
+// A key and a value attached to an event. Make one with `string`,
+// `integer`, `number`, `boolean`, `duration` or `cause`.
+pub struct Field {
+    key: String
+    value: Value
+}
+
+// A text field.
+pub fn string(key: str, value: str) -> Field {
+    return Field{key: key.toString(), value: .Str(value.toString())}
+}
+
+// An integer field.
+pub fn integer(key: str, value: int) -> Field {
+    return Field{key: key.toString(), value: .Int(value)}
+}
+
+// A number field.
+pub fn number(key: str, value: f64) -> Field {
+    return Field{key: key.toString(), value: .Num(value)}
+}
+
+// A true or false field.
+pub fn boolean(key: str, value: bool) -> Field {
+    return Field{key: key.toString(), value: .Bool(value)}
+}
+
+// A duration in nanoseconds, shown as `time.formatDuration` shows it
+// (`1.5s`); in JSON, a number of seconds.
+pub fn duration(key: str, ns: int) -> Field {
+    return Field{key: key.toString(), value: .Dur(ns)}
+}
+
+// The message of an error, under the key "error".
+pub fn cause(e: Message) -> Field {
+    return Field{key: "error", value: .Str(e.message())}
+}
+
+// Writes events at or above `level`, with `fields` on every line.
+pub struct Logger {
+    pub level: Level = .Info
+    pub format: Format = .Text
+    pub out: Output = .Stderr
+    // whether lines start with the time (UTC, to the millisecond)
+    pub time: bool = true
+    extra: Vec[Field] = Vec[Field]{}
+
+    // A logger that also adds `fields` to every line.
+    pub fn fields(self, fields: []Field) -> Logger {
+        var l = self.clone()
+        for f in fields {
+            l.extra.push(f.clone())
+        }
+        return l
+    }
+
+    // Whether events at `level` are written: to skip work that only builds
+    // a log message.
+    pub fn enabled(self, level: Level) -> bool {
+        return level >= self.level
+    }
+
+    // Writes `msg` at `level`.
+    pub fn log(self, level: Level, msg: str) {
+        if level < self.level {
+            return
+        }
+        write(self.out, self.line(level, msg, time.unixNanos()))
+    }
+
+    pub fn debug(self, msg: str) {
+        self.log(.Debug, msg)
+    }
+
+    pub fn info(self, msg: str) {
+        self.log(.Info, msg)
+    }
+
+    pub fn warn(self, msg: str) {
+        self.log(.Warn, msg)
+    }
+
+    pub fn error(self, msg: str) {
+        self.log(.Error, msg)
+    }
+
+    // The line, with its `\n`, that an event at `level` would be at the
+    // instant `ns` (Unix nanoseconds): to write logs somewhere else.
+    pub fn line(self, level: Level, msg: str, ns: int) -> String {
+        var out: String = ""
+        out.reserve(64 + msg.len())
+        match self.format {
+            .Text => {
+                if self.time {
+                    stamp(&out, ns)
+                    out.push(" ")
+                }
+                out.push(match level {
+                    .Debug => "DEBUG "
+                    .Info => "INFO  "
+                    .Warn => "WARN  "
+                    .Error => "ERROR "
+                })
+                out.push(msg)
+                for f in self.extra {
+                    out.push(" ")
+                    textValue(&out, f.key, true)
+                    out.push("=")
+                    match f.value {
+                        .Str(s) => textValue(&out, s, false)
+                        .Int(i) => out.push("${i}")
+                        .Num(x) => out.push("${x}")
+                        .Bool(b) => out.push(if b { "true" } else { "false" })
+                        .Dur(d) => out.push(time.formatDuration(d))
+                    }
+                }
+            }
+            .Json => {
+                out.push("{")
+                if self.time {
+                    out.push("\"time\":\"")
+                    stamp(&out, ns)
+                    out.push("\",")
+                }
+                out.push("\"level\":\"${level}\",\"msg\":")
+                out.push(json.quoted(msg))
+                for f in self.extra {
+                    out.push(",")
+                    out.push(json.quoted(f.key))
+                    out.push(":")
+                    match f.value {
+                        .Str(s) => out.push(json.quoted(s))
+                        .Int(i) => out.push("${i}")
+                        .Num(x) => out.push(if x.isFinite() { "${x}" } else { "null" })
+                        .Bool(b) => out.push(if b { "true" } else { "false" })
+                        .Dur(d) => out.push("${f64(d) / 1e9}")
+                    }
+                }
+                out.push("}")
+            }
+        }
+        out.push("\n")
+        return out
+    }
+}
+
+// A value as is, or quoted when it would be ambiguous: empty, or holding a
+// space, `=`, a quote or a control character. A key is never empty.
+fn textValue(out: inout String, s: str, key: bool) {
+    var plain = !s.isEmpty() || key
+    for c in s.bytes() {
+        if c <= ' ' || c == '=' || c == '"' || c == 127 {
+            plain = false
+            break
+        }
+    }
+    if plain {
+        out.push(s)
+    } else {
+        out.push(json.quoted(s))
+    }
+}
+
+// 2026-11-08T16:40:00.123Z
+fn stamp(out: inout String, ns: int) {
+    let d = time.utc(ns)
+    pad(&out, d.year, 4)
+    out.push("-")
+    pad(&out, d.month, 2)
+    out.push("-")
+    pad(&out, d.day, 2)
+    out.push("T")
+    pad(&out, d.hour, 2)
+    out.push(":")
+    pad(&out, d.minute, 2)
+    out.push(":")
+    pad(&out, d.second, 2)
+    out.push(".")
+    pad(&out, d.nanosecond / 1000000, 3)
+    out.push("Z")
+}
+
+fn pad(out: inout String, n: int, width: int) {
+    var digits = 1
+    var p = 10
+    while p <= n{
+        digits += 1
+        p *= 10
+    }
+    for _ in digits..width {
+        out.push("0")
+    }
+    out.push("${n}")
+}
+
+// The logger behind the package functions; its level is also kept apart, so
+// a dropped event doesn't need the lock.
+let current = RwLock(Logger{})
+let minLevel = Atomic(1)
+
+// A copy of the logger the package functions use.
+pub fn default() -> Logger {
+    return with l = current.read() {
+        l.clone()
+    }
+}
+
+// Makes `l` the logger the package functions use.
+pub fn setDefault(l: sink Logger) {
+    minLevel.store(int(l.level))
+    with c = current.write() {
+        c = l
+    }
+}
+
+// Changes the level of the default logger.
+pub fn setLevel(level: Level) {
+    with c = current.write() {
+        c.level = level
+        minLevel.store(int(level))
+    }
+}
+
+// Changes the format of the default logger.
+pub fn setFormat(format: Format) {
+    with c = current.write() {
+        c.format = format
+    }
+}
+
+// Changes where the default logger writes.
+pub fn setOutput(out: Output) {
+    with c = current.write() {
+        c.out = out
+    }
+}
+
+// The default logger with `fields` added to every line it writes.
+pub fn fields(fields: []Field) -> Logger {
+    return with l = current.read() {
+        l.fields(fields)
+    }
+}
+
+// Whether the default logger writes events at `level`.
+pub fn enabled(level: Level) -> bool {
+    return int(level) >= minLevel.load()
+}
+
+fn emit(level: Level, msg: str) {
+    if int(level) < minLevel.load() {
+        return
+    }
+    // formatted under the lock, written after it
+    let out = with l = current.read() {
+        if level < l.level {
+            return
+        }
+        (l.out, l.line(level, msg, time.unixNanos()))
+    }
+    write(out.0, out.1)
+}
+
+fn write(out: Output, line: str) {
+    match out {
+        .Stderr => eprint(line)
+        .Stdout => print(line)
+    }
+}
+
+pub fn debug(msg: str) {
+    emit(.Debug, msg)
+}
+
+pub fn info(msg: str) {
+    emit(.Info, msg)
+}
+
+pub fn warn(msg: str) {
+    emit(.Warn, msg)
+}
+
+pub fn error(msg: str) {
+    emit(.Error, msg)
+}

@@ -1,0 +1,19 @@
+// std/path: joining, cleaning, taking apart, relative paths and globs.
+use std/path
+
+fn main() {
+    println(path.join("src", "main.gojo"), path.join("a/", "/etc"), path.join("", "x"), path.join("a", ""), path.join("a/b", "../c"))
+    println(path.joinAll(["a", "", "b/", "c"]), path.joinAll(["a", "/r", "s"]), path.joinAll([]))
+    println(path.clean(""), path.clean("a/./b/../c//"), path.clean("/../x"), path.clean("../../a/.."), path.clean("a/../.."), path.clean("//"), path.clean("./"))
+    println(path.base("a/b/c.txt"), path.base("a/b/"), path.base("/"), path.base(""), path.base("x"))
+    println(path.dir("a/b/c"), path.dir("c"), path.dir("/c"), path.dir("a//b"), path.dir("./a/../b/c"))
+    println(path.ext("a/b.tar.gz"), path.ext(".bashrc"), path.ext("a.d/file"), path.ext("x."), path.stem("a/b.tar.gz"), path.stem(".bashrc"))
+    println(path.withExt("a/b.txt", "md"), path.withExt("a/b.txt", ".md"), path.withExt("a/b.txt", ""), path.withExt("noext", "c"))
+    println(path.isAbsolute("/x"), path.isAbsolute("x"), path.components("/usr//lib/"), path.components(""))
+    println(path.relative("/a/b", "/a/c/d"), path.relative("/a", "/a"), path.relative("a/b", "a/b/c"), path.relative("/a", "b"), path.relative("../x", "y"), path.relative("x", "../y"))
+    let abs = path.abs("sub/../f") catch _ { "?" }
+    println(path.isAbsolute(abs), abs.endsWith("/f"), path.abs("/a/./b") catch _ { "?" })
+    println(path.match("*.gojo", "main.gojo"), path.match("*.gojo", "a/main.gojo"), path.match("src/**/*.gojo", "src/a/b/c.gojo"), path.match("src/**/*.gojo", "src/c.gojo"), path.match("**", "a/b"))
+    println(path.match("?at", "cat"), path.match("?at", "at"), path.match("[a-c]x", "bx"), path.match("[!a-c]x", "bx"), path.match("[!a-c]x", "dx"), path.match("\\*", "*"), path.match("\\*", "a"))
+    println(path.match("a*b*c", "aXXbYYc"), path.match("a*b*c", "aXXbYY"), path.match("*", ""), path.match("é?", "éü"), path.match("[", "["), path.match("[]]", "]"))
+}
