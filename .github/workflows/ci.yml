@@ -21,7 +21,15 @@ jobs:
           version: 0.17.0
       - run: cargo build --locked
       - run: cargo test --locked
-      - name: sanitizers (ASan, UBSan, TSan)
+      # One sanitizer per step, not the ignored tests side by side: each needs
+      # much memory, and a step shows its report even if a later one hangs.
+      - name: AddressSanitizer and UBSan
         if: runner.os == 'Linux'
-        run: cargo test --locked -- --ignored
+        run: cargo test --locked --test suite -- --ignored --exact address_sanitizer
+      - name: ThreadSanitizer
+        if: runner.os == 'Linux'
+        run: cargo test --locked --test suite -- --ignored --exact thread_sanitizer
+      - name: TypeSanitizer (where clang has it)
+        if: runner.os == 'Linux'
+        run: cargo test --locked --test suite -- --ignored --exact type_sanitizer
       - run: ./target/debug/gojo fmt --check std examples

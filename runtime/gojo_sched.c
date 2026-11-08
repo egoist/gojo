@@ -33,6 +33,7 @@
 #if defined(__APPLE__)
 #include <sys/event.h>
 #include <mach/mach.h>
+#include <mach/mach_vm.h>
 #else
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
@@ -47,6 +48,9 @@
 #endif
 #if __has_feature(thread_sanitizer)
 #define GOJO_TSAN 1
+#endif
+#if __has_feature(type_sanitizer)
+#define GOJO_TYSAN 1
 #endif
 #endif
 #if defined(__SANITIZE_ADDRESS__) && !defined(GOJO_ASAN)
@@ -925,6 +929,25 @@ static gojo_g *g_new_slot(void) {
     return g;
 }
 
+// TypeSanitizer's mmap interceptor clears the shadow of the whole mapping,
+// eight bytes of it per byte mapped, so every 2 MB goroutine stack would cost
+// 16 MB of memory at once (and the main goroutine's 1 GB stack 8 GB). A stack
+// holds only frames, whose types TypeSanitizer resets as they are entered, so
+// under it stacks are mapped with the system call itself.
+static void *stack_mmap(size_t len, int flags) {
+#if defined(GOJO_TYSAN) && defined(__linux__)
+    return (void *)syscall(SYS_mmap, NULL, len, PROT_READ | PROT_WRITE, flags, -1, 0);
+#elif defined(GOJO_TYSAN) && defined(__APPLE__)
+    // zero-filled and lazily backed, like the anonymous mapping
+    (void)flags;
+    mach_vm_address_t a = 0;
+    if (mach_vm_allocate(mach_task_self(), &a, len, VM_FLAGS_ANYWHERE) != KERN_SUCCESS) return MAP_FAILED;
+    return (void *)(uintptr_t)a;
+#else
+    return mmap(NULL, len, PROT_READ | PROT_WRITE, flags, -1, 0);
+#endif
+}
+
 static void g_map_stack(gojo_g *g, size_t size) {
     size_t total = size + s_guard_size;
     int flags = MAP_PRIVATE | MAP_ANON;
@@ -934,7 +957,7 @@ static void g_map_stack(gojo_g *g, size_t size) {
 #ifdef MAP_STACK
     flags |= MAP_STACK;
 #endif
-    uint8_t *m = mmap(NULL, total, PROT_READ | PROT_WRITE, flags, -1, 0);
+    uint8_t *m = stack_mmap(total, flags);
     if (m == MAP_FAILED) gojo_panic("cannot allocate a goroutine stack: out of address space or memory (set GOJO_GOROUTINE_STACK to use smaller stacks)", "<runtime>");
 #if defined(__linux__)
     // Linux 6.13+: a guard region that doesn't split the mapping, so stacks next

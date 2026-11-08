@@ -217,9 +217,17 @@ fn thread_sanitizer() {
 /// generated as must not access memory through a type it doesn't have (spec
 /// 11.1). Needs a clang with `-fsanitize=type` (LLVM 20 or later, not Apple's):
 /// `GOJO_TYSAN_CC`, else `clang`; without one the test says so and passes.
+/// Not on arm64 Linux: TypeSanitizer's shadow there (LLVM 21, 48-bit address
+/// space) is indexed by the low 35 bits of an address, so memory 32 GB apart,
+/// such as a goroutine stack and the heap, shares one shadow, and one's types
+/// are reported against the other.
 #[test]
 #[ignore]
 fn type_sanitizer() {
+    if cfg!(all(target_os = "linux", target_arch = "aarch64")) {
+        eprintln!("skipped: TypeSanitizer's arm64 Linux shadow mapping aliases addresses 32 GB apart");
+        return;
+    }
     let clang = std::env::var("GOJO_TYSAN_CC").unwrap_or_else(|_| "clang".into());
     let dir = std::env::temp_dir().join("gojo_tysan");
     let _ = std::fs::create_dir_all(&dir);
