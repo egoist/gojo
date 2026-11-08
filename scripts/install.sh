@@ -40,8 +40,8 @@ tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
 fetch() {
-    if command -v curl >/dev/null 2>&1; then curl -fsSL "$1" -o "$2"
-    elif command -v wget >/dev/null 2>&1; then wget -qO "$2" "$1"
+    if command -v curl >/dev/null 2>&1; then curl -fsSL --retry 3 "$1" -o "$2"
+    elif command -v wget >/dev/null 2>&1; then wget -q --tries=3 -O "$2" "$1"
     else echo "install.sh: needs curl or wget" >&2; exit 1
     fi
 }
@@ -68,7 +68,10 @@ if [ -z "$archive" ]; then
         version=$(tr -d ' \n' < "$tmp/VERSION")
     else
         if [ -z "$version" ]; then
-            fetch "$RELEASES/latest/download/VERSION" "$tmp/VERSION"
+            if ! fetch "$RELEASES/latest/download/VERSION" "$tmp/VERSION"; then
+                echo "install.sh: cannot find the latest release at $RELEASES (there may be none yet: --nightly installs the latest nightly build)" >&2
+                exit 1
+            fi
             version=$(tr -d ' \n' < "$tmp/VERSION")
         fi
         tag=v$version
