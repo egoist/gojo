@@ -68,11 +68,11 @@ function Home() {
           </a>
           <h1 class="mt-6 max-w-3xl text-4xl leading-[1.05] font-semibold tracking-[-0.04em] sm:text-5xl md:text-6xl">
             Memory-safe systems code,
-            <span class="block text-muted-foreground">without the ceremony.</span>
+            <span class="block text-muted-foreground">for you and your agents.</span>
           </h1>
           <p class="mt-6 max-w-xl text-lg leading-8 text-muted-foreground">
-            Ownership frees memory and rules out data races, with no lifetimes to annotate. Errors are values, every task lives in a scope, and it all
-            compiles fast to C, then to one native binary.
+            Ownership frees memory and rules out data races, with no lifetimes to annotate. Error messages say what to write instead, gojo doc prints
+            any module's API, and all of the docs are at /llms.txt. Gojo compiles fast to C, then to one native binary.
           </p>
           <div class="mt-10 flex flex-wrap items-center gap-3">
             <InstallCommand command={site.install} />
