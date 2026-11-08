@@ -1,0 +1,17 @@
+name: website
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  website:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      # The Gojo grammar against src/lexer.rs and every Gojo program of the repository.
+      - run: bun run --cwd website test
+      - run: bun run --cwd website typecheck
+      - run: bun run --cwd website build

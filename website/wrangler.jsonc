@@ -1,0 +1,19 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "gojo",
+  "compatibility_date": "2026-09-01",
+  // The site's domain, as site.url in src/lib/site.ts says: `wrangler deploy`
+  // creates its DNS record and certificate. Its zone must be in this account.
+  "routes": [{ "pattern": "gojo.egoist.dev", "custom_domain": true }],
+  // A static site: no Worker script, only the pages that `bun run build` prerenders.
+  "assets": {
+    "directory": "./dist/client",
+    // docs/std/index.html is served at /docs/std.
+    "html_handling": "drop-trailing-slash",
+    // dist/client/404.html, with a 404 status.
+    "not_found_handling": "404-page",
+  },
+  // `wrangler preview`, which Cloudflare's builds run, needs this block, even empty:
+  // previews take the settings above.
+  "previews": {},
+}

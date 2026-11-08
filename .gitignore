@@ -4,3 +4,4 @@ target/
 zig-out/
 fuzz-out/
 dist/
+node_modules/

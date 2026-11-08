@@ -1,0 +1,8 @@
+{
+  "name": "gojo-dev",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "website"
+  ]
+}
