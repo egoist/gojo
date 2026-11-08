@@ -1667,3 +1667,40 @@ bool gojo_http___readable(int64_t fd) {
     struct pollfd p = { (int)fd, POLLIN, 0 };
     return poll(&p, 1, 0) != 0;
 }
+
+// ------------------------------------------------------------------ binary
+
+uint64_t gojo_binary___load(gojo_slice b, int64_t n, bool big) {
+    const uint8_t *p = b.ptr;
+    uint64_t v = 0;
+    if (big) {
+        for (int64_t i = 0; i < n; i++) v = v << 8 | p[i];
+    } else {
+        for (int64_t i = n - 1; i >= 0; i--) v = v << 8 | p[i];
+    }
+    return v;
+}
+
+int64_t gojo_binary___signed(uint64_t u, int64_t n) {
+    if (n >= 8) {
+        int64_t r;
+        memcpy(&r, &u, 8);
+        return r;
+    }
+    uint64_t sign = (uint64_t)1 << (n * 8 - 1);
+    u &= (sign << 1) - 1;
+    return (int64_t)(u ^ sign) - (int64_t)sign;
+}
+
+uint64_t gojo_binary___bits(int64_t v) {
+    uint64_t u;
+    memcpy(&u, &v, 8);
+    return u;
+}
+
+void gojo_binary___append(gojo_vec *out, uint64_t v, int64_t n, bool big) {
+    gojo_vec_reserve(out, n, 1);
+    uint8_t *p = (uint8_t *)out->ptr + out->len;
+    for (int64_t i = 0; i < n; i++) p[big ? n - 1 - i : i] = (uint8_t)(v >> (i * 8));
+    out->len += n;
+}

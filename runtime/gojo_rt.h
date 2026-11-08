@@ -443,6 +443,10 @@ int64_t gojo_net___sendTo(int64_t fd, gojo_slice data, gojo_str addr);
 int64_t gojo_net___recvFrom(int64_t fd, gojo_vec *buf, int64_t max, gojo_string *from);
 int64_t gojo_net___lookup(gojo_str host, gojo_vec *out);
 bool gojo_http___readable(int64_t fd);
+uint64_t gojo_binary___load(gojo_slice b, int64_t n, bool big);
+int64_t gojo_binary___signed(uint64_t u, int64_t n);
+uint64_t gojo_binary___bits(int64_t v);
+void gojo_binary___append(gojo_vec *out, uint64_t v, int64_t n, bool big);
 
 // ---- os / time / ffi
 void gojo_rt_init(int argc, char **argv);

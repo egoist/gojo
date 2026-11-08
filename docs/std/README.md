@@ -25,6 +25,7 @@ The prelude is available everywhere; other modules are imported with `use std/na
 | [`collections`](collections.md) | Collections beyond the prelude's `Vec`, `Map` and `Set`: a double-ended queue, a priority queue, maps and sets kept in key order, and a set of small integers. |
 | [`crypto`](crypto.md) | Cryptographic hashes (SHA-2, and SHA-1 and MD5 for old formats), HMAC, PBKDF2, and comparison in constant time. |
 | [`crc32`](crc32.md) | CRC-32 checksums (IEEE 802.3: the one in zip, gzip and PNG). |
+| [`binary`](binary.md) | Fixed-size numbers as bytes, in either byte order, and variable-length integers (varints, as in Protocol Buffers and Go's encoding/binary). |
 | [`tls`](tls.md) | TLS: encrypted, authenticated connections (what HTTPS runs on), through the system's OpenSSL 1.1 or 3. |
 | [`regex`](regex.md) | Regular expressions with the syntax of RE2 (as in Go and Rust). |
 | [`flag`](flag.md) | Command-line parsing: declare the options and arguments, then read them back by name, typed. |

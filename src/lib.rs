@@ -41,6 +41,7 @@ pub const STD: &[(&str, &str)] = &[
     ("collections", include_str!("../std/collections.gojo")),
     ("crypto", include_str!("../std/crypto.gojo")),
     ("crc32", include_str!("../std/crc32.gojo")),
+    ("binary", include_str!("../std/binary.gojo")),
     ("tls", include_str!("../std/tls.gojo")),
     ("regex", include_str!("../std/regex.gojo")),
     ("flag", include_str!("../std/flag.gojo")),
