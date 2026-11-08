@@ -52,6 +52,8 @@ pub struct FnCx {
     /// `if let x { }` / `if let x = x { }`: the binding may reuse the name of
     /// the optional it unwraps.
     pub shadow_ok: Option<String>,
+    /// The value expected from the `with` body being checked (`let n = with ...`).
+    pub with_value: Option<Expect>,
 }
 
 /// A `scope` block being checked.
@@ -137,6 +139,7 @@ impl FnCx {
             loop_body_next: None,
             defer_depth: 0,
             shadow_ok: None,
+            with_value: None,
         }
     }
     pub fn depth(&self) -> u32 {
@@ -1208,6 +1211,25 @@ impl Checker {
                         }
                         continue;
                     }
+                    if let ExprKind::With(_) = &e.kind {
+                        // a `with` whose body gives no value stays a statement
+                        let te = self.expr_x(cx, e, expect.clone());
+                        if self.resolve(cx, &te.ty) == Ty::Unit && matches!(&te.kind, TK::Block(b) if b.value.is_none()) {
+                            if let TK::Block(b) = te.kind {
+                                stmts.extend(b.stmts);
+                            }
+                            continue;
+                        }
+                        let te = match &expect {
+                            Expect::Ty(t) => {
+                                let t = t.clone();
+                                self.coerce(cx, te, &t, Use::Value)
+                            }
+                            _ => self.value(cx, te),
+                        };
+                        value = Some(Box::new(te));
+                        continue;
+                    }
                     let te = match &expect {
                         Expect::Ty(t) => {
                             let t = t.clone();
@@ -1240,8 +1262,15 @@ impl Checker {
     }
 
     fn stmt(&mut self, cx: &mut FnCx, s: &Stmt) -> Option<TStmt> {
+        if let StmtKind::Expr(Expr { kind: ExprKind::With(inner), .. }) = &s.kind {
+            return self.stmt(cx, inner);
+        }
         let sp = s.span;
         Some(match &s.kind {
+            StmtKind::LetElse { .. } => {
+                self.err(sp, "`let ... else` must be a statement of a block");
+                return None;
+            }
             StmtKind::Let { name, name_span, ty, init, mutable } => {
                 let decl_ty = ty.as_ref().map(|t| {
                     let env = cx.env.clone();
@@ -1485,6 +1514,7 @@ impl Checker {
                 TStmt::Send { chan: ch, value: v }
             }
             StmtKind::With { name, name_span, expr, body } => {
+                let wx = cx.with_value.take().unwrap_or(Expect::NoValue);
                 let te = self.expr(cx, expr, None);
                 let info = self.place_info(cx, &te);
                 let lock = is_lock_proj(&self.prog, &te);
@@ -1505,7 +1535,7 @@ impl Checker {
                 if lock {
                     cx.locked.push((cx.depth(), lock_name(expr)));
                 }
-                let b = self.block_in_scope(cx, body, Expect::NoValue, false);
+                let b = self.block_in_scope(cx, body, wx.clone(), false);
                 if lock {
                     cx.locked.pop();
                 }
@@ -1517,6 +1547,7 @@ impl Checker {
                 return self.select_stmt(cx, arms, sp);
             }
             StmtKind::WithLocks { names, mutexes, body } => {
+                let wx = cx.with_value.take().unwrap_or(Expect::NoValue);
                 if names.len() != mutexes.len() {
                     self.err(sp, format!("`with` binds {} name(s) to {} lock(s)", names.len(), mutexes.len()));
                     return None;
@@ -1547,7 +1578,7 @@ impl Checker {
                     places.push(te);
                 }
                 cx.locked.push((cx.depth(), names.iter().map(|n| n.0.clone()).collect::<Vec<_>>().join(", ")));
-                let b = self.block_in_scope(cx, body, Expect::NoValue, false);
+                let b = self.block_in_scope(cx, body, wx.clone(), false);
                 cx.locked.pop();
                 self.pop_scope(cx);
                 TStmt::WithLocks { locals, places, body: b }
@@ -2012,7 +2043,7 @@ impl Checker {
     /// Expression in statement position: if/match/blocks don't produce values.
     fn expr_novalue(&mut self, cx: &mut FnCx, e: &Expr) -> TExpr {
         match &e.kind {
-            ExprKind::If { .. } | ExprKind::IfLet { .. } | ExprKind::Match { .. } | ExprKind::Block(_) | ExprKind::Unsafe(_) => self.expr_x(cx, e, Expect::NoValue),
+            ExprKind::If { .. } | ExprKind::IfLet { .. } | ExprKind::Match { .. } | ExprKind::Block(_) | ExprKind::Unsafe(_) | ExprKind::With(_) | ExprKind::LetElse { .. } => self.expr_x(cx, e, Expect::NoValue),
             ExprKind::Scope { name, body, implicit } => self.scope_expr(cx, name.as_ref(), body, *implicit, Expect::NoValue, e.span),
             _ => self.expr(cx, e, None),
         }
@@ -2049,6 +2080,35 @@ impl Checker {
             }
             ExprKind::Str(s) => TExpr::new(TK::Str(s.clone()), Ty::Str, sp),
             ExprKind::Interp(parts) => self.interp(cx, parts, sp),
+            ExprKind::With(inner) => self.with_expr(cx, inner, ex, sp),
+            ExprKind::LetElse { pat, expr, else_, rest } => {
+                // `match expr { pat => { rest }, _ => { else } }`, where the else
+                // branch has to leave
+                let arms = vec![
+                    ast::Arm { pat: pat.clone(), guard: None, body: Expr { kind: ExprKind::Block(rest.clone()), span: rest.span }, span: pat.span },
+                    ast::Arm { pat: ast::Pattern { kind: ast::PatternKind::Wild, span: else_.span }, guard: None, body: Expr { kind: ExprKind::Block(else_.clone()), span: else_.span }, span: else_.span },
+                ];
+                let m = Expr { kind: ExprKind::Match { scrut: expr.clone(), arms }, span: sp };
+                let before = self.diags.len();
+                let te = self.expr_x(cx, &m, ex);
+                if let TK::Match { arms, .. } = &te.kind {
+                    let et = self.resolve(cx, &arms[1].body.ty);
+                    let inside = |d: &Diag| d.span.file == else_.span.file && d.span.lo >= else_.span.lo && d.span.hi <= else_.span.hi && d.msg.starts_with("mismatched types");
+                    let mismatch = self.diags[before..].iter().any(inside);
+                    if arms.len() == 2 && et != Ty::Never && (mismatch || !et.is_error()) {
+                        let mut i = before;
+                        while i < self.diags.len() {
+                            if inside(&self.diags[i]) {
+                                self.diags.remove(i);
+                            } else {
+                                i += 1;
+                            }
+                        }
+                        self.diags.push(Diag::new(else_.span, "the `else` of `let ... else` must leave: end it with `return`, `break`, `continue` or a panic").note(None, "the names the pattern binds exist only after the `let`, so the code can't continue without them"));
+                    }
+                }
+                te
+            }
             ExprKind::Tuple(xs) => {
                 let Some(d) = self.tuple_def(xs.len()) else {
                     self.err(sp, "tuples have 2 to 6 elements; use a struct for more");
@@ -2279,6 +2339,19 @@ impl Checker {
             ExprKind::DotVariant(name) => self.dot_variant(cx, name, &[], false, sp, expect.as_ref()),
             ExprKind::StructLit { ty, fields, positional, kv } => self.struct_lit(cx, ty, fields, positional, kv, sp, expect.as_ref()),
             ExprKind::VecLit(xs) => self.vec_lit(cx, xs, sp, expect.as_ref()),
+            ExprKind::MapLit(kvs) => {
+                let ty = match expect.as_ref().map(|t| self.resolve(cx, t)) {
+                    Some(t @ Ty::Map(..)) => t,
+                    _ => Ty::Map(Rc::new(self.fresh(cx)), Rc::new(self.fresh(cx))),
+                };
+                let infer = Expr { kind: ExprKind::Ident("_".into()), span: sp };
+                let r = self.struct_lit(cx, &infer, &[], &[], kvs, sp, Some(&ty));
+                if self.resolve(cx, &r.ty).has_vars() {
+                    self.err(sp, "cannot infer the key and value types of `[:]`; write the type: `let m: Map[String, int] = [:]`");
+                    return TExpr::error(sp);
+                }
+                r
+            }
             ExprKind::TypeExpr(_) => {
                 self.err(sp, "type used as a value");
                 TExpr::error(sp)
@@ -3258,6 +3331,17 @@ impl Checker {
     }
 
     fn vec_lit(&mut self, cx: &mut FnCx, xs: &[Expr], sp: Span, expect: Option<&Ty>) -> TExpr {
+        // a list where a `Set` is expected builds the set
+        if let Some(t @ Ty::Adt(..)) = expect.map(|t| self.resolve(cx, t)) {
+            let Ty::Adt(d, args) = t.clone() else { unreachable!() };
+            if Some(d) == self.prog.prelude_type("Set") {
+                let set = self.prog.packages[self.prog.prelude as usize].items.get("setOf").cloned();
+                if let Some(Sym::Func(f)) = set {
+                    let list = Expr { kind: ExprKind::VecLit(xs.to_vec()), span: sp };
+                    return self.call_fn(cx, f, Some(args.to_vec()), None, &[list], sp, Some(&t));
+                }
+            }
+        }
         let (elem, is_array, n) = match expect {
             Some(Ty::Vec(t)) => ((**t).clone(), false, 0),
             Some(Ty::Array(t, n)) => ((**t).clone(), true, *n),
@@ -3800,6 +3884,52 @@ impl Checker {
             targs.push(TArg { mode: ArgMode::Borrow, e });
         }
         Some(TExpr::new(TK::Intrinsic { name: format!("fmt.{}", name), targs: vec![], args: targs }, ret, sp))
+    }
+
+    /// `with` in expression position. With a value, `let n = with v = m.lock() { v.len() }`
+    /// is checked as `var h: ?T = none; with v = m.lock() { h = some(v.len()) };
+    /// h.unwrap()`, so the borrow rules of the body (nothing may leave a lock) apply as they
+    /// are; the value can't be a view.
+    fn with_expr(&mut self, cx: &mut FnCx, inner: &Stmt, ex: Expect, sp: Span) -> TExpr {
+        let want_value = !matches!(ex, Expect::NoValue);
+        if want_value {
+            cx.with_value = Some(ex);
+        }
+        let Some(mut ts) = self.stmt(cx, inner) else { return TExpr::error(sp) };
+        cx.with_value = None;
+        let body = match &mut ts {
+            TStmt::With { body, .. } | TStmt::WithLocks { body, .. } => body,
+            _ => return TExpr::error(sp),
+        };
+        let v = body.value.take();
+        let Some(mut v) = v.map(|b| *b) else {
+            let ty = if block_diverges(body) { Ty::Never } else { Ty::Unit };
+            return TExpr::new(TK::Block(TBlock { stmts: vec![ts], value: None, span: sp }), ty, sp);
+        };
+        // a unit value wrapped to fit an expected `! E` or `?T` is no value
+        if let TK::OkLit(inner) | TK::SomeLit(inner) = &v.kind {
+            if self.resolve(cx, &inner.ty) == Ty::Unit {
+                let (TK::OkLit(inner) | TK::SomeLit(inner)) = std::mem::replace(&mut v.kind, TK::Unit) else { unreachable!() };
+                v = *inner;
+            }
+        }
+        let vt = self.resolve(cx, &v.ty);
+        if matches!(vt, Ty::Never | Ty::Error | Ty::Unit) {
+            body.stmts.push(TStmt::Expr(v));
+            let ty = if vt == Ty::Unit { Ty::Unit } else { vt };
+            return TExpr::new(TK::Block(TBlock { stmts: vec![ts], value: None, span: sp }), ty, sp);
+        }
+        if vt.contains_view() {
+            let s = self.prog.show(&vt);
+            self.diags.push(Diag::new(v.span, format!("the value of a `with` block can't be a view (`{}`): what it borrows is only reachable inside the block", s)).note(None, "give back an owned copy (`.toString()`, `.clone()`) or a value computed from it"));
+            return TExpr::error(sp);
+        }
+        let ot = Ty::opt(vt.clone());
+        let h = self.hidden_local(cx, ot.clone(), LocalKind::Var, sp);
+        let vsp = v.span;
+        body.stmts.push(TStmt::Assign { place: TExpr::new(TK::Local(h), ot.clone(), vsp), op: None, value: TExpr::new(TK::SomeLit(Box::new(v)), ot.clone(), vsp), span: vsp });
+        let un = self.method_call_on(cx, TExpr::new(TK::Local(h), ot.clone(), sp), "unwrap", sp, None, &[], sp, None);
+        TExpr::new(TK::Block(TBlock { stmts: vec![TStmt::Let { local: h, init: TExpr::new(TK::NoneLit, ot, sp) }, ts], value: Some(Box::new(un)), span: sp }), vt, sp)
     }
 
     /// `"x = ${x:>4}"`: the same as `fmt.format("x = {:>4}", x)`, a `String`.

@@ -57,6 +57,12 @@ pub struct Checker {
     copy_candidates: Vec<DefId>,
     /// Types whose capabilities are being checked (for recursive types).
     cap_stack: std::cell::RefCell<Vec<(DefId, Vec<Ty>, &'static str)>>,
+    /// Answers found during the current outermost capability query. Without
+    /// it, a type like `Chan[Chan[...T]]` (two fields per level) costs 2^depth.
+    /// Within one query an answer that relied on an "in progress" assumption is
+    /// only wrong when that ancestor turns out false, and then so does the
+    /// query; the cache is dropped when the query ends.
+    cap_cache: std::cell::RefCell<HashMap<(DefId, Vec<Ty>, &'static str), bool>>,
     /// Per constant: 0 not checked yet, 1 being checked, 2 checked.
     pub const_state: Vec<u8>,
     pub global_state: Vec<u8>,
@@ -81,6 +87,7 @@ pub fn check_program(units: Vec<Unit>) -> Result<(Program, Vec<TFunc>, Vec<(Stri
         iface_error: None,
         pending_infer: vec![],
         cap_stack: std::cell::RefCell::new(vec![]),
+        cap_cache: std::cell::RefCell::new(HashMap::new()),
         inferred_copy: vec![],
         allow_typeset: false,
         copy_candidates: vec![],
@@ -1407,7 +1414,10 @@ impl Checker {
                 if self.cap_stack.borrow().contains(&key) || self.cap_stack.borrow().len() > MAX_CAP_DEPTH {
                     return true;
                 }
-                self.cap_stack.borrow_mut().push(key);
+                if let Some(&r) = self.cap_cache.borrow().get(&key) {
+                    return r;
+                }
+                self.cap_stack.borrow_mut().push(key.clone());
                 let def = self.prog.def(d).clone();
                 let s = self.prog.def_subst(d, args);
                 let tys: Vec<Ty> = match &def.kind {
@@ -1416,7 +1426,7 @@ impl Checker {
                     _ => vec![],
                 };
                 let r = tys.iter().all(|t| self.is_send(t));
-                self.cap_stack.borrow_mut().pop();
+                self.cap_done(key, r);
                 // valid under the assumption above (the greatest fixed point)
                 if args.is_empty() {
                     self.send_memo.insert(d, r);
@@ -1438,7 +1448,10 @@ impl Checker {
         if self.cap_stack.borrow().contains(&key) || self.cap_stack.borrow().len() > MAX_CAP_DEPTH {
             return true;
         }
-        self.cap_stack.borrow_mut().push(key);
+        if let Some(&r) = self.cap_cache.borrow().get(&key) {
+            return r;
+        }
+        self.cap_stack.borrow_mut().push(key.clone());
         let def = self.prog.def(d);
         let s = self.prog.def_subst(d, args);
         let r = match &def.kind {
@@ -1446,8 +1459,19 @@ impl Checker {
             TypeDefKind::Enum { variants } => variants.iter().all(|v| v.fields.iter().all(|(_, t)| f(self, &t.subst(&s)))),
             _ => false,
         };
-        self.cap_stack.borrow_mut().pop();
+        self.cap_done(key, r);
         r
+    }
+
+    /// Ends the check of `key` (on top of `cap_stack`) with answer `r`.
+    fn cap_done(&self, key: (DefId, Vec<Ty>, &'static str), r: bool) {
+        let mut st = self.cap_stack.borrow_mut();
+        st.pop();
+        if st.is_empty() {
+            self.cap_cache.borrow_mut().clear();
+        } else {
+            self.cap_cache.borrow_mut().insert(key, r);
+        }
     }
 
     pub fn satisfies(&mut self, t: &Ty, b: &Bound) -> Result<(), String> {

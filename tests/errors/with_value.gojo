@@ -1,0 +1,10 @@
+// The value of a `with` can't borrow from what the block locked.
+fn main() {
+    let m = Mutex("abc".toString())
+    let s = with v = m.lock() { v.asStr() }
+    // error: the value of a `with` block can't be a view (`str`)
+    let l = Mutex(["a".toString()])
+    let t = with v = l.lock() { v[0] }
+    // error: cannot move out of an element of a collection
+    println(s, t)
+}

@@ -1,0 +1,18 @@
+fn get(x: ?int) -> int {
+    let v = x else {
+        // error: the `else` of `let ... else` must leave
+        println("none")
+    }
+    v
+}
+
+fn main() {
+    var n = 0
+    let some(v) = some(1) else {
+        // error: the `else` of `let ... else` must leave
+        n += 1
+    }
+    let m = [:]
+    // error: cannot infer the key and value types of `[:]`
+    println(get(none), v, n, m)
+}

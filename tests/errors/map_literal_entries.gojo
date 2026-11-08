@@ -1,0 +1,5 @@
+fn main() {
+    let n = ["a": 1, "b"]
+    // error: every entry of a map literal is `key: value`
+    println(n)
+}

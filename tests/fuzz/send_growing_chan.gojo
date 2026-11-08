@@ -1,0 +1,11 @@
+// The `send` check on a type that grows through `Chan` (two fields per level)
+// once took time exponential in the depth limit.
+struct Bad[T] {
+    v: T
+    next: ?Box[Bad[Chan[T]]]
+}
+
+fn main() {
+    let ch = Chan[Bad[int]](1)
+    println(ch.tx.len(), Bad[int]{v: 1} == Bad[int]{v: 1})
+}

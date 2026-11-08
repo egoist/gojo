@@ -5835,6 +5835,12 @@ static void intro_{m}({c} *a, int64_t n, int depth) {{\n    while (n > 24) {{\n 
                         if def.newtype {
                             let ff = self.fmt_fn(&fsx[0].1);
                             let _ = writeln!(b, "    {}(b, &p->f_value, nested);", ff);
+                        } else if Some(*d) == self.prog.prelude_type("Set") && fsx.len() == 1 && matches!(fsx[0].1, Ty::Map(..)) {
+                            // a set prints its elements: `{"a", "b"}`
+                            let Ty::Map(k, v) = fsx[0].1.clone() else { unreachable!() };
+                            let (ent, _) = self.map_ent(&k, &v);
+                            let fk = self.fmt_fn(&k);
+                            let _ = writeln!(b, "    gojo_fmt_cstr(b, \"{{\");\n    int first = 1;\n    for (int64_t i = 0; i < p->f_{}.n_entries; i++) {{ {} *e = (({} *)p->f_{}.entries) + i; if (!e->live) continue; if (!first) gojo_fmt_cstr(b, \", \"); first = 0; {}(b, &e->k, 1); }}\n    gojo_fmt_cstr(b, \"}}\");", fsx[0].0, ent, ent, fsx[0].0, fk);
                         } else if def.tuple {
                             b.push_str("    gojo_fmt_cstr(b, \"(\");\n");
                             for (i, (fname, ft)) in fsx.iter().enumerate() {

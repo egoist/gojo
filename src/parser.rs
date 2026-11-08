@@ -1040,6 +1040,15 @@ impl Parser {
         let save = self.allow_struct;
         self.allow_struct = true;
         self.skip_nl();
+        let stmts = self.stmts_until_close()?;
+        self.bump();
+        self.allow_struct = save;
+        Ok(Block { stmts, span: self.sp_from(lo) })
+    }
+
+    /// The statements of a block, up to (not including) its `}`. After a
+    /// `let ... else`, the rest of the block becomes its success branch.
+    fn stmts_until_close(&mut self) -> PResult<Vec<Stmt>> {
         let mut stmts = vec![];
         while !self.is_p("}") {
             if matches!(self.peek(), Tok::Eof) {
@@ -1051,10 +1060,19 @@ impl Parser {
                 stmts.push(self.stmt()?);
             }
             self.end_stmt()?;
+            if matches!(stmts.last().map(|s| &s.kind), Some(StmtKind::LetElse { .. })) {
+                let st = stmts.pop().unwrap();
+                let StmtKind::LetElse { pat, expr, else_ } = st.kind else { unreachable!() };
+                let rlo = self.span();
+                let rest = self.nested(|p| p.stmts_until_close())?;
+                let rest = Block { stmts: rest, span: self.sp_from(rlo) };
+                let span = st.span;
+                let e = Expr { kind: ExprKind::LetElse { pat, expr: Box::new(expr), else_, rest }, span };
+                stmts.push(Stmt { kind: StmtKind::Expr(e), span });
+                break;
+            }
         }
-        self.bump();
-        self.allow_struct = save;
-        Ok(Block { stmts, span: self.sp_from(lo) })
+        Ok(stmts)
     }
 
     /// `let (a, (b, _)) = e`: a hidden variable holding `e`, then one `let` per
@@ -1067,6 +1085,13 @@ impl Parser {
         let ty = if self.eat_p(":") { Some(self.ty()?) } else { None };
         self.expect_p("=")?;
         let init = self.expr()?;
+        if self.is_kw(Kw::Else) && !mutable && ty.is_none() {
+            // `let (x, 0) = pair else { ... }`
+            self.bump();
+            let else_ = self.block()?;
+            out.push(Stmt { kind: StmtKind::LetElse { pat, expr: init, else_ }, span: self.sp_from(lo) });
+            return Ok(());
+        }
         let sp = self.sp_from(lo);
         self.destructure(pat, ty, init, mutable, sp, out)
     }
@@ -1103,11 +1128,35 @@ impl Parser {
     }
 
     fn stmt(&mut self) -> PResult<Stmt> {
+        let st = self.stmt_inner()?;
+        Ok(match st.kind {
+            StmtKind::With { .. } | StmtKind::WithLocks { .. } => {
+                let span = st.span;
+                Stmt { kind: StmtKind::Expr(Expr { kind: ExprKind::With(Box::new(st)), span }), span }
+            }
+            _ => st,
+        })
+    }
+
+    fn stmt_inner(&mut self) -> PResult<Stmt> {
         let lo = self.span();
         let kind = match self.peek().clone() {
             Tok::Kw(Kw::Let) | Tok::Kw(Kw::Var) => {
                 let mutable = self.is_kw(Kw::Var);
                 self.bump();
+                let simple = matches!(self.peek(), Tok::Ident(_)) && matches!(self.peek_at(1), Tok::P(":" | "=" | "}" | ";") | Tok::Newline | Tok::Eof);
+                if !simple && !mutable {
+                    // `let .Circle(r) = s else { ... }`
+                    let pat = self.pattern()?;
+                    self.expect_p("=")?;
+                    let expr = self.expr()?;
+                    if !self.is_kw(Kw::Else) {
+                        return Err(Diag::new(pat.span, "`let` with a pattern that may not match needs an `else` that leaves: `let .Circle(r) = s else { return }`"));
+                    }
+                    self.bump();
+                    let else_ = self.block()?;
+                    return Ok(Stmt { kind: StmtKind::LetElse { pat, expr, else_ }, span: self.sp_from(lo) });
+                }
                 let (name, name_span) = self.ident()?;
                 let ty = if self.is_p("=") || matches!(self.peek(), Tok::Newline) || self.is_p("}") || self.is_p(";") {
                     None
@@ -1116,6 +1165,16 @@ impl Parser {
                     Some(self.ty()?)
                 };
                 let init = if self.eat_p("=") { Some(self.expr()?) } else { None };
+                if self.is_kw(Kw::Else) && !mutable && ty.is_none() {
+                    if let Some(expr) = init {
+                        // `let x = opt else { ... }`: unwraps an optional
+                        self.bump();
+                        let else_ = self.block()?;
+                        let inner = Pattern { kind: PatternKind::Ident(name), span: name_span };
+                        let pat = Pattern { kind: PatternKind::Path(vec!["some".into()], Some(vec![inner])), span: name_span };
+                        return Ok(Stmt { kind: StmtKind::LetElse { pat, expr, else_ }, span: self.sp_from(lo) });
+                    }
+                }
                 StmtKind::Let { name, name_span, ty, init, mutable }
             }
             Tok::Kw(Kw::Return) => {
@@ -1748,7 +1807,13 @@ impl Parser {
             }
             Tok::P("[") => {
                 let type_follows = matches!(self.peek_at(2), Tok::Ident(_) | Tok::P("?") | Tok::P("[") | Tok::P("*") | Tok::Kw(Kw::Func)) && !self.toks[(self.pos + 2).min(self.toks.len() - 1)].nl_before;
-                if matches!(self.peek_at(1), Tok::P("]")) && !type_follows {
+                if matches!(self.peek_at(1), Tok::P(":")) && matches!(self.peek_at(2), Tok::P("]")) {
+                    // `[:]`: an empty map
+                    self.bump();
+                    self.bump();
+                    self.bump();
+                    ExprKind::MapLit(vec![])
+                } else if matches!(self.peek_at(1), Tok::P("]")) && !type_follows {
                     self.bump();
                     self.bump();
                     ExprKind::VecLit(vec![])
@@ -1761,8 +1826,18 @@ impl Parser {
                     self.allow_struct = true;
                     self.skip_nl();
                     let mut xs = vec![];
+                    let mut kvs = vec![];
                     while !self.is_p("]") {
-                        xs.push(self.expr()?);
+                        let x = self.expr()?;
+                        if (xs.is_empty() && kvs.is_empty() || !kvs.is_empty()) && self.eat_p(":") {
+                            // `["a": 1]`
+                            self.skip_nl();
+                            kvs.push((x, self.expr()?));
+                        } else if !kvs.is_empty() {
+                            return self.err("every entry of a map literal is `key: value`");
+                        } else {
+                            xs.push(x);
+                        }
                         self.skip_nl();
                         if !self.eat_p(",") {
                             break;
@@ -1771,6 +1846,9 @@ impl Parser {
                     }
                     self.allow_struct = save;
                     self.expect_p("]")?;
+                    if !kvs.is_empty() {
+                        return Ok(Expr { kind: ExprKind::MapLit(kvs), span: self.sp_from(lo) });
+                    }
                     // `[N]T` array type
                     if xs.len() == 1 && !self.toks[self.pos].nl_before && matches!(self.peek(), Tok::Ident(_) | Tok::P("?") | Tok::Kw(Kw::Func)) {
                         let elem = self.ty_atom()?;
@@ -1823,6 +1901,10 @@ impl Parser {
                 ExprKind::DotVariant(n)
             }
             Tok::Kw(Kw::If) => return self.if_expr(),
+            Tok::Kw(Kw::With) => match self.stmt()?.kind {
+                StmtKind::Expr(e) => return Ok(e),
+                _ => return self.err("expected a `with` block"),
+            },
             Tok::Kw(Kw::Match) => {
                 self.bump();
                 let save = self.allow_struct;

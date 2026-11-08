@@ -611,14 +611,14 @@ Old names give errors that say what to write now (`` undefined: `rc` `` with "bu
 | `while` / `loop` | `for cond {}`, `for {}` | `while cond {}`, `loop {}` | Each loop says what it is; `for` only iterates |
 | Tuples | a named struct for every pair | `(A, B)`, `(a, b)`, `t.0`, `(x, _)` patterns, `let (q, r) = f()` | Several results without ceremony. A tuple is a prelude struct (`Tuple2[A, B]` …), so moves, borrows and code generation are the struct paths; it is copy when its elements are, `==`/hash when they are, holds no views (like any struct), and prints as `(1, "a")`. 2 to 6 elements |
 | One parameter, one type | `fn f(x, y int)` | `fn f(x: int, y: int)` | One form, read the same everywhere |
+| `with` has a value | `var n = 0; with v = m.lock() { n = v.len() }` | `let n = with v = m.lock() { v.len() }` | `if`, `match` and blocks were already expressions. Checked as a hidden `?T` set in the body and unwrapped after it, so the lock and borrow rules apply unchanged; the value can't be a view |
+| `let ... else` | `let r = match s { .Circle(r) => r, _ => return 0 }` | `let .Circle(r) = s else { return 0 }` | Early exits without nesting; the parser folds the rest of the block into the match, and the `else` must leave |
+| Collection literals by context | `setOf(["a"])`, `Map[String, int]{"a": 1}` | `let s: Set[String] = ["a"]`, `["a": 1]`, `[:]` | One literal syntax for `Vec`, `Set` and `Map`; sets print as `{"a", "b"}` |
 
 The whole repository was converted by a throwaway tool that used the old parser to find each annotation. Old forms now fail with an error that names the new one (`` expected `:` before the type of parameter `x` ``, `` expected `->` before the result type ``, `` the mode goes before `self`: `inout self` ``, `` a loop with a condition is `while cond { }` ``).
 
-**Considered and left for later** (each is compatible with the current syntax):
+**Considered and not adopted** (each would still fit the syntax, if a need shows up):
 
-- **A value-producing `with`** (`let n = with v = m.lock() { v.len() }`). It needs a new expression form in the IR and a check that the value is not a view into the locked data; today the body assigns to an outer `var`.
-- **`let ... else`** (`let some(x) = f() else { return }`). `x ?? return ...` already covers the common optional case.
-- **Collection literals typed by the context**: `let s: Set[String] = ["a", "b"]`, a map literal `["a": 1]` with an expected `Map`.
 - **Default parameter values** (`fn serve(ln: Listener, h: Handler, o: Options = .{})`). Options structs with `.{...}` cover most uses without adding overload-like call rules.
-- **Patterns in more places**: `x is .Circle` as a boolean test, struct patterns `Point{x, y: 0}`.
+- **Patterns in more places**: `x is .Circle` as a boolean test, struct patterns `Point{x, y: 0}`. `if let` and `let ... else` cover most uses.
 - **Trailing closures** (`task.timeout(time.second) { work() }`): conflicts with `if cond {` and struct literals without adding much over `() => { }`.

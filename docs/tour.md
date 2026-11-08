@@ -279,8 +279,10 @@ some(0) true
 ```
 
 `if let`, `??`, `match` and `try` take a `?T` apart; `unwrap()` panics on
-none. `if let x { }` unwraps the variable `x` in place, and `?.` reaches into
-an optional value, giving none when there is nothing there:
+none. `if let x { }` unwraps the variable `x` in place, `let v = x else {
+return }` unwraps it or leaves (any pattern works: `let .Circle(r) = shape
+else { ... }`), and `?.` reaches into an optional value, giving none when there
+is nothing there:
 
 ```zig
 fn main() {
@@ -290,12 +292,17 @@ fn main() {
     }
     let missing: ?String = none
     println(nick?.len(), missing?.len(), missing?.len() ?? 0)
+    let n = nick else {
+        return
+    }
+    println(n.toUpper())
 }
 ```
 
 ```text
 hi, ada
 some(3) none 0
+ADA
 ```
 
 ## Errors
@@ -463,7 +470,7 @@ it in place:
 
 ```zig
 fn main() {
-    var counts = Map[String, int]{}
+    var counts: Map[String, int] = [:]
     for w in "the cat and the hat".fields() {
         // the map keeps its keys: it gets a copy of the word
         with n = counts.entry(w.clone()) {
@@ -517,6 +524,8 @@ fn main() {
 ## Collections and closures
 
 `Vec[T]`, `Map[K, V]` and `Set[T]` are in the prelude, with the usual methods.
+A list literal builds a `Set` where one is expected, and `["a": 1]` (or `[:]`)
+is a map.
 Closures are written `x => expr`, `(a, b) => expr` or `x => { ... }`:
 
 ```zig
@@ -541,7 +550,7 @@ fn main() {
     names.sortBy((a, b) => a.len() < b.len() || (a.len() == b.len() && a < b))
     println(names.join(", "))
 
-    let seen = setOf(["a", "b", "a"])
+    let seen: Set[String] = ["a", "b", "a"]
     println(seen.len(), seen.contains("a"))
 }
 ```
@@ -715,7 +724,7 @@ fn main() {
 A task may also write to a variable that nothing else touches until the
 scope ends. Shared mutable data goes in a `Mutex`, whose `lock` is a
 projection: the data can't escape the `with` block, so it can't be used
-without the lock.
+without the lock. Like `if`, a `with` block has the value of its body.
 
 ```zig
 fn main() {
@@ -736,9 +745,8 @@ fn main() {
             }
         }
     }
-    with t = total.lock() {
-        println(t, longest)
-    }
+    let sum = with t = total.lock() { t }
+    println(sum, longest)
 }
 ```
 

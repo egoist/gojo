@@ -1,0 +1,39 @@
+// `let pattern = e else { leave }`: the names stay bound for the rest of the block.
+enum Shape {
+    Circle(r: f64)
+    Rect(w: f64, h: f64)
+}
+fn radius(s: Shape) -> f64 {
+    let .Circle(r) = s else {
+        return -1.0
+    }
+    r * 2.0
+}
+fn port(text: str) -> int ! String {
+    let n = text.parseInt() else {
+        return err("not a number: ${text}")
+    }
+    let ok(checked) = check(n) else {
+        return err("bad")
+    }
+    checked
+}
+fn check(n: int) -> int ! String {
+    if n > 0 { n } else { err("neg") }
+}
+fn main() {
+    println(radius(.Circle(1.5)), radius(.Rect(1.0, 2.0)))
+    println(port("80"), port("x"), port("-1"))
+    for w in ["a=1", "b", "c=3"] {
+        let some(i) = w.find("=") else {
+            continue
+        }
+        let (k, v) = (w[..i].toString(), w[i + 1..].toString())
+        println(k, v)
+    }
+    let pair = (1, 0)
+    let (a, 0) = pair else {
+        panic("no")
+    }
+    println("a", a)
+}

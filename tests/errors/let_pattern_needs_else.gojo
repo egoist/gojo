@@ -1,0 +1,6 @@
+fn main() {
+    let x: ?int = none
+    let some(v) = x
+    // error: `let` with a pattern that may not match needs an `else` that leaves
+    println(v)
+}

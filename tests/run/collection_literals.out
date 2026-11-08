@@ -1,0 +1,2 @@
+{"a", "b"} 2 {"ann": 31, "bob": 27} {1: true} Conf{tags: {"x"}, limits: {"cpu": 2}} 1
+{(1, 2): "pair"}

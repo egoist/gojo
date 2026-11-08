@@ -187,6 +187,9 @@ pub struct Block {
 #[derive(Clone, Debug)]
 pub enum StmtKind {
     Let { name: String, name_span: Span, ty: Option<TypeExpr>, init: Option<Expr>, mutable: bool },
+    /// `let .Circle(r) = s else { return }`, before the parser folds the rest of
+    /// the block into an `ExprKind::LetElse`.
+    LetElse { pat: Pattern, expr: Expr, else_: Block },
     Expr(Expr),
     Assign { place: Expr, op: &'static str, value: Expr },
     Return(Option<Expr>),
@@ -323,6 +326,8 @@ pub enum ExprKind {
     DotVariant(String),
     StructLit { ty: Box<Expr>, fields: Vec<(String, Span, Expr)>, positional: Vec<Expr>, kv: Vec<(Expr, Expr)> },
     VecLit(Vec<Expr>),
+    /// `[k: v, ...]`, `[:]`: a `Map`
+    MapLit(Vec<(Expr, Expr)>),
     /// `scope { }` / `scope s { }`: waits for the tasks started in it.
     /// `implicit`: the body of `main` or a test.
     Scope { name: Option<(String, Span)>, body: Block, implicit: bool },
@@ -332,6 +337,12 @@ pub enum ExprKind {
     Isolate(Block),
     /// `(a, b)`
     Tuple(Vec<Expr>),
+    /// `with v = m.lock() { ... }` (a `StmtKind::With` / `WithLocks`): a
+    /// statement, or an expression with its body's value.
+    With(Box<Stmt>),
+    /// `let pat = expr else { else_ }` followed by `rest`, the remaining
+    /// statements of the block, where the pattern's names are bound.
+    LetElse { pat: Pattern, expr: Box<Expr>, else_: Block, rest: Block },
     /// A type in expression position, e.g. `Chan[int]`, `[]int`, `?int`.
     TypeExpr(TypeExpr),
 }

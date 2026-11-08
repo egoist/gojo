@@ -1,0 +1,28 @@
+// `with` blocks have the value of their body.
+fn len(m: Mutex[Vec[int]]) -> int {
+    with v = m.lock() {
+        v.len()
+    }
+}
+fn first(m: Mutex[Vec[String]]) -> String {
+    with v = m.lock() { v[0].clone() }
+}
+fn main() {
+    let m = Mutex([1, 2, 3])
+    let n = with v = m.lock() {
+        v.push(4)
+        v.sum()
+    }
+    let a = Mutex(1)
+    let b = Mutex(2)
+    let s = with x, y = lock(a, b) { x + y }
+    var counts = Map[String, int]{}
+    let c = with e = counts.entry("k") {
+        e += 5
+        e
+    }
+    with v = m.lock() {
+        v.push(5)
+    }
+    println(n, len(m), s, c, first(Mutex(["a"])), counts)
+}

@@ -243,7 +243,7 @@ Tests: `run/ownership`, `run/errdefer`, `run/labels`, `run/push_flow`, `run/temp
 - The view types `str`, `[]T` and `MutexRef[T]`, and references lent by projections, **cannot be stored**: they cannot be struct fields, collection elements or captures of escaping closures, and cannot be returned from functions (except through the `yield` of a projection).
 - A projection function lends a reference with `yield`: `yield &T`, `yield inout T`, `yield ?&T`. `v[i]`, `m.get(k)`, `m.entry(k)` and `mu.lock()` are all projections.
 - `let x = v[i]`: when the element is copy it is copied out; otherwise `x` is a reference. To own the value, write `.clone()`.
-- `if let u = m.get(k) { }` and `with e = m.entry(k) { }` bind the reference to the block; the reference cannot be taken out of the block. The block cannot modify the borrowed container. A `with` body runs exactly once, so a function can end with a `with` whose body returns.
+- `if let u = m.get(k) { }` and `with e = m.entry(k) { }` bind the reference to the block; the reference cannot be taken out of the block. The block cannot modify the borrowed container. A `with` body runs exactly once, so a function can end with a `with` whose body returns. A `with` is an expression with its body's value (`let n = with v = m.lock() { v.len() }`, or the last expression of a function); that value can't be a view (what the block borrows, such as locked data, is reachable only inside it), and moving out of the borrowed value is an error as anywhere else.
 - **Last use**: a view or reference bound with `let` stops holding the borrowed value after its last use in the block; after that the original value can be modified.
 - A view cannot outlive the value it borrows. You cannot take a view of a temporary and keep it (`let s: str = make()`).
 - While a view exists, the borrowed `Vec`/`String` cannot be modified, so `push` never leaves a view dangling.
@@ -282,7 +282,7 @@ Tests: `run/basics`, `run/concurrency`, `errors/escaping_view`, `errors/go_closu
 - A numeric conversion `T(x)` uses the target type only to decide the type of literals (`u64(18446744073709551615)`, `u64(1 << 63)`); other arguments are converted from their own type (when `b` is a `u8`, `int(~b)` first complements on `u8`).
 - `if`, `match` and blocks are expressions; their value is the last expression.
 - Operations on `?T`: `if let v = x { }` (and `if let x { }`, which unwraps the variable `x` under the same name inside the block), `x ?? d`, `x?.field` (the result is still optional, and `field` must be a copy type; otherwise use `if let`), `x?.method(args)` (`none` when `x` is `none`; a method that returns `?U` gives `?U`, not `??U`; the method may only read its receiver, and a view it returns borrows `x`, so `x` must be a variable to keep it), `x.unwrap()` (panics on `none`), `match`.
-- `[a, b]` is a `Vec` literal; `Map[K, V]{k: v}` and `Vec[T]{}` are typed literals. A list made only of string literals is inferred as `Vec[String]`.
+- `[a, b]` is a `Vec` literal, or a `Set` where a `Set` is expected (`let s: Set[String] = ["a", "b"]`, a field, a parameter). `["a": 1, "b": 2]` is a `Map` literal and `[:]` an empty one, typed by the context or by the entries. `Map[K, V]{k: v}` and `Vec[T]{}` are typed literals. String literals in a list or map are `String`s.
 - `a..b` is a half-open range and `a..=b` a closed range; `s[a..b]` takes a view of a string or slice.
 - A `T ! E` result must be handled; discard it with `_ = f()`.
 
@@ -295,6 +295,7 @@ Tests: `run/basics`, `run/edge`, `run/misc`, `run/constraints`, `run/patterns`, 
 - `for x in v` borrows each element; `for x in &v` iterates mutably, and `v` must be a `var`. The collection being iterated cannot be modified during the iteration.
 - **Labels**: `outer: for ...` (or `outer: while`, `outer: loop`); `break outer` and `continue outer` jump to that loop. A label cannot have the same name as the label of an enclosing loop; the label of a `break` must belong to an enclosing loop. A `break` inside a `select` arm applies to the enclosing loop.
 - `match` is exhaustive. Patterns: literals (including negative ones), ranges `1..=9`, alternatives with `|`, `_`, bindings, enum variants (can nest; every field must be written), `ok(x)`/`err(e)`, `some(x)`/`none`, tuples `(a, b)`, and the concrete type of an interface value, `f: File`. An arm can have a guard `if cond`; guarded arms do not count toward the exhaustiveness check.
+- **`let ... else`**: `let pattern = e else { ... }` matches `e` against a pattern that may fail (`let .Circle(r) = s else { return 0 }`, `let ok(v) = r else { ... }`, `let (k, 0) = pair else { ... }`); `let x = opt else { ... }` unwraps an optional. The `else` block must leave (`return`, `break`, `continue`, a panic); the names it binds are in scope for the rest of the block. It is the same as `match e { pattern => { rest of the block }, _ => { else } }`, with the same binding rules.
 - When the matched value is a place, bindings are references by default. When an arm moves a binding away, that arm consumes the matched value.
 - There is no `switch`.
 

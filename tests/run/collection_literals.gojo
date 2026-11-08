@@ -1,0 +1,16 @@
+// List literals build a `Set` where one is expected; `[k: v]` and `[:]` are maps.
+struct Conf {
+    tags: Set[String] = []
+    limits: Map[String, int] = [:]
+}
+fn count(m: Map[String, int]) -> int { m.len() }
+fn main() {
+    let s: Set[String] = ["a", "b", "a"]
+    let ages = ["ann": 31, "bob": 27]
+    var empty: Map[int, bool] = [:]
+    empty[1] = true
+    let c = Conf{tags: ["x"], limits: ["cpu": 2]}
+    println(s, s.len(), ages, empty, c, count(["k": 1]))
+    let nested = [(1, 2): "pair"]
+    println(nested)
+}
