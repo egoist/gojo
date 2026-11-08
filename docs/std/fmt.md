@@ -6,7 +6,7 @@ Formatting and printing. The functions here are built into the compiler.
 import. They, `fmt.sprint` and `fmt.sprintln` (which return the text) take
 any number of values of any type but functions, separated by spaces:
 
-```zig
+```gojo
 println("x =", 1, 2.5, true)          // x = 1 2.5 true
 println(P{x: 1, y: "q"}, [1, 2])      // P{x: 1, y: "q"} [1, 2]
 let s = fmt.sprint("id", 7)           // "id 7"
@@ -20,7 +20,7 @@ an `i32` and prints as a number: `s.pushRune(r)` adds it to a string.
 `fmt.format` returns a string, and `fmt.printf` prints it, from a template
 with `{}` placeholders:
 
-```zig
+```gojo
 fmt.format("{} has {} items", name, n)
 fmt.printf("{:>8}|{:<4}|{:^7}|\n", "r", 1, "mid")   //        r|1   |  mid  |
 fmt.format("{:08.3}", -3.14159)                      // -003.142

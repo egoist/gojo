@@ -2,7 +2,7 @@
 
 Buffered reading and writing on top of io.Reader / io.Writer.
 
-```zig
+```gojo
 var input = bufio.reader(os.stdin())
 loop {
     let line = try input.readLine() ?? break
@@ -21,7 +21,7 @@ try out.flush()
 
 ### struct Reader
 
-```zig
+```gojo
 pub struct Reader[R: io.Reader] {
     // and private fields
 }
@@ -31,7 +31,7 @@ Reads from `R` in large chunks, and line by line.
 
 #### Reader.readByte
 
-```zig
+```gojo
 pub fn readByte(inout self) -> ?byte ! io.Error
 ```
 
@@ -39,7 +39,7 @@ The next byte, or none at the end.
 
 #### Reader.readUntil
 
-```zig
+```gojo
 pub fn readUntil(inout self, delim: byte) -> ?Vec[byte] ! io.Error
 ```
 
@@ -48,7 +48,7 @@ nothing is left.
 
 #### Reader.readLine
 
-```zig
+```gojo
 pub fn readLine(inout self) -> ?String ! io.Error
 ```
 
@@ -56,7 +56,7 @@ The next line without its "\n" (or "\r\n"), or none at the end.
 
 #### Reader.read
 
-```zig
+```gojo
 pub fn read(inout self, buf: inout Vec[byte], max: int) -> int ! io.Error
 ```
 
@@ -64,7 +64,7 @@ As an io.Reader: what is buffered first.
 
 #### Reader.readAll
 
-```zig
+```gojo
 pub fn readAll(inout self) -> Vec[byte] ! io.Error
 ```
 
@@ -72,7 +72,7 @@ Everything that is left.
 
 ### struct Writer
 
-```zig
+```gojo
 pub struct Writer[W: io.Writer] {
     // and private fields
 }
@@ -84,7 +84,7 @@ see errors.
 
 #### Writer.write
 
-```zig
+```gojo
 pub fn write(inout self, data: []byte) ! io.Error
 ```
 
@@ -92,7 +92,7 @@ Buffers `data` (large writes go straight through).
 
 #### Writer.writeText
 
-```zig
+```gojo
 pub fn writeText(inout self, s: str) ! io.Error
 ```
 
@@ -100,7 +100,7 @@ Buffers the bytes of `s`.
 
 #### Writer.flush
 
-```zig
+```gojo
 pub fn flush(inout self) ! io.Error
 ```
 
@@ -110,7 +110,7 @@ Writes out everything buffered.
 
 ### reader
 
-```zig
+```gojo
 pub fn reader[R: io.Reader](src: sink R) -> Reader[R]
 ```
 
@@ -118,7 +118,7 @@ A buffered reader on `src` (which it owns).
 
 ### writer
 
-```zig
+```gojo
 pub fn writer[W: io.Writer](dst: sink W) -> Writer[W]
 ```
 

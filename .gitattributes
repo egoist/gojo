@@ -1,2 +1,0 @@
-# GitHub has no Gojo highlighter; Zig's grammar fits Gojo best.
-*.gojo linguist-language=Zig

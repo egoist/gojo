@@ -26,7 +26,7 @@ Gojo (a code name; it may change) is a small, fast-compiling systems language wi
 
 The syntax aims to be read without context: annotations are `name: Type`, results come after `->`, and no token's meaning depends on the spaces around it (the formatter and parser decide everything from the tokens). Braces go on the same line and newlines end statements.
 
-```zig
+```gojo
 use std/os
 
 struct Config {
@@ -74,7 +74,7 @@ fn main() {
 
 A directory is a package, the package name is the directory name, and files contain no package declaration. The entry package of `gojo run`/`gojo build` holds the `main` function (it does not need `pub`). Imports go at the top of the file:
 
-```zig
+```gojo
 use std/{fmt, os, time}        // standard library: all under std; one line can import several
 use ./geom                     // a package of this project: path relative to the current package's directory
 use ../shared/util as u        // nested path; as picks a different binding name
@@ -120,7 +120,7 @@ Structs and enums get `==`, `hash` and `.clone()` automatically when all their f
 
 **Enums** are true sum types, and variants can carry data. Without data they are plain enums and replace `iota`.
 
-```zig
+```gojo
 enum Shape {
     Circle(r f64)
     Rect(w f64, h f64)
@@ -170,7 +170,7 @@ A method's receiver is written as the first parameter `self` and has the same th
 
 Containers must be able to lend out their elements; otherwise every access would need a copy. A projection function lends a reference with `yield`. A lent reference (and a view such as `str` or `[]T`) is valid within the current statement. When bound with `let`, it stops holding the borrowed value **after its last use** in the block, so the original value can be modified again once the borrow ends.
 
-```zig
+```gojo
 extend Vec[T] {
     pub fn at(self, i: int) yield &T
     pub fn atMut(inout self, i: int) yield inout T
@@ -220,7 +220,7 @@ A list of string literals, `["a", "b"]`, is a `Vec[String]`, not a `Vec[str]`: v
 
 Errors are still values, but the type system guarantees that they are handled. `T ! E` replaces `(T, error)`, and `try` replaces `if err != nil { return err }`.
 
-```zig
+```gojo
 enum LoadError {
     Io(os.Error)
     Syntax(line: int, msg: String)
@@ -248,7 +248,7 @@ match load(p) {                                      // handle case by case
 - `x.unwrap()` panics on error. Use it only in tests and in places that truly cannot fail.
 - `errdefer` (from Zig) runs only when the function leaves with an error (or `none`, or through `try`), which suits rolling back partial work:
 
-```zig
+```gojo
 fn createAccount(db: inout Db, name: str) -> Account ! DbError {
     let id = try db.insert(name)
     errdefer db.delete(id)            // only if a later step fails
@@ -267,7 +267,7 @@ fn createAccount(db: inout Db, name: str) -> Account ! DbError {
 
 Interfaces keep Go's structural, implicit satisfaction: a type satisfies an interface as long as it has the methods, with no declaration needed. What changes: interface values are never empty, and owned and borrowed interface values are distinguished.
 
-```zig
+```gojo
 interface Reader {
     fn read(inout self, buf: inout []byte) -> int ! io.Error
 }
@@ -301,7 +301,7 @@ match r {                           // replaces type assertions and type switche
 
 Methods are written inside the braces of the type declaration, and the receiver is the explicit first parameter `self`. A function without `self` is an associated function and is called through the type.
 
-```zig
+```gojo
 pub struct Stack[T] {
     items: Vec[T]
 
@@ -336,7 +336,7 @@ extend []String {                             // the standard library adds metho
 
 Generics fill the gaps Go users hit day to day: type parameters on methods, conditional methods, and the capability constraints that a language without GC requires. The type system itself is not made into a computation system. The compiler monomorphizes: each instantiation the program actually reaches is compiled on its own, so generic code runs as fast as hand-written code. Dictionary passing (a dictionary carrying the method table, `size`, `align` and a `drop` function pointer) is the plan for faster debug builds once Gojo has its own back end; see section 10.
 
-```zig
+```gojo
 pub struct Vec[T] {
     ...
 
@@ -377,7 +377,7 @@ A user-defined type that implements `equal` and `hash` can be a map key, which G
 
 **Integer const generics** are for fixed-length arrays, matrices and SIMD. Only integer parameters are allowed, and no arithmetic happens at the type level. Array size determines memory layout, so this part is monomorphized per N.
 
-```zig
+```gojo
 struct Mat[R: int, C: int] { data: [R][C]f32 }
 extend Mat[R, K] {
     fn mul[C: int](self, b: Mat[K, C]) -> Mat[R, C]   // mismatched dimensions are a compile error
@@ -391,7 +391,7 @@ extend Mat[R, K] {
 
 When both are provided, the cursor protocol is used.
 
-```zig
+```gojo
 extend Tree[T] {
     pub fn each(self, body: fn(&T) -> Flow)
 }
@@ -406,7 +406,7 @@ Loops can have labels: `outer: for row in grid { for x in row { if x == 0 { cont
 
 Tasks are Go's goroutines made structured: every task belongs to a `scope`, and a scope ends only when its tasks have. That one rule removes goroutine leaks, lets tasks borrow their caller's data (the borrow checker already reasons about blocks), gives results back as values, and makes cancellation a property of the tree. [concurrency.md](concurrency.md) explains the choices against other languages; the rules are in the reference (section 10).
 
-```zig
+```gojo
 // tasks borrow `urls`; results come back with `join` or through a lock
 fn fetchAll(urls: []String) -> Vec[Page] ! http.Error {
     var pages = Vec[Page]{}
@@ -450,7 +450,7 @@ Stacks differ from Go: tasks borrow data on other tasks' stacks, so stacks **can
 
 Safe code has no null pointers, dangling pointers or data races; every operation that cannot guarantee this must be written in an `unsafe` block. The standard library implements `Vec`, `Map` and `Arc` with it.
 
-```zig
+```gojo
 extern "C" lib "libz" {                       // dlopen at run time; no C toolchain needed at build time
     fn crc32(crc: u64, buf: *u8, len: u32) -> u64
 }

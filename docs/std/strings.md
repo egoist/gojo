@@ -8,7 +8,7 @@ Building strings piece by piece.
 
 ### struct Builder
 
-```zig
+```gojo
 pub struct Builder {
     // and private fields
 }
@@ -19,7 +19,7 @@ A growable string buffer: `write` pieces, then `finish` to take the
 
 #### Builder.write
 
-```zig
+```gojo
 pub fn write(inout self, s: str)
 ```
 
@@ -27,7 +27,7 @@ Appends `s`.
 
 #### Builder.writeRune
 
-```zig
+```gojo
 pub fn writeRune(inout self, r: rune)
 ```
 
@@ -35,7 +35,7 @@ Appends the UTF-8 encoding of `r`.
 
 #### Builder.len
 
-```zig
+```gojo
 pub fn len(self) -> int
 ```
 
@@ -43,7 +43,7 @@ The length so far, in bytes.
 
 #### Builder.finish
 
-```zig
+```gojo
 pub fn finish(sink self) -> String
 ```
 

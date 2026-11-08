@@ -2,7 +2,7 @@
 
 Tasks and cancellation.
 
-```zig
+```gojo
 scope {
     let a = go fetch(x)      // a task; it may borrow data from outside
     go log(y)                // a task whose result isn't needed
@@ -24,7 +24,7 @@ fail with an error whose `isCancelled()` is true.
 
 ### enum Reason
 
-```zig
+```gojo
 pub copy enum Reason {
     // a task in its scope failed
     Failed
@@ -41,7 +41,7 @@ Why a task was cancelled.
 
 ### struct Cancelled
 
-```zig
+```gojo
 pub copy struct Cancelled {
     pub reason: Reason
 }
@@ -51,7 +51,7 @@ The error of an operation that stopped because its task was cancelled.
 
 #### Cancelled.message
 
-```zig
+```gojo
 pub fn message(self) -> String
 ```
 
@@ -59,7 +59,7 @@ pub fn message(self) -> String
 
 ### struct Local
 
-```zig
+```gojo
 pub copy struct Local[T: send] {
     // and private fields
 }
@@ -69,7 +69,7 @@ A task-local value: code bound with `with` sees it, and so does every task
 started inside, however deep. For what a whole request shares (an id, a
 deadline budget, a logger) without passing it through every call:
 
-```zig
+```gojo
 let requestId = task.local[String]()
 
 fn handle(req: Request) {
@@ -82,7 +82,7 @@ fn log(msg: str) {
 
 #### Local.get
 
-```zig
+```gojo
 pub fn get(self) -> ?T where T: clone
 ```
 
@@ -90,7 +90,7 @@ The value bound by the nearest enclosing `with` (a copy), or none.
 
 ### struct Stats
 
-```zig
+```gojo
 pub struct Stats {
     // goroutines alive, `main` included
     pub goroutines: int
@@ -112,7 +112,7 @@ A snapshot of the scheduler, from `stats`.
 
 ### cancelled
 
-```zig
+```gojo
 pub fn cancelled() -> bool
 ```
 
@@ -120,7 +120,7 @@ Has the current task been cancelled?
 
 ### reason
 
-```zig
+```gojo
 pub fn reason() -> ?Reason
 ```
 
@@ -128,7 +128,7 @@ Why the current task was cancelled, or none.
 
 ### check
 
-```zig
+```gojo
 pub fn check() ! Cancelled
 ```
 
@@ -136,7 +136,7 @@ A checkpoint for long computations: `try task.check()`.
 
 ### deadline
 
-```zig
+```gojo
 pub fn deadline() -> ?int
 ```
 
@@ -146,7 +146,7 @@ makes.
 
 ### shield
 
-```zig
+```gojo
 pub fn shield[T](d: int, body: fn() -> T) -> T
 ```
 
@@ -157,7 +157,7 @@ this already, for up to a second, when their task is cancelled.
 
 ### yieldNow
 
-```zig
+```gojo
 pub fn yieldNow()
 ```
 
@@ -165,7 +165,7 @@ Let other tasks run.
 
 ### local
 
-```zig
+```gojo
 pub fn local[T: send]() -> Local[T]
 ```
 
@@ -173,7 +173,7 @@ A new task-local key; declare it at package level: `let k = task.local[T]()`.
 
 ### with
 
-```zig
+```gojo
 pub fn with[T: send, R](key: Local[T], value: sink T, body: fn() -> R) -> R
 ```
 
@@ -181,7 +181,7 @@ Runs `body` with `key` bound to `value`, for it and the tasks it starts.
 
 ### dump
 
-```zig
+```gojo
 pub fn dump()
 ```
 
@@ -191,7 +191,7 @@ stops, on SIGQUIT (Ctrl-\ in a terminal).
 
 ### stats
 
-```zig
+```gojo
 pub fn stats() -> Stats
 ```
 
@@ -199,7 +199,7 @@ How many goroutines and threads there are now.
 
 ### setMaxProcs
 
-```zig
+```gojo
 pub fn setMaxProcs(n: int) -> int
 ```
 
@@ -207,7 +207,7 @@ Changes how many goroutines run Gojo code at the same time; returns the old valu
 
 ### timeout
 
-```zig
+```gojo
 pub fn timeout[T](d: int, body: fn() -> T) -> ?T
 ```
 
@@ -216,20 +216,20 @@ cancelled, and the result is none. Also none when the caller is cancelled.
 
 ### map
 
-```zig
+```gojo
 pub fn map[T: send, R: send](xs: []T, limit: int, f: send fn(T) -> R) -> Vec[R]
 ```
 
 Calls `f` on every element, in up to `limit` tasks at once (0: no limit),
 and gives the results in the order of `xs`.
 
-```zig
+```gojo
 let sizes = task.map(paths, 8, (p) => fileSize(p))
 ```
 
 ### tryMap
 
-```zig
+```gojo
 pub fn tryMap[T: send, R: send, E: send](xs: []T, limit: int, f: send fn(T) -> R ! E) -> Vec[R] ! E
 ```
 
@@ -238,7 +238,7 @@ calls still running, and is the result.
 
 ### each
 
-```zig
+```gojo
 pub fn each[T: send](xs: []T, limit: int, f: send fn(T))
 ```
 
@@ -246,14 +246,14 @@ Calls `f` on every element, in up to `limit` tasks at once (0: no limit).
 
 ### race
 
-```zig
+```gojo
 pub fn race[R: send, E: send](fs: []send fn() -> R ! E) -> R ! E
 ```
 
 Runs every function at once; the first to succeed wins and the others are
 cancelled. When all fail, the last error is the result.
 
-```zig
+```gojo
 let page = try task.race([() => fetch(primary), () => fetch(mirror)])
 ```
 

@@ -29,7 +29,7 @@ gojo doc os                       # the API of a standard module
 
 A program is a `main` function:
 
-```zig
+```gojo
 fn main() {
     println("hello, world")
 }
@@ -48,7 +48,7 @@ A directory is a package; `gojo run dir` runs the package in `dir`, whose
 the name. A local variable that is never used is an error, and a block can't
 declare a name that hides one from an outer block.
 
-```zig
+```gojo
 fn main() {
     let name = "Gojo"
     var count = 0
@@ -77,7 +77,7 @@ Statements end at the end of a line (inside parentheses and brackets, lines
 continue). `if`, `match` and blocks are expressions, and a function body's
 last expression is its result, so `return` is only for leaving early:
 
-```zig
+```gojo
 fn classify(n: int) -> str {
     match n {
         0 => "zero"
@@ -115,7 +115,7 @@ fn main() {
 Strings interpolate with `${...}`; a format after a colon pads, aligns or
 picks a base, checked at compile time:
 
-```zig
+```gojo
 fn main() {
     let name = "Gojo"
     let items = 3
@@ -135,7 +135,7 @@ Gojo: 3 items, total 28.50
 Methods are written inside the type. `self` borrows the value; `inout self`
 may change it.
 
-```zig
+```gojo
 struct Account {
     owner: String
     balance: int = 0
@@ -191,7 +191,7 @@ written `.Rect(...)`, and a struct literal `.{...}`. `Point{x, y}` fills
 fields from variables of the same names, and a type with a `new` function can
 be called directly: `Stack[int]()` is `Stack[int].new()`.
 
-```zig
+```gojo
 struct Options {
     port: int = 8080
     verbose: bool = false
@@ -224,7 +224,7 @@ Point{x: 1, y: 2}
 Tuples group a few values without declaring a struct, and `let` takes them
 apart:
 
-```zig
+```gojo
 fn divmod(a: int, b: int) -> (int, int) {
     (a / b, a % b)
 }
@@ -251,7 +251,7 @@ divides 3 times
 
 There is no null pointer. A value that may be missing has type `?T`:
 
-```zig
+```gojo
 fn find(names: []String, want: str) -> ?int {
     for i, n in names {
         if n == want {
@@ -284,7 +284,7 @@ return }` unwraps it or leaves (any pattern works: `let .Circle(r) = shape
 else { ... }`), and `?.` reaches into an optional value, giving none when there
 is nothing there:
 
-```zig
+```gojo
 fn main() {
     let nick: ?String = "ada"
     if let nick {
@@ -311,7 +311,7 @@ A function that can fail returns `T ! E`. `try` passes an error up to the
 caller; `catch` handles it where it happens. An error can't be ignored by
 accident: discarding one takes `_ = f()`.
 
-```zig
+```gojo
 enum ConfigError {
     Missing(key: String)
     BadNumber(key: String, text: String)
@@ -383,7 +383,7 @@ and other `copy` types are copied instead; everything else is copied with
 Parameters borrow by default. `inout` borrows to change (the caller writes
 `&`), `sink` takes ownership:
 
-```zig
+```gojo
 struct Doc {
     title: String
     words: Vec[String] = []
@@ -438,7 +438,7 @@ Views can't be stored in structs or collections, or outlive what they borrow,
 and while one exists the owner can't change. That is the whole lifetime
 system: no annotations, and no dangling references.
 
-```zig
+```gojo
 fn firstWord(s: str) -> str {
     let i = s.find(" ") ?? s.len()
     return s[0..i]
@@ -468,7 +468,7 @@ Containers lend their elements through *projections*: `m.get(k)` and
 `xs[i]` give a reference that lives in a block, and `with` binds one to change
 it in place:
 
-```zig
+```gojo
 fn main() {
     var counts: Map[String, int] = [:]
     for w in "the cat and the hat".fields() {
@@ -501,7 +501,7 @@ A slice is read-only, even in a `var`: other views of the same elements may
 exist. A function changes elements through an `inout []T` parameter, called
 with `&v` or with a range of it, `&v[a..b]`:
 
-```zig
+```gojo
 fn bump(v: inout []int) {
     for x in &v {
         x += 100
@@ -530,7 +530,7 @@ adds one element per iteration and `..v` splices in a whole `Vec`, so a
 list keeps the shape of what it builds (see [`examples/ui`](../examples/ui)
 for a UI tree written this way):
 
-```zig
+```gojo
 fn main() {
     let xs = [3, 8, 1, 6]
     let verbose = true
@@ -554,7 +554,7 @@ fn main() {
 ```
 Closures are written `x => expr`, `(a, b) => expr` or `x => { ... }`:
 
-```zig
+```gojo
 fn main() {
     var xs = [4, 1, 3, 9, 2]
     xs.sort()
@@ -597,7 +597,7 @@ variables it uses and may change them. One that is kept (stored, or given to
 
 Type parameters go in brackets, with constraints:
 
-```zig
+```gojo
 fn largest[T: copy + ordered](xs: []T) -> ?T {
     if xs.len() == 0 {
         return none
@@ -641,7 +641,7 @@ Interfaces are satisfied implicitly: a type with the methods satisfies the
 interface. An interface parameter borrows; an interface value (in a variable
 or a collection) owns what it holds.
 
-```zig
+```gojo
 interface Shape {
     fn area(self) -> f64
     fn name(self) -> String
@@ -692,7 +692,7 @@ and two ends: `tx` sends and `rx` receives (each can be cloned). Sending moves
 the value: the sender can't touch it afterwards. When the last sender is
 dropped the channel closes, and a `for` over the receiver ends.
 
-```zig
+```gojo
 fn worker(jobs: Receiver[int], results: Sender[int]) {
     for j in jobs {
         results <- j * j
@@ -725,7 +725,7 @@ A `scope` block runs tasks and waits for all of them before it ends, so the
 tasks may borrow anything that outlives it. `let t = go f()` gives a handle
 whose `join` returns the task's result:
 
-```zig
+```gojo
 use std/time
 
 fn lookup(id: int) -> int {
@@ -752,7 +752,7 @@ scope ends. Shared mutable data goes in a `Mutex`, whose `lock` is a
 projection: the data can't escape the `with` block, so it can't be used
 without the lock. Like `if`, a `with` block has the value of its body.
 
-```zig
+```gojo
 fn main() {
     let words = ["alpha", "beta", "gamma", "delta"]
     let total = Mutex(0)
@@ -788,7 +788,7 @@ operations return early: a receive gives none, `time.sleep` wakes up, and
 network calls fail with an error whose `isCancelled()` is true. `task.timeout`
 runs code under a deadline:
 
-```zig
+```gojo
 use std/{task, time}
 
 fn main() {
@@ -813,7 +813,7 @@ iterations of a loop on every CPU, each owning its element. Two tasks may
 also change parts of one slice, when the borrow checker can see that the
 ranges don't overlap:
 
-```zig
+```gojo
 fn fill(v: inout []int, x: int) {
     for e in &v {
         e = x
@@ -839,7 +839,7 @@ A package-level `let` is computed once, the first time it is used, and every
 task sees it. It is read-only; what changes goes in a `Mutex`, an `RwLock`
 (many readers or one writer) or an `Atomic` inside it:
 
-```zig
+```gojo
 let hits = Atomic(0)
 let names = RwLock(Vec[String]{})
 
@@ -878,7 +878,7 @@ then used by its own name (`os.readText`). Only
 `pub` declarations are visible outside their package, and an unused import is
 an error.
 
-```zig
+```gojo
 use std/{fmt, json, os, time}
 
 fn main() {
@@ -924,7 +924,7 @@ and formatting (`fmt`). See [docs/std](std/README.md), or `gojo doc <module>`.
 `test` blocks live next to the code; `gojo test` runs each one in a process of
 its own, so a panicking test fails alone:
 
-```zig
+```gojo
 fn double(x: int) -> int {
     return x * 2
 }
@@ -948,7 +948,7 @@ fn main() {
 pointers (`*T`), takes an `unsafe` block. No header files are needed: the
 compiler generates the calls from the Gojo declarations.
 
-```zig
+```gojo
 extern "C" {
     fn abs(x: i32) -> i32
 }

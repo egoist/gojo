@@ -41,7 +41,7 @@ The common thread: **every task has a parent that outlives it**, results come ba
 
 ## The design in one page
 
-```zig
+```gojo
 use std/{task, time}
 
 // `scope` waits for the tasks started in it with `go`; they borrow what

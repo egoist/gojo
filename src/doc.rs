@@ -222,7 +222,7 @@ fn render(name: &str, intro: &str, decls: &[Decl]) -> String {
             names.push(format!("[`{}`](#{})", d.title, a));
             body.push_str(&format!("### {}\n\n", d.title));
             if !d.code.is_empty() {
-                body.push_str(&format!("```zig\n{}\n```\n\n", d.code));
+                body.push_str(&format!("```gojo\n{}\n```\n\n", d.code));
             }
             if !d.doc.is_empty() {
                 body.push_str(&markdown(&d.doc));
@@ -232,7 +232,7 @@ fn render(name: &str, intro: &str, decls: &[Decl]) -> String {
                 let owner = if matches!(d.kind, Kind::Extend) { d.key.as_str() } else { d.title.split(' ').nth(1).unwrap_or("") };
                 let title = format!("{}.{}", owner, m.name);
                 anchor(&title);
-                body.push_str(&format!("#### {}\n\n```zig\n{}\n```\n\n", title, m.code));
+                body.push_str(&format!("#### {}\n\n```gojo\n{}\n```\n\n", title, m.code));
                 if !m.doc.is_empty() {
                     body.push_str(&markdown(&m.doc));
                     body.push('\n');
@@ -264,7 +264,7 @@ fn markdown(doc: &str) -> String {
             if !out.is_empty() && !out.ends_with("\n\n") {
                 out.push('\n');
             }
-            out.push_str("```zig\n");
+            out.push_str("```gojo\n");
             for l in &lines[i..j] {
                 out.push_str(l.get(indent..).unwrap_or("").trim_end());
                 out.push('\n');

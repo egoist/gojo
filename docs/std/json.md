@@ -2,7 +2,7 @@
 
 JSON: parse text into a `json.Value` tree and encode it back.
 
-```zig
+```gojo
 let v = try json.parse(`{"name": "gojo", "tags": ["fast", "safe"]}`)
 if let name = v.get("name") {
     println(name.str() ?? "not a string")
@@ -25,7 +25,7 @@ exact (`Int`); other numbers are `Num` (f64).
 
 ### maxDepth
 
-```zig
+```gojo
 pub const maxDepth = 500
 ```
 
@@ -35,7 +35,7 @@ Deeper nesting is refused: parsing is recursive, and goroutine stacks are small.
 
 ### enum Value
 
-```zig
+```gojo
 pub enum Value {
     Null
     Bool(b: bool)
@@ -52,7 +52,7 @@ A JSON value. Build one with the functions below (`json.object()`,
 
 #### Value.isNull
 
-```zig
+```gojo
 pub fn isNull(self) -> bool
 ```
 
@@ -60,7 +60,7 @@ Whether this is `null`.
 
 #### Value.isObject
 
-```zig
+```gojo
 pub fn isObject(self) -> bool
 ```
 
@@ -68,7 +68,7 @@ Whether this is an object.
 
 #### Value.isArray
 
-```zig
+```gojo
 pub fn isArray(self) -> bool
 ```
 
@@ -76,7 +76,7 @@ Whether this is an array.
 
 #### Value.boolean
 
-```zig
+```gojo
 pub fn boolean(self) -> ?bool
 ```
 
@@ -84,7 +84,7 @@ The value of `true` or `false`.
 
 #### Value.int
 
-```zig
+```gojo
 pub fn int(self) -> ?int
 ```
 
@@ -92,7 +92,7 @@ An integer (also a float with no fractional part that fits).
 
 #### Value.num
 
-```zig
+```gojo
 pub fn num(self) -> ?f64
 ```
 
@@ -100,7 +100,7 @@ A number, integer or not.
 
 #### Value.str
 
-```zig
+```gojo
 pub fn str(self) -> ?str
 ```
 
@@ -108,7 +108,7 @@ The text of a string.
 
 #### Value.get
 
-```zig
+```gojo
 pub fn get(self, key: str) yield ?&Value
 ```
 
@@ -116,7 +116,7 @@ The value at `key` of an object.
 
 #### Value.at
 
-```zig
+```gojo
 pub fn at(self, i: int) yield ?&Value
 ```
 
@@ -124,7 +124,7 @@ Element `i` of an array.
 
 #### Value.len
 
-```zig
+```gojo
 pub fn len(self) -> int
 ```
 
@@ -132,7 +132,7 @@ Elements of an array, members of an object, or 0.
 
 #### Value.keys
 
-```zig
+```gojo
 pub fn keys(self) -> Vec[String]
 ```
 
@@ -140,7 +140,7 @@ The keys of an object, in order.
 
 #### Value.set
 
-```zig
+```gojo
 pub fn set(inout self, key: str, v: sink Value)
 ```
 
@@ -148,7 +148,7 @@ Sets a member of an object (does nothing to other values).
 
 #### Value.push
 
-```zig
+```gojo
 pub fn push(inout self, v: sink Value)
 ```
 
@@ -156,7 +156,7 @@ Appends to an array (does nothing to other values).
 
 #### Value.encode
 
-```zig
+```gojo
 pub fn encode(self) -> String
 ```
 
@@ -164,7 +164,7 @@ Compact JSON text.
 
 #### Value.pretty
 
-```zig
+```gojo
 pub fn pretty(self) -> String
 ```
 
@@ -172,7 +172,7 @@ JSON text indented by two spaces.
 
 ### struct Error
 
-```zig
+```gojo
 pub struct Error {
     pub msg: String
     // where, from 1
@@ -185,7 +185,7 @@ Why `parse` failed, and where.
 
 #### Error.message
 
-```zig
+```gojo
 pub fn message(self) -> String
 ```
 
@@ -195,7 +195,7 @@ The message, with the line and column.
 
 ### null, boolean, integer, number, string, array, object
 
-```zig
+```gojo
 pub fn null() -> Value
 pub fn boolean(b: bool) -> Value
 pub fn integer(i: int) -> Value
@@ -210,7 +210,7 @@ them with `push` and `set`).
 
 ### quoted
 
-```zig
+```gojo
 pub fn quoted(s: str) -> String
 ```
 
@@ -218,7 +218,7 @@ Quotes a string as JSON.
 
 ### parse
 
-```zig
+```gojo
 pub fn parse(text: str) -> Value ! Error
 ```
 

@@ -16,7 +16,7 @@ Functions without a body are implemented by the compiler or runtime.
 
 ### enum Ordering
 
-```zig
+```gojo
 pub enum Ordering { Less, Equal, Greater }
 ```
 
@@ -24,7 +24,7 @@ The result of comparing two values: `a.compare(b)`.
 
 ### enum Flow
 
-```zig
+```gojo
 pub enum Flow { Continue, Break }
 ```
 
@@ -32,7 +32,7 @@ Control signal for push-style iteration.
 
 ### interface error
 
-```zig
+```gojo
 pub interface error {
     fn message(self) -> String
 }
@@ -42,7 +42,7 @@ The built-in error interface, for application-level error handling.
 
 ### interface Number
 
-```zig
+```gojo
 pub interface Number {
     ~int | ~i8 | ~i16 | ~i32 | ~u8 | ~u16 | ~u32 | ~u64 | ~f32 | ~f64
 }
@@ -52,7 +52,7 @@ Numeric types, for generic arithmetic.
 
 ### interface Integer
 
-```zig
+```gojo
 pub interface Integer {
     ~int | ~i8 | ~i16 | ~i32 | ~u8 | ~u16 | ~u32 | ~u64
 }
@@ -62,7 +62,7 @@ Integer types, for `Atomic`.
 
 ### struct Atomic
 
-```zig
+```gojo
 pub unsafe send struct Atomic[T: Integer] {
     // and private fields
 }
@@ -72,20 +72,20 @@ An integer that tasks share and change without a lock: each operation is
 atomic and sequentially consistent. Tasks borrow it and call its methods at
 the same time:
 
-```zig
+```gojo
 let hits = Atomic(0)
 par for r in requests { if r.ok { _ = hits.add(1) } }
 ```
 
 #### Atomic.new
 
-```zig
+```gojo
 pub fn new(x: T) -> Atomic[T]
 ```
 
 #### Atomic.load
 
-```zig
+```gojo
 pub fn load(self) -> T
 ```
 
@@ -93,7 +93,7 @@ The value now.
 
 #### Atomic.store
 
-```zig
+```gojo
 pub fn store(self, x: T)
 ```
 
@@ -101,7 +101,7 @@ Replaces the value.
 
 #### Atomic.add
 
-```zig
+```gojo
 pub fn add(self, d: T) -> T
 ```
 
@@ -109,7 +109,7 @@ Adds `d`, wrapping around on overflow, and gives the new value.
 
 #### Atomic.sub
 
-```zig
+```gojo
 pub fn sub(self, d: T) -> T
 ```
 
@@ -117,7 +117,7 @@ Subtracts `d`, wrapping around on overflow, and gives the new value.
 
 #### Atomic.swap
 
-```zig
+```gojo
 pub fn swap(self, x: T) -> T
 ```
 
@@ -125,7 +125,7 @@ Replaces the value and gives the old one.
 
 #### Atomic.compareSwap
 
-```zig
+```gojo
 pub fn compareSwap(self, old: T, new: T) -> bool
 ```
 
@@ -133,7 +133,7 @@ Replaces the value with `new` if it is `old`; true if it did.
 
 #### Atomic.clone
 
-```zig
+```gojo
 pub fn clone(self) -> Atomic[T]
 ```
 
@@ -141,7 +141,7 @@ A new `Atomic` with the value now.
 
 ### struct RwLock
 
-```zig
+```gojo
 pub unsafe send struct RwLock[T: send] {
     // and private fields
 }
@@ -149,7 +149,7 @@ pub unsafe send struct RwLock[T: send] {
 
 A lock that many readers may hold at once, or one writer:
 
-```zig
+```gojo
 let cache = RwLock(Map[String, String]{})
 with c = cache.read() { ... }     // shared: other readers too
 with c = cache.write() { ... }    // exclusive
@@ -161,13 +161,13 @@ starve.
 
 #### RwLock.new
 
-```zig
+```gojo
 pub fn new(x: sink T) -> RwLock[T]
 ```
 
 #### RwLock.read
 
-```zig
+```gojo
 pub fn read(self) yield &T
 ```
 
@@ -175,7 +175,7 @@ Shared access.
 
 #### RwLock.write
 
-```zig
+```gojo
 pub fn write(self) yield inout T
 ```
 
@@ -183,7 +183,7 @@ Exclusive access.
 
 #### RwLock.toString
 
-```zig
+```gojo
 pub fn toString(self) -> String
 ```
 
@@ -191,7 +191,7 @@ pub fn toString(self) -> String
 
 ### struct Chan
 
-```zig
+```gojo
 pub struct Chan[T] {
     // The sending end; `.clone()` it for more senders.
     pub tx: Sender[T]
@@ -203,7 +203,7 @@ pub struct Chan[T] {
 `Chan[T](n)` makes a channel with room for `n` values (`Chan[T]()`: none, so
 a send waits for a receiver). Its two ends are handed out separately:
 
-```zig
+```gojo
 let ch = Chan[Job](16)
 go produce(ch.tx)          // the channel closes when the last sender is dropped
 for job in ch.rx { run(job) }
@@ -211,7 +211,7 @@ for job in ch.rx { run(job) }
 
 ### struct Hasher
 
-```zig
+```gojo
 pub struct Hasher {
     // and private fields
 }
@@ -222,7 +222,7 @@ custom `hash` method.
 
 #### Hasher.writeU64
 
-```zig
+```gojo
 pub fn writeU64(inout self, x: u64)
 ```
 
@@ -230,7 +230,7 @@ Mixes `x` into the hash.
 
 #### Hasher.write
 
-```zig
+```gojo
 pub fn write[T: hash](inout self, x: T)
 ```
 
@@ -238,7 +238,7 @@ Mixes in the hash of any hashable value.
 
 ### struct Id
 
-```zig
+```gojo
 pub copy struct Id[T] {
     // and private fields
 }
@@ -248,7 +248,7 @@ A handle to a value in an `Arena[T]`.
 
 ### struct Arena
 
-```zig
+```gojo
 pub struct Arena[T] {
     // and private fields
 }
@@ -259,7 +259,7 @@ other: nodes are values in the arena, references are `Id`s. An `Id` carries
 a generation, so one whose value was removed finds nothing, rather than a
 different value that took its slot.
 
-```zig
+```gojo
 var a = Arena[Node]{}
 let root = a.alloc(Node{name: "root"})
 with n = a.getMut(root) { ... }
@@ -267,7 +267,7 @@ with n = a.getMut(root) { ... }
 
 #### Arena.alloc
 
-```zig
+```gojo
 pub fn alloc(inout self, v: sink T) -> Id[T]
 ```
 
@@ -275,7 +275,7 @@ Stores `v` and returns its `Id`.
 
 #### Arena.get
 
-```zig
+```gojo
 pub fn get(self, id: Id[T]) yield ?&T
 ```
 
@@ -283,7 +283,7 @@ The value for `id`, if it is still there.
 
 #### Arena.getMut
 
-```zig
+```gojo
 pub fn getMut(inout self, id: Id[T]) yield ?inout T
 ```
 
@@ -291,7 +291,7 @@ The value for `id`, to change in place.
 
 #### Arena.remove
 
-```zig
+```gojo
 pub fn remove(inout self, id: Id[T]) -> ?T
 ```
 
@@ -300,7 +300,7 @@ generation.
 
 #### Arena.len
 
-```zig
+```gojo
 pub fn len(self) -> int
 ```
 
@@ -308,7 +308,7 @@ The number of values stored.
 
 ### struct Span
 
-```zig
+```gojo
 pub copy struct Span {
     pub lo: int
     pub hi: int
@@ -321,7 +321,7 @@ ever stored in a struct.
 
 #### Span.of
 
-```zig
+```gojo
 pub fn of(self, s: str) -> str
 ```
 
@@ -329,7 +329,7 @@ The part of `s` the span covers.
 
 #### Span.len
 
-```zig
+```gojo
 pub fn len(self) -> int
 ```
 
@@ -337,7 +337,7 @@ The length in bytes.
 
 ### struct Set
 
-```zig
+```gojo
 pub struct Set[T: hash] {
     // and private fields
 }
@@ -345,14 +345,14 @@ pub struct Set[T: hash] {
 
 A set of values, kept in the order they were first inserted.
 
-```zig
+```gojo
 var seen = Set[String].new()
 if seen.insert(name.clone()) { ... first time ... }
 ```
 
 #### Set.new
 
-```zig
+```gojo
 pub fn new() -> Set[T]
 ```
 
@@ -360,7 +360,7 @@ An empty set.
 
 #### Set.insert
 
-```zig
+```gojo
 pub fn insert(inout self, x: sink T) -> bool
 ```
 
@@ -368,7 +368,7 @@ Adds `x`; false if it was there already.
 
 #### Set.remove
 
-```zig
+```gojo
 pub fn remove(inout self, x: T) -> bool
 ```
 
@@ -376,7 +376,7 @@ Takes `x` out; false if it wasn't there.
 
 #### Set.contains
 
-```zig
+```gojo
 pub fn contains(self, x: T) -> bool
 ```
 
@@ -384,7 +384,7 @@ Whether `x` is in the set.
 
 #### Set.len
 
-```zig
+```gojo
 pub fn len(self) -> int
 ```
 
@@ -392,7 +392,7 @@ The number of values.
 
 #### Set.isEmpty
 
-```zig
+```gojo
 pub fn isEmpty(self) -> bool
 ```
 
@@ -400,7 +400,7 @@ Whether the set is empty.
 
 #### Set.clear
 
-```zig
+```gojo
 pub fn clear(inout self)
 ```
 
@@ -408,7 +408,7 @@ Removes every value.
 
 #### Set.each
 
-```zig
+```gojo
 pub fn each(self, body: fn(&T) -> Flow)
 ```
 
@@ -416,7 +416,7 @@ pub fn each(self, body: fn(&T) -> Flow)
 
 #### Set.toVec
 
-```zig
+```gojo
 pub fn toVec(self) -> Vec[T] where T: clone
 ```
 
@@ -424,7 +424,7 @@ Copies of the values, in insertion order.
 
 #### Set.union
 
-```zig
+```gojo
 pub fn union(self, other: Set[T]) -> Set[T] where T: clone
 ```
 
@@ -432,7 +432,7 @@ What is in either.
 
 #### Set.intersection
 
-```zig
+```gojo
 pub fn intersection(self, other: Set[T]) -> Set[T] where T: clone
 ```
 
@@ -440,7 +440,7 @@ What is in both.
 
 #### Set.difference
 
-```zig
+```gojo
 pub fn difference(self, other: Set[T]) -> Set[T] where T: clone
 ```
 
@@ -448,7 +448,7 @@ What is in this one but not in `other`.
 
 ### struct Tuple2
 
-```zig
+```gojo
 pub struct Tuple2[A, B] {
     pub _0: A
     pub _1: B
@@ -460,7 +460,7 @@ its first element. They are copy when their elements are.
 
 ### struct Tuple3
 
-```zig
+```gojo
 pub struct Tuple3[A, B, C] {
     pub _0: A
     pub _1: B
@@ -470,7 +470,7 @@ pub struct Tuple3[A, B, C] {
 
 ### struct Tuple4
 
-```zig
+```gojo
 pub struct Tuple4[A, B, C, D] {
     pub _0: A
     pub _1: B
@@ -481,7 +481,7 @@ pub struct Tuple4[A, B, C, D] {
 
 ### struct Tuple5
 
-```zig
+```gojo
 pub struct Tuple5[A, B, C, D, E] {
     pub _0: A
     pub _1: B
@@ -493,7 +493,7 @@ pub struct Tuple5[A, B, C, D, E] {
 
 ### struct Tuple6
 
-```zig
+```gojo
 pub struct Tuple6[A, B, C, D, E, F] {
     pub _0: A
     pub _1: B
@@ -508,7 +508,7 @@ pub struct Tuple6[A, B, C, D, E, F] {
 
 ### panic
 
-```zig
+```gojo
 pub fn panic(msg: str) -> never
 ```
 
@@ -517,7 +517,7 @@ cannot be caught; deferred code does not run.
 
 ### assert
 
-```zig
+```gojo
 pub fn assert(cond: bool)
 ```
 
@@ -525,7 +525,7 @@ Panics unless `cond` holds.
 
 ### assertEq
 
-```zig
+```gojo
 pub fn assertEq[T: comparable](a: T, b: T)
 ```
 
@@ -533,7 +533,7 @@ Panics unless `a == b`, showing both values.
 
 ### unreachable
 
-```zig
+```gojo
 pub fn unreachable() -> never
 ```
 
@@ -541,7 +541,7 @@ Marks code that can't run; panics if it does.
 
 ### drop
 
-```zig
+```gojo
 pub fn drop[T](x: sink T)
 ```
 
@@ -549,7 +549,7 @@ Explicitly end the lifetime of a value.
 
 ### swap
 
-```zig
+```gojo
 pub fn swap[T](a: inout T, b: inout T)
 ```
 
@@ -557,7 +557,7 @@ Exchanges two places.
 
 ### replace
 
-```zig
+```gojo
 pub fn replace[T](dst: inout T, value: sink T) -> T
 ```
 
@@ -565,7 +565,7 @@ Puts `value` into `dst` and returns what was there.
 
 ### take
 
-```zig
+```gojo
 pub fn take[T: default](dst: inout T) -> T
 ```
 
@@ -574,7 +574,7 @@ an empty `Vec`...).
 
 ### min
 
-```zig
+```gojo
 pub fn min[T: copy + ordered](a: T, b: T) -> T
 ```
 
@@ -582,7 +582,7 @@ The smaller of two values (`a` when they are equal).
 
 ### max
 
-```zig
+```gojo
 pub fn max[T: copy + ordered](a: T, b: T) -> T
 ```
 
@@ -590,7 +590,7 @@ The larger of two values (`a` when they are equal).
 
 ### setOf
 
-```zig
+```gojo
 pub fn setOf[T: hash](xs: sink Vec[T]) -> Set[T]
 ```
 
@@ -602,7 +602,7 @@ A set of the values in `xs` (duplicates once, in the order first seen).
 
 #### ?T.isSome
 
-```zig
+```gojo
 pub fn isSome(self) -> bool
 ```
 
@@ -610,7 +610,7 @@ Whether there is a value.
 
 #### ?T.isNone
 
-```zig
+```gojo
 pub fn isNone(self) -> bool
 ```
 
@@ -618,7 +618,7 @@ Whether there is no value.
 
 #### ?T.unwrap
 
-```zig
+```gojo
 pub fn unwrap(sink self) -> T
 ```
 
@@ -627,7 +627,7 @@ happen.
 
 #### ?T.expect
 
-```zig
+```gojo
 pub fn expect(sink self, msg: str) -> T
 ```
 
@@ -635,7 +635,7 @@ The value; panics with `msg` on none.
 
 #### ?T.unwrapOr
 
-```zig
+```gojo
 pub fn unwrapOr(sink self, d: sink T) -> T
 ```
 
@@ -644,7 +644,7 @@ when needed).
 
 #### ?T.map
 
-```zig
+```gojo
 pub fn map[U](self, f: fn(T) -> U) -> ?U
 ```
 
@@ -654,7 +654,7 @@ pub fn map[U](self, f: fn(T) -> U) -> ?U
 
 #### T ! E.isOk
 
-```zig
+```gojo
 pub fn isOk(self) -> bool
 ```
 
@@ -662,7 +662,7 @@ Whether this is a value rather than an error.
 
 #### T ! E.isErr
 
-```zig
+```gojo
 pub fn isErr(self) -> bool
 ```
 
@@ -670,7 +670,7 @@ Whether this is an error.
 
 #### T ! E.unwrap
 
-```zig
+```gojo
 pub fn unwrap(sink self) -> T
 ```
 
@@ -678,7 +678,7 @@ The value; panics with the error. Prefer `try` or `catch`.
 
 #### T ! E.expect
 
-```zig
+```gojo
 pub fn expect(sink self, msg: str) -> T
 ```
 
@@ -686,7 +686,7 @@ The value; panics with `msg` and the error.
 
 #### T ! E.unwrapOr
 
-```zig
+```gojo
 pub fn unwrapOr(sink self, d: sink T) -> T
 ```
 
@@ -694,7 +694,7 @@ The value, or `d` on an error (which is dropped).
 
 #### T ! E.ok
 
-```zig
+```gojo
 pub fn ok(sink self) -> ?T
 ```
 
@@ -702,7 +702,7 @@ The value, or none on an error.
 
 #### T ! E.err
 
-```zig
+```gojo
 pub fn err(sink self) -> ?E
 ```
 
@@ -712,7 +712,7 @@ The error, or none.
 
 #### str.len
 
-```zig
+```gojo
 pub fn len(self) -> int
 ```
 
@@ -720,7 +720,7 @@ The length in bytes (UTF-8). Indexes and slices count bytes too.
 
 #### str.ptr
 
-```zig
+```gojo
 pub fn ptr(self) -> *u8
 ```
 
@@ -728,7 +728,7 @@ raw pointer to the bytes, for FFI
 
 #### str.isEmpty
 
-```zig
+```gojo
 pub fn isEmpty(self) -> bool
 ```
 
@@ -736,7 +736,7 @@ Whether the length is 0.
 
 #### str.contains
 
-```zig
+```gojo
 pub fn contains(self, sub: str) -> bool
 ```
 
@@ -744,7 +744,7 @@ Whether `sub` occurs in the string (the empty string always does).
 
 #### str.startsWith
 
-```zig
+```gojo
 pub fn startsWith(self, prefix: str) -> bool
 ```
 
@@ -752,7 +752,7 @@ Whether the string begins with `prefix`.
 
 #### str.endsWith
 
-```zig
+```gojo
 pub fn endsWith(self, suffix: str) -> bool
 ```
 
@@ -760,7 +760,7 @@ Whether the string ends with `suffix`.
 
 #### str.find
 
-```zig
+```gojo
 pub fn find(self, sub: str) -> ?int
 ```
 
@@ -768,7 +768,7 @@ The byte index of the first occurrence of `sub`.
 
 #### str.trim
 
-```zig
+```gojo
 pub fn trim(self) -> str
 ```
 
@@ -777,7 +777,7 @@ newline, carriage return, vertical tab, form feed). A view: no copy.
 
 #### str.trimStart
 
-```zig
+```gojo
 pub fn trimStart(self) -> str
 ```
 
@@ -785,7 +785,7 @@ The string without leading ASCII whitespace.
 
 #### str.trimEnd
 
-```zig
+```gojo
 pub fn trimEnd(self) -> str
 ```
 
@@ -793,7 +793,7 @@ The string without trailing ASCII whitespace.
 
 #### str.split
 
-```zig
+```gojo
 pub fn split(self, sep: str) -> Vec[String]
 ```
 
@@ -803,7 +803,7 @@ characters.
 
 #### str.lines
 
-```zig
+```gojo
 pub fn lines(self) -> Vec[String]
 ```
 
@@ -812,7 +812,7 @@ newline.
 
 #### str.fields
 
-```zig
+```gojo
 pub fn fields(self) -> Vec[String]
 ```
 
@@ -821,7 +821,7 @@ The words between runs of ASCII whitespace: `"  a b\tc ".fields()` is
 
 #### str.toUpper
 
-```zig
+```gojo
 pub fn toUpper(self) -> String
 ```
 
@@ -829,7 +829,7 @@ A copy with ASCII letters in upper case (other characters unchanged).
 
 #### str.toLower
 
-```zig
+```gojo
 pub fn toLower(self) -> String
 ```
 
@@ -837,7 +837,7 @@ A copy with ASCII letters in lower case (other characters unchanged).
 
 #### str.toString
 
-```zig
+```gojo
 pub fn toString(self) -> String
 ```
 
@@ -845,7 +845,7 @@ An owned copy.
 
 #### str.repeat
 
-```zig
+```gojo
 pub fn repeat(self, n: int) -> String
 ```
 
@@ -853,7 +853,7 @@ The string `n` times (empty for `n` <= 0).
 
 #### str.replace
 
-```zig
+```gojo
 pub fn replace(self, from: str, to: str) -> String
 ```
 
@@ -862,7 +862,7 @@ A copy with every occurrence of `from` replaced by `to` (unchanged when
 
 #### str.bytes
 
-```zig
+```gojo
 pub fn bytes(self) -> []byte
 ```
 
@@ -870,7 +870,7 @@ The bytes, as a view.
 
 #### str.runes
 
-```zig
+```gojo
 pub fn runes(self) -> Vec[rune]
 ```
 
@@ -880,7 +880,7 @@ U+FFFD.
 
 #### str.compare
 
-```zig
+```gojo
 pub fn compare(self, other: str) -> Ordering
 ```
 
@@ -888,7 +888,7 @@ Byte-wise order, which is also code-point order.
 
 #### str.parseInt
 
-```zig
+```gojo
 pub fn parseInt(self) -> ?int
 ```
 
@@ -897,7 +897,7 @@ digits), or none: no spaces, no other characters, nothing out of range.
 
 #### str.parseFloat
 
-```zig
+```gojo
 pub fn parseFloat(self) -> ?f64
 ```
 
@@ -908,7 +908,7 @@ The floating-point number that is the whole string, or none. Accepts what C's
 
 #### String.push
 
-```zig
+```gojo
 pub fn push(inout self, t: str)
 ```
 
@@ -916,7 +916,7 @@ Appends `t`. (`s += t` does the same.)
 
 #### String.pushRune
 
-```zig
+```gojo
 pub fn pushRune(inout self, r: rune)
 ```
 
@@ -925,7 +925,7 @@ scalar value (a surrogate, negative, or above U+10FFFF).
 
 #### String.clear
 
-```zig
+```gojo
 pub fn clear(inout self)
 ```
 
@@ -933,7 +933,7 @@ Makes the string empty, keeping its buffer.
 
 #### String.asStr
 
-```zig
+```gojo
 pub fn asStr(self) -> str
 ```
 
@@ -943,7 +943,7 @@ The string as a view.
 
 #### []T.len
 
-```zig
+```gojo
 pub fn len(self) -> int
 ```
 
@@ -951,7 +951,7 @@ The number of elements.
 
 #### []T.reverse
 
-```zig
+```gojo
 pub fn reverse(inout self)
 ```
 
@@ -960,7 +960,7 @@ Reverses the order in place. Only an `inout []T` (or a range of a
 
 #### []T.swap
 
-```zig
+```gojo
 pub fn swap(inout self, i: int, j: int)
 ```
 
@@ -968,7 +968,7 @@ Exchanges elements `i` and `j`; panics when either is out of range.
 
 #### []T.sort
 
-```zig
+```gojo
 pub fn sort(inout self) where T: ordered
 ```
 
@@ -976,7 +976,7 @@ Sorts in ascending order. Stable; O(n log n).
 
 #### []T.sortBy
 
-```zig
+```gojo
 pub fn sortBy(inout self, less: fn(T, T) -> bool)
 ```
 
@@ -984,7 +984,7 @@ Sorts by `less(a, b)`: true when `a` goes before `b`. Stable.
 
 #### []T.ptr
 
-```zig
+```gojo
 pub fn ptr(self) -> *T
 ```
 
@@ -992,7 +992,7 @@ raw pointer to the first element, for FFI
 
 #### []T.isEmpty
 
-```zig
+```gojo
 pub fn isEmpty(self) -> bool
 ```
 
@@ -1000,7 +1000,7 @@ Whether there are no elements.
 
 #### []T.get
 
-```zig
+```gojo
 pub fn get(self, i: int) yield ?&T
 ```
 
@@ -1009,7 +1009,7 @@ panics instead).
 
 #### []T.first
 
-```zig
+```gojo
 pub fn first(self) yield ?&T
 ```
 
@@ -1017,7 +1017,7 @@ The first element, if any.
 
 #### []T.last
 
-```zig
+```gojo
 pub fn last(self) yield ?&T
 ```
 
@@ -1025,7 +1025,7 @@ The last element, if any.
 
 #### []T.contains
 
-```zig
+```gojo
 pub fn contains(self, x: T) -> bool where T: comparable
 ```
 
@@ -1033,7 +1033,7 @@ Whether some element equals `x`.
 
 #### []T.indexOf
 
-```zig
+```gojo
 pub fn indexOf(self, x: T) -> ?int where T: comparable
 ```
 
@@ -1041,7 +1041,7 @@ The index of the first element equal to `x`.
 
 #### []T.map
 
-```zig
+```gojo
 pub fn map[U](self, f: fn(T) -> U) -> Vec[U]
 ```
 
@@ -1049,7 +1049,7 @@ pub fn map[U](self, f: fn(T) -> U) -> Vec[U]
 
 #### []T.filter
 
-```zig
+```gojo
 pub fn filter(self, keep: fn(T) -> bool) -> Vec[T] where T: clone
 ```
 
@@ -1057,7 +1057,7 @@ Copies of the elements for which `keep` is true.
 
 #### []T.each
 
-```zig
+```gojo
 pub fn each(self, f: fn(T))
 ```
 
@@ -1065,7 +1065,7 @@ Calls `f` on each element, in order.
 
 #### []T.any
 
-```zig
+```gojo
 pub fn any(self, f: fn(T) -> bool) -> bool
 ```
 
@@ -1073,7 +1073,7 @@ Whether `f` is true for some element (stops at the first).
 
 #### []T.all
 
-```zig
+```gojo
 pub fn all(self, f: fn(T) -> bool) -> bool
 ```
 
@@ -1081,7 +1081,7 @@ Whether `f` is true for every element (stops at the first false).
 
 #### []T.count
 
-```zig
+```gojo
 pub fn count(self, f: fn(T) -> bool) -> int
 ```
 
@@ -1089,7 +1089,7 @@ How many elements `f` is true for.
 
 #### []T.fold
 
-```zig
+```gojo
 pub fn fold[A](self, init: sink A, f: fn(sink A, T) -> A) -> A
 ```
 
@@ -1097,7 +1097,7 @@ Combines the elements from the left: `f(f(f(init, x0), x1), x2)`.
 
 #### []T.sum
 
-```zig
+```gojo
 pub fn sum(self) -> T where T: Number
 ```
 
@@ -1105,7 +1105,7 @@ The sum (0 for no elements). Integer overflow panics, as with `+`.
 
 #### []T.min
 
-```zig
+```gojo
 pub fn min(self) -> ?T where T: copy + ordered
 ```
 
@@ -1113,7 +1113,7 @@ The smallest element, or none for no elements.
 
 #### []T.max
 
-```zig
+```gojo
 pub fn max(self) -> ?T where T: copy + ordered
 ```
 
@@ -1121,7 +1121,7 @@ The largest element, or none for no elements.
 
 #### []T.toVec
 
-```zig
+```gojo
 pub fn toVec(self) -> Vec[T] where T: clone
 ```
 
@@ -1131,7 +1131,7 @@ An owned copy.
 
 #### []String.join
 
-```zig
+```gojo
 pub fn join(self, sep: str) -> String
 ```
 
@@ -1141,7 +1141,7 @@ The strings with `sep` between them: `["a", "b"].join(", ")` is `"a, b"`.
 
 #### Vec[T].push
 
-```zig
+```gojo
 pub fn push(inout self, x: sink T)
 ```
 
@@ -1149,7 +1149,7 @@ Appends `x`.
 
 #### Vec[T].pop
 
-```zig
+```gojo
 pub fn pop(inout self) -> ?T
 ```
 
@@ -1157,7 +1157,7 @@ Removes and returns the last element, or none when empty.
 
 #### Vec[T].insert
 
-```zig
+```gojo
 pub fn insert(inout self, i: int, x: sink T)
 ```
 
@@ -1166,7 +1166,7 @@ up; panics otherwise.
 
 #### Vec[T].remove
 
-```zig
+```gojo
 pub fn remove(inout self, i: int) -> T
 ```
 
@@ -1175,7 +1175,7 @@ Removes and returns element `i`, moving the later elements down; panics when
 
 #### Vec[T].swapRemove
 
-```zig
+```gojo
 pub fn swapRemove(inout self, i: int) -> T
 ```
 
@@ -1184,7 +1184,7 @@ O(1), but changes the order. Panics when `i` is out of range.
 
 #### Vec[T].clear
 
-```zig
+```gojo
 pub fn clear(inout self)
 ```
 
@@ -1192,7 +1192,7 @@ Removes (and drops) every element, keeping the buffer.
 
 #### Vec[T].truncate
 
-```zig
+```gojo
 pub fn truncate(inout self, n: int)
 ```
 
@@ -1201,7 +1201,7 @@ Keeps the first `n` elements and drops the rest; nothing happens when `n`
 
 #### Vec[T].extend
 
-```zig
+```gojo
 pub fn extend(inout self, other: sink Vec[T])
 ```
 
@@ -1209,7 +1209,7 @@ Moves the elements of `other` to the end.
 
 #### Vec[T].reverse
 
-```zig
+```gojo
 pub fn reverse(inout self)
 ```
 
@@ -1217,7 +1217,7 @@ Reverses the order in place.
 
 #### Vec[T].swap
 
-```zig
+```gojo
 pub fn swap(inout self, i: int, j: int)
 ```
 
@@ -1225,7 +1225,7 @@ Exchanges elements `i` and `j`; panics when either is out of range.
 
 #### Vec[T].sort
 
-```zig
+```gojo
 pub fn sort(inout self) where T: ordered
 ```
 
@@ -1234,7 +1234,7 @@ order) and takes O(n log n) time.
 
 #### Vec[T].sortBy
 
-```zig
+```gojo
 pub fn sortBy(inout self, less: fn(T, T) -> bool)
 ```
 
@@ -1242,7 +1242,7 @@ Sorts by `less(a, b)`: true when `a` goes before `b`. Stable.
 
 #### Vec[T].reserve
 
-```zig
+```gojo
 pub fn reserve(inout self, n: int)
 ```
 
@@ -1251,7 +1251,7 @@ overflow") for an impossible size.
 
 #### Vec[T].cap
 
-```zig
+```gojo
 pub fn cap(self) -> int
 ```
 
@@ -1261,7 +1261,7 @@ The number of elements there is room for.
 
 #### Map[K, V].len
 
-```zig
+```gojo
 pub fn len(self) -> int
 ```
 
@@ -1269,7 +1269,7 @@ The number of entries.
 
 #### Map[K, V].isEmpty
 
-```zig
+```gojo
 pub fn isEmpty(self) -> bool
 ```
 
@@ -1277,7 +1277,7 @@ Whether there are no entries.
 
 #### Map[K, V].get
 
-```zig
+```gojo
 pub fn get(self, k: K) yield ?&V
 ```
 
@@ -1285,7 +1285,7 @@ The value for `k`, if any. (`m[k]` panics when there is none.)
 
 #### Map[K, V].getMut
 
-```zig
+```gojo
 pub fn getMut(inout self, k: K) yield ?inout V
 ```
 
@@ -1293,7 +1293,7 @@ The value for `k`, to change in place.
 
 #### Map[K, V].contains
 
-```zig
+```gojo
 pub fn contains(self, k: K) -> bool
 ```
 
@@ -1301,7 +1301,7 @@ Whether there is an entry for `k`.
 
 #### Map[K, V].insert
 
-```zig
+```gojo
 pub fn insert(inout self, k: sink K, v: sink V) -> ?V
 ```
 
@@ -1310,7 +1310,7 @@ the iteration order; replacing a value keeps the key's place.
 
 #### Map[K, V].remove
 
-```zig
+```gojo
 pub fn remove(inout self, k: K) -> ?V
 ```
 
@@ -1318,7 +1318,7 @@ Removes the entry for `k`, returning its value. The others keep their order.
 
 #### Map[K, V].entry
 
-```zig
+```gojo
 pub fn entry(inout self, k: sink K) yield inout V where V: default
 ```
 
@@ -1327,7 +1327,7 @@ The value for `k`, inserting the default first if there is none:
 
 #### Map[K, V].clear
 
-```zig
+```gojo
 pub fn clear(inout self)
 ```
 
@@ -1335,7 +1335,7 @@ Removes every entry.
 
 #### Map[K, V].keys
 
-```zig
+```gojo
 pub fn keys(self) -> Vec[K] where K: clone
 ```
 
@@ -1343,7 +1343,7 @@ Copies of the keys, in insertion order.
 
 #### Map[K, V].values
 
-```zig
+```gojo
 pub fn values(self) -> Vec[V] where V: clone
 ```
 
@@ -1353,7 +1353,7 @@ Copies of the values, in insertion order.
 
 #### Rc[T].count
 
-```zig
+```gojo
 pub fn count(self) -> int
 ```
 
@@ -1361,7 +1361,7 @@ How many `rc` handles share the value.
 
 #### Rc[T].downgrade
 
-```zig
+```gojo
 pub fn downgrade(self) -> Weak[T]
 ```
 
@@ -1372,7 +1372,7 @@ would otherwise make a cycle).
 
 #### Weak[T].upgrade
 
-```zig
+```gojo
 pub fn upgrade(self) -> ?Rc[T]
 ```
 
@@ -1382,7 +1382,7 @@ A strong handle again, or none when the value is gone.
 
 #### Arc[T].count
 
-```zig
+```gojo
 pub fn count(self) -> int
 ```
 
@@ -1392,7 +1392,7 @@ How many `arc` handles share the value (across threads).
 
 #### Cell[T].get
 
-```zig
+```gojo
 pub fn get(self) -> T
 ```
 
@@ -1400,7 +1400,7 @@ A copy of the value. A `Cell` lets copy values inside an `rc` change.
 
 #### Cell[T].set
 
-```zig
+```gojo
 pub fn set(self, v: T)
 ```
 
@@ -1410,7 +1410,7 @@ Replaces the value.
 
 #### Mutex[T].lock
 
-```zig
+```gojo
 pub fn lock(self) yield inout T
 ```
 
@@ -1420,7 +1420,7 @@ Locking is a projection: the guarded value can't escape the block.
 
 #### Sender[T].send
 
-```zig
+```gojo
 pub fn send(self, x: sink T) -> bool
 ```
 
@@ -1430,7 +1430,7 @@ receiver is gone or the task is cancelled.
 
 #### Sender[T].len
 
-```zig
+```gojo
 pub fn len(self) -> int
 ```
 
@@ -1440,7 +1440,7 @@ The number of values waiting in the buffer.
 
 #### Receiver[T].recv
 
-```zig
+```gojo
 pub fn recv(self) -> ?T
 ```
 
@@ -1449,7 +1449,7 @@ gone and the buffer is empty (or the task is cancelled).
 
 #### Receiver[T].len
 
-```zig
+```gojo
 pub fn len(self) -> int
 ```
 
@@ -1459,7 +1459,7 @@ The number of values waiting in the buffer.
 
 #### Task[T].join
 
-```zig
+```gojo
 pub fn join(sink self) -> T
 ```
 
@@ -1467,7 +1467,7 @@ Waits for the task to finish and gives its result.
 
 #### Task[T].cancel
 
-```zig
+```gojo
 pub fn cancel(sink self)
 ```
 
@@ -1478,7 +1478,7 @@ dropped.
 
 #### Iso[T].take
 
-```zig
+```gojo
 pub fn take(sink self) -> T
 ```
 
@@ -1488,7 +1488,7 @@ The value, to use in this task.
 
 #### Scope.cancel
 
-```zig
+```gojo
 pub fn cancel(self)
 ```
 
@@ -1498,7 +1498,7 @@ Cancels the scope: every task in it, and its body.
 
 #### MutexRef[T].lock
 
-```zig
+```gojo
 pub fn lock(self) yield inout T
 ```
 
