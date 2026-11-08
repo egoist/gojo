@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# Prepares a fresh Amp orb (Debian 12) to build and test Gojo: the Rust
+# toolchain, zig (cross-compilation, `gojo build --target`), the website's
+# Bun dependencies, and warm build caches. Idempotent; reruns on a stale
+# snapshot only redo what changed.
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+step() {
+  local name=$1
+  shift
+  echo "==> $name"
+  local start=$SECONDS
+  "$@"
+  echo "    $name: $((SECONDS - start))s"
+}
+
+# Same version as .github/workflows/ci.yml.
+zig_version=0.17.0
+
+install_rust() {
+  if [ ! -x "$HOME/.cargo/bin/rustup" ]; then
+    curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs |
+      sh -s -- -y --no-modify-path --profile minimal --component rustfmt,clippy
+  fi
+  # CI uses the latest stable; this is a no-op when it is already current.
+  "$HOME/.cargo/bin/rustup" toolchain install stable --profile minimal --component rustfmt,clippy --no-self-update
+  "$HOME/.cargo/bin/rustup" default stable
+}
+
+persist_cargo_path() {
+  # Login shells (Amp, orb services) read ~/.bash_profile; interactive ones ~/.bashrc.
+  local marker='# gojo: Rust toolchain'
+  local file
+  for file in "$HOME/.bash_profile" "$HOME/.bashrc"; do
+    if ! grep -Fqx "$marker" "$file" 2>/dev/null; then
+      printf '\n%s\n. "$HOME/.cargo/env"\n' "$marker" >> "$file"
+    fi
+  done
+}
+
+install_zig() {
+  if [ "$(zig version 2>/dev/null || true)" = "$zig_version" ]; then
+    return
+  fi
+  local arch dir
+  arch=$(uname -m)
+  dir=/usr/local/lib/zig-$zig_version
+  sudo rm -rf "$dir"
+  sudo mkdir -p "$dir"
+  curl -fsSL "https://ziglang.org/download/$zig_version/zig-$arch-linux-$zig_version.tar.xz" |
+    sudo tar -xJ -C "$dir" --strip-components=1
+  sudo ln -sfn "$dir/zig" /usr/local/bin/zig
+}
+
+step "rust toolchain" install_rust
+step "cargo PATH" persist_cargo_path
+# shellcheck disable=SC1091
+source "$HOME/.cargo/env"
+step "zig $zig_version" install_zig
+step "bun install" bun install --frozen-lockfile
+step "cargo build" cargo build --locked
+step "cargo test --no-run" cargo test --locked --no-run
+# Compiles the C runtime once into ~/.cache/gojo.
+step "warm gojo runtime cache" ./target/debug/gojo run examples/hello.gojo

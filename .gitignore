@@ -5,3 +5,4 @@ zig-out/
 fuzz-out/
 dist/
 node_modules/
+.amp/portals/*
