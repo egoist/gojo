@@ -647,6 +647,13 @@ fn gojo_bin() -> PathBuf {
 }
 
 /// Runs a command with a time limit. None when it ran out of time.
+/// `ASAN_OPTIONS` for sanitized runs. On arm64 Linux, the fake stacks that catch
+/// use after return leak every frame with gcc 13 (Ubuntu 24.04), and each call
+/// then scans the whole fake stack, so loops slow down without bound.
+fn asan_options(base: &str) -> String {
+    if cfg!(all(target_os = "linux", target_arch = "aarch64")) { format!("{}:detect_stack_use_after_return=0", base) } else { base.to_string() }
+}
+
 fn run_limited(cmd: &mut Command, limit: Duration) -> Option<std::process::Output> {
     let mut child = cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().ok()?;
     // read the pipes on other threads so a chatty child can't block on them
@@ -711,7 +718,7 @@ fn exec_check(text: &str, work: &Path, findings: &Findings) {
     }
     let mut run = Command::new(&bin);
     run.current_dir(work);
-    run.env("ASAN_OPTIONS", "detect_leaks=0:abort_on_error=0:halt_on_error=1");
+    run.env("ASAN_OPTIONS", asan_options("detect_leaks=0:abort_on_error=0:halt_on_error=1"));
     run.env("UBSAN_OPTIONS", "print_stacktrace=1:halt_on_error=1");
     run.env("GOJO_MAXPROCS", "2");
     let Some(out) = run_limited(&mut run, Duration::from_secs(5)) else { return };
@@ -999,7 +1006,7 @@ fn deep_signature(f: &Path, scratch: &Path) -> String {
     }
     let mut run = Command::new(&bin);
     run.current_dir(scratch);
-    run.env("ASAN_OPTIONS", "detect_leaks=0:halt_on_error=1");
+    run.env("ASAN_OPTIONS", asan_options("detect_leaks=0:halt_on_error=1"));
     let Some(out) = run_limited(&mut run, Duration::from_secs(5)) else { return "timeout".into() };
     let stderr = String::from_utf8_lossy(&out.stderr);
     if let Some(l) = stderr.lines().find(|l| l.contains("ERROR: AddressSanitizer") || l.contains("runtime error:")) {
@@ -1134,7 +1141,7 @@ fn run_variant(src: &Path, work: &Path, name: &str, flags: &[&str], findings: &F
     }
     let mut run = Command::new(&bin);
     run.current_dir(work);
-    run.env("ASAN_OPTIONS", "detect_leaks=0:halt_on_error=1");
+    run.env("ASAN_OPTIONS", asan_options("detect_leaks=0:halt_on_error=1"));
     run.env("UBSAN_OPTIONS", "print_stacktrace=1:halt_on_error=1");
     let r = match run_limited(&mut run, Duration::from_secs(20)) {
         None => RunResult { status: None, stdout: String::new(), panic: String::new() },

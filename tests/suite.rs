@@ -1,7 +1,8 @@
 // Runs every program in tests/run and compares its stdout with the `.out` file,
 // and checks that every program in tests/errors fails with the expected messages.
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output, Stdio};
+use std::time::{Duration, Instant};
 
 fn gojo() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_gojo"))
@@ -15,6 +16,50 @@ fn files(dir: &str) -> Vec<PathBuf> {
         .collect();
     v.sort();
     v
+}
+
+/// Runs a command with stdin closed, killing it after `limit`: sanitizers slow
+/// programs down, and a hang should fail the test, not stall it.
+fn output_within(cmd: &mut Command, limit: Duration) -> Result<Output, String> {
+    let mut child = cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| e.to_string())?;
+    // read the pipes on other threads so a chatty child can't block on them
+    let mut so = child.stdout.take().unwrap();
+    let mut se = child.stderr.take().unwrap();
+    let t1 = std::thread::spawn(move || {
+        let mut v = vec![];
+        let _ = std::io::Read::read_to_end(&mut so, &mut v);
+        v
+    });
+    let t2 = std::thread::spawn(move || {
+        let mut v = vec![];
+        let _ = std::io::Read::read_to_end(&mut se, &mut v);
+        v
+    });
+    let start = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Ok(Output { status, stdout: t1.join().unwrap_or_default(), stderr: t2.join().unwrap_or_default() }),
+            Ok(None) if start.elapsed() < limit => std::thread::sleep(Duration::from_millis(10)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("still running after {} s; killed", limit.as_secs()));
+            }
+        }
+    }
+}
+
+/// A command for a program built with ASan. On arm64 Linux, the fake stacks that
+/// catch use after return leak every frame with gcc 13 (Ubuntu 24.04): each call
+/// then scans the whole fake stack, and loops slow down without bound, so that
+/// one check is left to the other platforms there.
+fn asan_command(bin: &Path) -> Command {
+    let mut c = Command::new(bin);
+    if cfg!(all(target_os = "linux", target_arch = "aarch64")) {
+        let opts = std::env::var("ASAN_OPTIONS").unwrap_or_default();
+        c.env("ASAN_OPTIONS", if opts.is_empty() { "detect_stack_use_after_return=0".to_string() } else { format!("{}:detect_stack_use_after_return=0", opts) });
+    }
+    c
 }
 
 /// Every program in tests/run, and every single-file example, prints its `.out`.
@@ -114,7 +159,13 @@ fn address_sanitizer() {
             failures.push(format!("{}: build failed\n{}", f.display(), String::from_utf8_lossy(&out.stderr)));
             continue;
         }
-        let run = Command::new(&bin).output().unwrap();
+        let run = match output_within(&mut asan_command(&bin), Duration::from_secs(300)) {
+            Ok(run) => run,
+            Err(e) => {
+                failures.push(format!("{}: {}", f.display(), e));
+                continue;
+            }
+        };
         let stderr = String::from_utf8_lossy(&run.stderr);
         if stderr.contains("Sanitizer") || stderr.contains("runtime error") {
             failures.push(format!("{}:\n{}", f.display(), stderr.lines().take(20).collect::<Vec<_>>().join("\n")));
@@ -143,7 +194,13 @@ fn thread_sanitizer() {
             failures.push(format!("{}: build failed\n{}", f.display(), String::from_utf8_lossy(&out.stderr)));
             continue;
         }
-        let run = Command::new(&bin).output().unwrap();
+        let run = match output_within(&mut Command::new(&bin), Duration::from_secs(300)) {
+            Ok(run) => run,
+            Err(e) => {
+                failures.push(format!("{}: {}", f.display(), e));
+                continue;
+            }
+        };
         let stderr = String::from_utf8_lossy(&run.stderr);
         if stderr.contains("ThreadSanitizer") {
             failures.push(format!("{}:\n{}", f.display(), stderr.lines().take(30).collect::<Vec<_>>().join("\n")));
