@@ -4,6 +4,7 @@
 #
 #   curl -fsSL https://github.com/egoist/gojo/releases/latest/download/install.sh | sh
 #   sh install.sh --version 0.1.0                          a given release
+#   ... | sh -s -- --nightly                               the latest nightly build
 #   sh install.sh --archive dist/gojo-0.1.0-macos-arm64.tar.gz   a local archive
 #
 # Downloads come from the GitHub releases of egoist/gojo ($GOJO_RELEASES
@@ -14,13 +15,15 @@ set -eu
 RELEASES=${GOJO_RELEASES:-https://github.com/egoist/gojo/releases}
 home=${GOJO_HOME:-$HOME/.gojo}
 version=
+nightly=
 archive=
 
 while [ $# -gt 0 ]; do
     case $1 in
         --version) version=$2; shift 2 ;;
+        --nightly) nightly=1; shift ;;
         --archive) archive=$2; shift 2 ;;
-        -h|--help) sed -n '2,10p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,12p' "$0"; exit 0 ;;
         *) echo "install.sh: unknown argument $1" >&2; exit 2 ;;
     esac
 done
@@ -54,14 +57,26 @@ if [ -z "$archive" ]; then
         echo "install.sh: set GOJO_RELEASES to a releases page, or pass --archive FILE" >&2
         exit 1
     fi
-    if [ -z "$version" ]; then
-        fetch "$RELEASES/latest/download/VERSION" "$tmp/VERSION"
+    # nightly builds live in one release, tagged `nightly`, replaced by each build
+    if [ -n "$nightly" ]; then
+        if [ -n "$version" ]; then
+            echo "install.sh: --nightly and --version exclude each other" >&2
+            exit 2
+        fi
+        tag=nightly
+        fetch "$RELEASES/download/nightly/VERSION" "$tmp/VERSION"
         version=$(tr -d ' \n' < "$tmp/VERSION")
+    else
+        if [ -z "$version" ]; then
+            fetch "$RELEASES/latest/download/VERSION" "$tmp/VERSION"
+            version=$(tr -d ' \n' < "$tmp/VERSION")
+        fi
+        tag=v$version
     fi
     name=gojo-$version-$platform.tar.gz
     echo "downloading $name"
-    fetch "$RELEASES/download/v$version/$name" "$tmp/$name"
-    fetch "$RELEASES/download/v$version/SHA256SUMS" "$tmp/SHA256SUMS"
+    fetch "$RELEASES/download/$tag/$name" "$tmp/$name"
+    fetch "$RELEASES/download/$tag/SHA256SUMS" "$tmp/SHA256SUMS"
     want=$(grep " $name\$" "$tmp/SHA256SUMS" | cut -d' ' -f1)
     if [ -z "$want" ] || [ "$want" != "$(sha256 "$tmp/$name")" ]; then
         echo "install.sh: checksum mismatch for $name" >&2

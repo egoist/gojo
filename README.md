@@ -84,6 +84,7 @@ A release archive contains a statically linked `gojo` executable (with the stand
 ```sh
 curl -fsSL https://github.com/egoist/gojo/releases/latest/download/install.sh | sh
 sh scripts/install.sh --archive dist/gojo-0.1.0-macos-arm64.tar.gz    # or install a local archive
+curl -fsSL https://github.com/egoist/gojo/releases/download/nightly/install.sh | sh -s -- --nightly   # the latest nightly build
 ```
 
 It installs to `~/.gojo` (change it with `GOJO_HOME`). `gojo version` shows the version. Building from source only needs the Rust toolchain: `cargo build --release`.
@@ -229,3 +230,5 @@ Results go to `fuzz-out/findings/`. Rules and limits are in section 15 of [`docs
 ## Releases
 
 `scripts/release.sh` builds four release archives on a Mac (`macos-arm64`, `macos-x86_64`, `linux-x86_64`, `linux-arm64`; the Linux ones are statically linked against musl with `cargo zigbuild`), plus `SHA256SUMS`, `VERSION` and `install.sh`, in `dist/`. When a `vX.Y.Z` tag is pushed, `.github/workflows/release.yml` does the same and creates a GitHub release (versions containing `-` are marked as prerelease). `ci.yml` runs the tests on Linux (x86-64, arm64) and macOS, and also runs the sanitizers on Linux.
+
+Every night (03:00 UTC), `.github/workflows/nightly.yml` takes the newest commit on `main` that passed `ci.yml` and, if the code (`src`, `runtime`, `std`, `examples`, the build files, `release.sh`, `install.sh`) changed since the previous nightly, builds it and replaces the `nightly` prerelease and its tag. A nightly's version is Cargo.toml's with `-nightly.YYYYMMDD` appended (`GOJO_VERSION` overrides the version for `release.sh` and `gojo version`). Running the workflow by hand publishes now; its `force` option publishes even without code changes.

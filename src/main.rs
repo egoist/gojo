@@ -59,7 +59,7 @@ fn usage() -> ExitCode {
 }
 
 fn version() -> String {
-    format!("gojo {} ({}, {})", env!("CARGO_PKG_VERSION"), env!("GOJO_COMMIT"), env!("GOJO_HOST"))
+    format!("gojo {} ({}, {})", env!("GOJO_VERSION"), env!("GOJO_COMMIT"), env!("GOJO_HOST"))
 }
 
 /// Why the C compiler could not be started, and what to do about it.

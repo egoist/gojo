@@ -1,0 +1,126 @@
+# Every night, publishes the newest commit on main that passed ci as the
+# `nightly` prerelease, if the code changed since the previous nightly (docs,
+# tests and benchmarks alone don't make a new one). The release and its tag
+# are replaced each time; install it with
+#
+#   curl -fsSL https://github.com/egoist/gojo/releases/download/nightly/install.sh | sh -s -- --nightly
+#
+# Its version is Cargo.toml's with `-nightly.YYYYMMDD` appended. Run it by hand
+# (Actions > nightly > Run workflow) to publish now; `force` publishes even
+# without code changes.
+name: nightly
+on:
+  schedule:
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Publish even if the code has not changed since the last nightly
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  actions: read
+
+concurrency:
+  group: nightly
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      publish: ${{ steps.check.outputs.publish }}
+      sha: ${{ steps.check.outputs.sha }}
+      previous: ${{ steps.check.outputs.previous }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          # What ships: the compiler, runtime, standard library, examples and
+          # the scripts that build and install the archives.
+          code=(src runtime std examples build.rs Cargo.toml Cargo.lock scripts/release.sh scripts/install.sh)
+
+          sha=$(gh run list --workflow ci.yml --branch main --event push --status success --limit 1 --json headSha --jq '.[0].headSha // empty')
+          if [ -z "$sha" ] || ! git cat-file -e "$sha^{commit}" 2>/dev/null; then
+            echo "::notice::no commit on main has passed ci; nothing to publish"
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          previous=$(git rev-parse -q --verify 'refs/tags/nightly^{commit}' || true)
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "previous=$previous" >> "$GITHUB_OUTPUT"
+
+          if [ "$FORCE" = true ]; then
+            publish=true; why="forced"
+          elif [ -z "$previous" ]; then
+            publish=true; why="first nightly"
+          elif [ "$previous" = "$sha" ]; then
+            publish=false; why="the previous nightly is already $sha"
+          elif changed=$(git diff --name-only "$previous" "$sha" -- "${code[@]}") && [ -n "$changed" ]; then
+            publish=true; why="code changed since ${previous:0:10}:"$'\n'"$changed"
+          else
+            publish=false; why="no code changes since ${previous:0:10}"
+          fi
+          echo "publish=$publish" >> "$GITHUB_OUTPUT"
+          echo "::notice::publish=$publish ($(echo "$why" | head -n 1))"
+          echo "$why"
+
+  release:
+    needs: check
+    if: needs.check.outputs.publish == 'true'
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.check.outputs.sha }}
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin,x86_64-unknown-linux-musl,aarch64-unknown-linux-musl
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
+      - run: cargo install cargo-zigbuild --locked
+      - name: build
+        run: |
+          base=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
+          GOJO_VERSION="$base-nightly.$(date -u +%Y%m%d)" JOBS=4 scripts/release.sh
+      - name: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ needs.check.outputs.sha }}
+          PREVIOUS: ${{ needs.check.outputs.previous }}
+        run: |
+          version=$(cat dist/VERSION)
+          {
+            echo "Nightly build of $SHA, from main after ci passed. Not a stable release."
+            echo
+            echo '```sh'
+            echo "curl -fsSL https://github.com/$GITHUB_REPOSITORY/releases/download/nightly/install.sh | sh -s -- --nightly"
+            echo '```'
+            if [ -n "$PREVIOUS" ] && [ "$PREVIOUS" != "$SHA" ]; then
+              echo
+              echo "## Changes since the previous nightly"
+              echo
+              git log --no-merges --format='- %s (%h)' "$PREVIOUS..$SHA"
+            fi
+          } > "$RUNNER_TEMP/notes.md"
+
+          # replace the previous nightly: its release, then its tag
+          if gh release view nightly >/dev/null 2>&1; then
+            gh release delete nightly --yes
+          fi
+          if git ls-remote --exit-code --tags origin refs/tags/nightly >/dev/null; then
+            git push origin :refs/tags/nightly
+          fi
+          gh release create nightly --target "$SHA" --prerelease --latest=false \
+            --title "Gojo nightly $version" --notes-file "$RUNNER_TEMP/notes.md" \
+            dist/*.tar.gz dist/SHA256SUMS dist/VERSION dist/install.sh

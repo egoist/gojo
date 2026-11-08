@@ -14,10 +14,13 @@
 #
 # usage: scripts/release.sh [target...]   (default: all four)
 #        JOBS=N limits the build's parallelism (default 4)
+#        GOJO_VERSION=V names the archives and `gojo version` V instead of
+#        Cargo.toml's version (nightly builds use X.Y.Z-nightly.YYYYMMDD)
 set -eu
 
 cd "$(dirname "$0")/.."
-version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
+version=${GOJO_VERSION:-$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)}
+export GOJO_VERSION=$version
 jobs=${JOBS:-4}
 targets=${*:-"macos-arm64 macos-x86_64 linux-x86_64 linux-arm64"}
 
