@@ -3,11 +3,11 @@
 use std/{fmt, http, io, net, os, time}
 
 struct App {
-    fn serve(self, req http.Request) http.Response {
+    fn serve(self, req: http.Request) -> http.Response {
         return match req.path.asStr() {
             "/" => http.text(200, "hello\n")
             "/echo" => http.text(200, req.text())
-            "/hi" => http.text(200, "hi " + (req.param("name") ?? "stranger".toString()) + "\n")
+            "/hi" => http.text(200, "hi " + (req.param("name") ?? "stranger") + "\n")
             "/slow" => {
                 // cancelled at the deadline, or when the client hangs up
                 time.sleep(10 * time.second)
@@ -18,12 +18,12 @@ struct App {
     }
 }
 
-fn status(port int, path str) String ! io.Error {
+fn status(port: int, path: str) -> String ! io.Error {
     let r = try http.get(fmt.format("http://127.0.0.1:{}{}", port, path))
     return fmt.format("{} {}", r.status, http.statusText(r.status))
 }
 
-fn hangUp(port int, path str) ! io.Error {
+fn hangUp(port: int, path: str) ! io.Error {
     let c = try net.dial(fmt.format("127.0.0.1:{}", port))
     try c.writeText("GET " + path + " HTTP/1.1\r\nHost: localhost\r\n\r\n")
     // dropping `c` closes the connection without reading the answer
@@ -43,7 +43,7 @@ fn main() ! io.Error {
     let ln = try net.listen("127.0.0.1:0")
     let port = ln.port()
     let start = time.now()
-    let stop = chan[bool]()
+    let stop = Chan[bool]()
     let opts = http.Options{deadline: 50 * time.millisecond}
     scope {
         // the server, in a scope of its own so that it can be stopped alone
@@ -63,12 +63,12 @@ fn main() ! io.Error {
             }
         }
         println("20 requests to /:", fast.isOk())
-        println("/missing:", status(port, "/missing") catch _e { "?".toString() })
+        println("/missing:", status(port, "/missing") catch _e { "?" })
         let hi = http.get(fmt.format("http://127.0.0.1:{}/hi?name=k%C3%AFte+lang", port)) catch _e { http.text(0, "?") }
         print("/hi:", hi.text())
         let echo = http.post(fmt.format("http://127.0.0.1:{}/echo", port), "text/plain", "posted body".bytes()) catch _e { http.text(0, "?") }
         println("/echo:", echo.status, echo.text(), echo.header("content-type") ?? "")
-        println("/slow:", status(port, "/slow") catch _e { "?".toString() })
+        println("/slow:", status(port, "/slow") catch _e { "?" })
         _ = hangUp(port, "/slow")
         // wait until the server has noticed the hang-up
         for _ in 0..200 {
@@ -80,7 +80,7 @@ fn main() ! io.Error {
         // a request still in flight when the server stops
         scope {
             go () => {
-                let line = status(port, "/slow") catch _e { "connection closed".toString() }
+                let line = status(port, "/slow") catch _e { "connection closed" }
                 println("in flight at shutdown:", line)
             }
             time.sleep(10 * time.millisecond)

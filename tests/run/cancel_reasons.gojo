@@ -10,9 +10,9 @@ fn fails() ! E {
 }
 
 struct Goodbye {
-    name String
+    name: String
 
-    fn drop(self inout) {
+    fn drop(inout self) {
         // blocks, in a cancelled task: still runs (shielded)
         time.sleep(time.millisecond)
         println("goodbye from", self.name, "cancelled inside drop:", task.cancelled())

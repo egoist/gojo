@@ -244,6 +244,8 @@ pub enum TPat {
     Bool(bool),
     Str(String),
     Variant { def: DefId, variant: usize, subs: Vec<TPat> },
+    /// `(a, b)`: the fields of a tuple, in order.
+    Tuple(Vec<TPat>),
     Some(Box<TPat>),
     None,
     Ok(Box<TPat>),
@@ -328,7 +330,7 @@ pub enum TK {
     Unsafe(TBlock),
     /// Construct Box/rc/arc/Mutex/Cell around a value.
     Wrap(Box<TExpr>),
-    /// `chan[T](n)`
+    /// `Chan[T](n)`
     MakeChan(Box<TExpr>),
     /// Move the contents out of an owned Box, freeing the allocation.
     Unbox(Box<TExpr>),

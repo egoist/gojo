@@ -5,8 +5,8 @@ small client. Plain HTTP only (no TLS).
 
 ```zig
 struct Hello {
-    fn serve(self, req http.Request) http.Response {
-        return http.text(200, "hello " + (req.param("name") ?? "world".toString()))
+    fn serve(self, req: http.Request) -> http.Response {
+        return http.text(200, "hello " + (req.param("name") ?? "world"))
     }
 }
 fn main() ! io.Error {
@@ -31,8 +31,8 @@ handler's blocking calls return early.
 
 ```zig
 pub struct Header {
-    pub name String
-    pub value String
+    pub name: String
+    pub value: String
 }
 ```
 
@@ -42,13 +42,13 @@ A header line. Names are matched without regard to case.
 
 ```zig
 pub struct Request {
-    pub method String
+    pub method: String
     // the path, without the query
-    pub path String
+    pub path: String
     // what follows `?` in the target, still percent-encoded
-    pub rawQuery String = ""
-    pub headers Vec[Header] = []
-    pub body Vec[byte] = []
+    pub rawQuery: String = ""
+    pub headers: Vec[Header] = []
+    pub body: Vec[byte] = []
 }
 ```
 
@@ -58,7 +58,7 @@ A request, as a handler gets it: the whole body has been read (up to
 #### Request.header
 
 ```zig
-pub fn header(self, name str) ?String
+pub fn header(self, name: str) -> ?String
 ```
 
 The value of header `name` (any case).
@@ -66,7 +66,7 @@ The value of header `name` (any case).
 #### Request.param
 
 ```zig
-pub fn param(self, name str) ?String
+pub fn param(self, name: str) -> ?String
 ```
 
 A query parameter, decoded: "/search?q=a+b" has param("q") == "a b".
@@ -74,7 +74,7 @@ A query parameter, decoded: "/search?q=a+b" has param("q") == "a b".
 #### Request.segments
 
 ```zig
-pub fn segments(self) Vec[String]
+pub fn segments(self) -> Vec[String]
 ```
 
 The path's parts: "/todos/7" -> ["todos", "7"].
@@ -82,7 +82,7 @@ The path's parts: "/todos/7" -> ["todos", "7"].
 #### Request.text
 
 ```zig
-pub fn text(self) String
+pub fn text(self) -> String
 ```
 
 The body, as a string.
@@ -91,9 +91,9 @@ The body, as a string.
 
 ```zig
 pub struct Response {
-    pub status int = 200
-    pub headers Vec[Header] = []
-    pub body Vec[byte] = []
+    pub status: int = 200
+    pub headers: Vec[Header] = []
+    pub body: Vec[byte] = []
 }
 ```
 
@@ -104,7 +104,7 @@ become spaces.
 #### Response.header
 
 ```zig
-pub fn header(self, name str) ?String
+pub fn header(self, name: str) -> ?String
 ```
 
 The value of header `name` (any case).
@@ -112,7 +112,7 @@ The value of header `name` (any case).
 #### Response.setHeader
 
 ```zig
-pub fn setHeader(self inout, name str, value str)
+pub fn setHeader(inout self, name: str, value: str)
 ```
 
 Adds a header.
@@ -120,7 +120,7 @@ Adds a header.
 #### Response.text
 
 ```zig
-pub fn text(self) String
+pub fn text(self) -> String
 ```
 
 The body, as a string.
@@ -129,7 +129,7 @@ The body, as a string.
 
 ```zig
 pub interface Handler {
-    fn serve(self, req Request) Response
+    fn serve(self, req: Request) -> Response
 }
 ```
 
@@ -142,9 +142,9 @@ the deadline passes, the client hangs up or the server stops.
 ```zig
 pub struct Options {
     // how long a handler may run
-    pub deadline int = 30 * time.second
+    pub deadline: int = 30 * time.second
     // the largest request body accepted
-    pub maxBody int = 8 * 1024 * 1024
+    pub maxBody: int = 8 * 1024 * 1024
 }
 ```
 
@@ -154,11 +154,11 @@ How the server treats requests.
 
 ```zig
 pub struct Stats {
-    pub served int = 0
-    pub timedOut int = 0
-    pub hungUp int = 0
-    pub stopped int = 0
-    pub rejected int = 0
+    pub served: int = 0
+    pub timedOut: int = 0
+    pub hungUp: int = 0
+    pub stopped: int = 0
+    pub rejected: int = 0
 }
 ```
 
@@ -171,7 +171,7 @@ cancelled when the server stopped, or rejected as malformed or too large.
 ### findHeader
 
 ```zig
-pub fn findHeader(hs []Header, name str) ?String
+pub fn findHeader(hs: []Header, name: str) -> ?String
 ```
 
 The value of header `name` (any case) in `hs`.
@@ -179,7 +179,7 @@ The value of header `name` (any case) in `hs`.
 ### text
 
 ```zig
-pub fn text(status int, body str) Response
+pub fn text(status: int, body: str) -> Response
 ```
 
 A plain-text response.
@@ -187,7 +187,7 @@ A plain-text response.
 ### json
 
 ```zig
-pub fn json(status int, body str) Response
+pub fn json(status: int, body: str) -> Response
 ```
 
 A JSON response; `body` is JSON text (see json.Value.encode).
@@ -195,7 +195,7 @@ A JSON response; `body` is JSON text (see json.Value.encode).
 ### statusText
 
 ```zig
-pub fn statusText(status int) str
+pub fn statusText(status: int) -> str
 ```
 
 The reason phrase for a status code: 404 -> "Not Found".
@@ -203,7 +203,7 @@ The reason phrase for a status code: 404 -> "Not Found".
 ### serve
 
 ```zig
-pub fn serve[H Handler + send](ln net.Listener, h H, opts Options)
+pub fn serve[H: Handler + send](ln: net.Listener, h: H, opts: Options)
 ```
 
 Serves until the calling task is cancelled; then cancels the requests in
@@ -212,7 +212,7 @@ flight and waits for them.
 ### serveCounting
 
 ```zig
-pub fn serveCounting[H Handler + send](ln net.Listener, h H, opts Options, stats Mutex[Stats])
+pub fn serveCounting[H: Handler + send](ln: net.Listener, h: H, opts: Options, stats: Mutex[Stats])
 ```
 
 Like `serve`, counting what happened to the requests in `stats`.
@@ -220,7 +220,7 @@ Like `serve`, counting what happened to the requests in `stats`.
 ### request
 
 ```zig
-pub fn request(method str, url str, headers []Header, body []byte) Response ! io.Error
+pub fn request(method: str, url: str, headers: []Header, body: []byte) -> Response ! io.Error
 ```
 
 Sends a request and reads the whole response. `url` is
@@ -229,7 +229,7 @@ Sends a request and reads the whole response. `url` is
 ### get
 
 ```zig
-pub fn get(url str) Response ! io.Error
+pub fn get(url: str) -> Response ! io.Error
 ```
 
 A GET request.
@@ -237,7 +237,7 @@ A GET request.
 ### post
 
 ```zig
-pub fn post(url str, contentType str, body []byte) Response ! io.Error
+pub fn post(url: str, contentType: str, body: []byte) -> Response ! io.Error
 ```
 
 A POST request with a body of the given type.
@@ -245,7 +245,7 @@ A POST request with a body of the given type.
 ### decode
 
 ```zig
-pub fn decode(s str) ?String
+pub fn decode(s: str) -> ?String
 ```
 
 Percent-decoding (and `+` as a space, as in query strings); none if malformed.
@@ -253,7 +253,7 @@ Percent-decoding (and `+` as a space, as in query strings); none if malformed.
 ### encode
 
 ```zig
-pub fn encode(s str) String
+pub fn encode(s: str) -> String
 ```
 
 Percent-encoding of everything but letters, digits and `-._~`.

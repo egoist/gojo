@@ -1,4 +1,4 @@
-fn div(a int, b int) int { return a / b }
+fn div(a: int, b: int) -> int { return a / b }
 fn main() {
     println(div(1, 0))
     // panic: division by zero

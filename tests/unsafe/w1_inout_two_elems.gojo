@@ -1,4 +1,4 @@
-fn f(a inout String, b inout String) {
+fn f(a: inout String, b: inout String) {
     a.push("x")
     b.push("y")
 }

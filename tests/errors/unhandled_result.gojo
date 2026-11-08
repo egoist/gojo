@@ -1,4 +1,4 @@
-fn check(n int) ! String {
+fn check(n: int) ! String {
     if n < 0 {
         return err("negative".toString())
     }

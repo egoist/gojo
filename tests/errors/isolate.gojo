@@ -1,12 +1,12 @@
 // An isolated value is built only from values that can cross tasks: nothing
 // outside it may point into it.
 fn main() {
-    let shared = rc(1)
+    let shared = Rc(1)
     let x = isolate {
-        var v = Vec[rc[int]]{}
+        var v = Vec[Rc[int]]{}
         v.push(shared.clone())
         v
     }
-    // error: `isolate` uses `shared` of type `rc[int]` from outside
+    // error: `isolate` uses `shared` of type `Rc[int]` from outside
     println(x)
 }

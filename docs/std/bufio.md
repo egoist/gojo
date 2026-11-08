@@ -4,7 +4,7 @@ Buffered reading and writing on top of io.Reader / io.Writer.
 
 ```zig
 var input = bufio.reader(os.stdin())
-for {
+loop {
     let line = try input.readLine() ?? break
     ...
 }
@@ -22,7 +22,7 @@ try out.flush()
 ### struct Reader
 
 ```zig
-pub struct Reader[R io.Reader] {
+pub struct Reader[R: io.Reader] {
     // and private fields
 }
 ```
@@ -32,7 +32,7 @@ Reads from `R` in large chunks, and line by line.
 #### Reader.readByte
 
 ```zig
-pub fn readByte(self inout) ?byte ! io.Error
+pub fn readByte(inout self) -> ?byte ! io.Error
 ```
 
 The next byte, or none at the end.
@@ -40,7 +40,7 @@ The next byte, or none at the end.
 #### Reader.readUntil
 
 ```zig
-pub fn readUntil(self inout, delim byte) ?Vec[byte] ! io.Error
+pub fn readUntil(inout self, delim: byte) -> ?Vec[byte] ! io.Error
 ```
 
 Everything up to and including `delim` (or to the end), or none when
@@ -49,7 +49,7 @@ nothing is left.
 #### Reader.readLine
 
 ```zig
-pub fn readLine(self inout) ?String ! io.Error
+pub fn readLine(inout self) -> ?String ! io.Error
 ```
 
 The next line without its "\n" (or "\r\n"), or none at the end.
@@ -57,7 +57,7 @@ The next line without its "\n" (or "\r\n"), or none at the end.
 #### Reader.read
 
 ```zig
-pub fn read(self inout, buf inout Vec[byte], max int) int ! io.Error
+pub fn read(inout self, buf: inout Vec[byte], max: int) -> int ! io.Error
 ```
 
 As an io.Reader: what is buffered first.
@@ -65,7 +65,7 @@ As an io.Reader: what is buffered first.
 #### Reader.readAll
 
 ```zig
-pub fn readAll(self inout) Vec[byte] ! io.Error
+pub fn readAll(inout self) -> Vec[byte] ! io.Error
 ```
 
 Everything that is left.
@@ -73,7 +73,7 @@ Everything that is left.
 ### struct Writer
 
 ```zig
-pub struct Writer[W io.Writer] {
+pub struct Writer[W: io.Writer] {
     // and private fields
 }
 ```
@@ -85,7 +85,7 @@ see errors.
 #### Writer.write
 
 ```zig
-pub fn write(self inout, data []byte) ! io.Error
+pub fn write(inout self, data: []byte) ! io.Error
 ```
 
 Buffers `data` (large writes go straight through).
@@ -93,7 +93,7 @@ Buffers `data` (large writes go straight through).
 #### Writer.writeText
 
 ```zig
-pub fn writeText(self inout, s str) ! io.Error
+pub fn writeText(inout self, s: str) ! io.Error
 ```
 
 Buffers the bytes of `s`.
@@ -101,7 +101,7 @@ Buffers the bytes of `s`.
 #### Writer.flush
 
 ```zig
-pub fn flush(self inout) ! io.Error
+pub fn flush(inout self) ! io.Error
 ```
 
 Writes out everything buffered.
@@ -111,7 +111,7 @@ Writes out everything buffered.
 ### reader
 
 ```zig
-pub fn reader[R io.Reader](src sink R) Reader[R]
+pub fn reader[R: io.Reader](src: sink R) -> Reader[R]
 ```
 
 A buffered reader on `src` (which it owns).
@@ -119,7 +119,7 @@ A buffered reader on `src` (which it owns).
 ### writer
 
 ```zig
-pub fn writer[W io.Writer](dst sink W) Writer[W]
+pub fn writer[W: io.Writer](dst: sink W) -> Writer[W]
 ```
 
 A buffered writer on `dst` (which it owns).

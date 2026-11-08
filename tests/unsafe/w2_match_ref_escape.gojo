@@ -1,5 +1,5 @@
 fn main() {
-    var o ?String = some("abc".toString())
+    var o: ?String = some("abc".toString())
     var keep = ""
     match o {
         some(s) => keep = s.asStr()

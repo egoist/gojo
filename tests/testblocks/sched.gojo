@@ -3,12 +3,12 @@
 use std/time
 
 struct Account {
-    balance int
+    balance: int
 }
 
 // A check-then-act race: both tasks may see the balance before either one
 // withdraws. Only some interleavings show it.
-fn withdraw(acct Mutex[Account], amount int) {
+fn withdraw(acct: Mutex[Account], amount: int) {
     var ok = false
     with a = acct.lock() {
         ok = a.balance >= amount

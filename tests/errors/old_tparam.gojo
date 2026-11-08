@@ -1,0 +1,6 @@
+fn first[T any](xs: []T) -> ?T {
+    // error: expected `:` before the constraints of `T`
+    none
+}
+
+fn main() {}

@@ -1,9 +1,9 @@
 enum E {
-    A(s String)
+    A(s: String)
     B
 }
 fn main() {
-    let e E = .A("abcdefghijklmnopqrstuvwxyz0123456789".toString())
+    let e: E = .A("abcdefghijklmnopqrstuvwxyz0123456789".toString())
     match e {
         .A(s) => {
             let t = s

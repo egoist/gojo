@@ -1,0 +1,5 @@
+fn main() {
+    let a = 1
+    // error: expected `}` to end the interpolation, found number
+    println("${a 2}")
+}

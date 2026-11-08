@@ -3,10 +3,10 @@
 use std/{fmt, time, task}
 
 enum Fail {
-    Bad(n int)
+    Bad(n: int)
 }
 
-fn work(n int) ! Fail {
+fn work(n: int) ! Fail {
     if n == 3 {
         time.sleep(time.millisecond)
         return err(.Bad(n))
@@ -15,12 +15,12 @@ fn work(n int) ! Fail {
     time.sleep(60 * time.second)
 }
 
-fn square(x int) int {
+fn square(x: int) -> int {
     time.sleep(time.millisecond)
     return x * x
 }
 
-fn consume(s sink String) String {
+fn consume(s: sink String) -> String {
     return s + "!"
 }
 
@@ -41,7 +41,7 @@ fn failing() ! Fail {
 }
 
 // leaving a scope early cancels its tasks, then waits for them
-fn early() int ! Fail {
+fn early() -> int ! Fail {
     scope {
         let a = go work(3)
         let b = go () => {
@@ -130,7 +130,7 @@ fn named() {
 
 // a function that starts long-running work takes the scope; the task may
 // outlive the function, so it owns what it uses
-fn background(s Scope, out sink arc[Mutex[int]]) {
+fn background(s: Scope, out: sink Arc[Mutex[int]]) {
     s.go(() => {
         time.sleep(time.millisecond)
         with o = out.lock() { o += 1 }
@@ -138,7 +138,7 @@ fn background(s Scope, out sink arc[Mutex[int]]) {
 }
 
 fn passing() {
-    let n = arc(Mutex(0))
+    let n = Arc(Mutex(0))
     scope s {
         for _ in 0..3 {
             background(s, n.clone())

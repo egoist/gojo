@@ -2,7 +2,7 @@ use ./geom.{Vec2, Shape, origin}
 use ./util/text as t
 use ./geom
 
-fn total(shapes []Shape) f64 {
+fn total(shapes: []Shape) -> f64 {
     var sum = 0.0
     for s in shapes {
         sum += s.area()

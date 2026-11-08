@@ -1,5 +1,5 @@
 fn main() {
-    let r = rc(1)
+    let r = Rc(1)
     let w = r.downgrade()
     scope {
         go () => println(w.upgrade() != none)

@@ -1,5 +1,5 @@
 use std/time
-fn show(s str) {
+fn show(s: str) {
     time.sleep(10 * time.millisecond)
     println(s)
 }

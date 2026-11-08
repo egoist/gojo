@@ -1,0 +1,74 @@
+// Tuples: `(A, B)` types, `(a, b)` values, `t.0`, patterns and `let (a, b) = e`.
+fn divmod(a: int, b: int) -> (int, int) {
+    (a / b, a % b)
+}
+
+fn names() -> (String, Vec[String]) {
+    ("ann", ["bob", "eve"])
+}
+
+fn parse(s: str) -> ?(String, int) {
+    let i = s.find("=") ?? return none
+    let n = s[i + 1..].parseInt() ?? return none
+    (s[..i].toString(), n)
+}
+
+fn swap[A, B](p: sink (A, B)) -> (B, A) {
+    (p.1, p.0)
+}
+
+fn classify(p: (int, int)) -> str {
+    match p {
+        (0, 0) => "origin"
+        (0, _) | (_, 0) => "axis"
+        (x, y) if x == y => "diagonal"
+        _ => "plane"
+    }
+}
+
+struct Drop1 {
+    name: String
+
+    fn drop(inout self) {
+        println("drop", self.name)
+    }
+}
+
+fn main() {
+    let (q, r) = divmod(17, 5)
+    println(q, r)
+    let t = divmod(9, 4)
+    let same = t
+    println(t, t.0, t.1, same == t)
+
+    var p = (1, (2.5, true))
+    p.1.0 = 3.5
+    println(p, p.1.1)
+
+    let (first, rest) = names()
+    println(first, rest)
+    let (_, y) = divmod(7, 2)
+    println("y = ${y}, t = ${t}")
+
+    if let (k, v) = parse("port=8080") {
+        println(k, v)
+    }
+    println(parse("nope"))
+    println(classify((0, 0)), classify((0, 3)), classify((2, 2)), classify((1, 2)))
+
+    var m = Map[(int, int), String]{}
+    m[(1, 2)] = "a"
+    println(m, m.get((1, 2)))
+    var v = [(3, "c"), (1, "a"), (2, "b")]
+    v.sortBy((a, b) => a.0 < b.0)
+    println(v, swap(("left", 2)))
+    for pr in v {
+        print(pr.1)
+    }
+    println()
+
+    // elements are dropped like struct fields; a moved-out element is not
+    let pair = (Drop1{name: "a"}, Drop1{name: "b"})
+    let (keep, _) = pair
+    println("kept", keep.name)
+}

@@ -1,15 +1,15 @@
 use std/task
 enum Tree[T] {
     Leaf
-    Node(l Box[Tree[T]], v T, r Box[Tree[T]])
+    Node(l: Box[Tree[T]], v: T, r: Box[Tree[T]])
 }
 struct Bad[T] {
-    v T
-    next ?Box[Bad[rc[T]]]
+    v: T
+    next: ?Box[Bad[Rc[T]]]
 }
 fn main() {
-    let t Tree[int] = .Node(Box(Tree[int].Leaf), 1, Box(Tree[int].Leaf))
-    let ch = chan[Tree[int]](1)
+    let t: Tree[int] = .Node(Box(Tree[int].Leaf), 1, Box(Tree[int].Leaf))
+    let ch = Chan[Tree[int]](1)
     ch <- t
     _ = task.group((g) => { g.go(() => println(1)) })
     println(ch.len())

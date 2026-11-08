@@ -1,8 +1,8 @@
-fn wrap[T](x T) Vec[T] {
+fn wrap[T](x: T) -> Vec[T] {
     return [x]
 }
 fn main() {
-    var v Vec[str] = []
+    var v: Vec[str] = []
     {
         let s = "abc".toString()
         v = wrap(s.asStr())

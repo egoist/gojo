@@ -6,6 +6,6 @@ type L = ?Box[L]
 // error: type alias `L` refers to itself
 
 fn main() {
-    let x A = 1
+    let x: A = 1
     println(x)
 }

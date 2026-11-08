@@ -1,8 +1,8 @@
 // A view variable outside a loop that every iteration sets before using it:
 // the owner may change in between.
 fn main() {
-    var s = "a".toString()
-    var t = "x".toString()
+    var s: String = "a"
+    var t: String = "x"
     var w = ""
     for i in 0..3 {
         s.push("b")
@@ -11,7 +11,7 @@ fn main() {
     }
     println(w)
     for i in 0..2 {
-        t = "fresh value number".toString()
+        t = "fresh value number"
         w = t.asStr()
         println(i, w.len())
     }

@@ -1,5 +1,5 @@
 fn main() {
-    var x ?String = some("abc".toString())
+    var x: ?String = some("abc".toString())
     match x {
         some(s) => {
             x = none

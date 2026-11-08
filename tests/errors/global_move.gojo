@@ -1,7 +1,7 @@
 // A package-level value can't be moved out: every task may be reading it.
-let names Vec[String] = Vec[String]{}
+let names: Vec[String] = Vec[String]{}
 
-fn consume(v sink Vec[String]) {
+fn consume(v: sink Vec[String]) {
     println(v.len())
 }
 

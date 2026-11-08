@@ -1,10 +1,10 @@
 struct W {
-    s String
+    s: String
 }
-fn get(w W) str {
+fn get(w: W) -> str {
     return w.s.asStr()
 }
-fn bad() str {
+fn bad() -> str {
     let w = W{s: "abc".toString()}
     return get(w)
 }

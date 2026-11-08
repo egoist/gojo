@@ -72,14 +72,38 @@ fn split_gaps(src: &str, toks: &[Token]) -> Vec<Entry> {
     out
 }
 
+/// A line starting with `.name` that continues the expression above it (a
+/// method chain), as the parser reads it: not a match arm (`.A(x) => ...`).
+fn dot_continues(toks: &[Token], k: usize) -> bool {
+    if k == 0 || toks[k - 1].tok != Tok::Newline || toks[k].tok != Tok::P(".") || !matches!(toks.get(k + 1).map(|t| &t.tok), Some(Tok::Ident(_))) {
+        return false;
+    }
+    let mut depth = 0i32;
+    for t in &toks[k..] {
+        match t.tok {
+            Tok::P("(" | "[" | "{") => depth += 1,
+            Tok::P(")" | "]" | "}") => {
+                depth -= 1;
+                if depth < 0 {
+                    return true;
+                }
+            }
+            Tok::P("=>") if depth == 0 => return false,
+            Tok::Newline | Tok::Eof if depth == 0 => return true,
+            _ => {}
+        }
+    }
+    true
+}
+
 fn is_word(t: &Tok) -> bool {
-    matches!(t, Tok::Ident(_) | Tok::Int(_) | Tok::Float(_) | Tok::Str(_) | Tok::Char(_) | Tok::Kw(_))
+    matches!(t, Tok::Ident(_) | Tok::Int(_) | Tok::Float(_) | Tok::Str(_) | Tok::Interp(_) | Tok::Char(_) | Tok::Kw(_))
 }
 
 /// Ends a value: after it, `-` `&` `*` `!` `<-` are binary.
 fn ends_value(t: &Tok) -> bool {
     match t {
-        Tok::Ident(_) | Tok::Int(_) | Tok::Float(_) | Tok::Str(_) | Tok::Char(_) => true,
+        Tok::Ident(_) | Tok::Int(_) | Tok::Float(_) | Tok::Str(_) | Tok::Interp(_) | Tok::Char(_) => true,
         Tok::Kw(k) => matches!(k, Kw::True | Kw::False | Kw::None),
         Tok::P(p) => matches!(*p, ")" | "]" | "}"),
         _ => false,
@@ -151,7 +175,7 @@ fn layout(src: &str) -> Result<String, String> {
             for _ in 0..n {
                 out.push('\n');
             }
-            line_continues = prev_binary && !prev_comment;
+            line_continues = (prev_binary && !prev_comment) || matches!(&e.item, Item::Tok(k) if dot_continues(&toks, *k));
             at_line_start = true;
             // a new statement, unless inside parentheses or continuing
             if !line_continues && matches!(stack.last().map(|o| o.kind), None | Some("{")) {
@@ -196,13 +220,12 @@ fn layout(src: &str) -> Result<String, String> {
                 // statement, an operator can only be a prefix)
                 let ended = *k > 0 && toks[*k - 1].tok == Tok::Newline;
                 let space_before = *k > 0 && (ended || toks[*k].span.lo > toks[*k - 1].span.hi);
-                let space_after = *k + 1 < toks.len() && toks[*k + 1].span.lo > toks[*k].span.hi;
-                // unary or binary? After a value, `*u8` / `-1` written as a prefix
-                // (space before, none after) is one: `fn f() *u8`, `handle *u8`.
+                // unary or binary? After a value it is binary (types follow `:`
+                // or `->`, so `*u8` never comes right after a value)
                 let binary = match t {
                     Tok::P(p) if BINARY.contains(p) => {
                         if matches!(*p, "-" | "&" | "*" | "!" | "<-") {
-                            !ended && prev.as_ref().is_some_and(ends_value) && !prev_comment && !(space_before && !space_after)
+                            !ended && prev.as_ref().is_some_and(ends_value) && !prev_comment
                         } else {
                             true
                         }
@@ -229,13 +252,10 @@ fn layout(src: &str) -> Result<String, String> {
                             (Tok::Kw(Kw::Func), Tok::P("(")) => false,
                             (Tok::Kw(_), Tok::P("(" | "[")) => space_before,
                             (_, Tok::P("(")) => !(matches!(pt, Tok::Ident(_) | Tok::P(")" | "]" | "}"))),
-                            // `f()[0]` or a result type `fn f() []byte`
-                            (Tok::P(")") | Tok::Str(_), Tok::P("[")) => space_before,
-                            // after a name, `[` indexes (`xs[1]`) or starts a type
-                            // (`t []int`): only the source tells, by its space
-                            (Tok::Ident(_), Tok::P("[")) => *k > 0 && toks[*k].span.lo > toks[*k - 1].span.hi,
+                            // `f()[0]`, `xs[1]`, `Vec[int]`
+                            (Tok::P(")") | Tok::Str(_) | Tok::Interp(_) | Tok::Ident(_), Tok::P("[")) => false,
                             (_, Tok::P("[")) => !(matches!(pt, Tok::P(")" | "]"))),
-                            (Tok::P("]"), Tok::Ident(_) | Tok::Kw(Kw::Func | Kw::Chan)) => false,
+                            (Tok::P("]"), Tok::Ident(_) | Tok::Kw(Kw::Func)) => false,
                             (_, Tok::P("{")) => !(matches!(pt, Tok::Ident(_) | Tok::P("]")) && !header),
                             (Tok::P("{"), Tok::P("}")) => false,
                             (_, Tok::P("}")) => !stack.last().is_some_and(|o| o.literal),
@@ -258,7 +278,7 @@ fn layout(src: &str) -> Result<String, String> {
                 out.push_str(text(*k));
                 match t {
                     Tok::P(p @ ("(" | "[" | "{")) => {
-                        let literal = *p == "{" && matches!(prev, Some(Tok::Ident(_)) | Some(Tok::P("]"))) && !header && !prev_comment;
+                        let literal = *p == "{" && ((matches!(prev, Some(Tok::Ident(_)) | Some(Tok::P("]"))) && !header) || prev == Some(Tok::P("."))) && !prev_comment;
                         stack.push(Open { kind: p, line_indent, literal, saved_header: header });
                         header = false;
                     }
@@ -336,22 +356,22 @@ mod tests {
         check("let p=P {x:1,y:2}\n", "let p = P{x: 1, y: 2}\n");
         check("if a==b{ x() }\n", "if a == b { x() }\n");
         check("for i in 0 .. n {}\n", "for i in 0..n {}\n");
-        check("let v=xs[ 1 ]\nlet t [ ]int=[1,2]\n", "let v = xs[1]\nlet t []int = [1, 2]\n");
+        check("let v=xs[ 1 ]\nlet t:[ ]int=[1,2]\n", "let v = xs[1]\nlet t: []int = [1, 2]\n");
         check("x  // note\n\n\n\ny\n", "x // note\n\ny\n");
         check("f(a,\nb)\n", "f(a,\n    b)\n");
         check("let s = a +\nb\n", "let s = a +\n    b\n");
         check("match x {\n1=>a\n_=>{ b }\n}\n", "match x {\n    1 => a\n    _ => { b }\n}\n");
-        check("let o ?int = none\nlet r = !ok && *p\n", "let o ?int = none\nlet r = !ok && *p\n");
+        check("let o:?int = none\nlet r = !ok && *p\n", "let o: ?int = none\nlet r = !ok && *p\n");
         check("ch <- v\nlet x = <-ch\n", "ch <- v\nlet x = <-ch\n");
-        check("fn f() int ! E {\n}\n", "fn f() int ! E {\n}\n");
+        check("fn f()->int ! E {\n}\n", "fn f() -> int ! E {\n}\n");
         check("let m = Map[int, int]{1: 2}\nlet f = (x) => x * 2\n", "let m = Map[int, int]{1: 2}\nlet f = (x) => x * 2\n");
         check("{\n\n    x\n\n}\n", "{\n    x\n}\n");
         check("select {\n<-quit => x\n}\nmatch v {\n-1..=0 => y\n}\n", "select {\n    <-quit => x\n}\nmatch v {\n    -1..=0 => y\n}\n");
         check("let a = f(x\n- y)\n", "let a = f(x\n    - y)\n");
         check("use ./geom\nuse std/os.{exit, args}\nuse std/{fmt, os}\n", "use ./geom\nuse std/os.{exit, args}\nuse std/{fmt, os}\n");
         check("use std/{\nfmt as f,\nos.{args},\n}\nfn main() { let s = S{a: 1} }\n", "use std/{\n    fmt as f,\n    os.{args},\n}\nfn main() { let s = S{a: 1} }\n");
-        check("let c = chan[int]()\nlet s = \"hello\"[1..3]\n", "let c = chan[int]()\nlet s = \"hello\"[1..3]\n");
-        check("fn f(xs []?String, m Map[int, ?int]) ?int {}\n", "fn f(xs []?String, m Map[int, ?int]) ?int {}\n");
+        check("let c = Chan[int]()\nlet s = \"hello\"[1..3]\n", "let c = Chan[int]()\nlet s = \"hello\"[1..3]\n");
+        check("fn f(xs: []?String, m :Map[int, ?int]) -> ?int {}\nfn g(inout self, p: *u8) -> *u8 {}\n", "fn f(xs: []?String, m: Map[int, ?int]) -> ?int {}\nfn g(inout self, p: *u8) -> *u8 {}\n");
         check("swap(& &a)\nlet x = - -1\nlet y = !!ok\n", "swap(& &a)\nlet x = - -1\nlet y = !!ok\n");
     }
 

@@ -1,5 +1,5 @@
-fn take(s sink String) {}
-fn twice(f fn()) {
+fn take(s: sink String) {}
+fn twice(f: fn()) {
     f()
     f()
 }

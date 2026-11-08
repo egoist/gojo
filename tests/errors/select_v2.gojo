@@ -1,11 +1,11 @@
 use std/time
 
-fn work() int {
+fn work() -> int {
     return 1
 }
 
 fn main() {
-    let rx = chan[int](1).rx
+    let rx = Chan[int](1).rx
     select {
         let v = <-rx => println(v)
         cancelled => {}

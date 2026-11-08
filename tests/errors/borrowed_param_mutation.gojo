@@ -1,5 +1,5 @@
-struct User { name String }
-fn rename(u User) {
+struct User { name: String }
+fn rename(u: User) {
     u.name = "x".toString()
     // error: cannot assign to field `name` of borrowed parameter `u`: it is not mutable
     // error: declare the parameter `inout` to modify it

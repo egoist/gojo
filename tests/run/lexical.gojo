@@ -10,7 +10,7 @@ fn main() {
     println(`raw \n stays`)
     // runes are i32 code points; they convert to bytes when the type says so
     let r = 'é'
-    let b u8 = 'A'
+    let b: u8 = 'A'
     println(r, b, String(r))
     // a newline ends a statement unless the line ends with an operator
     let total = 1 +

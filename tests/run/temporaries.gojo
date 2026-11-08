@@ -1,15 +1,15 @@
 // Temporaries live until their statement is done with them.
-fn bytes() Vec[byte] {
+fn bytes() -> Vec[byte] {
     var v = Vec[byte]{}
     for _ in 0..100000 { v.push(120) }
     return v
 }
 
-fn tryBytes() Vec[byte] ! String {
+fn tryBytes() -> Vec[byte] ! String {
     return bytes()
 }
 
-fn text() String ! String {
+fn text() -> String ! String {
     // the Vec is a temporary; the String must be built before it is freed
     let s = String(try tryBytes())
     return s
@@ -22,6 +22,6 @@ fn main() {
     println(a.len(), b.len(), c)
 }
 
-fn try_or_empty() Vec[byte] {
+fn try_or_empty() -> Vec[byte] {
     return tryBytes() catch _e { Vec[byte]{} }
 }

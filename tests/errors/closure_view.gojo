@@ -1,5 +1,5 @@
 // A view a closure returns can point into what the closure captured.
-fn run(f fn() str) str {
+fn run(f: fn() -> str) -> str {
     return f()
 }
 

@@ -1,0 +1,6 @@
+fn one() int {
+    // error: expected `->` before the result type
+    1
+}
+
+fn main() {}

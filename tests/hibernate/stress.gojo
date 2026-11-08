@@ -2,7 +2,7 @@ use std/{time, fmt, task}
 // Tasks keep values on their stacks while they wait: hibernation must bring
 // them back exactly, including when a channel writes into a parked stack.
 // Run with GOJO_HIBERNATE=2 (put stacks away after 2 ms) by the test suite.
-fn worker(id int, input Receiver[String], out Sender[String], m Mutex[int]) {
+fn worker(id: int, input: Receiver[String], out: Sender[String], m: Mutex[int]) {
     var local = [id, id * 2, id * 3]
     let tag = fmt.format("w{}", id)
     for msg in input {
@@ -15,12 +15,12 @@ fn worker(id int, input Receiver[String], out Sender[String], m Mutex[int]) {
 
 fn main() {
     let n = 2000
-    let results = chan[String](n * 4)
+    let results = Chan[String](n * 4)
     let m = Mutex(0)
     var senders = Vec[Sender[String]]{}
     scope {
         for id in 0..n {
-            let c = chan[String]()
+            let c = Chan[String]()
             senders.push(c.tx)
             let out = results.tx.clone()
             let rx = c.rx
@@ -31,7 +31,7 @@ fn main() {
             if round == 2 {
                 // a loaded machine may take longer to get round to it
                 var tries = 0
-                for task.stats().hibernated == 0 && tries < 200 {
+                while task.stats().hibernated == 0 && tries < 200 {
                     time.sleep(10 * time.millisecond)
                     tries += 1
                 }

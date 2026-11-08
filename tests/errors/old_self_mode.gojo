@@ -1,0 +1,10 @@
+struct C {
+    n: int
+
+    fn bump(self inout) {
+        // error: the mode goes before `self`: `inout self`
+        self.n += 1
+    }
+}
+
+fn main() {}

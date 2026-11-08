@@ -1,6 +1,6 @@
 // the bound is a `var`: it changes after the first task starts, so the
 // ranges overlap even though they look disjoint
-fn fill(v inout []int, x int) {
+fn fill(v: inout []int, x: int) {
     for i in 0..v.len() {
         v[i] = x
     }

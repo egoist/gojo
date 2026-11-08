@@ -12,8 +12,8 @@ fn main() {
     var checksum = 0
     var permCount = 0
     var r = n
-    for {
-        for r != 1 {
+    loop {
+        while r != 1 {
             count[r - 1] = r
             r -= 1
         }
@@ -22,10 +22,10 @@ fn main() {
         }
         var flips = 0
         var k = perm[0]
-        for k != 0 {
+        while k != 0 {
             var lo = 0
             var hi = k
-            for lo < hi {
+            while lo < hi{
                 let t = perm[lo]
                 perm[lo] = perm[hi]
                 perm[hi] = t
@@ -45,7 +45,7 @@ fn main() {
         }
         // next permutation
         var done = false
-        for {
+        loop {
             if r == n {
                 done = true
                 break

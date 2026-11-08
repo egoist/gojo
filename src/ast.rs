@@ -167,6 +167,8 @@ pub enum TypeExprKind {
     Ptr(Box<TypeExpr>),
     Chan(Box<TypeExpr>),
     Unit,
+    /// `(A, B)`
+    Tuple(Vec<TypeExpr>),
     IntLit(u128),
 }
 
@@ -264,6 +266,8 @@ pub enum PatternKind {
     Range(i128, i128, bool),
     /// `name Type` (interface type match)
     Typed(String, TypeExpr),
+    /// `(a, b)`
+    Tuple(Vec<Pattern>),
     Or(Vec<Pattern>),
 }
 
@@ -286,6 +290,9 @@ pub enum ExprKind {
     Int(u128),
     Float(f64),
     Str(String),
+    /// `"x = ${x}"`: literal text and embedded expressions (with an optional
+    /// format, `${x:>8}`).
+    Interp(Vec<InterpPart>),
     Char(u32),
     Bool(bool),
     None,
@@ -323,8 +330,16 @@ pub enum ExprKind {
     Go(Box<Expr>),
     /// `isolate { }`: a value built only from what can cross tasks; `Iso[T]`.
     Isolate(Block),
-    /// A type in expression position, e.g. `chan[int]`, `[]int`, `?int`.
+    /// `(a, b)`
+    Tuple(Vec<Expr>),
+    /// A type in expression position, e.g. `Chan[int]`, `[]int`, `?int`.
     TypeExpr(TypeExpr),
+}
+
+#[derive(Clone, Debug)]
+pub enum InterpPart {
+    Lit(String),
+    Expr(Box<Expr>, Option<String>, Span),
 }
 
 #[derive(Clone, Debug)]

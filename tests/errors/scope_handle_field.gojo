@@ -1,6 +1,6 @@
 // A scope handle is a view of the running scope: it can't be stored.
 struct Keep {
-    s Scope
+    s: Scope
     // error: field `s` has borrowed view type `Scope`
 }
 

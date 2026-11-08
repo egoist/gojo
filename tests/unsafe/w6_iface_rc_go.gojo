@@ -1,15 +1,15 @@
 interface Show {
-    fn show(self) int
+    fn show(self) -> int
 }
 struct R {
-    r rc[int]
+    r: Rc[int]
 
-    fn show(self) int {
+    fn show(self) -> int {
         return 1
     }
 }
 fn main() {
     var xs = Vec[Show]{}
-    xs.push(R{r: rc(1)})
+    xs.push(R{r: Rc(1)})
     go () => println(xs.len())
 }

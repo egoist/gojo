@@ -1,5 +1,5 @@
 struct P {
-    name String
+    name: String
 }
 fn main() {
     var p = P{name: "abc".toString()}

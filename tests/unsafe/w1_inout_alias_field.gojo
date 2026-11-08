@@ -1,7 +1,7 @@
 struct P {
-    name String
+    name: String
 }
-fn f(p inout P, s str) {
+fn f(p: inout P, s: str) {
     p.name = "z".toString()
     println(s)
 }

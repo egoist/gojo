@@ -1,7 +1,7 @@
 // A library name reaches the C compiler's command line: only plain names, so
 // that it can't add options, or code to the generated C.
 extern "C" static "z\n#include <evil.h>" {
-    fn compress() i32
+    fn compress() -> i32
 }
 // error: is not a library name
 

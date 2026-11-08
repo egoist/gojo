@@ -1,18 +1,18 @@
 use std/fmt
 
-struct Stack[T any] {
-    items Vec[T]
+struct Stack[T] {
+    items: Vec[T]
 
     // no `self`: an associated function, called as `Stack[T].new()`
-    fn new() Stack[T] {
+    fn new() -> Stack[T] {
         return Stack[T]{items: Vec[T]{}}
     }
 
-    fn push(self inout, x sink T) {
+    fn push(inout self, x: sink T) {
         self.items.push(x)
     }
 
-    fn pop(self inout) ?T {
+    fn pop(inout self) -> ?T {
         return self.items.pop()
     }
 
@@ -23,21 +23,21 @@ struct Stack[T any] {
         yield self.items[self.items.len - 1]
     }
 
-    fn size(self) int {
+    fn size(self) -> int {
         return self.items.len
     }
 }
 
-struct Pair[A any, B any] {
-    first A
-    second B
+struct Pair[A, B] {
+    first: A
+    second: B
 }
 
-fn swapPair[A any, B any](p sink Pair[A, B]) Pair[B, A] {
+fn swapPair[A, B](p: sink Pair[A, B]) -> Pair[B, A] {
     return Pair[B, A]{first: p.second, second: p.first}
 }
 
-fn largest[T copy + ordered](xs []T) ?T {
+fn largest[T: copy + ordered](xs: []T) -> ?T {
     if xs.len == 0 {
         return none
     }
@@ -51,26 +51,26 @@ fn largest[T copy + ordered](xs []T) ?T {
 }
 
 interface Shape {
-    fn area(self) f64
-    fn name(self) String
+    fn area(self) -> f64
+    fn name(self) -> String
 }
 
 struct Square {
-    side f64
+    side: f64
 
-    fn area(self) f64 { return self.side * self.side }
+    fn area(self) -> f64 { return self.side * self.side }
 
-    fn name(self) String { return "square".toString() }
+    fn name(self) -> String { return "square" }
 }
 struct Circle {
-    r f64
+    r: f64
 
-    fn area(self) f64 { return 3.0 * self.r * self.r }
+    fn area(self) -> f64 { return 3.0 * self.r * self.r }
 
-    fn name(self) String { return "circle".toString() }
+    fn name(self) -> String { return "circle" }
 }
 
-fn totalArea[S Shape](shapes []S) f64 {
+fn totalArea[S: Shape](shapes: []S) -> f64 {
     var t = 0.0
     for s in shapes {
         t += s.area()
@@ -78,16 +78,16 @@ fn totalArea[S Shape](shapes []S) f64 {
     return t
 }
 
-fn describe[T Shape](s T) String {
+fn describe[T: Shape](s: T) -> String {
     return fmt.sprint(s.name(), s.area())
 }
 
-enum Tree[T any] {
+enum Tree[T] {
     Leaf
-    Node(left Box[Tree[T]], value T, right Box[Tree[T]])
+    Node(left: Box[Tree[T]], value: T, right: Box[Tree[T]])
 }
 
-fn insert(t sink Tree[int], v int) Tree[int] {
+fn insert(t: sink Tree[int], v: int) -> Tree[int] {
     return match t {
         Leaf => Tree.Node(Box(Tree[int].Leaf), v, Box(Tree[int].Leaf))
         Node(l, x, r) => if v < x {
@@ -98,7 +98,7 @@ fn insert(t sink Tree[int], v int) Tree[int] {
     }
 }
 
-fn walk(t Tree[int], out inout Vec[int]) {
+fn walk(t: Tree[int], out: inout Vec[int]) {
     match t {
         Leaf => {}
         Node(l, x, r) => {
@@ -109,20 +109,20 @@ fn walk(t Tree[int], out inout Vec[int]) {
     }
 }
 
-fn apply[T any, U any](x T, f fn(T) U) U {
+fn apply[T, U](x: T, f: fn(T) -> U) -> U {
     return f(x)
 }
 
-fn compose(f fn(int) int, g fn(int) int) fn(int) int {
-    return (x int) => x + 1
+fn compose(f: fn(int) -> int, g: fn(int) -> int) -> fn(int) -> int {
+    return (x: int) => x + 1
 }
 
 fn main() {
     var s = Stack[String].new()
-    let ints Stack[int] = Stack.new()
+    let ints: Stack[int] = Stack.new()
     println(ints.size())
-    s.push("a".toString())
-    s.push("b".toString())
+    s.push("a")
+    s.push("b")
     if let top = s.peek() {
         println("top", top)
     }

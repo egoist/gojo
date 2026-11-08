@@ -1,4 +1,4 @@
-fn grow(v inout Vec[int]) {
+fn grow(v: inout Vec[int]) {
     for x in v {
         v.push(x)
     }

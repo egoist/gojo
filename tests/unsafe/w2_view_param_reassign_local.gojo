@@ -1,4 +1,4 @@
-fn f(x str) str {
+fn f(x: str) -> str {
     var v = x
     let s = "zzz".toString()
     v = s.asStr()

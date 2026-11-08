@@ -1,4 +1,4 @@
-fn each2(xs []String, f fn(str)) {
+fn each2(xs: []String, f: fn(str)) {
     for x in xs {
         f(x.asStr())
     }

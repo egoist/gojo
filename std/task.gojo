@@ -26,10 +26,10 @@ pub copy enum Reason {
 
 // The error of an operation that stopped because its task was cancelled.
 pub copy struct Cancelled {
-    pub reason Reason
+    pub reason: Reason
 
     // "cancelled: a task failed", ...
-    pub fn message(self) String {
+    pub fn message(self) -> String {
         return match self.reason {
             .Failed => "cancelled: a task in the scope failed"
             .Deadline => "cancelled: the deadline passed"
@@ -39,21 +39,21 @@ pub copy struct Cancelled {
     }
 }
 
-fn __cancelled() bool
-fn __reason() int
-fn __deadline() int
-fn __scopeEnter(d int) *u8
-fn __scopeExit(s *u8) bool
-fn __shieldEnter(d int) *u8
-fn __shieldExit(s *u8)
+fn __cancelled() -> bool
+fn __reason() -> int
+fn __deadline() -> int
+fn __scopeEnter(d: int) -> *u8
+fn __scopeExit(s: *u8) -> bool
+fn __shieldEnter(d: int) -> *u8
+fn __shieldExit(s: *u8)
 
 // Has the current task been cancelled?
-pub fn cancelled() bool {
+pub fn cancelled() -> bool {
     return __cancelled()
 }
 
 // Why the current task was cancelled, or none.
-pub fn reason() ?Reason {
+pub fn reason() -> ?Reason {
     return match __reason() {
         0 => none
         1 => some(.Failed)
@@ -73,7 +73,7 @@ pub fn check() ! Cancelled {
 // The nearest deadline of the current task (`time.now()` scale), or none.
 // Pass it on: a server can give a request's remaining time to the calls it
 // makes.
-pub fn deadline() ?int {
+pub fn deadline() -> ?int {
     let d = __deadline()
     if d < 0 {
         return none
@@ -85,7 +85,7 @@ pub fn deadline() ?int {
 // caller doesn't affect it, only its own deadline does. For cleanup that has
 // to block (a goodbye message, a flush). `drop` methods run shielded like
 // this already, for up to a second, when their task is cancelled.
-pub fn shield[T any](d int, body fn() T) T {
+pub fn shield[T](d: int, body: fn() -> T) -> T {
     let s = __shieldEnter(d)
     let v = body()
     __shieldExit(s)
@@ -101,68 +101,68 @@ pub fn yieldNow()
 //
 //   let requestId = task.local[String]()
 //
-//   fn handle(req Request) {
+//   fn handle(req: Request) {
 //       task.with(requestId, req.id.clone(), () => serve(req))
 //   }
-//   fn log(msg str) {
+//   fn log(msg: str) {
 //       println(requestId.get() ?? String("-"), msg)
 //   }
-pub copy struct Local[T send] {
-    id int
+pub copy struct Local[T: send] {
+    id: int
 
     // The value bound by the nearest enclosing `with` (a copy), or none.
-    pub fn get(self) ?T where T: clone
+    pub fn get(self) -> ?T where T: clone
 }
 
-fn __newLocal() int
+fn __newLocal() -> int
 
 // A new task-local key; declare it at package level: `let k = task.local[T]()`.
-pub fn local[T send]() Local[T] {
+pub fn local[T: send]() -> Local[T] {
     return Local[T]{id: __newLocal()}
 }
 
 // Runs `body` with `key` bound to `value`, for it and the tasks it starts.
-pub fn with[T send, R any](key Local[T], value sink T, body fn() R) R
+pub fn with[T: send, R](key: Local[T], value: sink T, body: fn() -> R) -> R
 
 // Prints every task to stderr: where it was started, what it waits for and
 // for how long, and the locks it holds. A program also prints this, and
 // stops, on SIGQUIT (Ctrl-\ in a terminal).
 pub fn dump()
 
-fn __numGoroutines() int
-fn __numThreads() int
-fn __maxProcs() int
-fn __numHibernated() int
-fn __setMaxProcs(n int) int
+fn __numGoroutines() -> int
+fn __numThreads() -> int
+fn __maxProcs() -> int
+fn __numHibernated() -> int
+fn __setMaxProcs(n: int) -> int
 
 // A snapshot of the scheduler, from `stats`.
 pub struct Stats {
     // goroutines alive, `main` included
-    pub goroutines int
+    pub goroutines: int
     // threads started to run goroutines (more than maxProcs only while some
     // goroutines are in long C calls)
-    pub threads int
+    pub threads: int
     // goroutines running Gojo code at the same time; defaults to the number of
     // CPUs, or GOJO_MAXPROCS
-    pub maxProcs int
+    pub maxProcs: int
     // parked goroutines whose stacks are put away (copied out, memory given
     // back) until they run again; GOJO_HIBERNATE=0 turns this off
-    pub hibernated int
+    pub hibernated: int
 }
 
 // How many goroutines and threads there are now.
-pub fn stats() Stats {
+pub fn stats() -> Stats {
     return Stats{goroutines: __numGoroutines(), threads: __numThreads(), maxProcs: __maxProcs(), hibernated: __numHibernated()}
 }
 
 // Changes how many goroutines run Gojo code at the same time; returns the old value.
-pub fn setMaxProcs(n int) int {
+pub fn setMaxProcs(n: int) -> int {
     return __setMaxProcs(n)
 }
 
 // Runs `body` with a deadline. When it passes, everything `body` started is
 // cancelled, and the result is none. Also none when the caller is cancelled.
-pub fn timeout[T any](d int, body fn() T) ?T {
+pub fn timeout[T](d: int, body: fn() -> T) -> ?T {
     let s = __scopeEnter(d)
     let v = body()
     if __scopeExit(s) {
@@ -173,7 +173,7 @@ pub fn timeout[T any](d int, body fn() T) ?T {
 
 // How many tasks to run for `n` items with at most `limit` at a time
 // (0: no limit).
-fn workers(n int, limit int) int {
+fn workers(n: int, limit: int) -> int {
     if limit <= 0 || limit > n {
         return n
     }
@@ -184,7 +184,7 @@ fn workers(n int, limit int) int {
 // and gives the results in the order of `xs`.
 //
 //   let sizes = task.map(paths, 8, (p) => fileSize(p))
-pub fn map[T send, R send](xs []T, limit int, f send fn(T) R) Vec[R] {
+pub fn map[T: send, R: send](xs: []T, limit: int, f: send fn(T) -> R) -> Vec[R] {
     let n = xs.len
     let next = Mutex(0)
     let slots = Mutex(Vec[?R]{})
@@ -196,7 +196,7 @@ pub fn map[T send, R send](xs []T, limit int, f send fn(T) R) Vec[R] {
     scope {
         for _ in 0..workers(n, limit) {
             go () => {
-                for {
+                loop {
                     var i = 0
                     with k = next.lock() {
                         i = k
@@ -224,7 +224,7 @@ pub fn map[T send, R send](xs []T, limit int, f send fn(T) R) Vec[R] {
 
 // Like `map` for a function that can fail: the first error cancels the
 // calls still running, and is the result.
-pub fn tryMap[T send, R send, E send](xs []T, limit int, f send fn(T) R ! E) Vec[R] ! E {
+pub fn tryMap[T: send, R: send, E: send](xs: []T, limit: int, f: send fn(T) -> R ! E) -> Vec[R] ! E {
     let n = xs.len
     let next = Mutex(0)
     let slots = Mutex(Vec[?R]{})
@@ -236,7 +236,7 @@ pub fn tryMap[T send, R send, E send](xs []T, limit int, f send fn(T) R ! E) Vec
     try scope {
         for _ in 0..workers(n, limit) {
             go () => {
-                for !cancelled() {
+                while !cancelled() {
                     var i = 0
                     with k = next.lock() {
                         i = k
@@ -263,13 +263,13 @@ pub fn tryMap[T send, R send, E send](xs []T, limit int, f send fn(T) R ! E) Vec
 }
 
 // Calls `f` on every element, in up to `limit` tasks at once (0: no limit).
-pub fn each[T send](xs []T, limit int, f send fn(T)) {
+pub fn each[T: send](xs: []T, limit: int, f: send fn(T)) {
     let n = xs.len
     let next = Mutex(0)
     scope {
         for _ in 0..workers(n, limit) {
             go () => {
-                for {
+                loop {
                     var i = 0
                     with k = next.lock() {
                         i = k
@@ -289,9 +289,9 @@ pub fn each[T send](xs []T, limit int, f send fn(T)) {
 // cancelled. When all fail, the last error is the result.
 //
 //   let page = try task.race([() => fetch(primary), () => fetch(mirror)])
-pub fn race[R send, E send](fs []send fn() R ! E) R ! E {
+pub fn race[R: send, E: send](fs: []send fn() -> R ! E) -> R ! E {
     let n = fs.len
-    let results = chan[R ! E](n)
+    let results = Chan[R ! E](n)
     scope {
         for f in fs {
             go () => {

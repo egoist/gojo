@@ -1,0 +1,13 @@
+hello, Gojo! n = 42, n * 2 = 84
+|    42|42    |3.14|ff|007|
+{braces} stay, ${this} is literal, nested: [Gojo]
+lengths: [1, 2, 3]
+[4, 16, 36]
+got 8
+missing is none
+localhost:8080 localhost:9000 (verbose)
+Point{x: 3, y: -4} Point{x: 3, y: 1} [Point{x: 1, y: 1}] 7 some(Point{x: 0, y: 0})
+some(7) none some("(3, -4)") none
+-1
+[0] 5 {"k": 1}
+6 rc

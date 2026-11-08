@@ -1,5 +1,5 @@
 // two tasks write overlapping ranges: element p is in both
-fn fill(v inout []int, x int) {
+fn fill(v: inout []int, x: int) {
     for i in 0..v.len() {
         v[i] = x
     }

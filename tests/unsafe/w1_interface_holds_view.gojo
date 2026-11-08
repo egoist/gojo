@@ -1,5 +1,5 @@
 interface Len {
-    fn len(self) int
+    fn len(self) -> int
 }
 fn main() {
     var xs = Vec[Len]{}

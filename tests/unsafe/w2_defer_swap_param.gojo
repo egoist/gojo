@@ -1,4 +1,4 @@
-fn head(v inout Vec[int]) []int {
+fn head(v: inout Vec[int]) -> []int {
     defer {
         var other = [7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
         swap(&v, &other)

@@ -1,7 +1,7 @@
 // What a task borrows must live until its scope ends: data declared outside
 // the scope or directly in its body. Values declared in blocks inside the
 // body are moved (or copied) into the task.
-fn work(items []String) {
+fn work(items: []String) {
     scope {
         // fine: `r` points into `items`, which outlives the scope
         for s in items {

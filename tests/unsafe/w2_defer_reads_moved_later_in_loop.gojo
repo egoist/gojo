@@ -1,4 +1,4 @@
-fn take(s sink String) {}
+fn take(s: sink String) {}
 fn main() {
     for i in 0..2 {
         let s = fmt_like(i)
@@ -8,6 +8,6 @@ fn main() {
         }
     }
 }
-fn fmt_like(i int) String {
+fn fmt_like(i: int) -> String {
     return "x".toString()
 }

@@ -15,7 +15,7 @@ Before this, Gojo had stackful goroutines on an M:N work-stealing scheduler, Go'
 | Go's channel edges | `close` twice and send after close panicked; nobody closed when the last sender left; with no nil, no way to disable a `select` arm | Panics in production, and a missing idiom |
 | `select` saw only channels | No timers, task results or cancellation | Timeouts in a loop needed extra goroutines |
 | Blunt cancellation | Cleanup that had to block failed silently in a cancelled task; no reason, no deadline to pass on | Lost data on shutdown |
-| All-or-nothing sharing | A finished `rc` tree could never be sent; no interface or function value was `send`; no atomics | `arc` everywhere, or copies |
+| All-or-nothing sharing | A finished `Rc` tree could never be sent; no interface or function value was `send`; no atomics | `Arc` everywhere, or copies |
 | Memory per goroutine | 100,000 parked goroutines: 1.67 GB on macOS (one 16 KB page each), 293 MB in Go | Servers with many idle connections |
 | Irreproducible bugs | Deadlocks and logic races appeared only sometimes | Agents, Gojo's main users, can't fix what they can't rerun |
 
@@ -46,7 +46,7 @@ use std/{task, time}
 
 // `scope` waits for the tasks started in it with `go`; they borrow what
 // outlives it, and `let t = go f()` gives the result back with `t.join()`.
-fn dashboard(id int) Page ! Error {
+fn dashboard(id: int) -> Page ! Error {
     return scope {
         let user = go fetchUser(id)            // Task[User ! Error]
         let orders = go fetchOrders(id)
@@ -54,9 +54,9 @@ fn dashboard(id int) Page ! Error {
     }   // a failing task cancels the other; leaving early cancels both
 }
 
-fn stats(words []String) {
+fn stats(words: []String) {
     var longest = 0
-    let total = Atomic.new(0)
+    let total = Atomic(0)
     scope {
         go () => {                             // writes `longest`: nothing else may touch it
             for w in words { longest = max(longest, w.len()) }
@@ -69,8 +69,8 @@ fn stats(words []String) {
 }
 
 // Channels have two ends; the last sender gone closes the channel.
-fn pipeline(jobs []Job) {
-    let ch = chan[Job](16)
+fn pipeline(jobs: []Job) {
+    let ch = Chan[Job](16)
     go produce(jobs, ch.tx)                     // the task takes the sender
     for j in ch.rx {                            // ends when `produce` returns
         run(j)
@@ -78,8 +78,8 @@ fn pipeline(jobs []Job) {
 }
 
 // `select` over channels, timers and cancellation, with guards.
-fn worker(jobs Receiver[Job], busy bool) {
-    for {
+fn worker(jobs: Receiver[Job], busy: bool) {
+    loop {
         select {
             let j = <-jobs if !busy => run(j.unwrap())
             time.after(5 * time.second) => println("idle")
@@ -90,12 +90,12 @@ fn worker(jobs Receiver[Job], busy bool) {
 
 // Cleanup survives cancellation, for a while; Ctrl-C cancels `main`.
 struct Conn {
-    fn drop(self inout) { _ = self.writeText("bye\n") }   // runs shielded (1 s)
+    fn drop(inout self) { _ = self.writeText("bye\n") }   // runs shielded (1 s)
 }
 
-// A graph of `rc` nodes, built from nothing shared, crosses tasks as a whole.
+// A graph of `Rc` nodes, built from nothing shared, crosses tasks as a whole.
 let tree = isolate { buildTree(src) }         // Iso[Tree]
-go index(tree)                                  // index(t sink Iso[Tree]) { let tr = t.take() ... }
+go index(tree)                                  // index(t: sink Iso[Tree]) { let tr = t.take() ... }
 ```
 
 Tests run on a simulated scheduler: `gojo test --explore 1000` tries a thousand interleavings and prints the seed of a failing one, which `--seed` replays exactly.
@@ -118,7 +118,7 @@ Tests run on a simulated scheduler: `gojo test --explore 1000` tries a thousand 
 
 ## 3. Channels
 
-`chan[T](n)` returns `Chan[T] { tx, rx }`. Ownership knows when the last `Sender` is gone, so that closes the channel: no `close`, nothing panics. The last `Receiver` gone makes sends fail (`tx.send(v)` returns `false`; the proposal's `! Unsent[T]` giving the value back seemed more than this needs) instead of blocking forever, which was a classic Go leak. This is Rust's and crossbeam's model; Go can't do it, having no destructors.
+`Chan[T](n)` returns `Chan[T] { tx, rx }`. Ownership knows when the last `Sender` is gone, so that closes the channel: no `close`, nothing panics. The last `Receiver` gone makes sends fail (`tx.send(v)` returns `false`; the proposal's `! Unsent[T]` giving the value back seemed more than this needs) instead of blocking forever, which was a classic Go leak. This is Rust's and crossbeam's model; Go can't do it, having no destructors.
 
 ## 4. `select`
 
@@ -130,7 +130,7 @@ Reasons (`task.reason()`: failed, deadline, explicit, shutdown), `task.deadline(
 
 ## 6. Sharing
 
-`send interface`, `Atomic[T]` for integers (sequentially consistent only: one memory order to learn), `with a, b = lock(m1, m2)` (several locks in one global order, the synchronous half of Verona's `when`), and a compile error for waiting directly inside a lock block (the indirect cases are caught by the lock-order checks, section 8). `isolate { }` is Pony's `recover` without capabilities: the body may only use `send` values from outside, so nothing outside points into what it builds, and the result `Iso[T]` may be sent even if it holds `rc` or `Cell`. All of this is checked within one function body.
+`send interface`, `Atomic[T]` for integers (sequentially consistent only: one memory order to learn), `with a, b = lock(m1, m2)` (several locks in one global order, the synchronous half of Verona's `when`), and a compile error for waiting directly inside a lock block (the indirect cases are caught by the lock-order checks, section 8). `isolate { }` is Pony's `recover` without capabilities: the body may only use `send` values from outside, so nothing outside points into what it builds, and the result `Iso[T]` may be sent even if it holds `Rc` or `Cell`. All of this is checked within one function body.
 
 ## 7. Stack hibernation
 

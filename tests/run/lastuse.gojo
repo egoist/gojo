@@ -1,5 +1,5 @@
 fn main() {
-    var name = "gojo".toString()
+    var name: String = "gojo"
     let v = name.asStr()
     println(v.len)
     name.push("!") // fine: `v` is no longer used

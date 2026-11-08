@@ -343,7 +343,7 @@ impl<'a> Gen<'a> {
             Ty::Unit | Ty::Never | Ty::Bool | Ty::Int(_) | Ty::F32 | Ty::F64 | Ty::Str | Ty::Slice(_) | Ty::Ptr(_) | Ty::Error | Ty::ConstInt(_) => true,
             Ty::Option(a) | Ty::Array(a, _) => self.is_copy(a),
             Ty::Result(a, b) => self.is_copy(a) && self.is_copy(b),
-            Ty::Adt(d, _) => self.prog.def(*d).is_copy,
+            Ty::Adt(d, args) => self.prog.def(*d).is_copy || (self.prog.def(*d).tuple && args.iter().all(|a| self.is_copy(a))),
             _ => false,
         }
     }
@@ -3633,6 +3633,18 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
                 let fsx = self.prog.variant_tys(*def, &args, *variant);
                 subs.iter().enumerate().map(|(i, _)| (format!("{}.u.v{}.f_{}", place, variant, fsx[i].0), fsx[i].1.clone())).collect()
             }
+            TPat::Tuple(subs) => {
+                let args = match ty {
+                    Ty::Adt(_, a) => a.to_vec(),
+                    _ => vec![],
+                };
+                let d = match ty {
+                    Ty::Adt(d, _) => *d,
+                    _ => unreachable!(),
+                };
+                let fsx = self.prog.field_tys(d, &args);
+                subs.iter().enumerate().map(|(i, _)| (format!("{}.f_{}", place, fsx[i].0), fsx[i].1.clone())).collect()
+            }
             TPat::Some(_) => {
                 let inner = match ty {
                     Ty::Option(i) => (**i).clone(),
@@ -3681,6 +3693,21 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
                     format!("({} && {})", head, inner)
                 }
             }
+            TPat::Tuple(subs) => {
+                let mut parts = vec![];
+                let sp = self.sub_places(pat, place, ty, false);
+                for (s, (p, t)) in subs.iter().zip(sp.iter()) {
+                    let c = self.pat_cond(s, p, &t.clone(), false);
+                    if c != "1" {
+                        parts.push(c);
+                    }
+                }
+                if parts.is_empty() {
+                    "1".into()
+                } else {
+                    format!("({})", parts.join(" && "))
+                }
+            }
             TPat::Variant { variant, subs, .. } => {
                 let mut parts = vec![format!("{}.tag == {}", place, variant)];
                 let sp = self.sub_places(pat, place, ty, false);
@@ -3727,7 +3754,7 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
                 let sp = self.sub_places(pat, place, ty, optptr);
                 self.bind_pat(fs, sub, &sp[0].0, &sp[0].1.clone(), false, consuming);
             }
-            TPat::Variant { subs, .. } => {
+            TPat::Variant { subs, .. } | TPat::Tuple(subs) => {
                 let sp = self.sub_places(pat, place, ty, false);
                 for (s, (p, t)) in subs.iter().zip(sp.iter()) {
                     self.bind_pat(fs, s, p, &t.clone(), false, consuming);
@@ -3744,7 +3771,7 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
                 let sp = self.sub_places(pat, place, ty, false);
                 self.residual_drop(fs, sub, &sp[0].0, &sp[0].1.clone());
             }
-            TPat::Variant { subs, .. } => {
+            TPat::Variant { subs, .. } | TPat::Tuple(subs) => {
                 let sp = self.sub_places(pat, place, ty, false);
                 for (s, (p, t)) in subs.iter().zip(sp.iter()) {
                     self.residual_drop(fs, s, p, &t.clone());
@@ -5808,6 +5835,13 @@ static void intro_{m}({c} *a, int64_t n, int depth) {{\n    while (n > 24) {{\n 
                         if def.newtype {
                             let ff = self.fmt_fn(&fsx[0].1);
                             let _ = writeln!(b, "    {}(b, &p->f_value, nested);", ff);
+                        } else if def.tuple {
+                            b.push_str("    gojo_fmt_cstr(b, \"(\");\n");
+                            for (i, (fname, ft)) in fsx.iter().enumerate() {
+                                let ff = self.fmt_fn(ft);
+                                let _ = writeln!(b, "    gojo_fmt_cstr(b, \"{}\"); {}(b, &p->f_{}, 1);", if i > 0 { ", " } else { "" }, ff, fname);
+                            }
+                            b.push_str("    gojo_fmt_cstr(b, \")\");\n");
                         } else {
                             let _ = writeln!(b, "    gojo_fmt_cstr(b, \"{}{{\");", def.name);
                             for (i, (fname, ft)) in fsx.iter().enumerate() {

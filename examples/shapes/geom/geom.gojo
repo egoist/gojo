@@ -1,42 +1,42 @@
 use std/math
 
 pub copy struct Vec2 {
-    pub x f64
-    pub y f64
+    pub x: f64
+    pub y: f64
 
-    pub fn add(self, b Vec2) Vec2 {
+    pub fn add(self, b: Vec2) -> Vec2 {
         return Vec2{x: self.x + b.x, y: self.y + b.y}
     }
 
-    pub fn length(self) f64 {
+    pub fn length(self) -> f64 {
         return math.sqrt(self.x * self.x + self.y * self.y)
     }
 }
 
 pub interface Shape {
-    fn area(self) f64
-    fn name(self) String
+    fn area(self) -> f64
+    fn name(self) -> String
 }
 
 pub struct Circle {
-    pub center Vec2
-    pub r f64
+    pub center: Vec2
+    pub r: f64
 
-    pub fn area(self) f64 { return math.Pi * self.r * self.r }
+    pub fn area(self) -> f64 { return math.Pi * self.r * self.r }
 
-    pub fn name(self) String { return "circle".toString() }
+    pub fn name(self) -> String { return "circle" }
 }
 
 pub struct Rect {
-    pub min Vec2
-    pub max Vec2
+    pub min: Vec2
+    pub max: Vec2
 
-    pub fn area(self) f64 {
+    pub fn area(self) -> f64 {
         return (self.max.x - self.min.x) * (self.max.y - self.min.y)
     }
 
-    pub fn name(self) String { return "rect".toString() }
+    pub fn name(self) -> String { return "rect" }
 }
 
 // not exported: callers can't see it
-fn secret() int { return 42 }
+fn secret() -> int { return 42 }

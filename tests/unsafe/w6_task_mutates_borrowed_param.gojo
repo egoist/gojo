@@ -1,4 +1,4 @@
-fn work(v inout Vec[int]) {
+fn work(v: inout Vec[int]) {
     scope {
         go () => v.push(1)
         go () => v.push(2)

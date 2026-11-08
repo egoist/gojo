@@ -3,16 +3,16 @@
 use std/fmt
 
 struct Res {
-    name String
-    dropped arc[Mutex[int]]
+    name: String
+    dropped: Arc[Mutex[int]]
 
-    fn drop(self inout) {
+    fn drop(inout self) {
         with n = self.dropped.lock() { n += 1 }
     }
 }
 
 fn main() {
-    let dropped = arc(Mutex(0))
+    let dropped = Arc(Mutex(0))
     let shared = "outside"
     let out = Mutex(Vec[String]{})
     scope g {

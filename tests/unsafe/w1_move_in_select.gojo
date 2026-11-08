@@ -1,6 +1,6 @@
-fn take(s sink String) {}
+fn take(s: sink String) {}
 fn main() {
-    let ch = chan[int](1)
+    let ch = Chan[int](1)
     let s = "abc".toString()
     ch.tx <- 1
     select {

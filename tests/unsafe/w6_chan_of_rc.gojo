@@ -1,5 +1,5 @@
 fn main() {
-    let ch = chan[rc[int]](1)
-    ch.tx <- rc(1)
+    let ch = Chan[Rc[int]](1)
+    ch.tx <- Rc(1)
     println(1)
 }

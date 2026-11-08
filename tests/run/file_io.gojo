@@ -15,7 +15,7 @@ fn main() ! io.Error {
     let f = try os.open(path)
     var buf = Vec[byte]{}
     var reads = 0
-    for {
+    loop {
         let n = try f.read(&buf, 4096)
         if n == 0 {
             break

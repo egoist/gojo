@@ -1,10 +1,10 @@
 // A view that comes out of `try` still borrows what it came from.
-fn firstWord(s str) ?str {
+fn firstWord(s: str) -> ?str {
     let i = try s.find(" ")
     return some(s[0..i])
 }
 
-fn run() ?int {
+fn run() -> ?int {
     var s = "hello world, a long enough string".toString()
     let w = try firstWord(s.asStr())
     s = "z".toString()

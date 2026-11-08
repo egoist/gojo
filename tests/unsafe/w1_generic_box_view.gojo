@@ -1,10 +1,10 @@
 struct Holder[T] {
-    x T
+    x: T
 }
-fn keep[T](x T) Holder[T] {
+fn keep[T](x: T) -> Holder[T] {
     return Holder[T]{x: x}
 }
-fn make() Holder[str] {
+fn make() -> Holder[str] {
     let s = "abc".toString()
     return keep(s.asStr())
 }

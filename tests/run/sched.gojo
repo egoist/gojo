@@ -1,9 +1,9 @@
 // Tasks are scheduled onto a few threads; blocking parks only the task.
 use std/{fmt, time, task}
 
-fn pingPong(n int) int {
-    let ping = chan[int]()
-    let pong = chan[int]()
+fn pingPong(n: int) -> int {
+    let ping = Chan[int]()
+    let pong = Chan[int]()
     let pings = ping.rx
     let pongs = pong.tx
     return scope {
@@ -27,8 +27,8 @@ fn pingPong(n int) int {
 fn main() {
     // many goroutines at once, each parked on a channel
     let n = 10000
-    let start = chan[bool]()
-    let done = chan[int](n)
+    let start = Chan[bool]()
+    let done = Chan[int](n)
     for i in 0..n {
         let s = start.rx.clone()
         let d = done.tx.clone()
@@ -48,8 +48,8 @@ fn main() {
     println("ping-pong", pingPong(10000))
 
     // a lock that parks goroutines instead of threads
-    let counter = arc(Mutex(0))
-    let fin = chan[bool](8)
+    let counter = Arc(Mutex(0))
+    let fin = Chan[bool](8)
     for _ in 0..8 {
         let c = counter.clone()
         let f = fin.tx.clone()
@@ -71,7 +71,7 @@ fn main() {
 
     // timers: sleepers wake in order of their deadlines, not of when they started
     // (10 ms apart: some virtual machines only have 3 ms timer precision)
-    let order = chan[int](20)
+    let order = Chan[int](20)
     let base = time.now() + 20 * time.millisecond
     for i in 0..20 {
         let o = order.tx.clone()
@@ -99,8 +99,8 @@ fn main() {
     println("timers in order", inversions <= 5)
 
     // select waits on several channels without spinning
-    let a = chan[int]()
-    let b = chan[String]()
+    let a = Chan[int]()
+    let b = Chan[String]()
     let ac = a.tx.clone()
     let bc = b.tx.clone()
     go () => {
@@ -117,14 +117,14 @@ fn main() {
     }
 
     // a goroutine stuck in a long computation doesn't hold up the others
-    let spin = chan[int](1)
+    let spin = Chan[int](1)
     let sc = spin.tx.clone()
     go () => {
         var x = 0
         for i in 0..200000000 { x = x +% i }
         sc <- x
     }
-    let quick = chan[bool](1)
+    let quick = Chan[bool](1)
     let qc = quick.tx.clone()
     go () => { qc <- true }
     println("quick", (<-quick.rx).unwrap())

@@ -4,26 +4,26 @@ use ./geom
 type Celsius f64
 type Fahrenheit f64
 
-fn toF(c Celsius) Fahrenheit {
+fn toF(c: Celsius) -> Fahrenheit {
     return Fahrenheit(f64(c) * 9.0 / 5.0 + 32.0)
 }
 
 struct Base {
-    id int
+    id: int
 
-    fn describe(self) String {
+    fn describe(self) -> String {
         return fmt.sprint("entity", self.id)
     }
 }
 
 struct Player {
     Base
-    name String
+    name: String
 }
 
 const MaxPlayers = 4
 
-fn total(shapes []geom.Shape) f64 {
+fn total(shapes: []geom.Shape) -> f64 {
     var t = 0.0
     for s in shapes {
         t += s.area()

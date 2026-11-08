@@ -1,5 +1,5 @@
 // the parent writes an element the task's range covers
-fn fill(v inout []int, x int) {
+fn fill(v: inout []int, x: int) {
     for i in 0..v.len() {
         v[i] = x
     }

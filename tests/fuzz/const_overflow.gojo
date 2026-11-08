@@ -3,8 +3,8 @@ const B = A * A
 const C = 1 << 200
 const D = -(0 - A - 1)
 fn main() {
-    var x [B]int
-    var y [C]int
-    var z [D]int
+    var x: [B]int
+    var y: [C]int
+    var z: [D]int
     println(x.len(), y.len(), z.len())
 }

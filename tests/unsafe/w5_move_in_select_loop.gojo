@@ -1,6 +1,6 @@
-fn take(s sink String) {}
+fn take(s: sink String) {}
 fn main() {
-    let ch = chan[int](2)
+    let ch = Chan[int](2)
     ch.tx <- 1
     ch.tx <- 2
     let s = "abcdefghijklmnopqrstuvwxyz0123456789".toString()

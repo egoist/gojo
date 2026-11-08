@@ -20,7 +20,7 @@ A growable string buffer: `write` pieces, then `finish` to take the
 #### Builder.write
 
 ```zig
-pub fn write(self inout, s str)
+pub fn write(inout self, s: str)
 ```
 
 Appends `s`.
@@ -28,7 +28,7 @@ Appends `s`.
 #### Builder.writeRune
 
 ```zig
-pub fn writeRune(self inout, r rune)
+pub fn writeRune(inout self, r: rune)
 ```
 
 Appends the UTF-8 encoding of `r`.
@@ -36,7 +36,7 @@ Appends the UTF-8 encoding of `r`.
 #### Builder.len
 
 ```zig
-pub fn len(self) int
+pub fn len(self) -> int
 ```
 
 The length so far, in bytes.
@@ -44,7 +44,7 @@ The length so far, in bytes.
 #### Builder.finish
 
 ```zig
-pub fn finish(self sink) String
+pub fn finish(sink self) -> String
 ```
 
 The string built (the builder is used up).

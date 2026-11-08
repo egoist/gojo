@@ -134,7 +134,7 @@ fn thread_sanitizer() {
     let _ = std::fs::create_dir_all(&dir);
     for f in files("tests/run") {
         let src = std::fs::read_to_string(&f).unwrap();
-        if !(src.contains("go ") || src.contains("task.") || src.contains("chan[")) {
+        if !(src.contains("go ") || src.contains("task.") || src.contains("Chan[")) {
             continue;
         }
         let bin = dir.join(f.file_stem().unwrap());
@@ -268,7 +268,7 @@ fn simulated_scheduler() {
     let dir = std::env::temp_dir().join(format!("gojo_sim_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let prog = dir.join("order.gojo");
-    std::fs::write(&prog, "fn main() {\n    let ch = chan[int](16)\n    scope {\n        for i in 0..8 {\n            let tx = ch.tx.clone()\n            go () => {\n                tx <- i\n            }\n        }\n    }\n    drop(ch.tx)\n    var s = Vec[int]{}\n    for v in ch.rx {\n        s.push(v)\n    }\n    println(s)\n}\n").unwrap();
+    std::fs::write(&prog, "fn main() {\n    let ch = Chan[int](16)\n    scope {\n        for i in 0..8 {\n            let tx = ch.tx.clone()\n            go () => {\n                tx <- i\n            }\n        }\n    }\n    drop(ch.tx)\n    var s = Vec[int]{}\n    for v in ch.rx {\n        s.push(v)\n    }\n    println(s)\n}\n").unwrap();
     let run = |seed: &str| String::from_utf8_lossy(&Command::new(gojo()).arg("run").arg("--seed").arg(seed).arg(&prog).output().unwrap().stdout).to_string();
     let a = run("11");
     assert_eq!(a, run("11"), "same seed, different runs");
@@ -357,19 +357,19 @@ fn nesting_limits() {
         match name {
             "parens" => format!("fn main() {{\n  let x = {}1{}\n  println(x)\n}}\n", r("("), r(")")),
             "chain" => format!("fn main() {{\n  let x = 1{}\n  println(x)\n}}\n", r(" + 1")),
-            "coalesce" => format!("fn main() {{\n  let a ?int = none\n  let x = a{} ?? 1\n  println(x)\n}}\n", r(" ?? a")),
+            "coalesce" => format!("fn main() {{\n  let a: ?int = none\n  let x = a{} ?? 1\n  println(x)\n}}\n", r(" ?? a")),
             "blocks" => format!("fn main() {{\n  var x = 0\n{}{}\n  println(x)\n}}\n", r("{\n x += 1\n"), r("}")),
             "elseif" => format!("fn main() {{\n  var x = 0\n{}{{ x += 2 }}\n  println(x)\n}}\n", r("if x == 1 { x += 1 } else ")),
             "types" => format!("fn main() {{\n  let v = Vec[{}int{}]{{}}\n  println(v.len())\n}}\n", r("Vec["), r("]")),
             "methods" => format!("fn main() {{\n  let s = \"a\".toString(){}\n  println(s)\n}}\n", r(".clone()")),
             "unary" => format!("fn main() {{\n  let x = {}1\n  let y = {}true\n  println(x, y)\n}}\n", r("-"), r("!")),
-            "calls" => format!("fn f(x int) int {{\n  return x\n}}\nfn main() {{\n  println({}1{})\n}}\n", r("f("), r(")")),
+            "calls" => format!("fn f(x: int) -> int {{\n  return x\n}}\nfn main() {{\n  println({}1{})\n}}\n", r("f("), r(")")),
             "loops" => format!("fn main() {{\n  var x = 0\n{}{}\n  println(x)\n}}\n", (0..n).map(|k| format!("for i{} in 0..1 {{\n x += i{}\n", k, k)).collect::<String>(), r("}")),
             "closures" => format!("fn main() {{\n  let _f = {}1\n  println(1)\n}}\n", r("() => ")),
             "match" => format!("fn main() {{\n  let x = 1\n  let y = {}2{}\n  println(y)\n}}\n", r("match x { 1 => "), r(", _ => 0 }")),
             "lists" => format!("fn main() {{\n  let v = {}1{}\n  println(v.len())\n}}\n", r("["), r("]")),
-            "arrays" => format!("fn main() {{\n  var v {}int\n  println(v.len())\n}}\n", r("[1]")),
-            "patterns" => format!("enum W[T] {{\n  V(x T)\n}}\nfn main() {{\n  let w {}int{} = {}7{}\n  match w {{\n    {}v{} => println(v)\n  }}\n}}\n", r("W["), r("]"), r(".V("), r(")"), r(".V("), r(")")),
+            "arrays" => format!("fn main() {{\n  var v: {}int\n  println(v.len())\n}}\n", r("[1]")),
+            "patterns" => format!("enum W[T] {{\n  V(x: T)\n}}\nfn main() {{\n  let w: {}int{} = {}7{}\n  match w {{\n    {}v{} => println(v)\n  }}\n}}\n", r("W["), r("]"), r(".V("), r(")"), r(".V("), r(")")),
             _ => unreachable!(),
         }
     }
@@ -565,7 +565,7 @@ fn debug_info_lines() {
     let dir = std::env::temp_dir().join(format!("gojo_dbg_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let src = dir.join("dbgline.gojo");
-    std::fs::write(&src, "fn square(x int) int {\n    let y = x * x\n    return y\n}\n\nfn main() {\n    var total = 0\n    for i in 0..3 {\n        total += square(i)\n    }\n    println(total)\n}\n").unwrap();
+    std::fs::write(&src, "fn square(x: int) -> int {\n    let y = x * x\n    return y\n}\n\nfn main() {\n    var total = 0\n    for i in 0..3 {\n        total += square(i)\n    }\n    println(total)\n}\n").unwrap();
     let bin = dir.join("dbgline");
     let out = Command::new(gojo()).arg("build").arg(&src).arg("-o").arg(&bin).output().unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));

@@ -1,4 +1,4 @@
-fn first(v Vec[String]) String {
+fn first(v: Vec[String]) -> String {
     return v[0]
     // error: cannot move out of an element of a collection
     // error: use `.clone()`

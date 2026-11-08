@@ -3,14 +3,14 @@
 // result on either side of it.
 
 struct Tracked {
-    log arc[Mutex[int]]
+    log: Arc[Mutex[int]]
 
-    fn drop(self inout) {
+    fn drop(inout self) {
         with n = self.log.lock() { n += 1 }
     }
 }
 
-fn sumTo(n int) int {
+fn sumTo(n: int) -> int {
     var s = 0
     for i in 0..n {
         s += i
@@ -18,7 +18,7 @@ fn sumTo(n int) int {
     return s
 }
 
-fn firstOver(n int, limit int) int {
+fn firstOver(n: int, limit: int) -> int {
     for i in 0..n {
         if i * 2 > limit { return i }
     }
@@ -55,8 +55,8 @@ fn main() {
     var bytes = 0
     for b in u8(0)..u8(255) { bytes += int(b) }
     println("u8:", bytes)
-    let start i32 = -100000
-    let end i32 = 100000
+    let start: i32 = -100000
+    let end: i32 = 100000
     var small = 0
     for x in start..end { small += int(x) }
     println("i32:", small)
@@ -112,14 +112,14 @@ fn main() {
     var part = 0
     for x in v[65530..65540] { part += x }
     println("slice:", part)
-    var arr [70000]int
+    var arr: [70000]int
     for i in 0..70000 { arr[i] = i }
     var arrTotal = 0
     for x in arr { arrTotal += x }
     println("array:", arrTotal)
 
     // a value made inside the body is dropped once per iteration, in both copies
-    let log = arc(Mutex(0))
+    let log = Arc(Mutex(0))
     for _ in 0..70000 {
         let t = Tracked{log: log.clone()}
         _ = t

@@ -2,7 +2,7 @@
 // goroutine that has run for a while to yield.
 use std/{task, time}
 
-fn spin(n int) int {
+fn spin(n: int) -> int {
     var x = 0
     for i in 0..n {
         x = (x +% i *% 2654435761) % 1000003
@@ -10,12 +10,12 @@ fn spin(n int) int {
     return x
 }
 
-fn collatz(limit int) int {
+fn collatz(limit: int) -> int {
     // a loop that isn't counted: `for cond {}`
     var steps = 0
     for s in 1..limit {
         var v = s
-        for v != 1 {
+        while v != 1 {
             v = if v % 2 == 0 { v / 2 } else { 3 * v + 1 }
             steps += 1
         }
@@ -23,7 +23,7 @@ fn collatz(limit int) int {
     return steps
 }
 
-fn fib(n int) int {
+fn fib(n: int) -> int {
     // recursion without loops
     if n < 2 { return n }
     return fib(n - 1) + fib(n - 2)

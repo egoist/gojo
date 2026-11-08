@@ -1,9 +1,9 @@
 enum Shape {
-    Rect(w f64, h f64)
+    Rect(w: f64, h: f64)
     Dot
 }
 
-fn area(s Shape) f64 {
+fn area(s: Shape) -> f64 {
     return match s {
         Rect => 1.0
         // error: variant `Rect` has values; match them with `Rect(...)`

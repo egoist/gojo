@@ -382,6 +382,9 @@ pub struct TypeDef {
     pub span: Span,
     /// Has a `drop` method.
     pub has_drop: bool,
+    /// One of the prelude's `TupleN` structs: written `(A, B)`, copy when its
+    /// elements are.
+    pub tuple: bool,
 }
 
 impl TypeDef {
@@ -626,9 +629,9 @@ impl Program {
                 }
             }
             Ty::Box(a) => format!("Box[{}]", self.show(a)),
-            Ty::Rc(a) => format!("rc[{}]", self.show(a)),
-            Ty::Arc(a) => format!("arc[{}]", self.show(a)),
-            Ty::Weak(a) => format!("weak[{}]", self.show(a)),
+            Ty::Rc(a) => format!("Rc[{}]", self.show(a)),
+            Ty::Arc(a) => format!("Arc[{}]", self.show(a)),
+            Ty::Weak(a) => format!("Weak[{}]", self.show(a)),
             Ty::Cell(a) => format!("Cell[{}]", self.show(a)),
             Ty::Mutex(a) => format!("Mutex[{}]", self.show(a)),
             Ty::MutexRef(a) => format!("MutexRef[{}]", self.show(a)),
@@ -652,9 +655,10 @@ impl Program {
                 if ft.ret == Ty::Unit {
                     format!("{}({})", kw, ps.join(", "))
                 } else {
-                    format!("{}({}) {}", kw, ps.join(", "), self.show(&ft.ret))
+                    format!("{}({}) -> {}", kw, ps.join(", "), self.show(&ft.ret))
                 }
             }
+            Ty::Adt(d, args) if self.def(*d).tuple => format!("({})", args.iter().map(|a| self.show(a)).collect::<Vec<_>>().join(", ")),
             Ty::Adt(d, args) | Ty::Iface(d, args) => {
                 let def = self.def(*d);
                 let pkg = &self.packages[def.pkg as usize];

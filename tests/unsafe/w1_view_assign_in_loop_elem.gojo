@@ -1,5 +1,5 @@
 struct U {
-    name String
+    name: String
 }
 fn main() {
     var us = [U{name: "a".toString()}, U{name: "bb".toString()}]

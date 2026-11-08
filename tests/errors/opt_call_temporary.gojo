@@ -1,0 +1,10 @@
+// `x?.m()` on a temporary: a view it returns can't outlive the statement.
+fn mk() -> ?String {
+    some("hi")
+}
+
+fn main() {
+    let w = mk()?.trim()
+    // error: `w` would view a temporary value that is dropped at the end of this statement
+    println(w)
+}

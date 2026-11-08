@@ -1,15 +1,15 @@
 use std/time
 
 struct Page {
-    url String
-    size int
+    url: String
+    size: int
 }
 
 enum FetchError {
-    NotFound(url String)
+    NotFound(url: String)
 }
 
-fn fetch(url str) Page ! FetchError {
+fn fetch(url: str) -> Page ! FetchError {
     time.sleep(time.millisecond)
     if url.contains("missing") {
         return err(FetchError.NotFound(url.toString()))
@@ -19,7 +19,7 @@ fn fetch(url str) Page ! FetchError {
 
 // The design document's example: tasks borrow `urls`, and push into `pages`
 // through a lock that borrows it.
-fn fetchAll(urls []String) Vec[Page] ! FetchError {
+fn fetchAll(urls: []String) -> Vec[Page] ! FetchError {
     var pages = Vec[Page]{}
     let mu = Mutex(&pages)
     try scope {
@@ -53,7 +53,7 @@ fn main() {
     println(count)
 
     // views of the locked data are fine inside the block
-    var name = "gojo".toString()
+    var name: String = "gojo"
     let nm = Mutex(&name)
     with s = nm.lock() {
         s.push("!")

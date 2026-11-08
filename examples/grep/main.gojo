@@ -6,22 +6,22 @@
 use std/{bufio, fmt, io, os}
 
 struct Options {
-    ignoreCase bool = false
-    numbers bool = false
-    count bool = false
-    invert bool = false
-    recursive bool = false
-    namesOnly bool = false
-    pattern String = ""
-    paths Vec[String] = []
+    ignoreCase: bool = false
+    numbers: bool = false
+    count: bool = false
+    invert: bool = false
+    recursive: bool = false
+    namesOnly: bool = false
+    pattern: String = ""
+    paths: Vec[String] = []
 }
 
-fn usage() never {
+fn usage() -> never {
     eprintln("usage: grep [-i] [-n] [-c] [-v] [-r] [-l] PATTERN [PATH...]")
     os.exit(2)
 }
 
-fn parseArgs() Options {
+fn parseArgs() -> Options {
     var o = Options{}
     var havePattern = false
     let args = os.args()
@@ -37,7 +37,7 @@ fn parseArgs() Options {
                     'r' => o.recursive = true
                     'l' => o.namesOnly = true
                     _ => {
-                        var opt = "-".toString()
+                        var opt: String = "-"
                         opt.pushRune(r)
                         eprintln("grep: unknown option " + opt)
                         usage()
@@ -61,23 +61,23 @@ fn parseArgs() Options {
 }
 
 struct Search {
-    o Options
-    matched bool = false
-    failed bool = false
+    o: Options
+    matched: bool = false
+    failed: bool = false
     // print file names before lines: several files, or a directory
-    names bool = false
+    names: bool = false
 
-    fn matches(self, line str) bool {
+    fn matches(self, line: str) -> bool {
         let found = if self.o.ignoreCase { line.toLower().contains(self.o.pattern) } else { line.contains(self.o.pattern) }
         return found != self.o.invert
     }
 
     // Searches one stream; `name` is what to print for it.
-    fn stream[R io.Reader](self inout, src sink R, name str) ! io.Error {
+    fn stream[R: io.Reader](inout self, src: sink R, name: str) ! io.Error {
         var input = bufio.reader(src)
         var n = 0
         var hits = 0
-        for {
+        loop {
             let line = try input.readLine() ?? break
             n += 1
             if !self.matches(line) {
@@ -92,7 +92,7 @@ struct Search {
             if self.o.count {
                 continue
             }
-            var prefix = "".toString()
+            var prefix: String = ""
             if self.names {
                 prefix.push(name)
                 prefix.push(":")
@@ -111,7 +111,7 @@ struct Search {
         }
     }
 
-    fn path(self inout, p str) {
+    fn path(inout self, p: str) {
         let info = os.stat(p) catch e {
             self.fail(e)
             return
@@ -138,7 +138,7 @@ struct Search {
         self.stream(f, p) catch e { self.fail(e) }
     }
 
-    fn fail(self inout, e io.Error) {
+    fn fail(inout self, e: io.Error) {
         eprintln("grep: " + e.message())
         self.failed = true
     }

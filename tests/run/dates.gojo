@@ -17,7 +17,7 @@ fn main() {
     // every week for 540 years (about what nanoseconds in an int can hold) round-trips
     var ok = true
     var day = -98000
-    for day < 98000 {
+    while day < 98000 {
         let t = day * 86400 * time.second + 3723 * time.second
         let x = time.utc(t)
         if x.unixNanos() != t || x.hour != 1 || x.minute != 2 || x.second != 3 {

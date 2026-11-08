@@ -2,14 +2,14 @@
 use std/{task, time}
 
 struct Conn {
-    id int
-    fn drop(self inout) {
+    id: int
+    fn drop(inout self) {
         println("closing", self.id, task.reason())
     }
 }
 
 fn main() {
-    let ready = chan[bool](4)
+    let ready = Chan[bool](4)
     for id in 0..3 {
         let tx = ready.tx.clone()
         go () => {

@@ -1,6 +1,6 @@
 fn main() {
     let s = "abc".toString()
-    let r = rc(s.asStr())
+    let r = Rc(s.asStr())
     drop(s)
     println(r)
 }

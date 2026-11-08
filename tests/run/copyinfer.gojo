@@ -1,9 +1,9 @@
 // Package-private types whose fields are all copy are copy themselves.
-struct Point { x, y int }
+struct Point { x: int, y: int }
 enum Dir { North, South }
-struct Seg { a Point, b Point, d Dir }
+struct Seg { a: Point, b: Point, d: Dir }
 
-fn len2(s sink Seg) int {
+fn len2(s: sink Seg) -> int {
     let dx = s.b.x - s.a.x
     let dy = s.b.y - s.a.y
     return dx * dx + dy * dy

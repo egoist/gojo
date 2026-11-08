@@ -1,11 +1,11 @@
 struct P {
-    s String
+    s: String
 
-    fn name(self) str {
+    fn name(self) -> str {
         return self.s.asStr()
     }
 
-    fn rename(self inout) {
+    fn rename(inout self) {
         self.s = "a completely new and longer name".toString()
     }
 }

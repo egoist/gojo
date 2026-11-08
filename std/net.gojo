@@ -3,7 +3,7 @@
 //
 //   let ln = try net.listen(":8080")
 //   scope {
-//       for {
+//       loop {
 //           let c = try ln.accept()
 //           go serve(c)
 //       }
@@ -13,24 +13,24 @@ use std/io
 // Errors here are io.Error; `isCancelled()` tells a cancelled call apart.
 pub type Error = io.Error
 
-fn __listen(addr str) int
-fn __connect(addr str) int
-fn __accept(fd int) int
-fn __read(fd int, buf inout Vec[byte], max int) int
-fn __write(fd int, data []byte) int
-fn __close(fd int)
-fn __shutdownWrite(fd int)
-fn __port(fd int) int
-fn fail(what str, code int) Error {
+fn __listen(addr: str) -> int
+fn __connect(addr: str) -> int
+fn __accept(fd: int) -> int
+fn __read(fd: int, buf: inout Vec[byte], max: int) -> int
+fn __write(fd: int, data: []byte) -> int
+fn __close(fd: int)
+fn __shutdownWrite(fd: int)
+fn __port(fd: int) -> int
+fn fail(what: str, code: int) -> Error {
     return io.fromCode(what, code)
 }
 
 // A listening TCP socket, from `listen`. Closed when dropped.
 pub struct Listener {
-    fd int
+    fd: int
 
     // Waits for the next connection.
-    pub fn accept(self) Conn ! Error {
+    pub fn accept(self) -> Conn ! Error {
         let fd = __accept(self.fd)
         if fd < 0 {
             return err(fail("accept", -fd))
@@ -39,11 +39,11 @@ pub struct Listener {
     }
 
     // The port it listens on; useful after `listen(":0")`.
-    pub fn port(self) int {
+    pub fn port(self) -> int {
         return __port(self.fd)
     }
 
-    fn drop(self inout) {
+    fn drop(inout self) {
         __close(self.fd)
     }
 }
@@ -51,11 +51,11 @@ pub struct Listener {
 // A TCP connection, from `dial` or `Listener.accept`. Closed when dropped. It
 // is an `io.Reader` and an `io.Writer`.
 pub struct Conn {
-    fd int
+    fd: int
 
     // Appends up to `max` bytes to `buf`, waiting until at least one arrives.
     // Returns how many were read; 0 means the peer closed the connection.
-    pub fn read(self, buf inout Vec[byte], max int) int ! Error {
+    pub fn read(self, buf: inout Vec[byte], max: int) -> int ! Error {
         let n = __read(self.fd, &buf, max)
         if n < 0 {
             return err(fail("read", -n))
@@ -64,9 +64,9 @@ pub struct Conn {
     }
 
     // Writes all of `data`.
-    pub fn write(self, data []byte) ! Error {
+    pub fn write(self, data: []byte) ! Error {
         var off = 0
-        for off < data.len {
+        while off < data.len{
             let n = __write(self.fd, data[off..])
             if n < 0 {
                 return err(fail("write", -n))
@@ -76,14 +76,14 @@ pub struct Conn {
     }
 
     // Writes the bytes of `s`.
-    pub fn writeText(self, s str) ! Error {
+    pub fn writeText(self, s: str) ! Error {
         return self.write(s.bytes())
     }
 
     // Reads until the peer closes the connection.
-    pub fn readAll(self) Vec[byte] ! Error {
+    pub fn readAll(self) -> Vec[byte] ! Error {
         var buf = Vec[byte]{}
-        for {
+        loop {
             let n = try self.read(&buf, 65536)
             if n == 0 {
                 return buf
@@ -96,13 +96,13 @@ pub struct Conn {
         __shutdownWrite(self.fd)
     }
 
-    fn drop(self inout) {
+    fn drop(inout self) {
         __close(self.fd)
     }
 }
 
 // Listens on "host:port"; ":port" listens on all interfaces, ":0" picks a free port.
-pub fn listen(addr str) Listener ! Error {
+pub fn listen(addr: str) -> Listener ! Error {
     let fd = __listen(addr)
     if fd < 0 {
         return err(fail("listen " + addr, -fd))
@@ -111,7 +111,7 @@ pub fn listen(addr str) Listener ! Error {
 }
 
 // Connects to `addr` ("host:port"; the host may be a name, which is looked up).
-pub fn dial(addr str) Conn ! Error {
+pub fn dial(addr: str) -> Conn ! Error {
     let fd = __connect(addr)
     if fd < 0 {
         return err(fail("dial " + addr, -fd))

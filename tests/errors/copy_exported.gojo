@@ -1,14 +1,14 @@
 // Exported types must declare `copy`; types with `drop` are never copy.
-pub struct Pub { x int }
+pub struct Pub { x: int }
 
 struct Guard {
-    n int
+    n: int
 
-    fn drop(self inout) {}
+    fn drop(inout self) {}
 }
 
-fn take(p sink Pub) {}
-fn keep(g sink Guard) {}
+fn take(p: sink Pub) {}
+fn keep(g: sink Guard) {}
 
 fn main() {
     let p = Pub{x: 1}

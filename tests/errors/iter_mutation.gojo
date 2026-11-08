@@ -1,7 +1,7 @@
 struct Bag {
-    items Vec[int]
+    items: Vec[int]
 
-    fn each(self, body fn(int) Flow) {
+    fn each(self, body: fn(int) -> Flow) {
         for x in self.items {
             if body(x) == .Break {
                 return
@@ -9,14 +9,14 @@ struct Bag {
         }
     }
 
-    fn add(self inout, x int) {
+    fn add(inout self, x: int) {
         self.items.push(x)
     }
 }
 
-struct Plain { x int }
+struct Plain { x: int }
 
-fn take(s sink String) {}
+fn take(s: sink String) {}
 
 fn main() {
     var b = Bag{items: [1]}

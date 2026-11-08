@@ -1,6 +1,6 @@
 // the range's bound is declared inside the task, so it covers many elements
 // over time: it can't be told apart from the other task's range
-fn set(v inout []int, x int) {
+fn set(v: inout []int, x: int) {
     v[0] = x
 }
 

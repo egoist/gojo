@@ -1,6 +1,6 @@
 // The iterations of a `par for` run at the same time: the body can only read
 // what it captures, and can't leave the loop.
-fn f() int ! String {
+fn f() -> int ! String {
     return 1
 }
 
@@ -17,10 +17,10 @@ fn g() ! String {
         _ = try f()
         // error: `try` can't leave a `par for`
     }
-    let r = rc(1)
+    let r = Rc(1)
     par for x in xs {
         println(x, r)
-        // error: a `par for` body uses `r` of type `rc[int]`, which can't be shared between tasks
+        // error: a `par for` body uses `r` of type `Rc[int]`, which can't be shared between tasks
     }
 }
 

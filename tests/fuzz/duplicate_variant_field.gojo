@@ -1,8 +1,8 @@
 enum Msg {
-    Move(y int, y int)
-    Say(text String)
+    Move(y: int, y: int)
+    Say(text: String)
 }
 fn main() {
-    let m Msg = .Say("hi".toString())
+    let m: Msg = .Say("hi".toString())
     println(m)
 }

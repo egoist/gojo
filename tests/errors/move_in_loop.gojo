@@ -1,4 +1,4 @@
-fn take(s sink String) {}
+fn take(s: sink String) {}
 fn main() {
     let s = "x".toString()
     for _i in 0..3 {

@@ -1,4 +1,4 @@
-fn f(a inout Vec[int], b inout int) {
+fn f(a: inout Vec[int], b: inout int) {
     a.clear()
     b = 5
 }

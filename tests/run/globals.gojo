@@ -3,21 +3,21 @@
 use std/fmt
 
 struct Config {
-    name String
-    limit int
+    name: String
+    limit: int
 }
 
-fn loadConfig() Config {
+fn loadConfig() -> Config {
     println("loading the config, once")
     return Config{name: String("app"), limit: 3}
 }
 
 let config = loadConfig()
-let hits = Atomic.new(0)
-let names Mutex[Vec[String]] = Mutex(Vec[String]{})
+let hits = Atomic(0)
+let names: Mutex[Vec[String]] = Mutex(Vec[String]{})
 let greeting = fmt.sprint("hello from", config.name)
 
-fn record(s str) {
+fn record(s: str) {
     _ = hits.add(1)
     with n = names.lock() { n.push(String(s)) }
 }

@@ -1,7 +1,7 @@
 // Files, directories, errors, the environment and processes.
 use std/{io, os}
 
-fn work(dir str) ! io.Error {
+fn work(dir: str) ! io.Error {
     let a = os.joinPath(dir, "a.txt")
     try os.writeText(a, "one\ntwo\n")
     println(try os.readText(a))
@@ -29,7 +29,7 @@ fn work(dir str) ! io.Error {
     // errors keep their kind
     let missing = os.readText(os.joinPath(dir, "nope")) catch e {
         println("missing:", e.isNotFound(), e.kind == io.ErrorKind.NotFound)
-        "".toString()
+        ""
     }
     println(missing.len())
     let notEmpty = os.remove(os.joinPath(dir, "x")) catch e {

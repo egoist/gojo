@@ -8,36 +8,36 @@ type Meters f64
 type Id int
 type Name String
 
-fn total[T Num](xs []T) T {
-    var s T
+fn total[T: Num](xs: []T) -> T {
+    var s: T
     for x in xs { s += x }
     return s
 }
 
-struct Pair[T any] {
-    a T
-    b T
+struct Pair[T] {
+    a: T
+    b: T
 
-    pub fn bigger(self) T where T: copy + ordered {
+    pub fn bigger(self) -> T where T: copy + ordered {
         if self.a > self.b { return self.a }
         return self.b
     }
 }
 
 struct Settings {
-    name String = "app"
-    port int = 80
+    name: String = "app"
+    port: int = 80
 }
 
 struct Grid {
-    cells Vec[int]
+    cells: Vec[int]
 
-    pub fn each(self, body fn(&int) Flow) {
+    pub fn each(self, body: fn(&int) -> Flow) {
         for c in self.cells {
             if body(c) == .Break { return }
         }
     }
-    pub fn eachMut(self inout, body fn(inout int) Flow) {
+    pub fn eachMut(inout self, body: fn(inout int) -> Flow) {
         for c in &self.cells {
             if body(&c) == .Break { return }
         }
@@ -50,10 +50,10 @@ fn main() {
     println(Pair{a: 3, b: 9}.bigger(), Pair{a: 2.5, b: 1.0}.bigger())
 
     // `var x T` needs T: default
-    var s Settings
-    var n int
-    var o ?String
-    var d Meters
+    var s: Settings
+    var n: int
+    var o: ?String
+    var d: Meters
     s.port = 8080
     println(s.name, s.port, n, o ?? "none", d)
 
@@ -66,9 +66,9 @@ fn main() {
     ids.sort()
     println(ids, ids.max(), Id(5) & Id(4), Id(5) +% Id(1))
     var byId = Map[Id, String]{}
-    byId.insert(Id(7), "seven".toString())
+    byId.insert(Id(7), "seven")
     println(byId.get(Id(7)).unwrap())
-    var names = [Name("b".toString()), Name("a".toString())]
+    var names = [Name("b"), Name("a")]
     names.sort()
     println(names)
 

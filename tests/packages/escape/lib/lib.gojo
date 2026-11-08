@@ -1,5 +1,5 @@
 use ../secret
 
-pub fn f() int {
+pub fn f() -> int {
     return secret.key()
 }

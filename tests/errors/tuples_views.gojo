@@ -1,0 +1,7 @@
+// A tuple owns its elements: no views inside, and moving it moves them.
+fn main() {
+    let s = "abc".toString()
+    let t = (s.asStr(), 1)
+    // error: `t` has type `(str, int)`, which would store a borrowed view
+    println(t)
+}

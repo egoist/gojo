@@ -1,13 +1,13 @@
 // Views of loop elements that could outlive what the iterator lent.
 struct Lines {
-    n int
+    n: int
 
-    fn cursor(self) Cur {
+    fn cursor(self) -> Cur {
         return Cur{i: 0, buf: "".toString()}
     }
 
     // a lending cursor: each element lives in the cursor until the next step
-    fn next(self, c inout Cur) yield ?&String {
+    fn next(self, c: inout Cur) yield ?&String {
         if c.i >= self.n {
             yield none
         }
@@ -18,14 +18,14 @@ struct Lines {
 }
 
 struct Cur {
-    i int
-    buf String
+    i: int
+    buf: String
 }
 
 struct Names {
-    items Vec[String]
+    items: Vec[String]
 
-    fn each(self, body fn(&String) Flow) {
+    fn each(self, body: fn(&String) -> Flow) {
         for x in self.items {
             if body(x) == Flow.Break {
                 return

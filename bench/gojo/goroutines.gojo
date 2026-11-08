@@ -2,11 +2,11 @@
 // through all of them.
 fn main() {
     let n = 100000
-    let start = chan[bool]()
-    var prev = chan[int]()
+    let start = Chan[bool]()
+    var prev = Chan[int]()
     let first = prev.tx.clone()
     for _ in 0..n {
-        let next = chan[int]()
+        let next = Chan[int]()
         let input = prev.rx.clone()
         let output = next.tx.clone()
         let s = start.rx.clone()

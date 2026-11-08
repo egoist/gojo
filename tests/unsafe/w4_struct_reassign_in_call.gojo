@@ -1,7 +1,7 @@
 struct P {
-    s String
+    s: String
 }
-fn both(p inout P, v str) {
+fn both(p: inout P, v: str) {
     p = P{s: "replaced with something else entirely".toString()}
     println(v)
 }

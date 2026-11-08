@@ -1,4 +1,4 @@
-fn f(a inout Vec[String], s str) {
+fn f(a: inout Vec[String], s: str) {
     a.clear()
     println(s)
 }

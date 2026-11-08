@@ -1,5 +1,5 @@
-fn take(s sink String) {}
-fn f(x ?int) ?int {
+fn take(s: sink String) {}
+fn f(x: ?int) -> ?int {
     let s = "abcdefghijklmnopqrstuvwxyz0123456789".toString()
     if x == none {
         take(s)

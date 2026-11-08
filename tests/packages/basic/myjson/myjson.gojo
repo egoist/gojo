@@ -1,3 +1,3 @@
-pub fn describe() str {
+pub fn describe() -> str {
     return "not the standard json"
 }

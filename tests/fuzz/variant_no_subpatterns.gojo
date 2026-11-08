@@ -1,9 +1,9 @@
 enum Shape {
-Rect( f64)
-fn add() {
+    Rect(f64)
+    fn add() {
+    }
 }
-}
-fn area(s Shape) { match s {
-Rect => w
+fn area(s: Shape) { match s {
+    Rect => w
 }
 }

@@ -2,8 +2,8 @@
 use std/{fmt, http, io, net}
 
 struct Echo {
-    fn serve(self, req http.Request) http.Response {
-        var r = http.text(200, fmt.format("{} {} q={} name={} body={} agent={}", req.method, req.path, req.rawQuery, req.param("name") ?? "-".toString(), req.body.len(), req.header("USER-AGENT") ?? "-".toString()))
+    fn serve(self, req: http.Request) -> http.Response {
+        var r = http.text(200, fmt.format("{} {} q={} name={} body={} agent={}", req.method, req.path, req.rawQuery, req.param("name") ?? "-", req.body.len(), req.header("USER-AGENT") ?? "-"))
         r.setHeader("X-Segments", fmt.sprint(req.segments()))
         if let v = req.param("set") {
             // user input in a header: line breaks can't add headers
@@ -14,7 +14,7 @@ struct Echo {
 }
 
 // sends raw bytes and returns the status line
-fn raw(port int, text str) String {
+fn raw(port: int, text: str) -> String {
     let c = net.dial(fmt.format("127.0.0.1:{}", port)) catch e {
         return e.message()
     }
@@ -48,7 +48,7 @@ fn main() ! io.Error {
         println(e2.status, e2.text())
         let split = http.get(base + "/s?set=a%0D%0AX-Evil:%201") catch e { http.text(0, e.message()) }
         println(split.status, split.header("x-echo") ?? "-", split.header("x-evil") ?? "no x-evil")
-        let inject = [http.Header{name: "X-A".toString(), value: "1\r\nX-B: 2".toString()}]
+        let inject = [http.Header{name: "X-A", value: "1\r\nX-B: 2"}]
         let hi = http.request("GET", base + "/", inject, "".bytes()) catch e { http.text(0, e.message()) }
         println(hi.text())
         let bm = http.request("GET /x HTTP/1.1\r\n", base + "/", Vec[http.Header]{}, "".bytes()) catch e { http.text(0, e.message()) }

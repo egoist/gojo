@@ -1,6 +1,6 @@
 struct Dup {
-    a int
-    fn a(self) int { return 1 }
+    a: int
+    fn a(self) -> int { return 1 }
     // error: `Dup` has both a field and a method named `a`
 }
 fn main() {}

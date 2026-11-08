@@ -1,5 +1,5 @@
-struct P { a String, b String }
-fn show(p P) {}
+struct P { a: String, b: String }
+fn show(p: P) {}
 fn main() {
     let p = P{a: "1".toString(), b: "2".toString()}
     let a = p.a

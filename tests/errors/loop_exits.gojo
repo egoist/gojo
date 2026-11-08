@@ -1,15 +1,15 @@
 // A function whose last statement is `for { }` can still fall off its end if
 // a `break` anywhere inside leaves that loop.
-fn nested_break(x int) int {
-    for {
+fn nested_break(x: int) -> int {
+    loop {
         return break
     }
     // error: missing return value: function returns `int`
 }
 
-fn labeled(x int) int {
-    outer: for {
-        for {
+fn labeled(x: int) -> int {
+    outer: loop {
+        loop {
             if x > 0 {
                 break outer
             }
@@ -18,8 +18,8 @@ fn labeled(x int) int {
     // error: missing return value: function returns `int`
 }
 
-fn in_select(ch Receiver[int]) int {
-    for {
+fn in_select(ch: Receiver[int]) -> int {
+    loop {
         select {
             let v = <-ch => {
                 if (v ?? 0) > 0 {
@@ -31,9 +31,9 @@ fn in_select(ch Receiver[int]) int {
     // error: missing return value: function returns `int`
 }
 
-fn fine(x int) int {
-    for {
-        for {
+fn fine(x: int) -> int {
+    loop {
+        loop {
             break
         }
         return x
@@ -41,5 +41,5 @@ fn fine(x int) int {
 }
 
 fn main() {
-    println(nested_break(1), labeled(1), in_select(chan[int](1).rx), fine(2))
+    println(nested_break(1), labeled(1), in_select(Chan[int](1).rx), fine(2))
 }

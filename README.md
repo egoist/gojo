@@ -2,7 +2,7 @@
 
 **Documentation:** [A tour of Gojo](docs/tour.md) · [Standard library reference](docs/std/README.md) · [Language reference](docs/spec.md) · [Design notes](docs/design.md) · [Packages](docs/packages.md)
 
-Gojo is a systems programming language. It keeps Go's simplicity and compile speed, uses Rust-style ownership to remove the GC and nil, and takes Zig's error unions, `errdefer`, explicit wrapping arithmetic and zero-dependency cross-compilation.
+Gojo is a small, fast-compiling systems programming language with no garbage collector and no nil. Ownership (without lifetime annotations) frees memory and rules out data races; errors are values (`T ! E`, `try`, `errdefer`); concurrency is structured (`scope`, `go`, channels, cancellation). It takes ideas from Rust, Zig, Swift, Kotlin and Go without following any of them.
 
 This repository is a prototype compiler built from the [design notes](docs/design.md). The compiler is written in Rust (about 19,000 lines, no third-party dependencies). The C runtime is about 4,000 lines, and the Gojo standard library about 3,400 lines.
 
@@ -10,24 +10,25 @@ This repository is a prototype compiler built from the [design notes](docs/desig
 use std/os
 
 struct Config {
-    name String // required
-    port int = 8080 // default value
-    proxy ?String // optional, defaults to none
+    name: String // required
+    port: int = 8080 // default value
+    proxy: ?String // optional, defaults to none
 }
 
-fn load(path str) Config ! os.Error {
+fn load(path: str) -> Config ! os.Error {
     let text = try os.readText(path)
-    return Config{name: text.trim().toString()}
+    Config{name: text.trim().toString()}
 }
 
 fn main() {
     let cfg = load("app.toml") catch e {
         eprintln("using defaults:", e)
-        Config{name: "app"}
+        .{name: "app"}
     }
-    var hits = 0
-    for i in 0..10 { hits += i }
-    println(cfg.name, cfg.port, hits)
+    let backups = [8081, 80, 9000]
+        .filter(p => p > 1024)
+        .map(p => ":${p}")
+    println("${cfg.name} on :${cfg.port}, backups ${backups.join(", ")}, proxy: ${cfg.proxy ?? "none"}")
 }
 ```
 
@@ -50,27 +51,27 @@ Methods are written together with their type. The receiver is an explicit `self`
 
 ```zig
 struct Counter {
-    n int = 0
+    n: int = 0
 
-    fn new(start int) Counter {        // no self: associated function, Counter.new(10)
+    fn new(start: int) -> Counter {        // no self: associated function, Counter.new(10)
         return Counter{n: start}
     }
 
-    fn value(self) int {               // borrow
+    fn value(self) -> int {               // borrow
         return self.n
     }
 
-    fn bump(self inout) {              // mutable borrow
+    fn bump(inout self) {              // mutable borrow
         self.n += 1
     }
 }
 
 extend Counter {                         // add methods, e.g. in another file of the same package
-    fn reset(self inout) { self.n = 0 }
+    fn reset(inout self) { self.n = 0 }
 }
 
 interface Bumper {
-    fn bump(self inout)                // interface methods use the same syntax
+    fn bump(inout self)                // interface methods use the same syntax
 }
 ```
 
@@ -122,7 +123,7 @@ Every check looks only at function signatures and a single function body. There 
 | References do not dangle | References can only be parameters, projections (`yield`) or block-scoped bindings. Views (`str`, `[]T`) live only in variables; they cannot go into fields, collections, boxes, interface values, generic types or escaping closures (inferred types included). When a view is assigned to an outer variable, the borrowed value must live at least as long. A view of data inside a lock cannot leave the `with` block | `this temporary value is dropped at the end of the statement` / `` returns a view of `s` `` / `` `s` does not live long enough `` |
 | Iterators are not invalidated | `for`/`with`/`if let` bindings hold a borrow inside the block | `` cannot modify `v` while it is borrowed by `x` `` |
 | Exclusive mutable borrows | Arguments of the same call are checked for overlap; `inout` must be written with `&` at the call site | `` `a` is used by two arguments of the same call `` |
-| No data races at compile time | `send` is derived from the structure of the type; `rc`/`Cell`/raw pointers cannot cross tasks; a variable a task changes is borrowed by that task alone until its scope ends (or the range of it the task uses); shared mutable state goes through a `Mutex`, `RwLock` or `Atomic` | `` a task captures `r` of type `rc[int]`, which is not safe to share between threads `` / `` cannot use `total`: a task modifies it until its scope ends `` |
+| No data races at compile time | `send` is derived from the structure of the type; `Rc`/`Cell`/raw pointers cannot cross tasks; a variable a task changes is borrowed by that task alone until its scope ends (or the range of it the task uses); shared mutable state goes through a `Mutex`, `RwLock` or `Atomic` | `` a task captures `r` of type `Rc[int]`, which is not safe to share between threads `` / `` cannot use `total`: a task modifies it until its scope ends `` |
 | Errors must be handled | An unhandled `T ! E` is a compile error; to discard it, write `_ = f()` | `` result of type `! String` is not handled `` |
 | Exhaustive matching | Based on the usefulness algorithm; reports the exact missing pattern | `` `match` is not exhaustive: `Rect(_, _)` is not covered `` |
 | Runtime checks | Integer overflow, out-of-bounds index, division by zero, out-of-range shift, out-of-range numeric conversion and a failed `unwrap` all panic and report the call site | `panic: integer overflow in addition` |
@@ -133,15 +134,15 @@ The memory safety of the generated code is verified separately. All test program
 
 ## Implemented language features
 
-- **Basics**: `let`/`var`, package-level `let` values (computed once, on first use), `for x in xs`, `for i in 0..n`, `for cond {}`, `for {}`, loop labels (`outer: for ...`, `break outer`), `if`/`match`/blocks as expressions, `defer` (block-scoped), `errdefer`, `const`, type aliases and newtypes (`type Celsius f64`; operators are kept when the underlying type is a number), `(x) => x * 2` short closures.
-- **Types**: all scalars, `String`/`str`, `Vec[T]`/`[]T` (a slice is read-only unless it is an `inout []T`), `[N]T`, `Map[K, V]`, `?T`, `T ! E`, `Box`, `rc`/`weak`, `arc`, `Cell`, `Mutex`, `RwLock`, `Atomic`, channels (`Chan[T]`, `Sender[T]`, `Receiver[T]`), `Task[T]`, `Iso[T]`, function types (`fn`, `send fn`), `*T`.
-- **Methods**: written inside the braces of a `struct`/`enum`; the first parameter, `self`, carries the receiver mode. Associated functions: `Stack[String].new()` (generic arguments can be inferred from the expected type). `extend T { ... }` adds methods; the standard library also uses it to add methods to built-in types and to specific instances of them (such as `extend []String`).
-- **Structs and enums**: field defaults (a missing required field is a compile error), `copy struct`, automatic copy derivation for package-private types, sum-type enums, `.Variant` shorthand, struct embedding (fields and methods are promoted).
+- **Basics**: `let`/`var`, package-level `let` values (computed once, on first use), `for x in xs`, `for i in 0..n`, `while cond {}`, `loop {}`, loop labels (`outer: for ...`, `break outer`), `if`/`match`/blocks as expressions (a function body's last expression is its result), `defer` (block-scoped), `errdefer`, `const`, type aliases and newtypes (`type Celsius f64`; operators are kept when the underlying type is a number), closures `x => x * 2` and `(a, b) => a + b`, string interpolation checked at compile time (`"${name}: ${total:.2}"`), method chains written one step per line (a line starting with `.name` continues the one before).
+- **Types**: all scalars, tuples (`(int, String)`, `let (q, r) = divmod(a, b)`, `t.0`, tuple patterns), `String`/`str`, `Vec[T]`/`[]T` (a slice is read-only unless it is an `inout []T`), `[N]T`, `Map[K, V]`, `?T`, `T ! E`, `Box`, `Rc`/`Weak`, `Arc`, `Cell`, `Mutex`, `RwLock`, `Atomic`, channels (`Chan[T]`, `Sender[T]`, `Receiver[T]`), `Task[T]`, `Iso[T]`, function types (`fn`, `send fn`), `*T`.
+- **Methods**: written inside the braces of a `struct`/`enum`; the first parameter, `self`, carries the receiver mode. Associated functions: `Stack[String].new()` (generic arguments can be inferred from the expected type); a type with a `new` function is called like one, `Stack[String]()`, `RwLock(x)`, `Atomic(0)`. `extend T { ... }` adds methods; the standard library also uses it to add methods to built-in types and to specific instances of them (such as `extend []String`).
+- **Structs and enums**: field defaults (a missing required field is a compile error), `copy struct`, automatic copy derivation for package-private types, sum-type enums, `.Variant` shorthand and `.{field: v}` literals typed by the context, `P{x, y}` field shorthand, struct embedding (fields and methods are promoted).
 - **Ownership**: three parameter modes (borrow / `inout` / `sink`), deterministic destruction (reverse scope order, `drop` method, `drop(x)`), partial moves, conditional moves (flags are inserted only when needed), `.clone()`.
 - **Projections**: `yield &T` / `yield inout T` / `yield ?&T` functions. `v[i]`, `m.get(k)`, `m.entry(k)` and `mu.lock()` are all projections, and the reference they lend cannot leave the block. References and views bound with `let` stop holding the borrowed value after their last use. Structures such as parsers store ranges as `Span` and do not need self-references.
 - **Custom iteration**: a cursor protocol (`cursor` + `next`/`nextMut`; `zip` and merging just advance several cursors together) and a push protocol (`each`/`eachMut`, suited to recursive structures such as trees). In both protocols `break`, `continue`, `return`, `try` and labeled jumps work as usual.
-- **Error handling**: `try`, `try x else Wrap`, `catch e { ... }`, `match` destructuring of `ok`/`err`, `try` on `?T`, `??`, `?.`.
-- **Interfaces**: structural, implicit satisfaction; interface values (heap box + vtable); borrowed interface parameters (fat pointer, no allocation); mutable-receiver methods such as `fn bump(self inout) int`; `match` branching on the concrete type; embedded interfaces; constraint interfaces with type sets (`~int | ~f64`).
+- **Error handling**: `try`, `try x else Wrap`, `catch e { ... }`, `match` destructuring of `ok`/`err`, `try` on `?T`, `??`, `?.` for fields and method calls, `if let x { }` to unwrap a variable in place.
+- **Interfaces**: structural, implicit satisfaction; interface values (heap box + vtable); borrowed interface parameters (fat pointer, no allocation); mutable-receiver methods such as `fn bump(inout self) -> int`; `match` branching on the concrete type; embedded interfaces; constraint interfaces with type sets (`~int | ~f64`).
 - **Generics**: generic functions/structs/enums, methods with their own type parameters, `where`-conditional methods, built-in capability constraints (`copy`, `clone`, `default`, `send`, `comparable`, `ordered`, `hash`), local bidirectional inference (including closure return types), integer const generics (`Mat[R, C]`; mismatched dimensions are a compile error). A type with custom `equal`/`hash`/`compare` methods can be a Map key or be sorted.
 - **Concurrency**: tasks are stackful coroutines with M:N scheduling, started with `go` inside a `scope`, which waits for them; they borrow what outlives the scope (down to disjoint ranges of one slice: `go psort(&v[..p])` and `go psort(&v[p + 1..])`), `let t = go f()` gives a handle whose `t.join()` returns the result, and a failing task cancels the others (`try scope { }`). `par for`, `task.map`/`each`/`race`, `send fn`. Channels with two ends that close when the last sender is dropped; `select` over channels, tasks, timers (`time.after`) and cancellation, with guards. `Mutex`, `Mutex(&x)`, `RwLock`, `with a, b = lock(m1, m2)`, `Atomic`, `send interface`, `isolate { }`, task-local values (`task.local`, `task.with`); waiting inside a lock block is an error. Preemption after 10 ms of running while others wait; C calls hand the CPU to other threads. A file read that has to wait parks its task: pipes and terminals on the poller, disk reads through io_uring on Linux. Parked tasks' stacks are hibernated (100,000 idle tasks: 0.2 GB on macOS).
 - **Cancellation**: propagates along the task tree (a failing task, `s.cancel()`, a deadline from `task.timeout`, Ctrl-C for the whole program); blocking operations in a cancelled task return immediately; `task.reason()`, `task.deadline()`, `task.shield`, `try task.check()`; `drop` methods run shielded so cleanup that blocks still happens.
@@ -155,7 +156,7 @@ The programs under `tests/run/` cover all of the features above and can be read 
 ## Implementation layout
 
 ```
-src/lexer.rs      lexing (Go-style automatic semicolons)
+src/lexer.rs      lexing (newlines end statements; string interpolation)
 src/parser.rs     recursive-descent parsing
 src/check/        declaration collection, type resolution and capability rules (mod.rs)
                   function body type checking → typed IR (body.rs)

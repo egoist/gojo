@@ -1,30 +1,30 @@
 // A generic function that keeps a `T` beyond the call can't get a view for it.
-fn use1[T](x T) int {
+fn use1[T](x: T) -> int {
     return 1
 }
 
-fn later[T](x sink T) fn() int {
+fn later[T](x: sink T) -> fn() -> int {
     return () => use1(x)
 }
 
 // a task started through a `Scope` value may outlive the call
-fn spawn[T send](s Scope, x sink T) {
+fn spawn[T: send](s: Scope, x: sink T) {
     s.go(() => {
         _ = use1(x)
     })
 }
 
-fn indirect[U](x sink U) fn() int {
+fn indirect[U](x: sink U) -> fn() -> int {
     return later(x)
 }
 
-fn mk() fn() int {
+fn mk() -> fn() -> int {
     let s = "abc".toString()
     return later(s.asStr())
     // error: `later` cannot be called with the borrowed view `str` for `T`: it keeps `T` values after it returns
 }
 
-fn mk2() fn() int {
+fn mk2() -> fn() -> int {
     let s = "abc".toString()
     return indirect(s.asStr())
     // error: `indirect` cannot be called with the borrowed view `str` for `U`

@@ -1,8 +1,8 @@
-fn take(s sink String) {}
+fn take(s: sink String) {}
 struct C {
-    n int
+    n: int
 
-    fn each(self, body fn(&int) Flow) {
+    fn each(self, body: fn(&int) -> Flow) {
         _ = body(&self.n)
         _ = body(&self.n)
     }

@@ -1,5 +1,5 @@
 struct Holder[T] {
-    x T
+    x: T
 }
 fn main() {
     var h = Holder[str]{x: "a"}

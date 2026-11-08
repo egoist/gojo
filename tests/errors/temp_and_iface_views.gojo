@@ -1,17 +1,17 @@
 // Views through an interface argument, and views of a binding into a temporary.
 interface Named {
-    fn name(self) str
+    fn name(self) -> str
 }
 
 struct P {
-    s String
+    s: String
 
-    fn name(self) str {
+    fn name(self) -> str {
         return self.s.asStr()
     }
 }
 
-fn get(n Named) str {
+fn get(n: Named) -> str {
     return n.name()
 }
 
@@ -24,14 +24,14 @@ fn through_interface() {
 }
 
 fn from_temporary() {
-    var r = rc("abcdefghijklmnopqrstuvwxyz".toString())
+    var r = Rc("abcdefghijklmnopqrstuvwxyz".toString())
     let w = r.downgrade()
     var keep = ""
     if let x = w.upgrade() {
         keep = x.asStr()
         // error: `x` does not live long enough: `keep` would still view it after it is dropped
     }
-    r = rc("z".toString())
+    r = Rc("z".toString())
     println(keep)
 }
 

@@ -1,5 +1,5 @@
 fn main() {
-    let ch = chan[String](1)
+    let ch = Chan[String](1)
     let s = "abc".toString()
     ch.tx <- s
     println(s)

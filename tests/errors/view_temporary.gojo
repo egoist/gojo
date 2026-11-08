@@ -1,6 +1,6 @@
-fn make() String { return "tmp".toString() }
+fn make() -> String { return "tmp".toString() }
 fn main() {
-    let s str = make()
+    let s: str = make()
     println(s)
     // error: this temporary value is dropped at the end of the statement
 }

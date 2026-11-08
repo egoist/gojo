@@ -1,5 +1,5 @@
 fn main() {
-    let c = chan[int]()
+    let c = Chan[int]()
     let d = c.rx.clone()
     go () => {
         // waits for a value nobody sends

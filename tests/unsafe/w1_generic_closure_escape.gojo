@@ -1,10 +1,10 @@
-fn use1[T](x T) int {
+fn use1[T](x: T) -> int {
     return 1
 }
-fn later[T](x sink T) fn() int {
+fn later[T](x: sink T) -> fn() -> int {
     return () => use1(x)
 }
-fn mk() fn() int {
+fn mk() -> fn() -> int {
     let s = "abc".toString()
     return later(s.asStr())
 }

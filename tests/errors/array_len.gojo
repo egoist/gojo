@@ -1,17 +1,17 @@
 const Neg = -1
 
-struct Grid[R int, C int] {
-    cells [R][C]u8
+struct Grid[R: int, C: int] {
+    cells: [R][C]u8
 }
 
 fn main() {
-    var a [9223372036854775807]i64
+    var a: [9223372036854775807]i64
     // error: array length 9223372036854775807 is too large
-    var b [18446744073709551616]int
+    var b: [18446744073709551616]int
     // error: array length 18446744073709551616 is too large
-    var c [Neg]int
+    var c: [Neg]int
     // error: array length must not be negative (it is -1)
-    var g Grid[4294967296, 1]
+    var g: Grid[4294967296, 1]
     // error: array length 4294967296 is too large
     println(a.len(), b.len(), c.len(), g.cells.len())
 }

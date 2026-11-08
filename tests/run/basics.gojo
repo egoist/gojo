@@ -1,39 +1,39 @@
 use std/math
 
 struct Config {
-    name String
-    port int = 8080
-    proxy ?String
+    name: String
+    port: int = 8080
+    proxy: ?String
 }
 
 enum Shape {
-    Circle(r f64)
-    Rect(w f64, h f64)
+    Circle(r: f64)
+    Rect(w: f64, h: f64)
 }
 
 enum Level { Debug, Info, Warn, Error }
 
 copy struct Point {
-    x, y int
+    x: int, y: int
 
-    fn add(self, o Point) Point {
+    fn add(self, o: Point) -> Point {
         return Point{x: self.x + o.x, y: self.y + o.y}
     }
 
-    fn scale(self inout, k int) {
+    fn scale(inout self, k: int) {
         self.x *= k
         self.y *= k
     }
 }
 
-fn area(s Shape) f64 {
+fn area(s: Shape) -> f64 {
     return match s {
         Circle(r) => math.Pi * r * r
         Rect(w, h) => w * h
     }
 }
 
-fn levelName(l Level) str {
+fn levelName(l: Level) -> str {
     return match l {
         .Debug => "debug"
         .Info => "info"
@@ -42,11 +42,11 @@ fn levelName(l Level) str {
     }
 }
 
-fn log(l Level, msg str) {
+fn log(l: Level, msg: str) {
     println("[" + levelName(l) + "]", msg)
 }
 
-fn classify(n int) str {
+fn classify(n: int) -> str {
     return match n {
         0 => "zero"
         1..=9 => "small"
@@ -75,11 +75,11 @@ fn main() {
         hits += i
     }
     var j = 0
-    for j < 5 {
+    while j < 5 {
         j += 1
     }
     var k = 0
-    for {
+    loop {
         k += 1
         if k == 3 {
             break
@@ -101,13 +101,13 @@ fn main() {
     sorted.sort()
     println(sorted)
 
-    let opt ?int = none
+    let opt: ?int = none
     if let v = opt {
         println("has", v)
     } else {
         println("empty")
     }
-    let o2 ?int = 5
+    let o2: ?int = 5
     if let v = o2 {
         println("has", v)
     }

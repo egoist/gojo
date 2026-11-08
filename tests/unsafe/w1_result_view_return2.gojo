@@ -1,4 +1,4 @@
-fn get() str ! String {
+fn get() -> str ! String {
     let s = "abc".toString()
     return s.asStr()
 }

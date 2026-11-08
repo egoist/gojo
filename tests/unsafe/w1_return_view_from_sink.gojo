@@ -1,4 +1,4 @@
-fn f(s sink String) str {
+fn f(s: sink String) -> str {
     return s.asStr()
 }
 fn main() {

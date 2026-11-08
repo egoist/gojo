@@ -1,6 +1,6 @@
 // each iteration's `lo` is a new value: ranges of different iterations can't
 // be compared, and here they overlap
-fn fill(v inout []int, x int) {
+fn fill(v: inout []int, x: int) {
     for i in 0..v.len() {
         v[i] = x
     }

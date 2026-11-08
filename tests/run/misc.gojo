@@ -1,28 +1,28 @@
 use std/{strings, os}
 
-struct Address { city String, zip ?String }
-struct Person { name String, age int, addr ?Address }
+struct Address { city: String, zip: ?String }
+struct Person { name: String, age: int, addr: ?Address }
 
 struct Grid {
-    cells [3][3]int
+    cells: [3][3]int
 }
 
 enum Token {
-    Num(v int)
-    Op(c rune)
+    Num(v: int)
+    Op(c: rune)
     LParen
     RParen
 }
 
-fn tokenize(s str) Vec[Token] {
+fn tokenize(s: str) -> Vec[Token] {
     var out = Vec[Token]{}
     var i = 0
     let b = s.bytes()
-    for i < b.len {
+    while i < b.len{
         let c = b[i]
         if c >= '0' && c <= '9' {
             var n = 0
-            for i < b.len && b[i] >= '0' && b[i] <= '9' {
+            while i < b.len && b[i] >= '0' && b[i] <= '9' {
                 n = n * 10 + int(b[i] - '0')
                 i += 1
             }
@@ -41,9 +41,9 @@ fn tokenize(s str) Vec[Token] {
 }
 
 // recursive-descent evaluator over a token slice
-fn expr(ts []Token, pos inout int) int {
+fn expr(ts: []Token, pos: inout int) -> int {
     var v = term(ts, &pos)
-    for pos < ts.len {
+    while pos < ts.len{
         match ts[pos] {
             Op(c) if c == '+' || c == '-' => {
                 pos += 1
@@ -56,9 +56,9 @@ fn expr(ts []Token, pos inout int) int {
     return v
 }
 
-fn term(ts []Token, pos inout int) int {
+fn term(ts: []Token, pos: inout int) -> int {
     var v = atom(ts, &pos)
-    for pos < ts.len {
+    while pos < ts.len{
         match ts[pos] {
             Op(c) if c == '*' || c == '/' => {
                 pos += 1
@@ -71,7 +71,7 @@ fn term(ts []Token, pos inout int) int {
     return v
 }
 
-fn atom(ts []Token, pos inout int) int {
+fn atom(ts: []Token, pos: inout int) -> int {
     let t = ts[pos]
     pos += 1
     return match t {
@@ -86,16 +86,16 @@ fn atom(ts []Token, pos inout int) int {
     }
 }
 
-fn fib(n int) int {
+fn fib(n: int) -> int {
     if n < 2 {
         return n
     }
     return fib(n - 1) + fib(n - 2)
 }
 
-fn counter() fn() int {
+fn counter() -> fn() -> int {
     let c = Cell(0)
-    let shared = rc(c)
+    let shared = Rc(c)
     return () => {
         shared.set(shared.get() + 1)
         return shared.get()
@@ -149,7 +149,7 @@ fn main() {
     _ = next()
     println("counter", next())
 
-    var x u32 = 1
+    var x: u32 = 1
     x = x << 31
     println(x, x >> 30, 0xff & 0x0f, 5 ^ 3, ~0)
     println(i64(x) * 2, f64(7) / 2.0, int(3.99), u8('A'))

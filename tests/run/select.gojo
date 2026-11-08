@@ -1,7 +1,7 @@
 // `select` arms on tasks, timers and cancellation, and guards.
 use std/{time, task}
 
-fn slow(ms int, v int) int {
+fn slow(ms: int, v: int) -> int {
     time.sleep(ms * time.millisecond)
     return v
 }
@@ -23,13 +23,13 @@ fn main() {
         }
     }
     // timers
-    let never = chan[int]()
+    let never = Chan[int]()
     select {
         let v = <-never.rx => println("got", v)
         time.after(2 * time.millisecond) => println("timed out")
     }
     // guards: the arm is left out
-    let ch = chan[int](1)
+    let ch = Chan[int](1)
     ch.tx <- 7
     var allow = false
     select {

@@ -1,5 +1,5 @@
-fn take(s sink String) {}
-fn f() String {
+fn take(s: sink String) {}
+fn f() -> String {
     let s = "abcdefghijklmnopqrstuvwxyz0123456789".toString()
     defer take(s)
     return s

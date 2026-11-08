@@ -1,13 +1,13 @@
 // Tasks may hold ranges of one Vec only when the checker can see they don't
 // overlap: constants and immutable locals plus constants.
-fn fill(v inout []int, x int) {
+fn fill(v: inout []int, x: int) {
     for e in &v {
         e = x
     }
 }
 
 // an inout slice may be re-sliced, but not pointed at other elements
-fn retarget(v inout []int, other []int) {
+fn retarget(v: inout []int, other: []int) {
     v = v[1..]
     v[0] = 1
     v = other

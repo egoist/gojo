@@ -3,16 +3,16 @@
 use std/{fmt, math, task, time}
 
 struct P {
-    x f64
-    name String
+    x: f64
+    name: String
 }
 
-fn slowSquare(x int) int {
+fn slowSquare(x: int) -> int {
     time.sleep(time.millisecond)
     return x * x
 }
 
-fn check(x int) int ! String {
+fn check(x: int) -> int ! String {
     if x == 5 {
         return err(fmt.sprint("bad", x))
     }
@@ -20,7 +20,7 @@ fn check(x int) int ! String {
     return x
 }
 
-fn fetch(name str, ms int, fail bool) String ! String {
+fn fetch(name: str, ms: int, fail: bool) -> String ! String {
     time.sleep(ms * time.millisecond)
     if fail {
         return err(String(name) + " failed")
@@ -29,7 +29,7 @@ fn fetch(name str, ms int, fail bool) String ! String {
 }
 
 // any number of tasks may call a `send fn` at once
-fn twice(f send fn(int) int, xs []int) Vec[int] {
+fn twice(f: send fn(int) -> int, xs: []int) -> Vec[int] {
     return task.map(xs, 0, (x) => f(f(x)))
 }
 

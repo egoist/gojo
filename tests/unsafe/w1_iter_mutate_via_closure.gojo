@@ -1,4 +1,4 @@
-fn run(f fn()) {
+fn run(f: fn()) {
     f()
 }
 fn main() {

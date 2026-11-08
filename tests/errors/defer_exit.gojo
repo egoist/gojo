@@ -1,19 +1,19 @@
 // Deferred code runs while the function is already leaving: it can't redirect that.
-fn g() int ! String { return 1 }
+fn g() -> int ! String { return 1 }
 
-fn ret() int {
+fn ret() -> int {
     defer { return 1 }
     // error: cannot `return` from a defer
     return 2
 }
 
-fn tried() int ! String {
+fn tried() -> int ! String {
     defer { _ = try g() }
     // error: cannot use `try` in a defer
     return 2
 }
 
-fn rolled() int ! String {
+fn rolled() -> int ! String {
     errdefer { return 1 }
     return 2
 }

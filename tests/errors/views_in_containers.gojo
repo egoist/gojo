@@ -1,5 +1,5 @@
-struct Stack[T any] { items Vec[T] }
-fn wrap[T any](x T) Vec[T] {
+struct Stack[T] { items: Vec[T] }
+fn wrap[T](x: T) -> Vec[T] {
     var v = Vec[T]{}
     v.push(x)
     return v

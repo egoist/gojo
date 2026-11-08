@@ -1,5 +1,5 @@
-struct User { name String }
-fn rename(u inout User) { u.name = "x".toString() }
+struct User { name: String }
+fn rename(u: inout User) { u.name = "x".toString() }
 fn main() {
     var u = User{name: "a".toString()}
     rename(u)

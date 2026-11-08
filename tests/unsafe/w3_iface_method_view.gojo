@@ -1,14 +1,14 @@
 interface Named {
-    fn name(self) str
+    fn name(self) -> str
 }
 struct P {
-    s String
+    s: String
 
-    fn name(self) str {
+    fn name(self) -> str {
         return self.s.asStr()
     }
 }
-fn get(n Named) str {
+fn get(n: Named) -> str {
     return n.name()
 }
 fn main() {

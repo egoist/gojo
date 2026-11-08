@@ -1,5 +1,5 @@
 fn main() {
-    let ch = chan[String](1)
+    let ch = Chan[String](1)
     var s = "abc".toString()
     select {
         ch.tx <- s => println("sent")

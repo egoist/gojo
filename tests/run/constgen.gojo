@@ -1,19 +1,19 @@
 // Integer type parameters: sizes checked at compile time.
-copy struct Mat[R int, C int] {
-    data [R][C]f64
+copy struct Mat[R: int, C: int] {
+    data: [R][C]f64
 
-    fn rows(self) int {
+    fn rows(self) -> int {
         return R
     }
 
-    fn cols(self) int {
+    fn cols(self) -> int {
         return C
     }
 }
 
 extend Mat[R, K] {
-    fn mul[C int](self, b Mat[K, C]) Mat[R, C] {
-        var data [R][C]f64
+    fn mul[C: int](self, b: Mat[K, C]) -> Mat[R, C] {
+        var data: [R][C]f64
         for i in 0..R {
             for j in 0..C {
                 var s = 0.0
@@ -27,15 +27,15 @@ extend Mat[R, K] {
     }
 }
 
-fn identity[N int]() Mat[N, N] {
-    var data [N][N]f64
+fn identity[N: int]() -> Mat[N, N] {
+    var data: [N][N]f64
     for i in 0..N {
         data[i][i] = 1.0
     }
     return Mat[N, N]{data: data}
 }
 
-fn sum[N int](xs [N]int) int {
+fn sum[N: int](xs: [N]int) -> int {
     var t = 0
     for x in xs {
         t += x
@@ -48,8 +48,8 @@ fn main() {
     let b = Mat[3, 2]{data: [[7.0, 8.0], [9.0, 10.0], [11.0, 12.0]]}
     let c = a.mul(b)
     println(c.rows(), c.cols(), c.data)
-    let i3 Mat[3, 3] = identity()
+    let i3: Mat[3, 3] = identity()
     println(a.mul(i3).data == a.data)
-    let xs [4]int = [1, 2, 3, 4]
+    let xs: [4]int = [1, 2, 3, 4]
     println(sum(xs), xs.len)
 }

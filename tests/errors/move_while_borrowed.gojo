@@ -1,4 +1,4 @@
-fn take(v sink Vec[int]) {}
+fn take(v: sink Vec[int]) {}
 fn main() {
     let v = [1, 2, 3]
     for x in v {

@@ -157,9 +157,10 @@ impl Checker {
     pub fn if_let(&mut self, cx: &mut FnCx, pat: &Pattern, scrut: &Expr, then: &ast::Block, else_: Option<&Expr>, ex: Expect, sp: Span) -> TExpr {
         let (s, owned, mutable) = self.scrutinee(cx, scrut);
         let sty = self.resolve(cx, &s.ty);
+        let orig_kind = pat.kind.clone();
         // `if let v = opt` means `if let some(v) = opt`
         let pat = match (&pat.kind, &sty) {
-            (PatternKind::Ident(_), Ty::Option(_)) => Pattern { kind: PatternKind::Path(vec!["some".into()], Some(vec![pat.clone()])), span: pat.span },
+            (PatternKind::Ident(_) | PatternKind::Tuple(_), Ty::Option(_)) => Pattern { kind: PatternKind::Path(vec!["some".into()], Some(vec![pat.clone()])), span: pat.span },
             _ => pat.clone(),
         };
         let aid = cx.n_arms;
@@ -168,7 +169,13 @@ impl Checker {
         self.push_scope(cx);
         let mut binds = vec![];
         let bm = BindMode { mutable, arm: if owned && !self.is_copy(&sty) { Some(aid) } else { None }, root: self.scrut_root(cx, &s) };
+        if let (PatternKind::Ident(n), ExprKind::Ident(m)) = (&orig_kind, &scrut.kind) {
+            if n == m {
+                cx.shadow_ok = Some(n.clone());
+            }
+        }
         let tp = self.check_pat(cx, &pat, &sty, bm, &mut binds);
+        cx.shadow_ok = None;
         let then_b = self.block(cx, then, ex.clone());
         self.pop_scope(cx);
         let consuming = cx.arm_consuming[aid as usize];
@@ -240,6 +247,19 @@ impl Checker {
         let sp = p.span;
         match &p.kind {
             PatternKind::Wild => TPat::Wild,
+            PatternKind::Tuple(ps) => {
+                let fts = match &ty {
+                    Ty::Adt(d, args) if self.prog.def(*d).tuple => self.prog.field_tys(*d, args),
+                    _ => vec![],
+                };
+                if fts.len() != ps.len() {
+                    let s = self.prog.show(&ty);
+                    self.err(sp, format!("this pattern has {} elements, but the value is a `{}`", ps.len(), s));
+                    self.declare_pat_names(cx, p, binds);
+                    return TPat::Wild;
+                }
+                TPat::Tuple(ps.iter().zip(fts).map(|(q, (_, t))| self.check_pat(cx, q, &t, bm, binds)).collect())
+            }
             PatternKind::Ident(n) => {
                 if let Ty::Adt(d, _) = &ty {
                     if let Some(vi) = self.prog.def(*d).variants().iter().position(|v| v.name == *n) {
@@ -413,7 +433,7 @@ impl Checker {
                 cx.used[id as usize] = true;
                 binds.push(id);
             }
-            PatternKind::Path(_, Some(s)) | PatternKind::DotVariant(_, Some(s)) | PatternKind::Or(s) => {
+            PatternKind::Path(_, Some(s)) | PatternKind::DotVariant(_, Some(s)) | PatternKind::Or(s) | PatternKind::Tuple(s) => {
                 for x in s {
                     self.declare_pat_names(cx, x, binds)
                 }
@@ -491,6 +511,7 @@ impl Checker {
             Ty::Bool => Some(vec![(Ctor::Bool(true), vec![], "true".into()), (Ctor::Bool(false), vec![], "false".into())]),
             Ty::Option(t) => Some(vec![(Ctor::Some, vec![(**t).clone()], "some".into()), (Ctor::None, vec![], "none".into())]),
             Ty::Result(a, b) => Some(vec![(Ctor::Ok, vec![(**a).clone()], "ok".into()), (Ctor::Err, vec![(**b).clone()], "err".into())]),
+            Ty::Adt(d, args) if self.prog.def(*d).tuple => Some(vec![(Ctor::Variant(0), self.prog.field_tys(*d, args).into_iter().map(|f| f.1).collect(), String::new())]),
             Ty::Adt(d, args) if !self.prog.def(*d).is_struct() => {
                 let def = self.prog.def(*d);
                 Some(def.variants().iter().enumerate().map(|(i, v)| (Ctor::Variant(i), self.prog.variant_tys(*d, args, i).into_iter().map(|f| f.1).collect(), v.name.clone())).collect())
@@ -583,6 +604,7 @@ fn head_ctor(p: &TPat) -> Option<Ctor> {
         TPat::Ok(_) => Some(Ctor::Ok),
         TPat::Err(_) => Some(Ctor::Err),
         TPat::Variant { variant, .. } => Some(Ctor::Variant(*variant)),
+        TPat::Tuple(_) => Some(Ctor::Variant(0)),
         _ => None,
     }
 }
@@ -594,6 +616,7 @@ fn spec(p: &TPat, c: &Ctor, arity: usize) -> Option<Vec<TPat>> {
         (TPat::Some(x), Ctor::Some) | (TPat::Ok(x), Ctor::Ok) | (TPat::Err(x), Ctor::Err) => Some(vec![(**x).clone()]),
         (TPat::None, Ctor::None) => Some(vec![]),
         (TPat::Variant { variant, subs, .. }, Ctor::Variant(v)) if variant == v => Some(subs.clone()),
+        (TPat::Tuple(subs), Ctor::Variant(0)) => Some(subs.clone()),
         _ => None,
     }
 }

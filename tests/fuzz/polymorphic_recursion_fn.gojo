@@ -1,4 +1,4 @@
-fn grow[T](x sink T, n int) int {
+fn grow[T](x: sink T, n: int) -> int {
     if n == 0 {
         return 0
     }

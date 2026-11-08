@@ -1,10 +1,10 @@
 // bufio: lines, delimiters and buffered writes, over files and memory.
 use std/{bufio, fmt, io, os}
 
-fn lines(text str) ! io.Error {
+fn lines(text: str) ! io.Error {
     var r = bufio.reader(io.textReader(text))
     var n = 0
-    for {
+    loop {
         let line = try r.readLine() ?? break
         n += 1
         println(n, "[" + line + "]")
@@ -26,8 +26,8 @@ fn main() {
     }
     var r = bufio.reader(os.open(path).unwrap())
     var count = 0
-    var last = "".toString()
-    for {
+    var last: String = ""
+    loop {
         let line = r.readLine().unwrap() ?? break
         count += 1
         last = line
@@ -40,7 +40,7 @@ fn main() {
     w.flush() catch e { println(e.message()) }
 
     var csv = bufio.reader(io.textReader("a,bb,,ccc"))
-    for {
+    loop {
         let field = csv.readUntil(44).unwrap() ?? break
         print(field.len(), " ")
     }

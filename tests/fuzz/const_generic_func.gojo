@@ -1,14 +1,14 @@
 fn bumpAll() {
 }
 enum State {
-fn start() {
-}
-fn advance() {
-}
-fn isDone() {
-}
+    fn start() {
+    }
+    fn advance() {
+    }
+    fn isDone() {
+    }
 }
 const Limit = max
 struct Settings {
-retries int = Limit
+    retries: int = Limit
 }

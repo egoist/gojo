@@ -1,4 +1,4 @@
-fn helper(self) int {
+fn helper(self) -> int {
     return 1
 }
 // error: `self` is only allowed in methods

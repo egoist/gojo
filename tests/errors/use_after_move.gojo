@@ -1,4 +1,4 @@
-fn take(s sink String) {}
+fn take(s: sink String) {}
 fn main() {
     let s = "hello".toString()
     take(s)

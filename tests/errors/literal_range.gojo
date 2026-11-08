@@ -5,7 +5,7 @@ fn main() {
     // error: integer literal 340282366920938463463374607431768211455 is too large for any integer type
     let b = -170141183460469231731687303715884105728
     // error: integer literal -170141183460469231731687303715884105728 is too large for any integer type
-    let c u64 = 18446744073709551615
+    let c: u64 = 18446744073709551615
     let d = -9223372036854775808
     let e = 18446744073709551616
     // error: integer literal 18446744073709551616 is too large for any integer type

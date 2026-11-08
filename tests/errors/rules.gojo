@@ -1,7 +1,7 @@
 // Smaller rules from docs/spec.md that have no test file of their own.
 enum Color { Red, Green }
 
-fn guarded(c Color) int {
+fn guarded(c: Color) -> int {
     return match c {
         .Red => 1
         .Green if true => 2
@@ -10,8 +10,8 @@ fn guarded(c Color) int {
 }
 
 struct NoHash {
-    x int
-    fn equal(self, other NoHash) bool { return self.x == other.x }
+    x: int
+    fn equal(self, other: NoHash) -> bool { return self.x == other.x }
 }
 
 fn keys() {
@@ -22,36 +22,36 @@ fn keys() {
     println(a, b)
 }
 
-struct Inner { name String }
-struct Outer { inner ?Box[Inner] }
+struct Inner { name: String }
+struct Outer { inner: ?Box[Inner] }
 
-fn optionalChain(o Outer) {
+fn optionalChain(o: Outer) {
     let n = o.inner?.name
     // error: `?.` can only read copyable members here
     println(n)
 }
 
 interface Bumper {
-    fn bump(self inout) int
+    fn bump(inout self) -> int
 }
 
 interface Reading {
-    fn bump(self) int
+    fn bump(self) -> int
 }
 
 // changes its receiver where the interface only lends it
 struct WrongMode {
-    n int
-    fn bump(self inout) int { return self.n }
+    n: int
+    fn bump(inout self) -> int { return self.n }
 }
 
 struct GenericMethod {
-    fn bump[T any](self inout) int { return 1 }
+    fn bump[T](inout self) -> int { return 1 }
 }
 
-fn useBumper(b inout Bumper) int { return b.bump() }
+fn useBumper(b: inout Bumper) -> int { return b.bump() }
 
-fn useReading(b Reading) int { return b.bump() }
+fn useReading(b: Reading) -> int { return b.bump() }
 
 fn notInout() {
     var w = WrongMode{n: 1}
@@ -62,7 +62,7 @@ fn notInout() {
     // error: method `bump` has type parameters and cannot satisfy an interface
 }
 
-fn noResult() int {
+fn noResult() -> int {
     errdefer println("x")
     // error: `errdefer` is only allowed in functions that return a result
     return 1

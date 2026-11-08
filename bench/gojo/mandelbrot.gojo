@@ -10,7 +10,7 @@ fn main() {
             var zi = 0.0
             var i = 0
             var escaped = false
-            for i < 50 {
+            while i < 50 {
                 let tr = zr * zr - zi * zi + cr
                 zi = 2.0 * zr * zi + ci
                 zr = tr

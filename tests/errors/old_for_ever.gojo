@@ -1,0 +1,6 @@
+fn main() {
+    for {
+        // error: a loop without a condition is `loop { }`
+        break
+    }
+}

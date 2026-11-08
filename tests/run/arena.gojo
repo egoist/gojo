@@ -1,6 +1,6 @@
 struct Node {
-    name String
-    edges Vec[Id[Node]]
+    name: String
+    edges: Vec[Id[Node]]
 }
 
 fn main() {

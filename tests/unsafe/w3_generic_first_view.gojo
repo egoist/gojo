@@ -1,4 +1,4 @@
-fn pickOne[T copy](a T, b T, first bool) T {
+fn pickOne[T: copy](a: T, b: T, first: bool) -> T {
     if first {
         return a
     }

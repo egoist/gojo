@@ -1,4 +1,4 @@
-fn head(v inout Vec[int]) []int {
+fn head(v: inout Vec[int]) -> []int {
     {
         defer v.push(9)
         return v[0..1]

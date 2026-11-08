@@ -1,8 +1,8 @@
 struct P {
-    s ?String
+    s: ?String
 }
-fn take(s sink String) {}
-fn f(p P) {
+fn take(s: sink String) {}
+fn f(p: P) {
     if let x = p.s {
         take(x)
     }

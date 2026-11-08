@@ -1,6 +1,6 @@
 // A view into data guarded by a lock must not outlive the `with` block: the
 // lock is released at its end.
-fn peek(mu Mutex[String]) str {
+fn peek(mu: Mutex[String]) -> str {
     with s = mu.lock() {
         return s.asStr()
         // error: a view into data locked by `mu` cannot leave the `with` block

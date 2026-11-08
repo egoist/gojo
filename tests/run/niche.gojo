@@ -1,10 +1,10 @@
-// ?Box[T], ?rc[T], ?arc[T] and ?weak[T] are stored as a single pointer.
+// ?Box[T], ?Rc[T], ?Arc[T] and ?Weak[T] are stored as a single pointer.
 struct Node {
-    value int
-    next ?Box[Node]
+    value: int
+    next: ?Box[Node]
 }
 
-fn length(n Node) int {
+fn length(n: Node) -> int {
     return match n.next {
         some(rest) => 1 + length(rest)
         none => 1
@@ -30,11 +30,11 @@ fn main() {
 
     var m = Map[String, Box[int]]{}
     m["a"] = Box(1)
-    let old = m.insert("a".toString(), Box(2))
+    let old = m.insert("a", Box(2))
     let gone = m.remove("a")
     println(old, gone, m.remove("a"))
 
-    let ch = chan[?Box[int]](2)
+    let ch = Chan[?Box[int]](2)
     ch.tx <- Box(3)
     ch.tx <- none
     drop(ch.tx)
@@ -44,9 +44,9 @@ fn main() {
     let r = <-ch.rx
     println("closed", r)
 
-    let shared = rc(10)
+    let shared = Rc(10)
     let w = shared.downgrade()
-    let up ?rc[int] = w.upgrade()
-    let opt ?arc[String] = arc("hi".toString())
-    println(up, opt, opt ?? arc("no".toString()))
+    let up: ?Rc[int] = w.upgrade()
+    let opt: ?Arc[String] = Arc("hi")
+    println(up, opt, opt ?? Arc("no"))
 }

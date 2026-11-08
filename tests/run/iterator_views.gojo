@@ -1,13 +1,13 @@
 // A cursor whose `next` yields parts of the collection: elements can outlive the
 // iteration, like those of a `Vec`.
 struct Ring {
-    items Vec[String]
+    items: Vec[String]
 
-    fn cursor(self) int {
+    fn cursor(self) -> int {
         return 0
     }
 
-    fn next(self, c inout int) yield ?&String {
+    fn next(self, c: inout int) yield ?&String {
         if c >= self.items.len() {
             yield none
         }
@@ -17,7 +17,7 @@ struct Ring {
 }
 
 fn main() {
-    let r = Ring{items: ["a".toString(), "bbb".toString(), "cc".toString()]}
+    let r = Ring{items: ["a", "bbb", "cc"]}
     var best = ""
     for s in r {
         if s.len() > best.len() {

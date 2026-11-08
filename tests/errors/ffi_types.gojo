@@ -1,22 +1,22 @@
 // Gojo-only representations can't cross a C call.
 extern "C" {
-    fn takesFn(f fn(i32) i32)
-    // error: `fn(i32) i32` has no C representation
-    fn takesString(s String)
+    fn takesFn(f: fn(i32) -> i32)
+    // error: `fn(i32) -> i32` has no C representation
+    fn takesString(s: String)
     // error: `String` has no C representation
-    fn takesStr(s str)
+    fn takesStr(s: str)
     // error: `str` has no C representation
-    fn returnsVec() Vec[int]
+    fn returnsVec() -> Vec[int]
     // error: `Vec[int]` has no C representation
-    fn takesOpt(o ?int)
+    fn takesOpt(o: ?int)
     // error: `?int` has no C representation
 }
 
 struct Named {
-    name String
+    name: String
 }
 
-extern "C" fn exported(n Named) {
+extern "C" fn exported(n: Named) {
     // error: `Named` has no C representation
 }
 

@@ -97,6 +97,16 @@ impl Diag {
     }
 }
 
+/// Tuple elements are fields `_0`, `_1`, ... inside; messages show `t.0` and
+/// "element 0".
+fn tuple_names(m: &str) -> String {
+    let mut s = m.to_string();
+    for i in 0..6 {
+        s = s.replace(&format!("field `_{}`", i), &format!("element `{}`", i)).replace(&format!("._{}", i), &format!(".{}", i));
+    }
+    s
+}
+
 pub fn render(sm: &SourceMap, d: &Diag, color: bool) -> String {
     let (red, blue, bold, reset) = if color {
         ("\x1b[31;1m", "\x1b[34;1m", "\x1b[1m", "\x1b[0m")
@@ -106,10 +116,11 @@ pub fn render(sm: &SourceMap, d: &Diag, color: bool) -> String {
     let mut out = String::new();
     let f = sm.file(d.span.file);
     let (line, col) = f.line_col(d.span.lo);
-    let _ = writeln!(out, "{red}error{reset}{bold}: {}{reset}", d.msg);
+    let _ = writeln!(out, "{red}error{reset}{bold}: {}{reset}", tuple_names(&d.msg));
     let _ = writeln!(out, "  {blue}-->{reset} {}:{}:{}", f.path, line, col);
     snippet(&mut out, sm, d.span, blue, red, reset);
     for (sp, n) in &d.notes {
+        let n = tuple_names(n);
         match sp {
             Some(sp) => {
                 let nf = sm.file(sp.file);

@@ -1,5 +1,5 @@
-fn take(s sink String) {}
-fn f(c bool) {
+fn take(s: sink String) {}
+fn f(c: bool) {
     let s = "x".toString()
     if c {
         take(s)

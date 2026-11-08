@@ -11,6 +11,9 @@ pub enum Tok {
     Int(u128),
     Float(f64),
     Str(String),
+    /// A string with `${expr}` interpolations: literal text and the tokens of
+    /// each embedded expression.
+    Interp(Vec<IPart>),
     Char(u32),
     Kw(Kw),
     P(&'static str),
@@ -18,17 +21,34 @@ pub enum Tok {
     Eof,
 }
 
+#[derive(Clone, Debug)]
+pub enum IPart {
+    Lit(String),
+    /// `${expr}` or `${expr:spec}`; `toks` ends with `Eof`.
+    Expr { toks: Vec<Token>, spec: Option<String>, span: Span },
+}
+
+impl PartialEq for IPart {
+    fn eq(&self, o: &IPart) -> bool {
+        match (self, o) {
+            (IPart::Lit(a), IPart::Lit(b)) => a == b,
+            (IPart::Expr { toks: a, spec: s, .. }, IPart::Expr { toks: b, spec: t, .. }) => a == b && s == t,
+            _ => false,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kw {
     Use, Extend, Pub, Func, Struct, Enum, Interface, Type, Copy, Let, Var, If, Else, For,
     In, Match, Return, Break, Continue, Defer, ErrDefer, Go, Try, Catch, With, Yield, Unsafe, Extern,
-    None, True, False, Inout, Sink, Where, Test, Const, Chan, Select, Scope, Isolate,
+    None, True, False, Inout, Sink, Where, Test, Const, Select, Scope, Isolate, While, Loop,
 }
 
 const KEYWORDS: &[&str] = &[
     "use", "extend", "pub", "fn", "struct", "enum", "interface", "type", "copy", "let", "var", "if", "else", "for", "in", "match", "return", "break",
     "continue", "defer", "errdefer", "go", "try", "catch", "with", "yield", "unsafe", "extern", "none", "true", "false", "inout", "sink", "where", "test",
-    "const", "chan", "select", "scope", "isolate",
+    "const", "select", "scope", "isolate", "while", "loop",
 ];
 
 impl Kw {
@@ -77,10 +97,11 @@ fn keyword(s: &str) -> Option<Kw> {
         "where" => Where,
         "test" => Test,
         "const" => Const,
-        "chan" => Chan,
         "select" => Select,
         "scope" => Scope,
         "isolate" => Isolate,
+        "while" => While,
+        "loop" => Loop,
         _ => return Option::None,
     })
 }
@@ -93,6 +114,14 @@ pub struct Token {
     pub nl_before: bool,
 }
 
+/// Tokens compare by kind and text only (interpolated strings hold tokens,
+/// and the formatter compares token streams of differently laid out files).
+impl PartialEq for Token {
+    fn eq(&self, o: &Token) -> bool {
+        self.tok == o.tok
+    }
+}
+
 const PUNCTS: &[&str] = &[
     "<<=", ">>=", "+%=", "-%=", "*%=", "..=", "...", "&&", "||", "==", "!=", "<=", ">=", "<<", ">>", "+=",
     "-=", "*=", "/=", "%=", "&=", "|=", "^=", "=>", "->", "??", "?.", "..", "<-", "+%", "-%", "*%",
@@ -100,9 +129,27 @@ const PUNCTS: &[&str] = &[
     "%", "&", "|", "^", "~", "@", "#",
 ];
 
+/// `PUNCTS` by first byte, longest first (as `PUNCTS` lists them).
+fn puncts() -> &'static [Vec<&'static str>] {
+    static T: std::sync::OnceLock<Vec<Vec<&'static str>>> = std::sync::OnceLock::new();
+    T.get_or_init(|| {
+        let mut t = vec![vec![]; 256];
+        for p in PUNCTS {
+            t[p.as_bytes()[0] as usize].push(*p);
+        }
+        t
+    })
+}
+
 pub fn lex(file: u32, src: &str) -> Result<Vec<Token>, Diag> {
+    lex_from(file, src, 0, false).map(|(t, _)| t)
+}
+
+/// Lexes from byte `i`. In an interpolation (`interp`), stops at the `}` or
+/// format `:` that ends it, at bracket level 0, and returns its position.
+fn lex_from(file: u32, src: &str, mut i: usize, interp: bool) -> Result<(Vec<Token>, usize), Diag> {
     let b = src.as_bytes();
-    let mut i = 0usize;
+    let open = i;
     let mut out: Vec<Token> = Vec::new();
     let mut stack: Vec<u8> = Vec::new();
     let mut nl_before = false;
@@ -110,7 +157,7 @@ pub fn lex(file: u32, src: &str) -> Result<Vec<Token>, Diag> {
 
     fn ends_stmt(t: &Tok) -> bool {
         match t {
-            Tok::Ident(_) | Tok::Int(_) | Tok::Float(_) | Tok::Str(_) | Tok::Char(_) => true,
+            Tok::Ident(_) | Tok::Int(_) | Tok::Float(_) | Tok::Str(_) | Tok::Interp(_) | Tok::Char(_) => true,
             Tok::Kw(k) => matches!(k, Kw::Return | Kw::Break | Kw::Continue | Kw::True | Kw::False | Kw::None),
             Tok::P(p) => matches!(*p, ")" | "]" | "}"),
             _ => false,
@@ -133,6 +180,16 @@ pub fn lex(file: u32, src: &str) -> Result<Vec<Token>, Diag> {
 
     while i < b.len() {
         let c = b[i];
+        if interp && stack.is_empty() && (c == b'}' || c == b':') {
+            if out.is_empty() {
+                return Err(Diag::new(sp(open, i + 1), "empty interpolation: write an expression inside `${...}`"));
+            }
+            out.push(Token { tok: Tok::Eof, span: sp(i, i), nl_before: false });
+            return Ok((out, i));
+        }
+        if interp && c == b'\n' {
+            return Err(Diag::new(sp(open.saturating_sub(2), i), "unterminated interpolation: `${` needs a `}` on the same line"));
+        }
         if c == b'\n' {
             newline!(i);
             i += 1;
@@ -177,11 +234,18 @@ pub fn lex(file: u32, src: &str) -> Result<Vec<Token>, Diag> {
                 Some(k) => Tok::Kw(k),
                 None => Tok::Ident(s.to_string()),
             }
+        } else if c.is_ascii_digit() && matches!(out.last().map(|t| &t.tok), Some(Tok::P("."))) {
+            // `t.0.1`: tuple elements, not the float `0.1`
+            while i < b.len() && b[i].is_ascii_digit() {
+                i += 1;
+            }
+            Tok::Int(src[start..i].parse::<u128>().map_err(|_| Diag::new(sp(start, i), "tuple index too large"))?)
         } else if c.is_ascii_digit() {
             lex_number(src, &mut i, file)?
         } else if c == b'"' {
             i += 1;
             let mut s = String::new();
+            let mut parts: Vec<IPart> = vec![];
             loop {
                 if i >= b.len() || b[i] == b'\n' {
                     return Err(Diag::new(sp(start, i), "unterminated string literal"));
@@ -189,6 +253,28 @@ pub fn lex(file: u32, src: &str) -> Result<Vec<Token>, Diag> {
                 if b[i] == b'"' {
                     i += 1;
                     break;
+                }
+                if b[i] == b'$' && i + 1 < b.len() && b[i + 1] == b'{' {
+                    let lo = i;
+                    let (toks, end) = lex_from(file, src, i + 2, true)?;
+                    i = end;
+                    let mut spec = None;
+                    if b[i] == b':' {
+                        let s0 = i + 1;
+                        while i < b.len() && b[i] != b'}' && b[i] != b'"' && b[i] != b'\n' {
+                            i += 1;
+                        }
+                        if i >= b.len() || b[i] != b'}' {
+                            return Err(Diag::new(sp(lo, i), "unterminated interpolation: expected `}` after the format"));
+                        }
+                        spec = Some(src[s0..i].to_string());
+                    }
+                    i += 1;
+                    if !s.is_empty() {
+                        parts.push(IPart::Lit(std::mem::take(&mut s)));
+                    }
+                    parts.push(IPart::Expr { toks, spec, span: sp(lo, i) });
+                    continue;
                 }
                 if b[i] == b'\\' {
                     let ch = lex_escape(src, &mut i, file)?;
@@ -199,7 +285,14 @@ pub fn lex(file: u32, src: &str) -> Result<Vec<Token>, Diag> {
                     i += ch.len_utf8();
                 }
             }
-            Tok::Str(s)
+            if parts.is_empty() {
+                Tok::Str(s)
+            } else {
+                if !s.is_empty() {
+                    parts.push(IPart::Lit(s));
+                }
+                Tok::Interp(parts)
+            }
         } else if c == b'`' {
             i += 1;
             let s0 = i;
@@ -230,8 +323,8 @@ pub fn lex(file: u32, src: &str) -> Result<Vec<Token>, Diag> {
             Tok::Char(ch as u32)
         } else {
             let mut found = None;
-            for p in PUNCTS {
-                if src[i..].starts_with(p) {
+            for p in &puncts()[c as usize] {
+                if b[i..].starts_with(p.as_bytes()) {
                     found = Some(*p);
                     break;
                 }
@@ -267,13 +360,16 @@ pub fn lex(file: u32, src: &str) -> Result<Vec<Token>, Diag> {
         out.push(Token { tok, span: sp(start, i), nl_before });
         nl_before = false;
     }
+    if interp {
+        return Err(Diag::new(sp(open.saturating_sub(2), b.len()), "unterminated interpolation: `${` needs a `}`"));
+    }
     if let Some(last) = out.last() {
         if ends_stmt(&last.tok) {
             out.push(Token { tok: Tok::Newline, span: sp(b.len(), b.len()), nl_before: false });
         }
     }
     out.push(Token { tok: Tok::Eof, span: sp(b.len(), b.len()), nl_before: true });
-    Ok(out)
+    Ok((out, b.len()))
 }
 
 fn lex_escape(src: &str, i: &mut usize, file: u32) -> Result<char, Diag> {
@@ -293,6 +389,7 @@ fn lex_escape(src: &str, i: &mut usize, file: u32) -> Result<char, Diag> {
         b'\\' => '\\',
         b'"' => '"',
         b'\'' => '\'',
+        b'$' => '$',
         b'x' => {
             let h = src.get(*i..*i + 2).ok_or_else(|| Diag::new(Span::new(file, start as u32, *i as u32), "bad \\x escape"))?;
             let v = u8::from_str_radix(h, 16).map_err(|_| Diag::new(Span::new(file, start as u32, *i as u32 + 2), "bad \\x escape"))?;

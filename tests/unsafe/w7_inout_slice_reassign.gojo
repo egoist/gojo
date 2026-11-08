@@ -1,6 +1,6 @@
 // pointing an inout slice at other data would let it write a `let` Vec that
 // another task reads
-fn retarget(v inout []int, other []int) {
+fn retarget(v: inout []int, other: []int) {
     v = other
     v[0] = 99
 }

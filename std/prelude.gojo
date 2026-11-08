@@ -12,7 +12,7 @@ pub enum Flow { Continue, Break }
 
 // The built-in error interface, for application-level error handling.
 pub interface error {
-    fn message(self) String
+    fn message(self) -> String
 }
 
 // Numeric types, for generic arithmetic.
@@ -29,56 +29,56 @@ pub interface Integer {
 // atomic and sequentially consistent. Tasks borrow it and call its methods at
 // the same time:
 //
-//   let hits = Atomic.new(0)
+//   let hits = Atomic(0)
 //   par for r in requests { if r.ok { _ = hits.add(1) } }
-pub unsafe send struct Atomic[T Integer] {
-    v T
+pub unsafe send struct Atomic[T: Integer] {
+    v: T
 
-    pub fn new(x T) Atomic[T] {
+    pub fn new(x: T) -> Atomic[T] {
         return Atomic[T]{v: x}
     }
 
     // The value now.
-    pub fn load(self) T
+    pub fn load(self) -> T
 
     // Replaces the value.
-    pub fn store(self, x T)
+    pub fn store(self, x: T)
 
     // Adds `d`, wrapping around on overflow, and gives the new value.
-    pub fn add(self, d T) T
+    pub fn add(self, d: T) -> T
 
     // Subtracts `d`, wrapping around on overflow, and gives the new value.
-    pub fn sub(self, d T) T
+    pub fn sub(self, d: T) -> T
 
     // Replaces the value and gives the old one.
-    pub fn swap(self, x T) T
+    pub fn swap(self, x: T) -> T
 
     // Replaces the value with `new` if it is `old`; true if it did.
-    pub fn compareSwap(self, old T, new T) bool
+    pub fn compareSwap(self, old: T, new: T) -> bool
 
     // A new `Atomic` with the value now.
-    pub fn clone(self) Atomic[T] {
-        return Atomic.new(self.load())
+    pub fn clone(self) -> Atomic[T] {
+        return Atomic(self.load())
     }
 }
 
-fn __rwNew() *u8
-fn __rwFree(l *u8)
+fn __rwNew() -> *u8
+fn __rwFree(l: *u8)
 
 // A lock that many readers may hold at once, or one writer:
 //
-//   let cache = RwLock.new(Map[String, String]{})
+//   let cache = RwLock(Map[String, String]{})
 //   with c = cache.read() { ... }     // shared: other readers too
 //   with c = cache.write() { ... }    // exclusive
 //
 // Like `Mutex.lock`, `read` and `write` are projections: the reference can't
 // leave the block. A writer waiting keeps new readers out, so writers don't
 // starve.
-pub unsafe send struct RwLock[T send] {
-    lk *u8
-    val T
+pub unsafe send struct RwLock[T: send] {
+    lk: *u8
+    val: T
 
-    pub fn new(x sink T) RwLock[T] {
+    pub fn new(x: sink T) -> RwLock[T] {
         return RwLock[T]{lk: __rwNew(), val: x}
     }
 
@@ -89,43 +89,43 @@ pub unsafe send struct RwLock[T send] {
     pub fn write(self) yield inout T
 
     // "RwLock" (the value can't be read without the lock).
-    pub fn toString(self) String {
+    pub fn toString(self) -> String {
         return String("RwLock")
     }
 
-    fn drop(self inout) {
+    fn drop(inout self) {
         __rwFree(self.lk)
     }
 }
 
 // implemented by the compiler / runtime
-fn __panicErr[E any](msg str, e E) never
-fn __strFind(s str, sub str) int
-fn __parseInt(s str, out inout int) bool
-fn __parseFloat(s str, out inout f64) bool
+fn __panicErr[E](msg: str, e: E) -> never
+fn __strFind(s: str, sub: str) -> int
+fn __parseInt(s: str, out: inout int) -> bool
+fn __parseFloat(s: str, out: inout f64) -> bool
 
 // Ends the program with `msg` and the caller's location (exit code 2). Panics
 // cannot be caught; deferred code does not run.
-pub fn panic(msg str) never
+pub fn panic(msg: str) -> never
 // Panics unless `cond` holds.
-pub fn assert(cond bool)
+pub fn assert(cond: bool)
 // Panics unless `a == b`, showing both values.
-pub fn assertEq[T comparable](a T, b T)
+pub fn assertEq[T: comparable](a: T, b: T)
 // Marks code that can't run; panics if it does.
-pub fn unreachable() never
+pub fn unreachable() -> never
 
 // Explicitly end the lifetime of a value.
-pub fn drop[T any](x sink T) {}
+pub fn drop[T](x: sink T) {}
 // Exchanges two places.
-pub fn swap[T any](a inout T, b inout T)
+pub fn swap[T](a: inout T, b: inout T)
 // Puts `value` into `dst` and returns what was there.
-pub fn replace[T any](dst inout T, value sink T) T
+pub fn replace[T](dst: inout T, value: sink T) -> T
 // Takes the value out of `dst`, leaving the type's default (`""`, `0`, `none`,
 // an empty `Vec`...).
-pub fn take[T default](dst inout T) T
+pub fn take[T: default](dst: inout T) -> T
 
 // The smaller of two values (`a` when they are equal).
-pub fn min[T copy + ordered](a T, b T) T {
+pub fn min[T: copy + ordered](a: T, b: T) -> T {
     if a < b {
         return a
     }
@@ -133,7 +133,7 @@ pub fn min[T copy + ordered](a T, b T) T {
 }
 
 // The larger of two values (`a` when they are equal).
-pub fn max[T copy + ordered](a T, b T) T {
+pub fn max[T: copy + ordered](a: T, b: T) -> T {
     if a > b {
         return a
     }
@@ -144,7 +144,7 @@ pub fn max[T copy + ordered](a T, b T) T {
 
 extend ?T {
     // Whether there is a value.
-    pub fn isSome(self) bool {
+    pub fn isSome(self) -> bool {
         return match self {
             none => false
             _ => true
@@ -152,7 +152,7 @@ extend ?T {
     }
 
     // Whether there is no value.
-    pub fn isNone(self) bool {
+    pub fn isNone(self) -> bool {
         return match self {
             none => true
             _ => false
@@ -161,7 +161,7 @@ extend ?T {
 
     // The value; panics on none. Prefer `??`, `if let` or `try` where none can
     // happen.
-    pub fn unwrap(self sink) T {
+    pub fn unwrap(sink self) -> T {
         return match self {
             some(v) => v
             none => panic("unwrap() called on none")
@@ -169,7 +169,7 @@ extend ?T {
     }
 
     // The value; panics with `msg` on none.
-    pub fn expect(self sink, msg str) T {
+    pub fn expect(sink self, msg: str) -> T {
         return match self {
             some(v) => v
             none => panic(msg)
@@ -178,7 +178,7 @@ extend ?T {
 
     // The value, or `d` (which is evaluated either way; `x ?? d` evaluates `d` only
     // when needed).
-    pub fn unwrapOr(self sink, d sink T) T {
+    pub fn unwrapOr(sink self, d: sink T) -> T {
         return match self {
             some(v) => v
             none => d
@@ -186,7 +186,7 @@ extend ?T {
     }
 
     // `f` applied to the value, if there is one.
-    pub fn map[U any](self, f fn(T) U) ?U {
+    pub fn map[U](self, f: fn(T) -> U) -> ?U {
         return match self {
             some(v) => some(f(v))
             none => none
@@ -198,7 +198,7 @@ extend ?T {
 
 extend T ! E {
     // Whether this is a value rather than an error.
-    pub fn isOk(self) bool {
+    pub fn isOk(self) -> bool {
         return match self {
             ok(_) => true
             err(_) => false
@@ -206,12 +206,12 @@ extend T ! E {
     }
 
     // Whether this is an error.
-    pub fn isErr(self) bool {
+    pub fn isErr(self) -> bool {
         return !self.isOk()
     }
 
     // The value; panics with the error. Prefer `try` or `catch`.
-    pub fn unwrap(self sink) T {
+    pub fn unwrap(sink self) -> T {
         return match self {
             ok(v) => v
             err(e) => __panicErr("unwrap() called on an error", e)
@@ -219,7 +219,7 @@ extend T ! E {
     }
 
     // The value; panics with `msg` and the error.
-    pub fn expect(self sink, msg str) T {
+    pub fn expect(sink self, msg: str) -> T {
         return match self {
             ok(v) => v
             err(e) => __panicErr(msg, e)
@@ -227,7 +227,7 @@ extend T ! E {
     }
 
     // The value, or `d` on an error (which is dropped).
-    pub fn unwrapOr(self sink, d sink T) T {
+    pub fn unwrapOr(sink self, d: sink T) -> T {
         return match self {
             ok(v) => v
             err(_) => d
@@ -235,7 +235,7 @@ extend T ! E {
     }
 
     // The value, or none on an error.
-    pub fn ok(self sink) ?T {
+    pub fn ok(sink self) -> ?T {
         return match self {
             ok(v) => some(v)
             err(_) => none
@@ -243,7 +243,7 @@ extend T ! E {
     }
 
     // The error, or none.
-    pub fn err(self sink) ?E {
+    pub fn err(sink self) -> ?E {
         return match self {
             ok(_) => none
             err(e) => some(e)
@@ -255,27 +255,27 @@ extend T ! E {
 
 extend str {
     // The length in bytes (UTF-8). Indexes and slices count bytes too.
-    pub fn len(self) int
+    pub fn len(self) -> int
 
     // raw pointer to the bytes, for FFI
-    pub fn ptr(self) *u8
+    pub fn ptr(self) -> *u8
 
     // Whether the length is 0.
-    pub fn isEmpty(self) bool {
+    pub fn isEmpty(self) -> bool {
         return self.len() == 0
     }
 
     // Whether `sub` occurs in the string (the empty string always does).
-    pub fn contains(self, sub str) bool
+    pub fn contains(self, sub: str) -> bool
 
     // Whether the string begins with `prefix`.
-    pub fn startsWith(self, prefix str) bool
+    pub fn startsWith(self, prefix: str) -> bool
 
     // Whether the string ends with `suffix`.
-    pub fn endsWith(self, suffix str) bool
+    pub fn endsWith(self, suffix: str) -> bool
 
     // The byte index of the first occurrence of `sub`.
-    pub fn find(self, sub str) ?int {
+    pub fn find(self, sub: str) -> ?int {
         let i = __strFind(self, sub)
         if i < 0 {
             return none
@@ -285,53 +285,53 @@ extend str {
 
     // The string without leading and trailing ASCII whitespace (space, tab,
     // newline, carriage return, vertical tab, form feed). A view: no copy.
-    pub fn trim(self) str
+    pub fn trim(self) -> str
 
     // The string without leading ASCII whitespace.
-    pub fn trimStart(self) str
+    pub fn trimStart(self) -> str
 
     // The string without trailing ASCII whitespace.
-    pub fn trimEnd(self) str
+    pub fn trimEnd(self) -> str
 
     // The pieces between occurrences of `sep`: `"a,,b".split(",")` is
     // `["a", "", "b"]`, and `"".split(",")` is `[""]`. An empty `sep` splits into
     // characters.
-    pub fn split(self, sep str) Vec[String]
+    pub fn split(self, sep: str) -> Vec[String]
 
     // The lines, without their `\n` or `\r\n`; no empty last line for a trailing
     // newline.
-    pub fn lines(self) Vec[String]
+    pub fn lines(self) -> Vec[String]
 
     // The words between runs of ASCII whitespace: `"  a b\tc ".fields()` is
     // `["a", "b", "c"]`.
-    pub fn fields(self) Vec[String]
+    pub fn fields(self) -> Vec[String]
 
     // A copy with ASCII letters in upper case (other characters unchanged).
-    pub fn toUpper(self) String
+    pub fn toUpper(self) -> String
 
     // A copy with ASCII letters in lower case (other characters unchanged).
-    pub fn toLower(self) String
+    pub fn toLower(self) -> String
 
     // An owned copy.
-    pub fn toString(self) String
+    pub fn toString(self) -> String
 
     // The string `n` times (empty for `n` <= 0).
-    pub fn repeat(self, n int) String
+    pub fn repeat(self, n: int) -> String
 
     // A copy with every occurrence of `from` replaced by `to` (unchanged when
     // `from` is empty).
-    pub fn replace(self, from str, to str) String
+    pub fn replace(self, from: str, to: str) -> String
 
     // The bytes, as a view.
-    pub fn bytes(self) []byte
+    pub fn bytes(self) -> []byte
 
     // The Unicode code points. A byte that isn't part of valid UTF-8 (strings
     // made with `String(bytes)` or read from files aren't checked) reads as
     // U+FFFD.
-    pub fn runes(self) Vec[rune]
+    pub fn runes(self) -> Vec[rune]
 
     // Byte-wise order, which is also code-point order.
-    pub fn compare(self, other str) Ordering {
+    pub fn compare(self, other: str) -> Ordering {
         if self < other {
             return .Less
         }
@@ -343,7 +343,7 @@ extend str {
 
     // The decimal integer that is the whole string (an optional `+` or `-`, then
     // digits), or none: no spaces, no other characters, nothing out of range.
-    pub fn parseInt(self) ?int {
+    pub fn parseInt(self) -> ?int {
         var v = 0
         if __parseInt(self, &v) {
             return v
@@ -353,7 +353,7 @@ extend str {
 
     // The floating-point number that is the whole string, or none. Accepts what C's
     // `strtod` does: `1.5`, `-2e10`, `inf`, `nan`, `0x1p3`.
-    pub fn parseFloat(self) ?f64 {
+    pub fn parseFloat(self) -> ?f64 {
         var v = 0.0
         if __parseFloat(self, &v) {
             return v
@@ -364,49 +364,49 @@ extend str {
 
 extend String {
     // Appends `t`. (`s += t` does the same.)
-    pub fn push(self inout, t str)
+    pub fn push(inout self, t: str)
 
     // Appends the UTF-8 encoding of `r`; U+FFFD for a value that isn't a Unicode
     // scalar value (a surrogate, negative, or above U+10FFFF).
-    pub fn pushRune(self inout, r rune)
+    pub fn pushRune(inout self, r: rune)
 
     // Makes the string empty, keeping its buffer.
-    pub fn clear(self inout)
+    pub fn clear(inout self)
 
     // The string as a view.
-    pub fn asStr(self) str
+    pub fn asStr(self) -> str
 }
 
 // ---------------------------------------------------------------- []T / Vec[T]
 
 extend []T {
     // The number of elements.
-    pub fn len(self) int
+    pub fn len(self) -> int
 
     // Reverses the order in place. Only an `inout []T` (or a range of a
     // `var` Vec or array, `v[a..b]`) can be changed.
-    pub fn reverse(self inout)
+    pub fn reverse(inout self)
 
     // Exchanges elements `i` and `j`; panics when either is out of range.
-    pub fn swap(self inout, i int, j int)
+    pub fn swap(inout self, i: int, j: int)
 
     // Sorts in ascending order. Stable; O(n log n).
-    pub fn sort(self inout) where T: ordered
+    pub fn sort(inout self) where T: ordered
 
     // Sorts by `less(a, b)`: true when `a` goes before `b`. Stable.
-    pub fn sortBy(self inout, less fn(T, T) bool)
+    pub fn sortBy(inout self, less: fn(T, T) -> bool)
 
     // raw pointer to the first element, for FFI
-    pub fn ptr(self) *T
+    pub fn ptr(self) -> *T
 
     // Whether there are no elements.
-    pub fn isEmpty(self) bool {
+    pub fn isEmpty(self) -> bool {
         return self.len() == 0
     }
 
     // Element `i`, or none when `i` is out of range (indexing with `xs[i]`
     // panics instead).
-    pub fn get(self, i int) yield ?&T {
+    pub fn get(self, i: int) yield ?&T {
         if i < 0 || i >= self.len() {
             yield none
         }
@@ -430,7 +430,7 @@ extend []T {
     }
 
     // Whether some element equals `x`.
-    pub fn contains(self, x T) bool where T: comparable {
+    pub fn contains(self, x: T) -> bool where T: comparable {
         for y in self {
             if y == x {
                 return true
@@ -440,7 +440,7 @@ extend []T {
     }
 
     // The index of the first element equal to `x`.
-    pub fn indexOf(self, x T) ?int where T: comparable {
+    pub fn indexOf(self, x: T) -> ?int where T: comparable {
         for i, y in self {
             if y == x {
                 return i
@@ -450,7 +450,7 @@ extend []T {
     }
 
     // `f` applied to each element, in order.
-    pub fn map[U any](self, f fn(T) U) Vec[U] {
+    pub fn map[U](self, f: fn(T) -> U) -> Vec[U] {
         var out = Vec[U]{}
         for x in self {
             out.push(f(x))
@@ -459,7 +459,7 @@ extend []T {
     }
 
     // Copies of the elements for which `keep` is true.
-    pub fn filter(self, keep fn(T) bool) Vec[T] where T: clone {
+    pub fn filter(self, keep: fn(T) -> bool) -> Vec[T] where T: clone {
         var out = Vec[T]{}
         for x in self {
             if keep(x) {
@@ -470,14 +470,14 @@ extend []T {
     }
 
     // Calls `f` on each element, in order.
-    pub fn each(self, f fn(T)) {
+    pub fn each(self, f: fn(T)) {
         for x in self {
             f(x)
         }
     }
 
     // Whether `f` is true for some element (stops at the first).
-    pub fn any(self, f fn(T) bool) bool {
+    pub fn any(self, f: fn(T) -> bool) -> bool {
         for x in self {
             if f(x) {
                 return true
@@ -487,7 +487,7 @@ extend []T {
     }
 
     // Whether `f` is true for every element (stops at the first false).
-    pub fn all(self, f fn(T) bool) bool {
+    pub fn all(self, f: fn(T) -> bool) -> bool {
         for x in self {
             if !f(x) {
                 return false
@@ -497,7 +497,7 @@ extend []T {
     }
 
     // How many elements `f` is true for.
-    pub fn count(self, f fn(T) bool) int {
+    pub fn count(self, f: fn(T) -> bool) -> int {
         var n = 0
         for x in self {
             if f(x) {
@@ -508,7 +508,7 @@ extend []T {
     }
 
     // Combines the elements from the left: `f(f(f(init, x0), x1), x2)`.
-    pub fn fold[A any](self, init sink A, f fn(sink A, T) A) A {
+    pub fn fold[A](self, init: sink A, f: fn(sink A, T) -> A) -> A {
         var acc = init
         for x in self {
             acc = f(acc, x)
@@ -517,8 +517,8 @@ extend []T {
     }
 
     // The sum (0 for no elements). Integer overflow panics, as with `+`.
-    pub fn sum(self) T where T: Number {
-        var total T = 0
+    pub fn sum(self) -> T where T: Number {
+        var total: T = 0
         for x in self {
             total += x
         }
@@ -526,7 +526,7 @@ extend []T {
     }
 
     // The smallest element, or none for no elements.
-    pub fn min(self) ?T where T: copy + ordered {
+    pub fn min(self) -> ?T where T: copy + ordered {
         if self.len() == 0 {
             return none
         }
@@ -540,7 +540,7 @@ extend []T {
     }
 
     // The largest element, or none for no elements.
-    pub fn max(self) ?T where T: copy + ordered {
+    pub fn max(self) -> ?T where T: copy + ordered {
         if self.len() == 0 {
             return none
         }
@@ -554,7 +554,7 @@ extend []T {
     }
 
     // An owned copy.
-    pub fn toVec(self) Vec[T] where T: clone {
+    pub fn toVec(self) -> Vec[T] where T: clone {
         var out = Vec[T]{}
         for x in self {
             out.push(x.clone())
@@ -565,8 +565,8 @@ extend []T {
 
 extend []String {
     // The strings with `sep` between them: `["a", "b"].join(", ")` is `"a, b"`.
-    pub fn join(self, sep str) String {
-        var out String = ""
+    pub fn join(self, sep: str) -> String {
+        var out: String = ""
         for i, s in self {
             if i > 0 {
                 out += sep
@@ -579,90 +579,90 @@ extend []String {
 
 extend Vec[T] {
     // Appends `x`.
-    pub fn push(self inout, x sink T)
+    pub fn push(inout self, x: sink T)
 
     // Removes and returns the last element, or none when empty.
-    pub fn pop(self inout) ?T
+    pub fn pop(inout self) -> ?T
 
     // Inserts `x` at index `i` (0 <= `i` <= `len()`), moving the later elements
     // up; panics otherwise.
-    pub fn insert(self inout, i int, x sink T)
+    pub fn insert(inout self, i: int, x: sink T)
 
     // Removes and returns element `i`, moving the later elements down; panics when
     // `i` is out of range.
-    pub fn remove(self inout, i int) T
+    pub fn remove(inout self, i: int) -> T
 
     // Removes and returns element `i`, putting the last element in its place:
     // O(1), but changes the order. Panics when `i` is out of range.
-    pub fn swapRemove(self inout, i int) T
+    pub fn swapRemove(inout self, i: int) -> T
 
     // Removes (and drops) every element, keeping the buffer.
-    pub fn clear(self inout)
+    pub fn clear(inout self)
 
     // Keeps the first `n` elements and drops the rest; nothing happens when `n`
     // >= `len()`. Panics when `n` is negative.
-    pub fn truncate(self inout, n int)
+    pub fn truncate(inout self, n: int)
 
     // Moves the elements of `other` to the end.
-    pub fn extend(self inout, other sink Vec[T])
+    pub fn extend(inout self, other: sink Vec[T])
 
     // Reverses the order in place.
-    pub fn reverse(self inout)
+    pub fn reverse(inout self)
 
     // Exchanges elements `i` and `j`; panics when either is out of range.
-    pub fn swap(self inout, i int, j int)
+    pub fn swap(inout self, i: int, j: int)
 
     // Sorts in ascending order. The sort is stable (equal elements keep their
     // order) and takes O(n log n) time.
-    pub fn sort(self inout) where T: ordered
+    pub fn sort(inout self) where T: ordered
 
     // Sorts by `less(a, b)`: true when `a` goes before `b`. Stable.
-    pub fn sortBy(self inout, less fn(T, T) bool)
+    pub fn sortBy(inout self, less: fn(T, T) -> bool)
 
     // Makes room for `n` more elements without reallocating; panics ("capacity
     // overflow") for an impossible size.
-    pub fn reserve(self inout, n int)
+    pub fn reserve(inout self, n: int)
 
     // The number of elements there is room for.
-    pub fn cap(self) int
+    pub fn cap(self) -> int
 }
 
 // ---------------------------------------------------------------- Map[K, V]
 
 extend Map[K, V] {
     // The number of entries.
-    pub fn len(self) int
+    pub fn len(self) -> int
 
     // Whether there are no entries.
-    pub fn isEmpty(self) bool {
+    pub fn isEmpty(self) -> bool {
         return self.len() == 0
     }
 
     // The value for `k`, if any. (`m[k]` panics when there is none.)
-    pub fn get(self, k K) yield ?&V
+    pub fn get(self, k: K) yield ?&V
 
     // The value for `k`, to change in place.
-    pub fn getMut(self inout, k K) yield ?inout V
+    pub fn getMut(inout self, k: K) yield ?inout V
 
     // Whether there is an entry for `k`.
-    pub fn contains(self, k K) bool
+    pub fn contains(self, k: K) -> bool
 
     // Sets the value for `k`, returning the old one. A new key goes at the end of
     // the iteration order; replacing a value keeps the key's place.
-    pub fn insert(self inout, k sink K, v sink V) ?V
+    pub fn insert(inout self, k: sink K, v: sink V) -> ?V
 
     // Removes the entry for `k`, returning its value. The others keep their order.
-    pub fn remove(self inout, k K) ?V
+    pub fn remove(inout self, k: K) -> ?V
 
     // The value for `k`, inserting the default first if there is none:
     // `with n = counts.entry(word) { n += 1 }`.
-    pub fn entry(self inout, k sink K) yield inout V where V: default
+    pub fn entry(inout self, k: sink K) yield inout V where V: default
 
     // Removes every entry.
-    pub fn clear(self inout)
+    pub fn clear(inout self)
 
     // Copies of the keys, in insertion order.
-    pub fn keys(self) Vec[K] where K: clone {
+    pub fn keys(self) -> Vec[K] where K: clone {
         var out = Vec[K]{}
         for k, _ in self {
             out.push(k.clone())
@@ -671,7 +671,7 @@ extend Map[K, V] {
     }
 
     // Copies of the values, in insertion order.
-    pub fn values(self) Vec[V] where V: clone {
+    pub fn values(self) -> Vec[V] where V: clone {
         var out = Vec[V]{}
         for _, v in self {
             out.push(v.clone())
@@ -682,31 +682,31 @@ extend Map[K, V] {
 
 // ---------------------------------------------------------------- shared ownership
 
-extend rc[T] {
+extend Rc[T] {
     // How many `rc` handles share the value.
-    pub fn count(self) int
+    pub fn count(self) -> int
 
     // A weak handle: it doesn't keep the value alive (for back references that
     // would otherwise make a cycle).
-    pub fn downgrade(self) weak[T]
+    pub fn downgrade(self) -> Weak[T]
 }
 
-extend weak[T] {
+extend Weak[T] {
     // A strong handle again, or none when the value is gone.
-    pub fn upgrade(self) ?rc[T]
+    pub fn upgrade(self) -> ?Rc[T]
 }
 
-extend arc[T] {
+extend Arc[T] {
     // How many `arc` handles share the value (across threads).
-    pub fn count(self) int
+    pub fn count(self) -> int
 }
 
 extend Cell[T] {
     // A copy of the value. A `Cell` lets copy values inside an `rc` change.
-    pub fn get(self) T
+    pub fn get(self) -> T
 
     // Replaces the value.
-    pub fn set(self, v T)
+    pub fn set(self, v: T)
 }
 
 extend Mutex[T] {
@@ -716,36 +716,36 @@ extend Mutex[T] {
 
 // ---------------------------------------------------------------- channels
 
-// `chan[T](n)` makes a channel with room for `n` values (`chan[T]()`: none, so
+// `Chan[T](n)` makes a channel with room for `n` values (`Chan[T]()`: none, so
 // a send waits for a receiver). Its two ends are handed out separately:
 //
-//   let ch = chan[Job](16)
+//   let ch = Chan[Job](16)
 //   go produce(ch.tx)          // the channel closes when the last sender is dropped
 //   for job in ch.rx { run(job) }
 pub struct Chan[T] {
     // The sending end; `.clone()` it for more senders.
-    pub tx Sender[T]
+    pub tx: Sender[T]
     // The receiving end; `.clone()` it for more receivers.
-    pub rx Receiver[T]
+    pub rx: Receiver[T]
 }
 
 extend Sender[T] {
     // Sends `x` (`tx <- x`): waits while the channel is full, or, unbuffered,
     // until a receiver takes it. False, and `x` is dropped, when every
     // receiver is gone or the task is cancelled.
-    pub fn send(self, x sink T) bool
+    pub fn send(self, x: sink T) -> bool
 
     // The number of values waiting in the buffer.
-    pub fn len(self) int
+    pub fn len(self) -> int
 }
 
 extend Receiver[T] {
     // Receives a value (`<-rx`), waiting for one; none once every sender is
     // gone and the buffer is empty (or the task is cancelled).
-    pub fn recv(self) ?T
+    pub fn recv(self) -> ?T
 
     // The number of values waiting in the buffer.
-    pub fn len(self) int
+    pub fn len(self) -> int
 }
 
 // ---------------------------------------------------------------- tasks
@@ -754,11 +754,11 @@ extend Receiver[T] {
 // must be joined or cancelled there.
 extend Task[T] {
     // Waits for the task to finish and gives its result.
-    pub fn join(self sink) T
+    pub fn join(sink self) -> T
 
     // Cancels the task; the scope still waits for it, and its result is
     // dropped.
-    pub fn cancel(self sink)
+    pub fn cancel(sink self)
 }
 
 // `isolate { ... }` builds a value from scratch, using only values from
@@ -766,10 +766,10 @@ extend Task[T] {
 // be sent to another task as a whole even if it holds `rc` or `Cell`:
 //
 //   let tree = isolate { buildTree(src) }    // Iso[Tree]
-//   go index(tree)                           // index(t sink Iso[Tree]) { let tr = t.take() ... }
+//   go index(tree)                           // index(t: sink Iso[Tree]) { let tr = t.take() ... }
 extend Iso[T] {
     // The value, to use in this task.
-    pub fn take(self sink) T
+    pub fn take(sink self) -> T
 }
 
 // `scope s { }` names the scope; a function that starts long-running tasks
@@ -784,15 +784,15 @@ extend Scope {
 // Computes the hash of values (FNV-1a over `u64` words), for writing a
 // custom `hash` method.
 pub struct Hasher {
-    state u64 = 14695981039346656037
+    state: u64 = 14695981039346656037
 
     // Mixes `x` into the hash.
-    pub fn writeU64(self inout, x u64) {
+    pub fn writeU64(inout self, x: u64) {
         self.state = (self.state ^ x) *% 1099511628211
     }
 
     // Mixes in the hash of any hashable value.
-    pub fn write[T hash](self inout, x T)
+    pub fn write[T: hash](inout self, x: T)
 }
 
 // ---------------------------------------------------------------- arenas
@@ -800,14 +800,14 @@ pub struct Hasher {
 // Ids carry a generation, so a stale Id yields none instead of a dangling pointer.
 
 // A handle to a value in an `Arena[T]`.
-pub copy struct Id[T any] {
-    index int
-    gen int
+pub copy struct Id[T] {
+    index: int
+    gen: int
 }
 
-struct Slot[T any] {
-    gen int
-    value ?T
+struct Slot[T] {
+    gen: int
+    value: ?T
 }
 
 // Storage for graphs, trees and other structures whose nodes refer to each
@@ -818,13 +818,13 @@ struct Slot[T any] {
 //   var a = Arena[Node]{}
 //   let root = a.alloc(Node{name: "root"})
 //   with n = a.getMut(root) { ... }
-pub struct Arena[T any] {
-    slots Vec[Slot[T]] = Vec[Slot[T]]{}
-    free Vec[int] = Vec[int]{}
-    count int = 0
+pub struct Arena[T] {
+    slots: Vec[Slot[T]] = Vec[Slot[T]]{}
+    free: Vec[int] = Vec[int]{}
+    count: int = 0
 
     // Stores `v` and returns its `Id`.
-    pub fn alloc(self inout, v sink T) Id[T] {
+    pub fn alloc(inout self, v: sink T) -> Id[T] {
         self.count += 1
         if let i = self.free.pop() {
             with s = self.slots[i] {
@@ -838,7 +838,7 @@ pub struct Arena[T any] {
     }
 
     // The value for `id`, if it is still there.
-    pub fn get(self, id Id[T]) yield ?&T {
+    pub fn get(self, id: Id[T]) yield ?&T {
         if id.index < 0 || id.index >= self.slots.len {
             yield none
         }
@@ -853,7 +853,7 @@ pub struct Arena[T any] {
     }
 
     // The value for `id`, to change in place.
-    pub fn getMut(self inout, id Id[T]) yield ?inout T {
+    pub fn getMut(inout self, id: Id[T]) yield ?inout T {
         if id.index < 0 || id.index >= self.slots.len {
             yield none
         }
@@ -869,7 +869,7 @@ pub struct Arena[T any] {
 
     // Removes and returns the value for `id`; its slot is reused, with a new
     // generation.
-    pub fn remove(self inout, id Id[T]) ?T {
+    pub fn remove(inout self, id: Id[T]) -> ?T {
         if id.index < 0 || id.index >= self.slots.len {
             return none
         }
@@ -885,7 +885,7 @@ pub struct Arena[T any] {
     }
 
     // The number of values stored.
-    pub fn len(self) int {
+    pub fn len(self) -> int {
         return self.count
     }
 }
@@ -903,16 +903,16 @@ extend MutexRef[T] {
 // input and `Span`s into it, and borrows views on demand: no reference is
 // ever stored in a struct.
 pub copy struct Span {
-    pub lo int
-    pub hi int
+    pub lo: int
+    pub hi: int
 
     // The part of `s` the span covers.
-    pub fn of(self, s str) str {
+    pub fn of(self, s: str) -> str {
         return s[self.lo..self.hi]
     }
 
     // The length in bytes.
-    pub fn len(self) int {
+    pub fn len(self) -> int {
         return self.hi - self.lo
     }
 }
@@ -923,46 +923,46 @@ pub copy struct Span {
 //
 //   var seen = Set[String].new()
 //   if seen.insert(name.clone()) { ... first time ... }
-pub struct Set[T hash] {
-    m Map[T, bool] = Map[T, bool]{}
+pub struct Set[T: hash] {
+    m: Map[T, bool] = Map[T, bool]{}
 
     // An empty set.
-    pub fn new() Set[T] {
+    pub fn new() -> Set[T] {
         return Set[T]{}
     }
 
     // Adds `x`; false if it was there already.
-    pub fn insert(self inout, x sink T) bool {
+    pub fn insert(inout self, x: sink T) -> bool {
         return self.m.insert(x, true) == none
     }
 
     // Takes `x` out; false if it wasn't there.
-    pub fn remove(self inout, x T) bool {
+    pub fn remove(inout self, x: T) -> bool {
         return self.m.remove(x) != none
     }
 
     // Whether `x` is in the set.
-    pub fn contains(self, x T) bool {
+    pub fn contains(self, x: T) -> bool {
         return self.m.contains(x)
     }
 
     // The number of values.
-    pub fn len(self) int {
+    pub fn len(self) -> int {
         return self.m.len()
     }
 
     // Whether the set is empty.
-    pub fn isEmpty(self) bool {
+    pub fn isEmpty(self) -> bool {
         return self.m.len() == 0
     }
 
     // Removes every value.
-    pub fn clear(self inout) {
+    pub fn clear(inout self) {
         self.m.clear()
     }
 
     // `for x in set`
-    pub fn each(self, body fn(&T) Flow) {
+    pub fn each(self, body: fn(&T) -> Flow) {
         for k, _ in self.m {
             if body(k) == Flow.Break {
                 return
@@ -971,12 +971,12 @@ pub struct Set[T hash] {
     }
 
     // Copies of the values, in insertion order.
-    pub fn toVec(self) Vec[T] where T: clone {
+    pub fn toVec(self) -> Vec[T] where T: clone {
         return self.m.keys()
     }
 
     // What is in either.
-    pub fn union(self, other Set[T]) Set[T] where T: clone {
+    pub fn union(self, other: Set[T]) -> Set[T] where T: clone {
         var out = Set[T]{}
         for k, _ in self.m {
             _ = out.insert(k.clone())
@@ -988,7 +988,7 @@ pub struct Set[T hash] {
     }
 
     // What is in both.
-    pub fn intersection(self, other Set[T]) Set[T] where T: clone {
+    pub fn intersection(self, other: Set[T]) -> Set[T] where T: clone {
         var out = Set[T]{}
         for k, _ in self.m {
             if other.contains(k) {
@@ -999,7 +999,7 @@ pub struct Set[T hash] {
     }
 
     // What is in this one but not in `other`.
-    pub fn difference(self, other Set[T]) Set[T] where T: clone {
+    pub fn difference(self, other: Set[T]) -> Set[T] where T: clone {
         var out = Set[T]{}
         for k, _ in self.m {
             if !other.contains(k) {
@@ -1011,13 +1011,50 @@ pub struct Set[T hash] {
 }
 
 // A set of the values in `xs` (duplicates once, in the order first seen).
-pub fn setOf[T hash](xs sink Vec[T]) Set[T] {
+pub fn setOf[T: hash](xs: sink Vec[T]) -> Set[T] {
     var s = Set[T]{}
     var v = xs
     v.reverse()
-    for {
+    loop {
         let x = v.pop() ?? break
         _ = s.insert(x)
     }
     return s
+}
+
+// Tuples: `(A, B)` is a `Tuple2[A, B]`, `(a, b)` builds one and `t.0` reads
+// its first element. They are copy when their elements are.
+pub struct Tuple2[A, B] {
+    pub _0: A
+    pub _1: B
+}
+
+pub struct Tuple3[A, B, C] {
+    pub _0: A
+    pub _1: B
+    pub _2: C
+}
+
+pub struct Tuple4[A, B, C, D] {
+    pub _0: A
+    pub _1: B
+    pub _2: C
+    pub _3: D
+}
+
+pub struct Tuple5[A, B, C, D, E] {
+    pub _0: A
+    pub _1: B
+    pub _2: C
+    pub _3: D
+    pub _4: E
+}
+
+pub struct Tuple6[A, B, C, D, E, F] {
+    pub _0: A
+    pub _1: B
+    pub _2: C
+    pub _3: D
+    pub _4: E
+    pub _5: F
 }

@@ -1,5 +1,5 @@
 // growing the Vec moves its elements while a task writes them
-fn fill(v inout []int, x int) {
+fn fill(v: inout []int, x: int) {
     for i in 0..v.len() {
         v[i] = x
     }

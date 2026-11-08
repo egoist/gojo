@@ -1,10 +1,10 @@
 // Views live only in variables; nothing may store one.
 interface Len {
-    fn len(self) int
+    fn len(self) -> int
 }
 
 fn arrays() {
-    var a [1]str
+    var a: [1]str
     // error: `a` has type `[1]str`, which would store a borrowed view
     let s = "abc".toString()
     a[0] = s.asStr()
@@ -14,8 +14,8 @@ fn boxes() {
     let s = "abc".toString()
     let b = Box(s.asStr())
     // error: `b` has type `Box[str]`, which would store a borrowed view
-    let r = rc(s.asStr())
-    // error: `r` has type `rc[str]`, which would store a borrowed view
+    let r = Rc(s.asStr())
+    // error: `r` has type `Rc[str]`, which would store a borrowed view
     println(b, r)
 }
 
@@ -39,7 +39,7 @@ fn interfaces() {
     // error: the borrowed view `str` cannot be boxed into an interface value
 }
 
-fn result_view() str ! String {
+fn result_view() -> str ! String {
     let s = "abc".toString()
     return s.asStr()
     // error: returns a view of `s`, which is dropped when the function returns

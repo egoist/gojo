@@ -1,8 +1,8 @@
 struct Point {
-    x int
+    x: int
 
-    fn origin() Point { return Point{x: 0} }
-    fn get(self) int { return self.x }
+    fn origin() -> Point { return Point{x: 0} }
+    fn get(self) -> int { return self.x }
 }
 
 fn main() {

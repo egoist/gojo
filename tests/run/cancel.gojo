@@ -2,10 +2,10 @@
 use std/{fmt, time, task}
 
 enum JobError {
-    Bad(id int)
+    Bad(id: int)
 }
 
-fn work(id int, log Mutex[Vec[String]]) ! JobError {
+fn work(id: int, log: Mutex[Vec[String]]) ! JobError {
     if id == 3 {
         time.sleep(time.millisecond)
         return err(.Bad(id))
@@ -37,7 +37,7 @@ fn firstErrorCancelsTheRest() {
 }
 
 fn blockedReceiversWake() {
-    let never = chan[int]()
+    let never = Chan[int]()
     let r = scope {
         for _ in 0..3 {
             go () => {
@@ -93,7 +93,7 @@ fn explicitCancel() {
     scope s {
         go () => {
             var rounds = 0
-            for !task.cancelled() {
+            while !task.cancelled() {
                 rounds += 1
                 time.sleep(100 * time.microsecond)
             }
@@ -105,9 +105,9 @@ fn explicitCancel() {
     println("cancelled scope ended")
 }
 
-fn checkpoint() int ! task.Cancelled {
+fn checkpoint() -> int ! task.Cancelled {
     var n = 0
-    for {
+    loop {
         try task.check()
         n += 1
         if n % 1000 == 0 { task.yieldNow() }

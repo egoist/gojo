@@ -1,5 +1,5 @@
 fn main() {
-    var x i8 = 120
+    var x: i8 = 120
     for _ in 0..10 {
         x += 1
     }

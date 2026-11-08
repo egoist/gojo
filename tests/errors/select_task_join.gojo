@@ -1,6 +1,6 @@
 // A `select` arm on a task takes its handle only when it is chosen: the
 // other handles must still be joined or cancelled.
-fn work() int {
+fn work() -> int {
     return 1
 }
 

@@ -1,0 +1,6 @@
+struct P {
+    x int
+    // error: expected `:` before the type of a field
+}
+
+fn main() {}

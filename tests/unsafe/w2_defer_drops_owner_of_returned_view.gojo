@@ -1,7 +1,7 @@
 struct W {
-    s String
+    s: String
 }
-fn pick(w inout W) str {
+fn pick(w: inout W) -> str {
     defer w.s = "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz".toString()
     return w.s.asStr()
 }

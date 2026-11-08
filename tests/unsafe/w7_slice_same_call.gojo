@@ -1,5 +1,5 @@
 // two arguments of one call share element 2
-fn both(a inout []int, b inout []int) {
+fn both(a: inout []int, b: inout []int) {
     a[a.len() - 1] = 1
     b[0] = 2
 }

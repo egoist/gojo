@@ -2,14 +2,14 @@ use std/fmt
 
 // Pull iteration: `cursor` + `next`. The cursor is plain data.
 struct Countdown {
-    from int
+    from: int
 
-    fn cursor(self) int {
+    fn cursor(self) -> int {
         return self.from
     }
 
     // returns owned values: a generator
-    fn next(self, c inout int) ?int {
+    fn next(self, c: inout int) -> ?int {
         if c == 0 {
             return none
         }
@@ -19,15 +19,15 @@ struct Countdown {
 }
 
 struct Ring {
-    items Vec[String]
-    start int
+    items: Vec[String]
+    start: int
 
-    fn cursor(self) int {
+    fn cursor(self) -> int {
         return 0
     }
 
     // yields references into the ring
-    fn next(self, c inout int) yield ?&String {
+    fn next(self, c: inout int) yield ?&String {
         if c >= self.items.len {
             yield none
         }
@@ -36,7 +36,7 @@ struct Ring {
         yield self.items[i]
     }
 
-    fn nextMut(self inout, c inout int) yield ?inout String {
+    fn nextMut(inout self, c: inout int) yield ?inout String {
         if c >= self.items.len {
             yield none
         }
@@ -49,9 +49,9 @@ struct Ring {
 // Push iteration: `each` with a body that returns Flow.
 enum Tree {
     Leaf
-    Node(left Box[Tree], value int, right Box[Tree])
+    Node(left: Box[Tree], value: int, right: Box[Tree])
 
-    fn insert(self sink, v int) Tree {
+    fn insert(sink self, v: int) -> Tree {
         return match self {
             Leaf => Tree.Node(Box(Tree.Leaf), v, Box(Tree.Leaf))
             Node(l, x, r) => if v < x {
@@ -63,7 +63,7 @@ enum Tree {
     }
 
     // in-order traversal; stops as soon as the body says Break
-    fn each(self, body fn(int) Flow) Flow {
+    fn each(self, body: fn(int) -> Flow) -> Flow {
         return match self {
             Leaf => .Continue
             Node(l, x, r) => {
@@ -79,7 +79,7 @@ enum Tree {
     }
 }
 
-fn firstOver(t Tree, limit int) ?int {
+fn firstOver(t: Tree, limit: int) -> ?int {
     for x in t {
         if x > limit {
             return x
@@ -88,7 +88,7 @@ fn firstOver(t Tree, limit int) ?int {
     return none
 }
 
-fn parseAll(t Tree) int ! String {
+fn parseAll(t: Tree) -> int ! String {
     var sum = 0
     for x in t {
         let checked = try check(x)
@@ -97,9 +97,9 @@ fn parseAll(t Tree) int ! String {
     return sum
 }
 
-fn check(x int) int ! String {
+fn check(x: int) -> int ! String {
     if x == 13 {
-        return err("unlucky".toString())
+        return err("unlucky")
     }
     return x
 }

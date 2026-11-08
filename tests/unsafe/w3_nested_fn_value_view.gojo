@@ -1,4 +1,4 @@
-fn apply(f fn(str) str, s str) str {
+fn apply(f: fn(str) -> str, s: str) -> str {
     return f(s)
 }
 fn main() {

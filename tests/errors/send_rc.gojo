@@ -1,8 +1,8 @@
-fn work(r rc[int]) {}
+fn work(r: Rc[int]) {}
 fn main() {
-    let r = rc(1)
+    let r = Rc(1)
     go work(r)
-    let c = chan[rc[int]](1)
-    // error: a task captures `r` of type `rc[int]`, which is not safe to share between threads
-    // error: channel element type `rc[int]` cannot be sent between tasks
+    let c = Chan[Rc[int]](1)
+    // error: a task captures `r` of type `Rc[int]`, which is not safe to share between threads
+    // error: channel element type `Rc[int]` cannot be sent between tasks
 }

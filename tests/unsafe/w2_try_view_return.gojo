@@ -1,4 +1,4 @@
-fn first(v Vec[String]) ?str {
+fn first(v: Vec[String]) -> ?str {
     let s = try v.get(0)
     return some(s.asStr())
 }

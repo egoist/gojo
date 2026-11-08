@@ -1,4 +1,4 @@
-fn peek(mu Mutex[String]) str {
+fn peek(mu: Mutex[String]) -> str {
     with s = mu.lock() {
         return s.asStr()
     }

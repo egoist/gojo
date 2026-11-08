@@ -19,12 +19,14 @@ The fuzzing tool is `gojo-fuzz` (section 15).
 
 - Source files are UTF-8. Comments are `// line comments` and `/* block comments */`; block comments can span lines.
 - **Automatic semicolons**: a statement terminator is inserted when the last token on a line is an identifier, a literal, `true`, `false`, `none`, `)`, `]`, `}`, `return`, `break` or `continue`. So a line that ends with an operator continues on the next line. Newlines inside parentheses and brackets do not end a statement. `;` puts several statements on one line.
-- Keywords: `use extend pub fn struct enum interface type copy let var if else for in match return break continue defer errdefer go try catch with yield unsafe extern none true false inout sink where test const chan select`. `self`, `as` and `lib` are contextual keywords.
+- **Leading-dot lines**: a line that starts with `.name` continues the expression on the line before (a method chain written one step per line), unless it is a `match` arm, that is, it has a `=>` outside brackets (`.Circle(r) => ...`). Comments and blank lines may sit between the steps. A block whose last line is a bare `.Variant` after another expression statement therefore needs the variant's type: `Color.Red`.
+- Keywords: `use extend pub fn struct enum interface type copy let var if else for in match return break continue defer errdefer go try catch with yield unsafe extern none true false inout sink where test const select scope isolate`. `self`, `as` and `lib` are contextual keywords.
 - Integer literals: decimal, `0x`, `0b`, `0o`, optionally separated with `_`. Floats: `1.5`, `2.5e3`, `1e-3`.
-- Strings `"..."` support `\n \t \\ \" \xNN \u{...}`. Backquoted strings are raw and process no escapes. A character literal `'é'` is a `rune` (an `i32` code point); when the expected type is `u8` it is converted to a byte.
+- Strings `"..."` support `\n \t \\ \" \$ \xNN \u{...}`. Backquoted strings are raw and process no escapes (and no interpolation).
+- **Interpolation**: `"x = ${expr}"` embeds the value of `expr`, shown as `print` shows it; `${expr:spec}` formats it with a `fmt.format` spec (`${n:>8}`, `${f:.2}`, `${b:08b}`), checked at compile time. A string with an interpolation is a new `String`; one without stays a literal. The expression stays on the string's line, and `\${` is a literal `${`. A character literal `'é'` is a `rune` (an `i32` code point); when the expected type is `u8` it is converted to a byte.
 - An untyped integer literal defaults to `int` and a float literal to `f64`. When there is an expected type, the literal takes it; a value out of range is a compile error. In a binary operation, a side whose value can only be a literal (`5`, `-1.5`, `(1 + 2)`, an `if`/`match` whose branches are all literals, `{ 3 }`) takes the type of the other side: in `(if c { 5 } else { 7 }) +% v` the literals have the type of `v`.
 
-Tests: `run/lexical`, `run/patterns`, `errors/int_mismatch`, `errors/literals`.
+Tests: `run/lexical`, `run/patterns`, `run/modern`, `errors/int_mismatch`, `errors/literals`, `errors/interp_empty`, `errors/interp_unclosed`, `errors/modern`, `errors/chan_renamed`.
 
 ## 2. Packages and imports
 
@@ -69,13 +71,13 @@ Tests: `projects/app`, `projects/cycle`, `projects/private`, `projects/groups`, 
 
 ### 3.1 Variables and constants
 
-- `let x = e` is immutable; `var x = e` is mutable. `var x T` requires `T` to satisfy `default` (section 4.6); its value is the default value.
+- `let x = e` is immutable; `var x = e` is mutable. A type annotation follows a colon: `let n: u8 = 1`. `var x: T` requires `T` to satisfy `default` (section 4.6); its value is the default value.
 - Assigning to a `let` binding is a compile error.
 - **No shadowing within a function**: an inner block cannot declare a variable with the same name as a local variable of an outer block.
 - A local variable that is declared but never used is a compile error. Names that start with `_`, and `_` itself, are exempt.
 - `const Name = constant expression`. It can refer to other constants. Integer constants can be used as array lengths.
 - The order of package-level declarations (functions, types, aliases, constants, values) does not matter; a declaration can use declarations written after it. An alias or constant that refers to itself, directly or indirectly, is a compile error (recursive types need a struct or enum).
-- **Package-level values**: `let name = e` (or `let name T = e`) at the top level of a file, `pub let` to export it. `e` is any expression; it is computed once, on first use, by whichever task gets there first (the others wait), so a program pays only for the values it uses. The type must be `send` and can't be or contain a view: every task can see the value. It is read-only: no assignment, no `inout` borrow, no move out of it; state that changes goes inside, in a `Mutex`, `RwLock` or `Atomic` (`let hits = Atomic.new(0)`). A value whose computation needs itself panics: `the value of x depends on itself`. There is no top-level `var`.
+- **Package-level values**: `let name = e` (or `let name: T = e`) at the top level of a file, `pub let` to export it. `e` is any expression; it is computed once, on first use, by whichever task gets there first (the others wait), so a program pays only for the values it uses. The type must be `send` and can't be or contain a view: every task can see the value. It is read-only: no assignment, no `inout` borrow, no move out of it; state that changes goes inside, in a `Mutex`, `RwLock` or `Atomic` (`let hits = Atomic(0)`). A value whose computation needs itself panics: `the value of x depends on itself`. There is no top-level `var`.
 
 Tests: `run/basics`, `run/decls`, `run/forward_decls`, `run/globals`, `errors/let_immutable`, `errors/shadowing`, `errors/unused`, `errors/constraints`, `errors/decl_cycles`, `errors/const_cycle`, `errors/globals`, `errors/global_move`, `panic/global_cycle`.
 
@@ -85,17 +87,19 @@ Tests: `run/basics`, `run/decls`, `run/forward_decls`, `run/globals`, `errors/le
 - `type A = B` is an alias, identical to `B`. `type Celsius f64` is a newtype: it is incompatible with its underlying type; convert explicitly with `Celsius(x)` and `f64(c)`.
 - A newtype whose underlying type is a number keeps the number's operators (`+ - * / %`, `+% -% *%`, bitwise operators for integers, unary `-`, comparisons). Both sides must be the same newtype, and the result is that newtype. A newtype satisfies `ordered`, `default` and `hash` when its underlying type does. Other newtypes (such as `type Name String`) have only comparisons, no operators.
 - Struct embedding: a field written as a bare type name (`struct Admin { Named }`) promotes the fields and methods of the embedded type to the outer type.
-- A recursive type must go through an indirection (`Box`, `Vec`, `rc`, etc.); otherwise its size is infinite, which is a compile error.
+- A recursive type must go through an indirection (`Box`, `Vec`, `Rc`, etc.); otherwise its size is infinite, which is a compile error.
 
 Tests: `run/decls`, `run/constraints`, `errors/infinite_type`, `errors/constraints`.
 
 ### 3.3 Functions and methods
 
-- `fn name(a A, b B) R`. When the return type is omitted it is unit.
-- Methods are written inside the braces of a `struct`/`enum`. Their first parameter is `self`, which can have a mode: `self`, `self inout`, `self sink` (section 5.2). A function without `self` is an associated function, called through the type: `Point.new()`, `Stack[String].new()`; type parameters can be inferred from the expected type.
+- `fn name(a: A, b: B) -> R`. Every parameter has its own `name: Type`; a mode goes before the type (`u: inout User`, `x: sink T`, section 5.2). Without `->` the function returns unit; `fn save(c: Config) ! E` returns nothing but may fail. Function types are written the same way: `fn(int, inout Buf) -> bool`.
+- Methods are written inside the braces of a `struct`/`enum`. Their first parameter is `self`, which can have a mode: `self`, `inout self`, `sink self` (section 5.2). A function without `self` is an associated function, called through the type: `Point.new()`, `Stack[String].new()`; type parameters can be inferred from the expected type.
 - `extend T { ... }` adds methods to a type, and can target a specific instance (`extend []String`). Methods can only be defined in the package that declares the type.
 - A field and a method, or a method and an associated function, cannot have the same name. `self` can only appear in methods.
-- Receivers take no `&`: `v.push(x)` takes a mutable borrow automatically for a `self inout` method.
+- Receivers take no `&`: `v.push(x)` takes a mutable borrow automatically for a `inout self` method.
+- **Constructors**: when a struct or enum has an associated function `new`, the type can be called like a function: `T(args)` is `T.new(args)` (`RwLock(m)`, `Atomic(0)`, `Stack[int]()`, or `Stack()` when the type is expected). For a newtype, `T(x)` is the conversion (3.2).
+- A function body, like any block, has the value of its last expression: `fn area(self) -> f64 { self.w * self.h }`. `return` is for leaving early.
 
 Tests: `run/basics`, `run/generics`, `run/interfaces`, `errors/methods`, `errors/assoc_calls`, `errors/self_outside_method`, `errors/dup_members`.
 
@@ -110,30 +114,33 @@ Tests: `run/basics`, `run/generics`, `run/interfaces`, `errors/methods`, `errors
 | `Vec[T]` / `[]T` | owned dynamic array / borrowed slice view (read-only unless `inout`, 5.2) |
 | `[N]T` | fixed-length array; `N` is an integer constant or an integer type parameter |
 | `Map[K, V]` | hash table; iteration order is insertion order |
+| `(A, B)` … | a tuple of 2 to 6 values (section 4.7) |
 | `?T` | `none` or a `T` |
 | `T ! E`, `! E` | a success value `T` or an error `E`; `! E` has no success value |
 | `Box[T]` | exclusive ownership on the heap |
-| `rc[T]`, `arc[T]`, `weak[T]` | non-atomic / atomic reference counting, weak reference |
+| `Rc[T]`, `Arc[T]`, `Weak[T]` | non-atomic / atomic reference counting, weak reference |
 | `Cell[T]`, `Mutex[T]`, `MutexRef[T]` | single-threaded interior mutability; lock; lock that borrows outside data (section 10.1) |
 | `Chan[T]`, `Sender[T]`, `Receiver[T]` | a channel and its two ends (section 10.3) |
 | `Task[T]`, `Scope` | a task handle and a scope handle; views (section 10.1) |
 | `Atomic[T]`, `Iso[T]` | an atomic integer; an isolated value (section 10.5) |
-| `fn(A) R` | functions and closures, never null |
+| `fn(A) -> R` | functions and closures, never null |
 | `*T` | raw pointer, can be null |
 | `Span` | `copy struct { lo int, hi int }`, a range within a string |
 
 - There is no `nil`. Only `?T` can be empty.
 - There are no implicit conversions between integer types, or between integers and floats; convert explicitly with `i64(x)`, `f64(n)`. A narrowing conversion panics when the value is out of range.
-- `?Box[T]`, `?rc[T]`, `?arc[T]` and `?weak[T]` are the size of one pointer; `none` is the null pointer.
+- `?Box[T]`, `?Rc[T]`, `?Arc[T]` and `?Weak[T]` are the size of one pointer; `none` is the null pointer.
 
 Tests: `run/basics`, `run/niche`, `run/spans`, `errors/no_nil`, `errors/int_mismatch`, `panic/conversion`.
 
 ### 4.2 Structs
 
 - Fields can have default values: `port int = 8080`. A `?T` field defaults to `none`. Leaving out a field without a default in a literal is a compile error.
+- `Point{x, y}` sets each field from the variable of the same name (`Point{x: x, y: y}`); it can be mixed with `name: value`.
+- `.{x: 1, y: 2}` is a literal of the struct the context expects (a parameter, a field, a `return`, a typed `let`, an element pushed into a `Vec[T]`, `?T` of a struct), as `.Variant` is for enums: `serve(ln, h, .{deadline: 5 * time.second})`. Without an expected struct type it is an error.
 - `copy struct` declares a bitwise-copied type. All its fields must be copy, and the type cannot have a `drop` method.
 - **copy inference**: structs and enums that are private to the package, not generic, have only copy fields and have no `drop` method are copy automatically. A `pub` type must write `copy` explicitly.
-- A type gets `==` automatically when all its fields are comparable; it can be a `Map` key when all its fields are hashable; it gets `.clone()` automatically when all its fields can be cloned. Defining `equal`, `hash`, `compare` or `clone` methods replaces the generated implementations. A type that defines `equal` but not `hash` cannot be a key. These methods have fixed signatures, and a wrong signature is a compile error: `fn equal(self, other T) bool`, `fn compare(self, other T) Ordering`, `fn hash(self, h inout Hasher)`, `fn clone(self) T`, `fn drop(self inout)`. `fn toString(self) String` (or `fn message(self) String`) decides how `print` shows the type; a method of the same name with a different signature is just an ordinary method.
+- A type gets `==` automatically when all its fields are comparable; it can be a `Map` key when all its fields are hashable; it gets `.clone()` automatically when all its fields can be cloned. Defining `equal`, `hash`, `compare` or `clone` methods replaces the generated implementations. A type that defines `equal` but not `hash` cannot be a key. These methods have fixed signatures, and a wrong signature is a compile error: `fn equal(self, other: T) -> bool`, `fn compare(self, other: T) -> Ordering`, `fn hash(self, h: inout Hasher)`, `fn clone(self) -> T`, `fn drop(inout self)`. `fn toString(self) -> String` (or `fn message(self) -> String`) decides how `print` shows the type; a method of the same name with a different signature is just an ordinary method.
 - Struct fields cannot have view types (`str`, `[]T`, `MutexRef`).
 
 Tests: `run/basics`, `run/copyinfer`, `run/interfaces`, `errors/bad_copy`, `errors/copy_exported`, `errors/missing_field`, `errors/view_field`, `errors/protocol_methods`.
@@ -148,20 +155,20 @@ Tests: `run/basics`, `run/generics`, `run/errors`, `run/patterns`, `errors/non_e
 
 ### 4.4 Function types and closures
 
-- `fn(int) int`. Closure literals are `(x) => x * 2` and `(x, y) => { ... }`; parameter and return types are inferred from the expected type. You can also write `fn(x int) int { ... }`.
+- `fn(int) -> int`. Closure literals are `x => x * 2`, `(x, y) => { ... }` and `(x int) => ...`; parameter and return types are inferred from the expected type. You can also write `fn(x: int) -> int { ... }`. In a `match` guard and the head of a `select` arm, `name =>` is the arm's arrow; a closure there goes in parentheses.
 - Section 5.6 specifies how closures capture variables.
 
 Tests: `run/basics`, `run/generics`, `run/edge`, `run/patterns`.
 
 ### 4.5 Interfaces
 
-- Structural and implicitly satisfied: a type satisfies an interface when it has all the methods the interface requires (with the same names, parameters and `self` modes). Exception: when the interface requires `self inout`, a read-only `self` method also satisfies it (whatever can be borrowed for writing can be borrowed for reading). So the read-only `read` of `os.File` and `net.Conn` satisfies `io.Reader`.
-- A borrowed interface parameter (`r Reader`, `r inout Reader`) is a data pointer plus a method table and allocates no memory.
+- Structural and implicitly satisfied: a type satisfies an interface when it has all the methods the interface requires (with the same names, parameters and `self` modes). Exception: when the interface requires `inout self`, a read-only `self` method also satisfies it (whatever can be borrowed for writing can be borrowed for reading). So the read-only `read` of `os.File` and `net.Conn` satisfies `io.Reader`.
+- A borrowed interface parameter (`r Reader`, `r: inout Reader`) is a data pointer plus a method table and allocates no memory.
 - An interface value (a variable, field or collection element) is an exclusive box on the heap plus a method table; dropping it drops the value inside. An interface value is never empty; write `?Reader` for an optional one.
 - `match r { f File => ..., _ => ... }` branches on the concrete type.
 - Interfaces can embed other interfaces. Methods with type parameters and conditional methods do not count toward the method set.
 - **Type sets**: `interface Num { ~int | ~f64 }`. `~T` also accepts newtypes whose underlying type is `T`. An interface with a type set can only be used as a constraint, not as the type of a value.
-- `error` is a built-in interface with the single method `fn message(self) String`.
+- `error` is a built-in interface with the single method `fn message(self) -> String`.
 
 Tests: `run/interfaces`, `run/iface_modes`, `run/generics`, `run/constraints`, `errors/constraints`, `errors/rules`.
 
@@ -172,14 +179,25 @@ Capabilities are built-in constraints that the compiler decides:
 | Capability | Types that satisfy it |
 | --- | --- |
 | `copy` | scalars, `Span`, copy structs and enums, fixed-length arrays of copy elements |
-| `clone` | copy types; `String`, `rc`, `arc`, `chan`; containers whose elements can be cloned; types with a `clone` method or whose fields can all be cloned |
+| `clone` | copy types; `String`, `Rc`, `Arc`, `Chan`; containers whose elements can be cloned; types with a `clone` method or whose fields can all be cloned |
 | `default` | scalars, `String`, `Vec`, `Map`, `?T`; fixed-length arrays whose elements have a default; structs whose fields all have defaults; newtypes whose underlying type has a default |
-| `send` | types that contain no `rc`, `weak`, `Cell`, raw pointer or function value (derived from the structure); interface values don't satisfy it for now (conservative) |
+| `send` | types that contain no `Rc`, `Weak`, `Cell`, raw pointer or function value (derived from the structure); interface values don't satisfy it for now (conservative) |
 | `comparable` | built-in comparable types; types with an `equal` method or whose fields are all comparable |
 | `ordered` | numbers, strings, `bool`, enums without data, types with a `compare` method, newtypes whose underlying type is ordered |
 | `hash` | integers, strings, `bool`; types with a `hash` method or whose fields are all hashable |
 
 Tests: `run/generics`, `run/interfaces`, `run/constraints`, `errors/unordered_sort`, `errors/send_rc`, `errors/bad_copy`, `errors/rules`.
+
+### 4.7 Tuples
+
+- `(A, B)` is the type of a pair, up to six elements: `(int, String, bool)`. `(a, b)` builds one; the element types come from the expected type, or from the elements (a string literal element is a `String`, as in a list). `(x)` is just `x` in parentheses, and `()` is unit.
+- `t.0`, `t.1` read and assign elements (`p.1.0 = 2`), and can be moved out of an owned tuple like struct fields.
+- A tuple is copy when all its elements are, comparable and hashable when they are (so it can be a `Map` key), and `clone` when they are. It prints as `(1, "a")`. Like a struct, it can't hold a view.
+- Patterns: `(p, q)` matches the elements (`match pair { (0, _) => ..., (x, y) if x == y => ... }`), counts toward exhaustiveness, and works in `if let`, also through an optional: `if let (k, v) = parse(s)` when `parse` returns `?(String, int)`.
+- `let (a, b) = e` and `var (a, b) = e` bind the elements (nested tuples and `_` too). The tuple is kept in a hidden variable, and each name takes its element as `let a = t.0` would: moved, copied, or, when `e` is a borrowed place, borrowed.
+- A tuple is a prelude struct (`Tuple2[A, B]` with fields `_0`, `_1`, …), so it costs the same as a struct with those fields.
+
+Tests: `run/tuples`, `errors/tuples`, `errors/tuples_views`, `errors/tuples_moves`.
 
 ## 5. Ownership
 
@@ -198,9 +216,9 @@ Tests: `run/ownership`, `errors/use_after_move`, `errors/maybe_moved`, `errors/m
 
 | Mode | Signature | Call site | Rules |
 | --- | --- | --- | --- |
-| read-only borrow (default) | `fn show(u User)` | `show(u)` | the function cannot modify it or move it away |
-| mutable borrow | `fn rename(u inout User)` | `rename(&u)` | the argument must be a `var` place; the call site must write `&` |
-| transfer | `fn store(u sink User)` | `store(u)` | the argument is moved by the call |
+| read-only borrow (default) | `fn show(u: User)` | `show(u)` | the function cannot modify it or move it away |
+| mutable borrow | `fn rename(u: inout User)` | `rename(&u)` | the argument must be a `var` place; the call site must write `&` |
+| transfer | `fn store(u: sink User)` | `store(u)` | the argument is moved by the call |
 
 - **Exclusivity**: at any moment a value has either any number of read-only borrows or exactly one mutable borrow. `both(&a, &a)` and `mixed(a, &a)` are compile errors.
 - **Slices**: a `[]T` is a read-only view of elements, even in a `var` (other views of the same elements may exist). Only an `inout []T` parameter can change them: `v[i] = x`, `for x in &v`, `v.sort()`, `v.swap(i, j)`, `v.reverse()`, `v.sortBy(less)`. Its argument is `&xs` or `&xs[a..b]` of a `var` `Vec` or array, or another `inout` slice (`&v`, `&v[a..b]`); `xs[a..b].sort()` works the same way. An `inout` slice can be re-sliced (`v = v[1..]`) but not pointed at other elements (5.4).
@@ -211,7 +229,7 @@ Tests: `run/ownership`, `run/slices_mut`, `errors/borrowed_param_mutation`, `err
 ### 5.3 Dropping
 
 - A value is dropped when its owner goes out of scope. Variables in the same scope are dropped in reverse order of declaration; struct fields are dropped in declaration order.
-- A `fn drop(self inout)` method is called when the value is dropped. A type with a `drop` method cannot be copy.
+- A `fn drop(inout self)` method is called when the value is dropped. A type with a `drop` method cannot be copy.
 - `drop(x)` drops early. It is an ordinary `sink` function.
 - `defer stmt` runs when the **current block** ends; several defers run in reverse order. `errdefer stmt` runs only when the function returns an error, and can only be used in functions that return a result or an optional value.
 - `break`, `continue`, `return` and `try` also run drops and defers when they leave a scope. A move inside deferred code happens where that code runs (at the end of the block, or at the `break`/`continue`/`return` that leaves the block), and is evaluated in execution order (reverse order): two defers that both move the same value, and a use after the block of a value moved in a defer, are compile errors. `errdefer` runs only when returning an error (or `none`), or when `try` propagates an error.
@@ -225,11 +243,11 @@ Tests: `run/ownership`, `run/errdefer`, `run/labels`, `run/push_flow`, `run/temp
 - The view types `str`, `[]T` and `MutexRef[T]`, and references lent by projections, **cannot be stored**: they cannot be struct fields, collection elements or captures of escaping closures, and cannot be returned from functions (except through the `yield` of a projection).
 - A projection function lends a reference with `yield`: `yield &T`, `yield inout T`, `yield ?&T`. `v[i]`, `m.get(k)`, `m.entry(k)` and `mu.lock()` are all projections.
 - `let x = v[i]`: when the element is copy it is copied out; otherwise `x` is a reference. To own the value, write `.clone()`.
-- `if let u = m.get(k) { }` and `with e = m.entry(k) { }` bind the reference to the block; the reference cannot be taken out of the block. The block cannot modify the borrowed container.
+- `if let u = m.get(k) { }` and `with e = m.entry(k) { }` bind the reference to the block; the reference cannot be taken out of the block. The block cannot modify the borrowed container. A `with` body runs exactly once, so a function can end with a `with` whose body returns.
 - **Last use**: a view or reference bound with `let` stops holding the borrowed value after its last use in the block; after that the original value can be modified.
-- A view cannot outlive the value it borrows. You cannot take a view of a temporary and keep it (`let s str = make()`).
+- A view cannot outlive the value it borrows. You cannot take a view of a temporary and keep it (`let s: str = make()`).
 - While a view exists, the borrowed `Vec`/`String` cannot be modified, so `push` never leaves a view dangling.
-- **Views live only in variables** (possibly inside a variable's `?T` / `T ! E`). No value can exist that puts a view into any other storage, whether its type is written or inferred: `[s]`, `rc(s)`, `Box(s)`, `[2]str`, `Map[int, str]`, `Vec[MutexRef[T]]`, and putting a view into an interface value (`xs.push(s)` where `xs` is a `Vec[Len]`).
+- **Views live only in variables** (possibly inside a variable's `?T` / `T ! E`). No value can exist that puts a view into any other storage, whether its type is written or inferred: `[s]`, `Rc(s)`, `Box(s)`, `[2]str`, `Map[int, str]`, `Vec[MutexRef[T]]`, and putting a view into an interface value (`xs.push(s)` where `xs` is a `Vec[Len]`).
 - **Assigning to a view variable**: `v = s.asStr()` requires the borrowed value (`s`, or the final owner that `s` borrows from) to live at least as long as `v`: it must be declared in an outer block, or in the same block before `v` (values in the same block are dropped in reverse order of declaration, so the later one is dropped first, and a `defer` in between would see it already gone). After that, the borrowed value cannot be modified anywhere in `v`'s scope (up to its last use). `let v = { let s = ...; s.asStr() }` is rejected for the same reason.
 - An `inout` view parameter can only be assigned a subview of itself (`rest = rest[1..]`) or a literal: the caller cannot see a new borrow. A closure cannot assign a view to a captured outer variable.
 - A view returned by a call is treated as borrowing all the arguments, including variables captured by function-value arguments (`run(() => s.asStr())` borrows `s`; `f()` borrows the closure `f` itself) and values passed as interfaces. A reference lent by a projection function written in Gojo is treated as borrowing the parameters that its `yield` actually points into.
@@ -242,8 +260,8 @@ Tests: `run/lastuse`, `run/generics`, `run/spans`, `run/mutexref`, `errors/view_
 
 ### 5.5 Shared ownership
 
-- `rc(x)` and `arc(x)` create reference-counted values that are read-only inside; to modify them, wrap the contents in `Cell` or `Mutex`. `.clone()` increments the count.
-- `weak[T]` comes from `rc.downgrade()`; `upgrade()` returns `?rc[T]`. The programmer breaks cycles with `weak`.
+- `Rc(x)` and `Arc(x)` create reference-counted values that are read-only inside; to modify them, wrap the contents in `Cell` or `Mutex`. `.clone()` increments the count.
+- `Weak[T]` comes from `Rc.downgrade()`; `upgrade()` returns `?Rc[T]`. The programmer breaks cycles with `Weak`.
 - `Arena[T]` with generational `Id[T]`: accessing through a deleted Id returns `none`.
 
 Tests: `run/misc`, `run/interfaces`, `run/niche`, `run/arena`.
@@ -263,7 +281,7 @@ Tests: `run/basics`, `run/concurrency`, `errors/escaping_view`, `errors/go_closu
 - `+ - *` panic on integer overflow (in both debug and release); `+% -% *%` wrap. `/` and `%` panic on division by zero. Out-of-bounds indexing panics. `<<` and `>>` panic when the shift amount is not between `0` and the bit width minus one.
 - A numeric conversion `T(x)` uses the target type only to decide the type of literals (`u64(18446744073709551615)`, `u64(1 << 63)`); other arguments are converted from their own type (when `b` is a `u8`, `int(~b)` first complements on `u8`).
 - `if`, `match` and blocks are expressions; their value is the last expression.
-- Operations on `?T`: `if let v = x { }`, `x ?? d`, `x?.field` (the result is still optional, and `field` must be a copy type; otherwise use `if let`), `x.unwrap()` (panics on `none`), `match`.
+- Operations on `?T`: `if let v = x { }` (and `if let x { }`, which unwraps the variable `x` under the same name inside the block), `x ?? d`, `x?.field` (the result is still optional, and `field` must be a copy type; otherwise use `if let`), `x?.method(args)` (`none` when `x` is `none`; a method that returns `?U` gives `?U`, not `??U`; the method may only read its receiver, and a view it returns borrows `x`, so `x` must be a variable to keep it), `x.unwrap()` (panics on `none`), `match`.
 - `[a, b]` is a `Vec` literal; `Map[K, V]{k: v}` and `Vec[T]{}` are typed literals. A list made only of string literals is inferred as `Vec[String]`.
 - `a..b` is a half-open range and `a..=b` a closed range; `s[a..b]` takes a view of a string or slice.
 - A `T ! E` result must be handled; discard it with `_ = f()`.
@@ -273,10 +291,10 @@ Tests: `run/basics`, `run/edge`, `run/misc`, `run/constraints`, `run/patterns`, 
 ## 7. Statements and control flow
 
 - `if c { } else if d { } else { }`; the condition must be a `bool`.
-- `for x in xs`, `for i, x in xs` (index and element), `for i in 0..n`, `for k, v in m`, `for x in ch`, `for cond { }`, `for { }`.
+- `for x in xs`, `for i, x in xs` (index and element), `for i in 0..n`, `for k, v in m`, `for x in ch`, `while cond { }`, `loop { }`.
 - `for x in v` borrows each element; `for x in &v` iterates mutably, and `v` must be a `var`. The collection being iterated cannot be modified during the iteration.
-- **Labels**: `outer: for ...`; `break outer` and `continue outer` jump to that loop. A label cannot have the same name as the label of an enclosing loop; the label of a `break` must belong to an enclosing loop. A `break` inside a `select` arm applies to the enclosing loop.
-- `match` is exhaustive. Patterns: literals (including negative ones), ranges `1..=9`, alternatives with `|`, `_`, bindings, enum variants (can nest; every field must be written), `ok(x)`/`err(e)`, `some(x)`/`none`, and the concrete type of an interface value, `f File`. An arm can have a guard `if cond`; guarded arms do not count toward the exhaustiveness check.
+- **Labels**: `outer: for ...` (or `outer: while`, `outer: loop`); `break outer` and `continue outer` jump to that loop. A label cannot have the same name as the label of an enclosing loop; the label of a `break` must belong to an enclosing loop. A `break` inside a `select` arm applies to the enclosing loop.
+- `match` is exhaustive. Patterns: literals (including negative ones), ranges `1..=9`, alternatives with `|`, `_`, bindings, enum variants (can nest; every field must be written), `ok(x)`/`err(e)`, `some(x)`/`none`, tuples `(a, b)`, and the concrete type of an interface value, `f: File`. An arm can have a guard `if cond`; guarded arms do not count toward the exhaustiveness check.
 - When the matched value is a place, bindings are references by default. When an arm moves a binding away, that arm consumes the matched value.
 - There is no `switch`.
 
@@ -286,8 +304,8 @@ Tests: `run/basics`, `run/labels`, `run/edge`, `run/misc`, `run/patterns`, `run/
 
 For a custom type, `for x in t` looks for a protocol in this order:
 
-1. **Cursor (pull)**: `fn cursor(self) C` and `fn next(self, c inout C) yield ?&T` (or one that returns an owned `?T`, used as a generator). `for x in &t` uses `nextMut`. The `for` is translated into "get a cursor, then call `next` in a loop", with no closure.
-2. **Push**: `fn each(self, body fn(&T) Flow)`; `for x in &t` uses `eachMut(self inout, body fn(inout T) Flow)`. The loop body becomes a non-escaping closure; the `break`, `continue`, `return`, `try` and labeled jumps in it are rewritten into control signals. When `each` receives `Flow.Break` it should return as soon as possible; even if it keeps calling, the loop body does not run again, so a wrong `each` only runs a few extra rounds and cannot change the program's result. The loop body runs many times, so it cannot move outer variables.
+1. **Cursor (pull)**: `fn cursor(self) -> C` and `fn next(self, c: inout C) yield ?&T` (or one that returns an owned `?T`, used as a generator). `for x in &t` uses `nextMut`. The `for` is translated into "get a cursor, then call `next` in a loop", with no closure.
+2. **Push**: `fn each(self, body: fn(&T) -> Flow)`; `for x in &t` uses `eachMut(inout self, body: fn(inout T) -> Flow)`. The loop body becomes a non-escaping closure; the `break`, `continue`, `return`, `try` and labeled jumps in it are rewritten into control signals. When `each` receives `Flow.Break` it should return as soon as possible; even if it keeps calling, the loop body does not run again, so a wrong `each` only runs a few extra rounds and cannot change the program's result. The loop body runs many times, so it cannot move outer variables.
 
 When a type provides both protocols, the cursor is used. A type that satisfies neither protocol cannot be used in `for`. The value being iterated cannot be modified during the iteration.
 
@@ -297,13 +315,13 @@ Tests: `run/iterators`, `run/iterator_views`, `run/constraints`, `run/push_flow`
 
 ## 8. Error handling
 
-- `fn f() T ! E`; `return err(e)`, `return x` (wrapped as ok automatically).
+- `fn f() -> T ! E`; `return err(e)`, `return x` (wrapped as ok automatically).
 - `try e`: on error, returns the error to the caller. The error types must be the same, or the outer error type must be `error`; otherwise write `try e else Wrap`, where `Wrap` is a function or enum variant that converts the inner error to the outer error. `try` can only be used in functions that return a result or an optional value; on a `?T` it propagates `none`.
 - `e catch err { block }`: handles the error in place; the block's value is the value of the whole expression.
 - `match r { ok(v) => ..., err(.Kind(x)) => ... }`.
 - `x.unwrap()` panics on error.
 - In a function that returns `?T ! E`, `return none` is a successful `none` (wrapped as ok). When the expected type of a `.Variant` shorthand is `E ! Err` or `?E`, it resolves against `E`.
-- **Error types**: each module uses its own concrete error type, and they all satisfy the built-in interface `error` (`fn message(self) String`), so a function written with `! error` can `try` errors from any module. Errors from the operating system, files, processes and the network are all `io.Error`: `kind` (an `io.ErrorKind`: `NotFound`, `PermissionDenied`, `AlreadyExists`, `Cancelled`, etc., independent of the platform), `message()`, `code` (the system error number). `os.Error` and `net.Error` are aliases of it. Errors of other modules carry their own information, such as the line and column of `json.Error`, or `time.ParseError`.
+- **Error types**: each module uses its own concrete error type, and they all satisfy the built-in interface `error` (`fn message(self) -> String`), so a function written with `! error` can `try` errors from any module. Errors from the operating system, files, processes and the network are all `io.Error`: `kind` (an `io.ErrorKind`: `NotFound`, `PermissionDenied`, `AlreadyExists`, `Cancelled`, etc., independent of the platform), `message()`, `code` (the system error number). `os.Error` and `net.Error` are aliases of it. Errors of other modules carry their own information, such as the line and column of `json.Error`, or `time.ParseError`.
 
 A **panic** signals a bug in the program. A panic prints a message and a source location (pointing into user code, not the standard library) and terminates the whole process with exit code 2. It does not unwind the stack and does not run defers. There is no `recover`.
 
@@ -311,11 +329,11 @@ Tests: `run/errors`, `run/errdefer`, `run/patterns`, `errors/try_error_mismatch`
 
 ## 9. Generics
 
-- Generic functions, structs and enums: `fn max[T ordered](xs []T) ?T`, `struct Stack[T any]`. Constraints are written next to the parameter, or with `where T: copy + ordered`.
+- Generic functions, structs and enums: `fn max[T: ordered](xs: []T) -> ?T`, `struct Stack[T]`. Constraints are written next to the parameter, or with `where T: copy + ordered`.
 - Methods can have their own type parameters. A `where` on a method makes it a conditional method, which exists only when the condition holds. Calling a method whose condition does not hold is a compile error.
 - Type parameters are inferred locally at the call site (including closure return types). When they cannot be inferred, write them out: `fresh[int]()`.
 - A generic body can only use operations its constraints guarantee: call methods declared by an interface constraint, copy only with `copy`, compare only with `ordered`, do arithmetic only when the type set is all numbers.
-- **Integer const generics**: `struct Mat[R int, C int] { data [R][C]f64 }`. Only integer parameters are allowed, and there is no arithmetic at the type level. Mismatched dimensions are a compile error.
+- **Integer const generics**: `struct Mat[R: int, C: int] { data: [R][C]f64 }`. Only integer parameters are allowed, and there is no arithmetic at the type level. Mismatched dimensions are a compile error.
 - Implementations are monomorphized per type argument.
 
 Tests: `run/generics`, `run/constgen`, `run/constraints`, `errors/constgen`, `errors/constraints`, `errors/unordered_sort`.
@@ -337,14 +355,14 @@ Tests: `run/scopes`, `run/task_move`, `run/concurrency`, `run/mutexref`, `run/ca
 ### 10.2 Data parallelism
 
 - `par for x in &v { }` (a `var` `Vec` or array, an `inout` slice, or a range of one), `par for x in v` (also any slice), `par for i, x in &v` and `par for i in a..b` run the iterations on up to `maxProcs` tasks, in chunks handed out as tasks finish them. With `&v` the body may modify its element. It may only read what it captures, which must be `send`. `continue` ends an iteration; `break`, `return` and `try` are errors. The statement ends when every iteration has.
-- `send fn(A) R` is the type of a function that any number of tasks may call at once. A closure is a `send fn` when everything it captures is `send` and it only reads it; functions declared with `fn` are `send fn`. A `send fn` can be used where a `fn` is expected, not the other way round. A `send fn` is `send`.
+- `send: fn(A) -> R` is the type of a function that any number of tasks may call at once. A closure is a `send fn` when everything it captures is `send` and it only reads it; functions declared with `fn` are `send fn`. A `send fn` can be used where a `fn` is expected, not the other way round. A `send fn` is `send`.
 - `task.map(xs, limit, f)` calls `f` on each element in up to `limit` tasks at once (0: no limit) and gives the results in order; `task.tryMap` does the same for `f` returning `R ! E`, and stops at the first error; `task.each` gives no results; `task.race(fs)` runs the functions at once, gives the first success and cancels the rest (all fail: the last error).
 
 Tests: `run/parallel`, `errors/par_for`, `errors/send_fn`.
 
 ### 10.3 Channels
 
-- `chan[T](n)` makes a channel with room for `n` values (`chan[T]()` and `chan[T](0)`: none, so a send waits for a receiver). Its value is a `Chan[T]` with two fields, `tx Sender[T]` and `rx Receiver[T]`; `chan T` in a type means `Chan[T]`. `T` must be `send` and can't be a view.
+- `Chan[T](n)` makes a channel with room for `n` values (`Chan[T]()` and `Chan[T](0)`: none, so a send waits for a receiver). Its value is a `Chan[T]` with two fields, `tx Sender[T]` and `rx Receiver[T]`. `T` must be `send` and can't be a view.
 - `tx <- v` sends `v` (moving it), waiting while the buffer is full. `tx.send(v)` does the same and gives `false` when the value was not sent: every receiver is gone, or the task was cancelled; the value is dropped then. `<-rx` gives `?T`: `none` once every sender is gone and the buffer is empty (or when the task is cancelled). `for x in rx` receives until then. Both ends can be cloned for more senders or receivers; `.len()` is the number of values in the buffer.
 - **Closing.** A channel closes when its last `Sender` is dropped (`drop(ch.tx)` closes it early). When its last `Receiver` is dropped, the values in the buffer are dropped, and sends fail. There is no `close` method; nothing about channels panics.
 
@@ -359,13 +377,13 @@ Tests: `run/select`, `run/concurrency`, `run/sched`, `errors/select_arms`, `erro
 
 ### 10.5 Sharing
 
-- `Mutex(x)` owns its data; `arc(Mutex(x))` is for long-term sharing. `with v = mu.lock() { }` locks; the lock is released when the block ends, and the reference can't leave the block. `Mutex(&x)` makes a `MutexRef[T]`, a lock that borrows `x` (a `var`); while it exists `x` is reachable only through it.
+- `Mutex(x)` owns its data; `Arc(Mutex(x))` is for long-term sharing. `with v = mu.lock() { }` locks; the lock is released when the block ends, and the reference can't leave the block. `Mutex(&x)` makes a `MutexRef[T]`, a lock that borrows `x` (a `var`); while it exists `x` is reachable only through it.
 - `with a, b = lock(m1, m2) { }` takes two or more locks at once, in one order everywhere (by address), so code that always takes several locks this way can't deadlock on them. The same mutex twice is an error, or a panic when only known at run time.
 - **No waiting under a lock.** A send, receive, `select`, `time.sleep`, `join` or `scope` written directly inside a `with ... lock()` body is an error: the tasks waiting for the lock would wait too. (Waits inside called functions are found at run time, 10.7.)
-- `RwLock.new(x)` lets many tasks read at once, or one write: `with v = rw.read() { }` gives a read-only reference, `with v = rw.write() { }` a mutable one; neither can leave its block, and the rules for waiting under a lock apply to both. Waiters are served in order, a run of readers together, so a stream of readers can't starve a writer.
-- `Atomic[T]`, for integer types: `Atomic.new(x)`, `load`, `store`, `add` and `sub` (wrapping; they give the new value), `swap` (gives the old one), `compareSwap(old, new)` and `clone`. Every operation is atomic and sequentially consistent; tasks share an `Atomic` by borrowing it.
+- `RwLock(x)` lets many tasks read at once, or one write: `with v = rw.read() { }` gives a read-only reference, `with v = rw.write() { }` a mutable one; neither can leave its block, and the rules for waiting under a lock apply to both. Waiters are served in order, a run of readers together, so a stream of readers can't starve a writer.
+- `Atomic[T]`, for integer types: `Atomic(x)`, `load`, `store`, `add` and `sub` (wrapping; they give the new value), `swap` (gives the old one), `compareSwap(old, new)` and `clone`. Every operation is atomic and sequentially consistent; tasks share an `Atomic` by borrowing it.
 - `send interface Name { }` is an interface that only `send` types implement, so its values are `send`; a type parameter bounded by it is `send`.
-- `isolate { body }` has type `Iso[T]` (`T` is the type of `body`, not a view). The body may use variables from outside only if their types are `send`, so nothing outside points into what it builds. `Iso[T]` is `send` whatever `T` is (it may hold `rc` and `Cell`), can't be cloned, and `iso.take()` gives back the `T`.
+- `isolate { body }` has type `Iso[T]` (`T` is the type of `body`, not a view). The body may use variables from outside only if their types are `send`, so nothing outside points into what it builds. `Iso[T]` is `send` whatever `T` is (it may hold `Rc` and `Cell`), can't be cloned, and `iso.take()` gives back the `T`.
 - `task.yieldNow()` lets other tasks run.
 
 - **Task-local values**: `let key = task.local[T]()` (at package level) makes a key; `task.with(key, value, () => body)` binds it while `body` runs, and `key.get()` gives a copy (`?T`; `T` must be `send` and cloneable) in that code and in every task started inside it, through any number of scopes and shields. An inner `task.with` of the same key hides the outer one until it ends. Nothing else can change a binding, so tasks never race on one.
@@ -387,7 +405,7 @@ Tests: `run/cancel`, `run/cancel_reasons`, `run/http`, `run/net`, `examples/http
 
 - Tasks are stackful coroutines, assigned to worker threads by an M:N scheduler. The number of tasks running Gojo code at the same time (`maxProcs`) defaults to the number of CPU cores, and can be changed with the environment variable `GOJO_MAXPROCS` or with `task.setMaxProcs(n)`. Channels, locks, `time.sleep` and network operations suspend only the current task.
 - **File I/O**: an `os.File` read or write of a pipe, terminal or socket that has to wait parks the task on the poller, as a network operation does: it takes no thread, and cancelling the task cancels it. On Linux, a read or write of a regular file first tries without waiting (`RWF_NOWAIT`); one that has to wait for the disk goes through an io_uring, where the task parks the same way (and cancelling it cancels the operation). Without io_uring (kernels before 5.6, seccomp profiles that block it such as Docker's default, `GOJO_IO_URING=0`), on filesystems without `RWF_NOWAIT`, and on macOS, regular-file I/O blocks its thread, which gives its CPU slot away first (below).
-- **Preemption**: when other tasks are waiting, a task that has run for about 10 ms in a row is asked to give up the CPU. It responds at its next checkpoint: the entry of a function that may recurse, each iteration of a loop that contains nested loops or calls, and every 65536 iterations of a purely computational counting loop. So computation that doesn't block cannot starve other tasks either. Other purely computational loops (`for cond {}`) don't check; the enclosing loop takes care of it. If such a loop still doesn't respond, it is treated as a C call after 20 ms. What counts is the CPU time the thread actually used: when the machine is overloaded and the thread gets no CPU, it is not treated as unresponsive, so no extra threads are started to add to the overload.
+- **Preemption**: when other tasks are waiting, a task that has run for about 10 ms in a row is asked to give up the CPU. It responds at its next checkpoint: the entry of a function that may recurse, each iteration of a loop that contains nested loops or calls, and every 65536 iterations of a purely computational counting loop. So computation that doesn't block cannot starve other tasks either. Other purely computational loops (`while cond {}`) don't check; the enclosing loop takes care of it. If such a loop still doesn't respond, it is treated as a C call after 20 ms. What counts is the CPU time the thread actually used: when the machine is overloaded and the thread gets no CPU, it is not treated as unresponsive, so no extra threads are started to add to the overload.
 - **C calls**: while an `extern` function, a blocking file operation, or a DNS lookup runs, its thread gives its CPU slot to another thread (file I/O and DNS give it up immediately; other C calls give it up after about 1 ms). So the number of threads is `maxProcs` plus the number of tasks inside C calls. A long loop without checkpoints (for example a large sort inside the runtime) is also treated as a C call after 20 ms.
 - **Stacks**: each task's stack stays at a fixed address (tasks can borrow data on other tasks' stacks). The default size is 2 MB (`GOJO_GOROUTINE_STACK`); `main` has 1 GB. Only the pages that are used take memory. Stack overflow is caught by a guard page and ends with a panic. A task parked for more than 200 ms, among more than 256, whose scopes have no running tasks (that might be reading its stack), is **hibernated**: the used part of its stack is copied out and its pages are given back, and both come back at the same address before it runs again or before a channel writes into it. `GOJO_HIBERNATE=0` turns this off (do so for a program whose C libraries keep pointers into a task's stack while the task waits: the runtime can't see those), `GOJO_HIBERNATE=n` waits `n` ms. It is off under sanitizers.
 - `task.stats()` returns the number of live tasks, threads, `maxProcs` and hibernated tasks.
@@ -429,13 +447,13 @@ Except for the prelude, every module needs a `use`. Standard library modules can
 | --- | --- |
 | prelude | `print`/`println` (with spaces between arguments), `assert`, `panic`, `drop`, `swap`, `replace`, `take`, `min`/`max`; methods of `?T`, `T ! E`, strings, slices, `Vec`, `Map`; `Set[T]` (insertion order, `setOf`, `union`/`intersection`/`difference`); `Arena[T]` |
 | `fmt` | `sprint`; `format(template, args...)` and `printf`: `{}`, `{:8}`, `{:<8}` `{:>8}` `{:^8}`, `{:*^8}` (fill character), `{:08}`, `{:.2}`, `{:x}` `{:X}` `{:o}` `{:b}`, `{{` `}}`. The template must be a string literal; the number of placeholders, and whether each format matches its argument's type, are checked at compile time. Numbers are right-aligned by default, everything else left-aligned |
-| `io` | `Error`, `ErrorKind`, `fromCode`, `newError`; interfaces `Reader` (`read(self inout, buf inout Vec[byte], max int) int ! Error`, 0 means end) and `Writer` (`write(self inout, data []byte) ! Error`); `readAll`, `readText`, `copy`, `writeText`; in-memory `BytesReader` (`textReader`, `bytesReader`) and `Buffer` |
+| `io` | `Error`, `ErrorKind`, `fromCode`, `newError`; interfaces `Reader` (`read(inout self, buf: inout Vec[byte], max: int) -> int ! Error`, 0 means end) and `Writer` (`write(inout self, data: []byte) ! Error`); `readAll`, `readText`, `copy`, `writeText`; in-memory `BytesReader` (`textReader`, `bytesReader`) and `Buffer` |
 | `bufio` | `reader(r)`: `readLine()` (strips `\n` / `\r\n`, `none` at the end), `readUntil(byte)`, `readByte()`, `readAll()`; it is itself an `io.Reader`. `writer(w)`: `write`, `writeText`, `flush`; flushes automatically when it goes out of scope (errors are lost; call `flush` explicitly when they matter) |
 | `os` | `args`, `exit`; `File` (`open`, `create`, `append`, `stdin`/`stdout`/`stderr`; `read`, `write`, `writeText`, `readAll`, `readText`, `flush`; closed when it goes out of scope; satisfies `io.Reader`/`io.Writer`); `readFile`, `readText`, `writeFile`, `writeText`; `stat`, `lstat` (`Info`: `kind`, `size`, `modified`, `mode`), `exists`, `readDir` (sorted names), `mkdir`, `mkdirAll`, `remove`, `removeAll` (does not follow symbolic links), `rename`, `cwd`, `chdir`, `tempDir`, `joinPath`, `dirName`, `baseName`; `getenv`, `setenv`, `unsetenv`; `run(prog, args)`, `runWithInput` (capture output and return `Output{status, stdout, stderr}`; `status` is the exit code or 128 + the signal), `call` (shares this process's standard streams). During file and process operations the thread gives up the CPU and other tasks keep running. Writes to standard output and `print` share one buffer, so their order is consistent |
 | `time` | monotonic clock `now`, `since`, `sleep`; wall-clock time `unixNanos`, `unix`; `Date` (`year`…`nanosecond`, `offset`; `unixNanos()`, `weekday()`, `yearDay()`, `iso()` (RFC 3339), `format("%Y-%m-%d %H:%M:%S")` and other strftime-style directives); `utc`, `local`, `at(ns, offset)`, `date(...)`, `parseIso` (`! ParseError`); `formatDuration` (`1.5s`, `250ms`, `2h5m0s`); `dayName`, `monthName`. Nanoseconds are held in an `int`, which covers about 292 years either side of 1970 |
 | `json` | `Value` (`Null`, `Bool`, `Int`, `Num`, `Str`, `Arr`, `Obj`; objects keep the insertion order of keys, and integers that fit in an `int` stay exact); `parse(text) Value ! json.Error` (with line and column; at most `maxDepth` = 500 levels of nesting); projections `get(key)`, `at(i)`; `str()`, `int()`, `num()`, `boolean()`, `isNull()`, `isObject()`, `isArray()`, `len()`, `keys()`, `set`, `push`; `encode()`, `pretty()`; constructors `object()`, `array()`, `string`, `integer`, `number`, `boolean`, `null`; `quoted(s)`. There is no automatic conversion between structs and JSON yet |
 | `net` | TCP, see 10.5 |
-| `http` | HTTP/1.1 server and client, plain-text HTTP only. `Handler` interface (`fn serve(self, req Request) Response`); `serve(ln, h, Options{deadline, maxBody})`, `serveCounting` (also gives `Stats`): each connection is a task in the server's task group; each request has a deadline (504 when it passes); a client disconnect cancels the request; cancelling the task that runs `serve` cancels in-flight requests. `Request`: `method`, `path`, `rawQuery`, `headers`, `body`, `header(name)` (case-insensitive), `param(name)` (a decoded query parameter), `segments()`, `text()`; request bodies support `Content-Length` and chunked; over `maxBody` returns 413, headers over 64 KB return 431. `Response`: `text(status, s)`, `json(status, s)`, `setHeader`. Client: `get`, `post`, `request(method, url, headers, body)`. `encode`/`decode` do percent-encoding. For now each connection handles one request (`Connection: close`) |
+| `http` | HTTP/1.1 server and client, plain-text HTTP only. `Handler` interface (`fn serve(self, req: Request) -> Response`); `serve(ln, h, Options{deadline, maxBody})`, `serveCounting` (also gives `Stats`): each connection is a task in the server's task group; each request has a deadline (504 when it passes); a client disconnect cancels the request; cancelling the task that runs `serve` cancels in-flight requests. `Request`: `method`, `path`, `rawQuery`, `headers`, `body`, `header(name)` (case-insensitive), `param(name)` (a decoded query parameter), `segments()`, `text()`; request bodies support `Content-Length` and chunked; over `maxBody` returns 413, headers over 64 KB return 431. `Response`: `text(status, s)`, `json(status, s)`, `setHeader`. Client: `get`, `post`, `request(method, url, headers, body)`. `encode`/`decode` do percent-encoding. For now each connection handles one request (`Connection: close`) |
 | `task`, `strings`, `math` | see section 10; `strings.Builder`; math functions |
 
 The full API of each module is in [`docs/std`](std/README.md) (generated by `gojo doc`, section 17).
@@ -456,7 +474,7 @@ Tests: `testblocks/blocks`.
 - The compiler generates C and compiles it with `cc` or `zig cc`. Debug and release (`-O2`) differ in optimization level and debug info: overflow checks and index checks stay in both.
 - Debug builds have debug info (`-g`), and the generated C uses `#line` to point at lines of the Gojo source, so lldb/gdb can set breakpoints like `main.gojo:12`, and stack traces and sanitizer reports show Gojo lines. On macOS the debug info is in a `.dSYM` next to the binary; `gojo build -o prog` also writes `prog.dSYM`. `gojo emit-c` and `--keep-c` output C without `#line`, which makes it easier to debug the compiler itself.
 - Generics are monomorphized. Functions with at most 60 IR nodes get an `inline` hint.
-- `Box`, `rc`/`arc` and interface boxes are allocated from thread-local free lists in size classes; `Vec`/`String` buffers use `malloc`.
+- `Box`, `Rc`/`Arc` and interface boxes are allocated from thread-local free lists in size classes; `Vec`/`String` buffers use `malloc`.
 - Tasks are stackful coroutines with M:N scheduling; see 10.7.
 - `Map` keeps insertion order. Floats print in the shortest round-trip representation, without scientific notation when the exponent is in [-4, 21).
 - If a function that returns a value runs off its end (type checking proves this cannot happen), the program panics with an internal error instead of returning an undefined value.
@@ -492,7 +510,7 @@ Findings go in `fuzz-out/findings/`; reduced regression cases go in `tests/fuzz/
 - Existing line breaks are kept: lines are never joined or split. Runs of blank lines collapse to one; blank lines at the start of the file and at the start and end of blocks are removed; trailing whitespace is removed; the file ends with one newline.
 - One space after binary operators, `=`, `=>`, `,` and `:`; no spaces around `..`, `..=`, `.`, unary operators, or the brackets of calls and indexing. Block braces have spaces inside (`if c { x }`); struct and map literals don't (`P{x: 1}`).
 - One space before a trailing comment. Comments are kept as written; only the indentation of their line changes. The inside of multi-line block comments is unchanged.
-- Where only the parser can tell (whether `*` and `-` are unary or binary, whether `[` is indexing or type parameters), the choice follows whether the source has a space there.
+- The layout never depends on the spaces in the source: types follow `:` or `->`, so whether `*`, `-` and `[` are prefixes, operators or indexing is clear from the tokens.
 - The formatted result has exactly the same tokens as the original file (otherwise it reports an internal error and does not write the file). All Gojo files in the repository are formatted (except the regression cases in `tests/fuzz`), and a test checks this.
 
 ## 17. Documentation

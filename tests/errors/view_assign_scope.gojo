@@ -1,6 +1,6 @@
 // A view assigned to a variable must not outlive what it points into.
 struct U {
-    name String
+    name: String
 }
 
 fn outer_block() {
@@ -14,7 +14,7 @@ fn outer_block() {
 }
 
 fn optional() {
-    var o ?str = none
+    var o: ?str = none
     {
         let s = "abc".toString()
         o = some(s.asStr())
@@ -25,7 +25,7 @@ fn optional() {
 
 fn slices() {
     let a = [1, 2]
-    var sl []int = a
+    var sl: []int = a
     {
         let b = [3, 4, 5]
         sl = b
@@ -56,16 +56,16 @@ fn longest() {
     println(best)
 }
 
-fn into_inout(out inout str, src str) {
+fn into_inout(out: inout str, src: str) {
     out = src
     // error: cannot store a view of `src` in the `inout` parameter `out`
 }
 
-fn reslice(rest inout str) {
+fn reslice(rest: inout str) {
     rest = rest[1..]
 }
 
-fn run(f fn()) {
+fn run(f: fn()) {
     f()
 }
 

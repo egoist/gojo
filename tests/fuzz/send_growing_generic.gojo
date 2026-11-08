@@ -1,8 +1,8 @@
 struct Bad[T] {
-    v T
-    next ?Box[Bad[Vec[T]]]
+    v: T
+    next: ?Box[Bad[Vec[T]]]
 }
 fn main() {
-    let ch = chan[Bad[int]](1)
+    let ch = Chan[Bad[int]](1)
     println(ch.len())
 }

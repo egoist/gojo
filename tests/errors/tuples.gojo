@@ -1,0 +1,19 @@
+// Misuses of tuples.
+fn first[A, B](p: (A, B)) -> A {
+    p.0
+    // error: cannot move out of element `0` of borrowed parameter `p`
+}
+
+fn main() {
+    match (1, 2) {
+        (1, _) => println(1)
+    }
+    // error: `match` is not exhaustive: `(_, _)` is not covered
+    match (1, 2) {
+        (x, y, z) => println(x, y, z)
+        // error: this pattern has 3 elements, but the value is a `(int, int)`
+    }
+    let big = (1, 2, 3, 4, 5, 6, 7)
+    // error: tuples have 2 to 6 elements
+    println(big)
+}

@@ -1,4 +1,4 @@
-fn id[T copy](x T) T {
+fn id[T: copy](x: T) -> T {
     return x
 }
 fn main() {

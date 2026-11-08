@@ -1,7 +1,7 @@
-fn use1[T](x T) int {
+fn use1[T](x: T) -> int {
     return 1
 }
-fn spawn[T send](s Scope, x sink T) {
+fn spawn[T: send](s: Scope, x: sink T) {
     s.go(() => {
         _ = use1(x)
     })

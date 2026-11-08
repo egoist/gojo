@@ -1,4 +1,4 @@
-fn make() String {
+fn make() -> String {
     return "abc".toString()
 }
 fn main() {

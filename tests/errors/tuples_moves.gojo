@@ -1,0 +1,6 @@
+fn main() {
+    let a = ("x", 1)
+    let b = a
+    println(a, b)
+    // error: use of `a` after it was moved
+}

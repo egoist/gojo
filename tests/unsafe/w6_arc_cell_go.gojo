@@ -1,5 +1,5 @@
 fn main() {
-    let a = arc(Cell(0))
+    let a = Arc(Cell(0))
     let b = a.clone()
     go () => b.set(b.get() + 1)
     a.set(a.get() + 1)

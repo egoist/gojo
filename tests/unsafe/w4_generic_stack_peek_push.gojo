@@ -1,11 +1,11 @@
 struct Stack[T] {
-    items Vec[T]
+    items: Vec[T]
 
     fn peek(self) yield &T {
         yield self.items[self.items.len() - 1]
     }
 
-    fn push(self inout, x sink T) {
+    fn push(inout self, x: sink T) {
         self.items.push(x)
     }
 }

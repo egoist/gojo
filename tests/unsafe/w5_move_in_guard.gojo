@@ -1,4 +1,4 @@
-fn take(s sink String) bool {
+fn take(s: sink String) -> bool {
     return true
 }
 fn main() {

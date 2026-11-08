@@ -1,4 +1,4 @@
 struct main {
     // error: `main` must be a function
-    x int
+    x: int
 }

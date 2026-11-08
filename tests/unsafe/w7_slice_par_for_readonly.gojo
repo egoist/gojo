@@ -1,7 +1,7 @@
 // `par for` with `&` over a read-only view writes elements other views see
 fn main() {
     var xs = [1, 2, 3, 4]
-    let a []int = xs
+    let a: []int = xs
     scope {
         go println(xs)
         par for x in &a {

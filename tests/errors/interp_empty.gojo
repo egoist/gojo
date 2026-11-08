@@ -1,0 +1,4 @@
+fn main() {
+    // error: empty interpolation: write an expression inside `${...}`
+    println("x = ${}")
+}

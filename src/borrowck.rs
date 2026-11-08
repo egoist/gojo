@@ -464,7 +464,7 @@ impl<'a> Bc<'a> {
             Ty::Unit | Ty::Never | Ty::Bool | Ty::Int(_) | Ty::F32 | Ty::F64 | Ty::Str | Ty::Slice(_) | Ty::Ptr(_) | Ty::Error | Ty::ConstInt(_) => true,
             Ty::Option(a) | Ty::Array(a, _) => self.is_copy(a),
             Ty::Result(a, b) => self.is_copy(a) && self.is_copy(b),
-            Ty::Adt(d, _) => self.prog.def(*d).is_copy,
+            Ty::Adt(d, args) => self.prog.def(*d).is_copy || (self.prog.def(*d).tuple && args.iter().all(|a| self.is_copy(a))),
             Ty::Param(p) => self.prog.tparam(*p).bounds.iter().any(|b| matches!(b, Bound::Cap(Cap::Copy))),
             _ => false,
         }
@@ -885,6 +885,11 @@ impl<'a> Bc<'a> {
                 if o.starts_with("__c") {
                     // the hidden cursor of a `for` loop over a type with `cursor` / `next`
                     self.err(Diag::new(sp, format!("`{}` would still view a loop element after the loop's cursor moved on", h)).note(Some(osp), "this type's `next` yields references into its cursor, which changes with every step").note(None, "store an owned copy (`.toString()` / `.clone()`), or have `next` yield parts of `self`"));
+                    return;
+                }
+                if o.starts_with("__h") {
+                    // a hidden binding, such as the unwrapped value of `x?.m()` on a temporary
+                    self.err(Diag::new(sp, format!("`{}` would view a temporary value that is dropped at the end of this statement", h)).note(None, "keep the value in a variable first (`let x = ...`), or store an owned copy (`.toString()` / `.clone()`)"));
                     return;
                 }
                 let hsp = self.tf.locals[holder as usize].span;

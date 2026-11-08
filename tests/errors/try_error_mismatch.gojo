@@ -1,6 +1,6 @@
 enum AppError { Bad }
-fn f() int ! String { return 1 }
-fn g() int ! AppError {
+fn f() -> int ! String { return 1 }
+fn g() -> int ! AppError {
     return try f()
     // error: `try` would propagate an error of type `String`
 }

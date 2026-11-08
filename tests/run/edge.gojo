@@ -1,29 +1,29 @@
 interface Counter {
-    fn bump(self inout) int
-    fn value(self) int
+    fn bump(inout self) -> int
+    fn value(self) -> int
 }
 
 struct Clicks {
-    n int
+    n: int
 
-    fn bump(self inout) int {
+    fn bump(inout self) -> int {
         self.n += 1
         return self.n
     }
 
-    fn value(self) int { return self.n }
+    fn value(self) -> int { return self.n }
 }
 struct Doubler {
-    n int
+    n: int
 
-    fn bump(self inout) int {
+    fn bump(inout self) -> int {
         self.n = if self.n == 0 { 1 } else { self.n * 2 }
         return self.n
     }
 
-    fn value(self) int { return self.n }
+    fn value(self) -> int { return self.n }
 }
-fn firstWord(s str) str {
+fn firstWord(s: str) -> str {
     for i, c in s {
         if c == ' ' {
             return s[0..i]
@@ -32,7 +32,7 @@ fn firstWord(s str) str {
     return s
 }
 
-fn bumpAll[C Counter](cs inout Vec[C]) {
+fn bumpAll[C: Counter](cs: inout Vec[C]) {
     for c in &cs {
         _ = c.bump()
     }
@@ -40,22 +40,22 @@ fn bumpAll[C Counter](cs inout Vec[C]) {
 
 enum State {
     Idle
-    Running(task String, steps int)
-    Done(result String)
+    Running(task: String, steps: int)
+    Done(result: String)
 
-    fn start() State {
+    fn start() -> State {
         return .Idle
     }
 
-    fn advance(self sink) State {
+    fn advance(sink self) -> State {
         return match self {
-            Idle => State.Running("job".toString(), 0)
+            Idle => State.Running("job", 0)
             Running(t, n) => if n >= 2 { State.Done(t + " ok") } else { State.Running(t, n + 1) }
             Done(r) => State.Done(r)
         }
     }
 
-    fn isDone(self) bool {
+    fn isDone(self) -> bool {
         return match self {
             Done(_) => true
             _ => false
@@ -66,16 +66,16 @@ enum State {
 const Limit = 3
 
 struct Settings {
-    retries int = Limit * 2
-    label String = "default".toString()
-    ratio f64 = 0.5
+    retries: int = Limit * 2
+    label: String = "default"
+    ratio: f64 = 0.5
 }
 
-fn makeAdder(base int) fn(int) int {
-    return (x int) => x + base
+fn makeAdder(base: int) -> fn(int) -> int {
+    return (x: int) => x + base
 }
 
-fn applyTwice(f fn(int) int, x int) int {
+fn applyTwice(f: fn(int) -> int, x: int) -> int {
     return f(f(x))
 }
 
@@ -96,7 +96,7 @@ fn main() {
     println(plain[0].n, plain[1].n)
 
     // views returned from functions borrow their arguments
-    let line = "hello brave new world".toString()
+    let line: String = "hello brave new world"
     let w = firstWord(line)
     println(w, w.len, firstWord("single"))
 
@@ -141,11 +141,11 @@ fn main() {
     println(scores, scores.get("ann")?.len, scores.get("zed")?.len)
 
     // nested results and options
-    let nested ?int ! String = some(3)
+    let nested: ?int ! String = some(3)
     match nested {
         ok(some(n)) => println("got", n)
         ok(none) => println("nothing")
         err(e) => println("error", e)
     }
-    println("b" < "ab", "abc" == "abc".toString(), 'z' > 'a')
+    println("b" < "ab", "abc" == "abc", 'z' > 'a')
 }

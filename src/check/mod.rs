@@ -188,7 +188,8 @@ impl Checker {
                 for tp in &tps {
                     tparams.push(self.new_tparam(&tp.name, tp.is_int));
                 }
-                self.prog.types.push(TypeDef { name: name.clone(), pkg, tparams, kind, is_copy, is_pub, unsafe_send, newtype, span, has_drop: false });
+                let tuple = self.prog.packages[pkg as usize].is_std && self.prog.packages[pkg as usize].name == "prelude" && name.starts_with("Tuple");
+                self.prog.types.push(TypeDef { name: name.clone(), pkg, tparams, kind, is_copy, is_pub, unsafe_send, newtype, span, has_drop: false, tuple });
                 if self.prog.packages[pkg as usize].items.insert(name.clone(), Sym::Type(id)).is_some() {
                     self.err(span, format!("`{}` is declared twice", name));
                 }
@@ -743,6 +744,7 @@ impl Checker {
             }
             TypeExprKind::Option(a) | TypeExprKind::Slice(a) | TypeExprKind::Ptr(a) | TypeExprKind::Chan(a) => self.collect_recv_params(a, env, out, false),
             TypeExprKind::Array(_, a) => self.collect_recv_params(a, env, out, false),
+            TypeExprKind::Tuple(ts) => ts.iter().for_each(|t| self.collect_recv_params(t, env, out, false)),
             TypeExprKind::Result(a, b) => {
                 self.collect_recv_params(a, env, out, false);
                 self.collect_recv_params(b, env, out, false);
@@ -866,6 +868,19 @@ impl Checker {
                 Ty::opt(t)
             }
             TypeExprKind::Result(a, b) => Ty::result(self.resolve_type(a, env), self.resolve_type(b, env)),
+            TypeExprKind::Tuple(ts) => {
+                let args: Vec<Ty> = ts.iter().map(|t| self.resolve_type(t, env)).collect();
+                if args.iter().any(|a| a.contains_view()) {
+                    self.err(te.span, "a tuple cannot hold a borrowed view; use an owned type (String / Vec[T])");
+                }
+                match self.tuple_def(args.len()) {
+                    Some(d) => Ty::Adt(d, Rc::new(args)),
+                    None => {
+                        self.err(te.span, "tuples have 2 to 6 elements; use a struct for more");
+                        Ty::Error
+                    }
+                }
+            }
             TypeExprKind::Slice(a) => Ty::Slice(Rc::new(self.resolve_type(a, env))),
             TypeExprKind::Ptr(a) => Ty::Ptr(Rc::new(self.resolve_type(a, env))),
             // `chan T`: both ends, `Chan[T] { tx Sender[T], rx Receiver[T] }`
@@ -962,6 +977,7 @@ impl Checker {
                     names(a, out);
                     names(b, out);
                 }
+                TypeExprKind::Tuple(ts) => ts.iter().for_each(|t| names(t, out)),
                 TypeExprKind::Func { params, ret, .. } => {
                     params.iter().for_each(|p| names(&p.1, out));
                     if let Some(r) = ret {
@@ -1023,11 +1039,11 @@ impl Checker {
                     && fd.ret == ret;
                 if !ok {
                     let self_part = match recv {
-                        Mode::Inout => "self inout",
+                        Mode::Inout => "inout self",
                         _ => "self",
                     };
-                    let ps: Vec<String> = params.iter().map(|(m, t)| format!("{}{}{}", if name == "hash" { "h " } else { "other " }, if *m == Mode::Inout { "inout " } else { "" }, self.prog.show(t))).collect();
-                    let sig = format!("fn {}({}{}{}){}", name, self_part, if ps.is_empty() { "" } else { ", " }, ps.join(", "), if ret == Ty::Unit { String::new() } else { format!(" {}", self.prog.show(&ret)) });
+                    let ps: Vec<String> = params.iter().map(|(m, t)| format!("{}{}{}", if name == "hash" { "h: " } else { "other: " }, if *m == Mode::Inout { "inout " } else { "" }, self.prog.show(t))).collect();
+                    let sig = format!("fn {}({}{}{}){}", name, self_part, if ps.is_empty() { "" } else { ", " }, ps.join(", "), if ret == Ty::Unit { String::new() } else { format!(" -> {}", self.prog.show(&ret)) });
                     self.diags.push(Diag::new(fd.span, format!("`{}` on `{}` must be `{}`", name, tname, sig)).note(None, format!("a method named `{}` defines {} for the type; give a method with another meaning a different name", name, what)));
                 }
             }
@@ -1129,9 +1145,9 @@ impl Checker {
                         Ty::Map(a, v)
                     }
                     "Box" => Ty::Box(a),
-                    "rc" => Ty::Rc(a),
-                    "arc" => Ty::Arc(a),
-                    "weak" => Ty::Weak(a),
+                    "Rc" => Ty::Rc(a),
+                    "Arc" => Ty::Arc(a),
+                    "Weak" => Ty::Weak(a),
                     "Cell" => Ty::Cell(a),
                     "Mutex" => Ty::Mutex(a),
                     "MutexRef" => Ty::MutexRef(a),
@@ -1145,7 +1161,11 @@ impl Checker {
             if let Some(sym) = self.lookup_unqualified(env.file, env.pkg, name) {
                 return self.type_from_sym(sym, name, targs, span);
             }
-            self.err(span, format!("unknown type `{}`", name));
+            let mut d = Diag::new(span, format!("unknown type `{}`", name));
+            if let Some(h) = renamed(name) {
+                d = d.note(None, h);
+            }
+            self.diags.push(d);
             return Ty::Error;
         }
         if path.len() == 2 {
@@ -1240,7 +1260,7 @@ impl Checker {
             Ty::Unit | Ty::Never | Ty::Bool | Ty::Int(_) | Ty::F32 | Ty::F64 | Ty::Str | Ty::Slice(_) | Ty::Ptr(_) | Ty::Error | Ty::ConstInt(_) | Ty::Scope => true,
             Ty::Option(a) | Ty::Array(a, _) | Ty::ArrayT(a, _) => self.is_copy(a),
             Ty::Result(a, b) => self.is_copy(a) && self.is_copy(b),
-            Ty::Adt(d, _) => self.prog.def(*d).is_copy,
+            Ty::Adt(d, args) => self.prog.def(*d).is_copy || (self.prog.def(*d).tuple && args.iter().all(|a| self.is_copy(a))),
             Ty::Param(p) => self.has_bound(*p, Cap::Copy),
             _ => false,
         }
@@ -1612,5 +1632,25 @@ pub fn builtin_type(name: &str) -> Option<Ty> {
 }
 
 pub fn is_generic_builtin(name: &str) -> bool {
-    matches!(name, "Vec" | "Map" | "Box" | "rc" | "arc" | "weak" | "Cell" | "Mutex" | "MutexRef" | "Task" | "Sender" | "Receiver" | "Iso")
+    matches!(name, "Vec" | "Map" | "Box" | "Rc" | "Arc" | "Weak" | "Cell" | "Mutex" | "MutexRef" | "Task" | "Sender" | "Receiver" | "Iso")
+}
+
+/// Names that older versions of Gojo used, and what to write now.
+pub fn renamed(name: &str) -> Option<String> {
+    Some(match name {
+        "rc" | "arc" | "weak" => format!("built-in types are capitalized: write `{}{}`", name[..1].to_uppercase(), &name[1..]),
+        "chan" => "channels are made with `Chan[T](n)`, and the type is `Chan[T]`".into(),
+        _ => return None,
+    })
+}
+
+impl Checker {
+    /// The prelude struct behind `(A, B, ...)` with `n` elements.
+    pub fn tuple_def(&self, n: usize) -> Option<DefId> {
+        if (2..=6).contains(&n) {
+            self.prog.prelude_type(&format!("Tuple{}", n))
+        } else {
+            None
+        }
+    }
 }

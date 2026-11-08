@@ -1,46 +1,46 @@
 // A method that only reads its receiver satisfies an interface method that may
 // change it (`self inout`): through generics, borrowed interfaces and boxes.
 interface Counter {
-    fn next(self inout) int
+    fn next(inout self) -> int
 }
 
 copy struct Fixed {
-    n int
+    n: int
 
-    fn next(self) int {
+    fn next(self) -> int {
         return self.n
     }
 }
 
 struct Up {
-    n int
+    n: int
 
-    fn next(self inout) int {
+    fn next(inout self) -> int {
         self.n += 1
         return self.n
     }
 }
 
 struct Named {
-    s String
+    s: String
 
-    fn next(self) int {
+    fn next(self) -> int {
         return self.s.len()
     }
 }
 
-fn twice[C Counter](c inout C) int {
+fn twice[C: Counter](c: inout C) -> int {
     return c.next() + c.next()
 }
 
-fn dyn(c inout Counter) int {
+fn dyn(c: inout Counter) -> int {
     return c.next() + c.next()
 }
 
 fn main() {
     var f = Fixed{n: 3}
     var u = Up{n: 0}
-    var s = Named{s: "four".toString()}
+    var s = Named{s: "four"}
     println(twice(&f), twice(&u), twice(&s))
     println(dyn(&f), dyn(&u), dyn(&s))
     var all = Vec[Counter]{}

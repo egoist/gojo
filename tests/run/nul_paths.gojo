@@ -2,7 +2,7 @@
 // instead of using only what comes before it.
 use std/{io, net, os}
 
-fn invalid(e io.Error) bool {
+fn invalid(e: io.Error) -> bool {
     return e.kind == .InvalidInput
 }
 
@@ -22,7 +22,7 @@ fn main() {
     os.writeText(file, "x").unwrap()
     _ = os.readText(bad) catch e {
         println("readText:", invalid(e))
-        "".toString()
+        ""
     }
     _ = os.stat(bad) catch e {
         println("stat:", invalid(e))
@@ -33,7 +33,7 @@ fn main() {
     os.mkdir(dir + "\x00x") catch e { println("mkdir:", invalid(e)) }
     os.setenv("GOJO_NUL", "a\x00b") catch e { println("setenv:", invalid(e)) }
     println("getenv:", os.getenv("HOME\x00").isNone())
-    _ = os.run("echo", ["a\x00b".toString()]) catch e {
+    _ = os.run("echo", ["a\x00b"]) catch e {
         println("run:", invalid(e))
         os.Output{status: 0, stdout: "", stderr: ""}
     }

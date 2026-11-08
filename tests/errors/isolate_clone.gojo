@@ -1,7 +1,7 @@
 // Copying an isolated value would share what is inside it.
 fn main() {
-    let x = isolate { rc(1) }
+    let x = isolate { Rc(1) }
     let y = x.clone()
-    // error: `Iso[rc[int]]` cannot be cloned
+    // error: `Iso[Rc[int]]` cannot be cloned
     println(y)
 }

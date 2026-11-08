@@ -49,6 +49,9 @@ pub struct FnCx {
     /// Inside `defer` / `errdefer`: the deferred code can't leave the function.
     /// An ordinary closure starts over at 0; a loop body doesn't.
     pub defer_depth: u32,
+    /// `if let x { }` / `if let x = x { }`: the binding may reuse the name of
+    /// the optional it unwraps.
+    pub shadow_ok: Option<String>,
 }
 
 /// A `scope` block being checked.
@@ -133,6 +136,7 @@ impl FnCx {
             call_owner: None,
             loop_body_next: None,
             defer_depth: 0,
+            shadow_ok: None,
         }
     }
     pub fn depth(&self) -> u32 {
@@ -259,7 +263,7 @@ impl Checker {
                 if self.prog.globals[gi].ty.is_error() {
                     let name = self.prog.globals[gi].name.clone();
                     let sp = use_sp.unwrap_or(self.prog.globals[gi].span);
-                    self.diags.push(Diag::new(sp, format!("the type of `{}` depends on itself", name)).note(None, format!("write its type: `let {} T = ...`", name)));
+                    self.diags.push(Diag::new(sp, format!("the type of `{}` depends on itself", name)).note(None, format!("write its type: `let {}: T = ...`", name)));
                 }
             }
             _ => {
@@ -296,7 +300,7 @@ impl Checker {
         };
         let t = self.resolve(&mut cx, &e.ty);
         let t = if t.has_vars() {
-            self.diags.push(Diag::new(value.span, format!("cannot infer the type of `{}`", g.name)).note(None, format!("write it: `let {} T = ...`", g.name)));
+            self.diags.push(Diag::new(value.span, format!("cannot infer the type of `{}`", g.name)).note(None, format!("write it: `let {}: T = ...`", g.name)));
             Ty::Error
         } else {
             t
@@ -307,7 +311,7 @@ impl Checker {
                 self.err(g.span, format!("package-level value `{}` can't be the borrowed view `{}`", g.name, s));
             } else if !self.is_send(&t) {
                 let s = self.prog.show(&t);
-                self.diags.push(Diag::new(g.span, format!("package-level value `{}` has type `{}`, which can't be shared between tasks", g.name, s)).note(None, "every task can read a package-level value: it must be `send` (no `rc`, `Cell` or raw pointers)"));
+                self.diags.push(Diag::new(g.span, format!("package-level value `{}` has type `{}`, which can't be shared between tasks", g.name, s)).note(None, "every task can read a package-level value: it must be `send` (no `Rc`, `Cell` or raw pointers)"));
             }
         }
         self.check_pending_infer(&mut cx);
@@ -511,7 +515,7 @@ impl Checker {
     }
 
     pub fn declare(&mut self, cx: &mut FnCx, name: &str, ty: Ty, kind: LocalKind, span: Span, is_param: bool) -> LocalId {
-        if name != "_" && !name.starts_with("__") {
+        if name != "_" && !name.starts_with("__") && cx.shadow_ok.take().as_deref() != Some(name) {
             for sc in cx.scopes.iter() {
                 for (n, id) in sc {
                     if n == name {
@@ -790,7 +794,7 @@ impl Checker {
                 let b = self.place_info(cx, base);
                 let (mutable, desc) = match &base.ty {
                     Ty::Box(_) => (b.as_ref().map(|b| b.mutable).unwrap_or(true), "the contents of a Box"),
-                    Ty::Rc(_) | Ty::Arc(_) => (false, "shared (rc/arc) data"),
+                    Ty::Rc(_) | Ty::Arc(_) => (false, "shared (Rc/Arc) data"),
                     Ty::Ptr(_) => (true, "data behind a raw pointer"),
                     _ => (false, "a reference"),
                 };
@@ -1289,7 +1293,7 @@ impl Checker {
                             self.err(*name_span, format!("`let {}` needs an initial value", name));
                         } else if !self.is_default(&ty) {
                             let s = self.prog.show(&ty);
-                            self.diags.push(Diag::new(*name_span, format!("`var {} {}` needs an initial value: `{}` has no default value", name, s, s)).note(None, format!("give it one: `var {} {} = ...`", name, s)));
+                            self.diags.push(Diag::new(*name_span, format!("`var {}: {}` needs an initial value: `{}` has no default value", name, s, s)).note(None, format!("give it one: `var {}: {} = ...`", name, s)));
                         }
                         let id = self.declare(cx, name, ty.clone(), LocalKind::Var, *name_span, false);
                         TStmt::Let { local: id, init: TExpr::new(TK::DefaultOf, ty, sp) }
@@ -1833,7 +1837,7 @@ impl Checker {
                 let ok = took && matches!(args.last(), Some(TArg { e: TExpr { kind: TK::Closure(c), .. }, mode: ArgMode::Borrow }) if c.loop_body == Some(id));
                 if !ok {
                     let s = self.prog.show(ity);
-                    self.err(iter.span, format!("`{}.{}` must take the loop body as its last parameter: `fn {}(self, body fn(T) Flow)`", s, each, each));
+                    self.err(iter.span, format!("`{}.{}` must take the loop body as its last parameter: `fn {}(self, body: fn(T) -> Flow)`", s, each, each));
                     return None;
                 }
                 let rt = self.resolve(cx, match args.last() {
@@ -1856,7 +1860,7 @@ impl Checker {
         let s = self.prog.show(ity);
         self.diags.push(
             Diag::new(iter.span, format!("cannot iterate over `{}`", s))
-                .note(None, format!("make it iterable with `fn cursor(self) C` and `fn {}(self{}, c inout C) yield ?&T`, or with `fn {}(self{}, body fn(T) Flow)`", next, if by_ref { " inout" } else { "" }, each, if by_ref { " inout" } else { "" })),
+                .note(None, format!("make it iterable with `fn cursor(self) -> C` and `fn {}({}self, c: inout C) yield ?&T`, or with `fn {}({}self, body: fn(T) -> Flow)`", next, if by_ref { "inout " } else { "" }, each, if by_ref { "inout " } else { "" })),
         );
         None
     }
@@ -2044,6 +2048,23 @@ impl Checker {
                 TExpr::new(TK::Float(*f), t, sp)
             }
             ExprKind::Str(s) => TExpr::new(TK::Str(s.clone()), Ty::Str, sp),
+            ExprKind::Interp(parts) => self.interp(cx, parts, sp),
+            ExprKind::Tuple(xs) => {
+                let Some(d) = self.tuple_def(xs.len()) else {
+                    self.err(sp, "tuples have 2 to 6 elements; use a struct for more");
+                    return TExpr::error(sp);
+                };
+                // the tuple type expected here, or one to infer
+                let ty = match expect.as_ref().map(|t| self.resolve(cx, t)) {
+                    Some(t @ Ty::Adt(e, _)) if e == d => t,
+                    Some(Ty::Option(t)) if matches!(&*t, Ty::Adt(e, _) if *e == d) => (*t).clone(),
+                    Some(Ty::Result(t, _)) if matches!(&*t, Ty::Adt(e, _) if *e == d) => (*t).clone(),
+                    _ => Ty::Adt(d, Rc::new(xs.iter().map(|_| self.fresh(cx)).collect())),
+                };
+                let fields: Vec<(String, Span, Expr)> = xs.iter().enumerate().map(|(i, x)| (format!("_{}", i), x.span, x.clone())).collect();
+                let infer = Expr { kind: ExprKind::Ident("_".into()), span: sp };
+                self.struct_lit(cx, &infer, &fields, &[], &[], sp, Some(&ty))
+            }
             ExprKind::Char(c) => {
                 let t = match &expect {
                     Some(Ty::Int(k)) => Ty::Int(*k),
@@ -2299,6 +2320,57 @@ impl Checker {
         TExpr::new(TK::Match { scrut: Box::new(b), owned, arms }, rty, sp)
     }
 
+    /// `x?.m(args)`: `none` when `x` is, else `some(x.m(args))`; a method that
+    /// returns `?T` gives that `?T` (no `??T`).
+    fn opt_call(&mut self, cx: &mut FnCx, base: &Expr, name: &str, nsp: Span, args: &[Expr], sp: Span) -> TExpr {
+        let b = self.expr(cx, base, None);
+        let bty = self.resolve(cx, &b.ty);
+        let inner = match &bty {
+            Ty::Option(t) => (**t).clone(),
+            Ty::Error => return TExpr::error(sp),
+            _ => {
+                let s = self.prog.show(&bty);
+                self.err(sp, format!("`?.` needs an optional value, found `{}`", s));
+                return TExpr::error(sp);
+            }
+        };
+        let owned = !b.is_place();
+        let b = if b.is_place() { self.borrow(cx, b) } else { b };
+        self.push_scope(cx);
+        let h = self.hidden_local(cx, inner.clone(), LocalKind::Ref { mutable: false }, sp);
+        let before = self.diags.len();
+        let call = self.method_call_on(cx, TExpr::new(TK::Local(h), inner, sp), name, nsp, None, args, sp, None);
+        // name the unwrapped value after what the user wrote
+        let (hidden, shown) = (format!("`{}`", cx.locals[h as usize].name), format!("the value in `{}`", ast_text(base)));
+        for d in &mut self.diags[before..] {
+            d.msg = d.msg.replace(&format!("reference {}", hidden), &shown).replace(&hidden, &shown);
+        }
+        self.pop_scope(cx);
+        let rt = self.resolve(cx, &call.ty);
+        if rt.is_error() {
+            return TExpr::error(sp);
+        }
+        if rt == Ty::Unit || rt == Ty::Never {
+            self.err(sp, format!("`{}` gives no value, so `?.` has nothing to wrap; use `if let v = x {{ v.{}(...) }}`", name, name));
+            return TExpr::error(sp);
+        }
+        let call = self.value(cx, call);
+        let rty = match &rt {
+            Ty::Option(_) => rt.clone(),
+            _ => Ty::opt(rt.clone()),
+        };
+        let some_body = if matches!(rt, Ty::Option(_)) { call } else { TExpr::new(TK::SomeLit(Box::new(call)), rty.clone(), sp) };
+        let a1 = cx.n_arms;
+        cx.n_arms += 2;
+        cx.arm_consuming.push(false);
+        cx.arm_consuming.push(false);
+        let arms = vec![
+            TArm { id: a1, pat: TPat::Some(Box::new(TPat::Bind(h))), guard: None, body: some_body, consuming: false, binds: vec![h] },
+            TArm { id: a1 + 1, pat: TPat::None, guard: None, body: TExpr::new(TK::NoneLit, rty.clone(), sp), consuming: false, binds: vec![] },
+        ];
+        TExpr::new(TK::Match { scrut: Box::new(b), owned, arms }, rty, sp)
+    }
+
     /// A literal's value, exactly. Beyond 64 bits no type can hold it (and an
     /// `i128` conversion could wrap).
     fn literal_value(&mut self, n: u128, neg: bool, sp: Span) -> Option<i128> {
@@ -2364,7 +2436,10 @@ impl Checker {
                     d = d.note(None, "Gojo has no nil; optional values are written `?T` and the empty value is `none`");
                 }
                 if name == "self" || name == "this" {
-                    d = d.note(None, "only methods have `self`: declare it as the first parameter, `fn get(self) int`");
+                    d = d.note(None, "only methods have `self`: declare it as the first parameter, `fn get(self) -> int`");
+                }
+                if let Some(h) = super::renamed(name) {
+                    d = d.note(None, h);
                 }
                 self.diags.push(d);
                 TExpr::error(sp)
@@ -2532,9 +2607,9 @@ impl Checker {
                     "Vec" => Ty::Vec(a),
                     "Map" => Ty::Map(a, Rc::new(tys[1].clone())),
                     "Box" => Ty::Box(a),
-                    "rc" => Ty::Rc(a),
-                    "arc" => Ty::Arc(a),
-                    "weak" => Ty::Weak(a),
+                    "Rc" => Ty::Rc(a),
+                    "Arc" => Ty::Arc(a),
+                    "Weak" => Ty::Weak(a),
                     "Cell" => Ty::Cell(a),
                     "Mutex" => Ty::Mutex(a),
                     _ => Ty::Error,
@@ -2990,8 +3065,25 @@ impl Checker {
     }
 
     fn struct_lit(&mut self, cx: &mut FnCx, tyexpr: &Expr, fields: &[(String, Span, Expr)], positional: &[Expr], kv: &[(Expr, Expr)], sp: Span, expect: Option<&Ty>) -> TExpr {
-        let res = self.resolve_path(cx, tyexpr);
+        let inferred = matches!(&tyexpr.kind, ExprKind::Ident(n) if n == "_");
+        let res = if inferred { None } else { self.resolve_path(cx, tyexpr) };
         let ty = match res {
+            _ if inferred => match expect.map(|t| self.resolve(cx, t)) {
+                Some(t @ (Ty::Adt(..) | Ty::Vec(_) | Ty::Map(..))) => t,
+                Some(Ty::Option(t)) if matches!(*t, Ty::Adt(..)) => (*t).clone(),
+                Some(t) if !matches!(t, Ty::Var(_) | Ty::Error) => {
+                    let s = self.prog.show(&t);
+                    self.err(sp, format!("`.{{...}}` builds a struct, but `{}` is expected here", s));
+                    return TExpr::error(sp);
+                }
+                _ => {
+                    self.err(sp, "cannot tell which struct `.{...}` builds here; name it: `Point{x: 1}`");
+                    for (_, _, v) in fields {
+                        let _ = self.expr(cx, v, None);
+                    }
+                    return TExpr::error(sp);
+                }
+            },
             Some(PathRes::TypeCon(t, gd)) => self.generic_type_instance(cx, t, gd),
             Some(PathRes::Pkg(u32::MAX, name)) => {
                 // `Vec{...}` / `Map{...}` without type args: infer
@@ -3086,16 +3178,23 @@ impl Checker {
                 if def.pkg != cx.env.pkg && def.fields().iter().any(|f| !f.is_pub) {
                     self.err(sp, format!("cannot build `{}` with a literal outside its package: it has private fields", def.name));
                 }
+                // `Point{x, y}` is `Point{x: x, y: y}`
+                let mut shorthand = vec![];
                 if !positional.is_empty() {
                     if def.newtype && positional.len() == 1 {
                         // allow Celsius{3.0}
                     } else {
-                        self.err(sp, "struct literals name their fields: `Point{x: 1, y: 2}`");
+                        for p in positional {
+                            match &p.kind {
+                                ExprKind::Ident(n) => shorthand.push((n.clone(), p.span, p.clone())),
+                                _ => self.err(p.span, "struct literals name their fields: `Point{x: 1, y: 2}`, or `Point{x, y}` for variables named like the fields"),
+                            }
+                        }
                     }
                 }
                 let ftys = self.prog.field_tys(d, &args);
                 let mut out: Vec<Option<TExpr>> = vec![None; ftys.len()];
-                for (name, nsp, val) in fields {
+                for (name, nsp, val) in fields.iter().chain(shorthand.iter()) {
                     match ftys.iter().position(|f| f.0 == *name) {
                         Some(i) => {
                             if out[i].is_some() {
@@ -3326,12 +3425,12 @@ impl Checker {
                 (None, Some(f)) => {
                     let t = self.resolve(cx, &f.params[i].1);
                     if t.has_vars() {
-                        self.err(p.span, format!("cannot infer the type of closure parameter `{}`; annotate it: `({} T) => ...`", p.name, p.name));
+                        self.err(p.span, format!("cannot infer the type of closure parameter `{}`; annotate it: `({}: T) => ...`", p.name, p.name));
                     }
                     (f.params[i].0, t)
                 }
                 (None, None) => {
-                    self.err(p.span, format!("cannot infer the type of closure parameter `{}`; annotate it: `({} T) => ...`", p.name, p.name));
+                    self.err(p.span, format!("cannot infer the type of closure parameter `{}`; annotate it: `({}: T) => ...`", p.name, p.name));
                     (p.mode, Ty::Error)
                 }
             };
@@ -3487,6 +3586,9 @@ impl Checker {
         if let ExprKind::DotVariant(name) = &callee.kind {
             return self.dot_variant(cx, name, args, true, sp, expect);
         }
+        if let ExprKind::OptField(base, name) = &callee.kind {
+            return self.opt_call(cx, base, name, callee.span, args, sp);
+        }
         if let ExprKind::Field(base, name, nsp) = &callee.kind {
             // package function / variant constructor / static
             let br = self.resolve_path(cx, base);
@@ -3580,7 +3682,22 @@ impl Checker {
         match self.resolve_path(cx, callee) {
             Some(PathRes::Func(f, targs)) => return self.call_fn(cx, f, targs, None, args, sp, expect),
             Some(PathRes::Variant(t, vi)) => return self.variant_value(cx, t, vi, args, true, sp, expect),
-            Some(PathRes::TypeCon(t, gd)) => return self.type_call(cx, t, gd, None, args, sp, expect),
+            Some(PathRes::TypeCon(t, gd)) => {
+                // `T(args)` calls `T.new(args)` (`RwLock(x)`, `Atomic(0)`, `Stack[int]()`)
+                let did = match (&t, gd) {
+                    (_, Some(g)) => Some(g),
+                    (Ty::Adt(d, _), _) => Some(*d),
+                    _ => None,
+                };
+                if let Some(d) = did {
+                    let def = self.prog.def(d);
+                    if !def.newtype && Some(d) != self.prog.prelude_type("Chan") && self.prog.assoc.contains_key(&(TyKey::Adt(d), "new".to_string())) {
+                        let f = Expr { kind: ExprKind::Field(Box::new(callee.clone()), "new".into(), callee.span), span: callee.span };
+                        return self.call(cx, &f, args, sp, expect);
+                    }
+                }
+                return self.type_call(cx, t, gd, None, args, sp, expect);
+            }
             Some(PathRes::Pkg(u32::MAX, name)) => return self.type_call(cx, Ty::Error, None, Some(name), args, sp, expect),
             Some(PathRes::Const(u32::MAX)) => return TExpr::error(sp),
             _ => {}
@@ -3685,6 +3802,33 @@ impl Checker {
         Some(TExpr::new(TK::Intrinsic { name: format!("fmt.{}", name), targs: vec![], args: targs }, ret, sp))
     }
 
+    /// `"x = ${x:>4}"`: the same as `fmt.format("x = {:>4}", x)`, a `String`.
+    fn interp(&mut self, cx: &mut FnCx, parts: &[ast::InterpPart], sp: Span) -> TExpr {
+        let mut tmpl = String::new();
+        let mut args = vec![Expr { kind: ExprKind::Str(String::new()), span: sp }];
+        for p in parts {
+            match p {
+                ast::InterpPart::Lit(l) => tmpl.push_str(&l.replace('{', "{{").replace('}', "}}")),
+                ast::InterpPart::Expr(e, spec, psp) => {
+                    match spec {
+                        Some(s) => {
+                            if let Err(m) = crate::fmtspec::parse(&format!("{{:{}}}", s)) {
+                                self.err(*psp, m);
+                                let _ = self.expr(cx, e, None);
+                                return TExpr::error(sp);
+                            }
+                            tmpl.push_str(&format!("{{:{}}}", s));
+                        }
+                        None => tmpl.push_str("{}"),
+                    }
+                    args.push((**e).clone());
+                }
+            }
+        }
+        args[0].kind = ExprKind::Str(tmpl);
+        self.format_call(cx, "format", &args, Ty::String, sp)
+    }
+
     /// `fmt.format("x = {:>4}", x)`: the template is checked here, against the
     /// arguments (see fmtspec.rs).
     fn format_call(&mut self, cx: &mut FnCx, name: &str, args: &[Expr], ret: Ty, sp: Span) -> TExpr {
@@ -3755,8 +3899,16 @@ impl Checker {
                 let t = Rc::new(self.resolve(cx, &p.ty));
                 return TExpr::new(TK::MutexRef(Box::new(p)), Ty::MutexRef(t), sp);
             }
+            // `let x ?Box[String] = Box("a")`: the wrapper inside the optional
+            let expect = match expect.map(|t| self.resolve(cx, t)) {
+                Some(Ty::Option(t)) => Some((*t).clone()),
+                e => e,
+            };
+            let expect = expect.as_ref();
             let inner_expect = match (name.as_str(), expect) {
-                ("Box", Some(Ty::Box(t))) | ("rc", Some(Ty::Rc(t))) | ("arc", Some(Ty::Arc(t))) | ("Mutex", Some(Ty::Mutex(t))) | ("Cell", Some(Ty::Cell(t))) => Some((**t).clone()),
+                ("Box", Some(Ty::Box(t))) | ("Rc", Some(Ty::Rc(t))) | ("Arc", Some(Ty::Arc(t))) | ("Mutex", Some(Ty::Mutex(t))) | ("Cell", Some(Ty::Cell(t))) => Some((**t).clone()),
+                // like `["a"]`, a wrapped string literal is a `String`: views can't be stored
+                _ if matches!(args[0].kind, ExprKind::Str(_) | ExprKind::Interp(_)) => Some(Ty::String),
                 _ => None,
             };
             let e = self.expr(cx, &args[0], inner_expect.as_ref());
@@ -3767,16 +3919,16 @@ impl Checker {
             let it = Rc::new(self.resolve(cx, &e.ty));
             let ty = match name.as_str() {
                 "Box" => Ty::Box(it.clone()),
-                "rc" => Ty::Rc(it.clone()),
-                "arc" => Ty::Arc(it.clone()),
+                "Rc" => Ty::Rc(it.clone()),
+                "Arc" => Ty::Arc(it.clone()),
                 "Mutex" => Ty::Mutex(it.clone()),
                 "Cell" => {
                     if !self.is_copy(&it) {
-                        self.err(sp, "Cell[T] needs a copy type; use Mutex or rc for other types");
+                        self.err(sp, "Cell[T] needs a copy type; use Mutex or Rc for other types");
                     }
                     Ty::Cell(it.clone())
                 }
-                "Vec" | "Map" | "weak" => {
+                "Vec" | "Map" | "Weak" => {
                     self.err(sp, format!("`{}` cannot be called; use a literal like `{}[T]{{}}`", name, name));
                     return TExpr::error(sp);
                 }
@@ -3785,7 +3937,7 @@ impl Checker {
             if matches!(ty, Ty::Arc(_)) {
                 if !self.is_send(&it) {
                     let s = self.prog.show(&it);
-                    self.err(sp, format!("arc[{}] would share a non-thread-safe value; use rc[T] for single-threaded sharing", s));
+                    self.err(sp, format!("Arc[{}] would share a non-thread-safe value; use Rc[T] for single-threaded sharing", s));
                 }
             }
             return TExpr::new(TK::Wrap(Box::new(e)), ty, sp);
@@ -4643,7 +4795,7 @@ impl Checker {
             let t = self.resolve(cx, &local.ty);
             if !self.is_send(&t) {
                 let s = self.prog.show(&t);
-                self.diags.push(Diag::new(c.span, format!("a task captures `{}` of type `{}`, which is not safe to share between threads", local.name, s)).note(Some(local.span), "declared here").note(None, "`rc`, `Cell`, `weak`, raw pointers and function values can't cross tasks; use `arc`, `Mutex` or `send fn`"));
+                self.diags.push(Diag::new(c.span, format!("a task captures `{}` of type `{}`, which is not safe to share between threads", local.name, s)).note(Some(local.span), "declared here").note(None, "`Rc`, `Cell`, `Weak`, raw pointers and function values can't cross tasks; use `Arc`, `Mutex` or `send fn`"));
             }
             let is_ref = matches!(local.kind, LocalKind::Ref { .. });
             let borrowed = if owned {
@@ -4792,6 +4944,8 @@ pub fn block_diverges(b: &TBlock) -> bool {
         Some(TStmt::Return(..)) | Some(TStmt::Break(..)) | Some(TStmt::Continue(..)) => true,
         Some(TStmt::Expr(e)) => e.ty == Ty::Never,
         Some(TStmt::While { cond: None, body, id }) => !breaks_out_of(body, *id),
+        // a `with` body runs exactly once
+        Some(TStmt::With { body, .. }) | Some(TStmt::WithLocks { body, .. }) => block_diverges(body),
         _ => false,
     }
 }
@@ -4858,6 +5012,7 @@ pub fn expr_to_type(e: &Expr) -> Option<ast::TypeExpr> {
             _ => return None,
         },
         ExprKind::TypeExpr(t) => return Some(t.clone()),
+        ExprKind::Tuple(xs) => ast::TypeExprKind::Tuple(xs.iter().map(expr_to_type).collect::<Option<Vec<_>>>()?),
         ExprKind::Int(n) => ast::TypeExprKind::IntLit(*n),
         _ => return None,
     };
@@ -5062,7 +5217,7 @@ pub fn zonk_walk_expr(e: &mut TExpr, f: &mut dyn FnMut(&mut Ty)) {
 
 fn zonk_walk_pat(p: &mut TPat, f: &mut dyn FnMut(&mut Ty)) {
     match p {
-        TPat::Variant { subs, .. } => subs.iter_mut().for_each(|s| zonk_walk_pat(s, f)),
+        TPat::Variant { subs, .. } | TPat::Tuple(subs) => subs.iter_mut().for_each(|s| zonk_walk_pat(s, f)),
         TPat::Some(x) | TPat::Ok(x) | TPat::Err(x) => zonk_walk_pat(x, f),
         TPat::TypeIs { ty, .. } => f(ty),
         TPat::Or(xs) => xs.iter_mut().for_each(|x| zonk_walk_pat(x, f)),

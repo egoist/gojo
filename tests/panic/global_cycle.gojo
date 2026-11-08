@@ -1,5 +1,5 @@
 // A package-level value whose computation needs itself.
-fn next() int {
+fn next() -> int {
     return counter + 1
 }
 

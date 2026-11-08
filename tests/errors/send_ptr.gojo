@@ -1,9 +1,9 @@
 struct Plain {
-    p *int
+    p: *int
 }
 
 extern "C" {
-    fn calloc(n u64, size u64) *int
+    fn calloc(n: u64, size: u64) -> *int
 }
 
 fn main() {

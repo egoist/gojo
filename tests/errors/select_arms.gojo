@@ -1,5 +1,5 @@
 fn main() {
-    let a = chan[int](1)
+    let a = Chan[int](1)
     select {
         let x = <-a.rx => println(x)
         _ => println("one")

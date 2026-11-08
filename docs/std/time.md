@@ -37,17 +37,17 @@ Durations are integer nanoseconds.
 
 ```zig
 pub copy struct Date {
-    pub year int
+    pub year: int
     // 1 to 12
-    pub month int
+    pub month: int
     // 1 to 31
-    pub day int
-    pub hour int
-    pub minute int
-    pub second int
-    pub nanosecond int
+    pub day: int
+    pub hour: int
+    pub minute: int
+    pub second: int
+    pub nanosecond: int
     // seconds east of UTC (+08:00 is 28800)
-    pub offset int = 0
+    pub offset: int = 0
 }
 ```
 
@@ -56,7 +56,7 @@ A calendar date and time of day, at some offset from UTC.
 #### Date.unixNanos
 
 ```zig
-pub fn unixNanos(self) int
+pub fn unixNanos(self) -> int
 ```
 
 The moment this is, as nanoseconds since 1970 (see `unixNanos`).
@@ -64,7 +64,7 @@ The moment this is, as nanoseconds since 1970 (see `unixNanos`).
 #### Date.weekday
 
 ```zig
-pub fn weekday(self) int
+pub fn weekday(self) -> int
 ```
 
 0 is Sunday.
@@ -72,7 +72,7 @@ pub fn weekday(self) int
 #### Date.yearDay
 
 ```zig
-pub fn yearDay(self) int
+pub fn yearDay(self) -> int
 ```
 
 1 to 366.
@@ -80,7 +80,7 @@ pub fn yearDay(self) int
 #### Date.iso
 
 ```zig
-pub fn iso(self) String
+pub fn iso(self) -> String
 ```
 
 RFC 3339: "2026-11-06T14:41:31Z", "2026-11-06T14:41:31.592+08:00".
@@ -88,7 +88,7 @@ RFC 3339: "2026-11-06T14:41:31Z", "2026-11-06T14:41:31.592+08:00".
 #### Date.format
 
 ```zig
-pub fn format(self, layout str) String
+pub fn format(self, layout: str) -> String
 ```
 
 Formats with `strftime`-style directives:
@@ -104,7 +104,7 @@ Formats with `strftime`-style directives:
 
 ```zig
 pub struct ParseError {
-    pub msg String
+    pub msg: String
 }
 ```
 
@@ -113,7 +113,7 @@ Why `parseIso` could not read a date.
 #### ParseError.message
 
 ```zig
-pub fn message(self) String
+pub fn message(self) -> String
 ```
 
 The message, which quotes the input.
@@ -123,7 +123,7 @@ The message, which quotes the input.
 ### sleep
 
 ```zig
-pub fn sleep(d int)
+pub fn sleep(d: int)
 ```
 
 Parks the goroutine; other goroutines keep running on its thread. Returns
@@ -132,7 +132,7 @@ early when the task is cancelled (see task.cancelled).
 ### now
 
 ```zig
-pub fn now() int
+pub fn now() -> int
 ```
 
 Monotonic clock in nanoseconds, for measuring; not related to the date.
@@ -140,7 +140,7 @@ Monotonic clock in nanoseconds, for measuring; not related to the date.
 ### since
 
 ```zig
-pub fn since(start int) int
+pub fn since(start: int) -> int
 ```
 
 Nanoseconds since `start`, a value of `now()`.
@@ -148,7 +148,7 @@ Nanoseconds since `start`, a value of `now()`.
 ### unixNanos
 
 ```zig
-pub fn unixNanos() int
+pub fn unixNanos() -> int
 ```
 
 The wall clock: nanoseconds since 1970-01-01 00:00 UTC.
@@ -156,7 +156,7 @@ The wall clock: nanoseconds since 1970-01-01 00:00 UTC.
 ### unix
 
 ```zig
-pub fn unix() int
+pub fn unix() -> int
 ```
 
 Seconds since 1970-01-01 00:00 UTC.
@@ -164,7 +164,7 @@ Seconds since 1970-01-01 00:00 UTC.
 ### formatDuration
 
 ```zig
-pub fn formatDuration(d int) String
+pub fn formatDuration(d: int) -> String
 ```
 
 "1.5s", "250ms", "3µs", "2h5m0s".
@@ -172,7 +172,7 @@ pub fn formatDuration(d int) String
 ### dayName
 
 ```zig
-pub fn dayName(weekday int) str
+pub fn dayName(weekday: int) -> str
 ```
 
 0 is Sunday.
@@ -180,7 +180,7 @@ pub fn dayName(weekday int) str
 ### monthName
 
 ```zig
-pub fn monthName(month int) str
+pub fn monthName(month: int) -> str
 ```
 
 1 is January.
@@ -188,7 +188,7 @@ pub fn monthName(month int) str
 ### at
 
 ```zig
-pub fn at(ns int, offset int) Date
+pub fn at(ns: int, offset: int) -> Date
 ```
 
 The date `ns` nanoseconds after 1970 is, at `offset` seconds east of UTC.
@@ -196,7 +196,7 @@ The date `ns` nanoseconds after 1970 is, at `offset` seconds east of UTC.
 ### utc
 
 ```zig
-pub fn utc(ns int) Date
+pub fn utc(ns: int) -> Date
 ```
 
 The date in UTC.
@@ -204,7 +204,7 @@ The date in UTC.
 ### local
 
 ```zig
-pub fn local(ns int) Date
+pub fn local(ns: int) -> Date
 ```
 
 The date in the local time zone.
@@ -212,7 +212,7 @@ The date in the local time zone.
 ### date
 
 ```zig
-pub fn date(year int, month int, day int, hour int, minute int, sec int) Date
+pub fn date(year: int, month: int, day: int, hour: int, minute: int, sec: int) -> Date
 ```
 
 A date in UTC.
@@ -220,7 +220,7 @@ A date in UTC.
 ### parseIso
 
 ```zig
-pub fn parseIso(s str) Date ! ParseError
+pub fn parseIso(s: str) -> Date ! ParseError
 ```
 
 Reads an RFC 3339 date: "2026-11-06T14:41:31Z", "2026-11-06 14:41:31.5+08:00".

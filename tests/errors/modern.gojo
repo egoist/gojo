@@ -1,0 +1,38 @@
+// Misuses of the newer conveniences.
+struct P {
+    x: int
+
+    fn bump(inout self) {
+        self.x += 1
+    }
+
+    fn get(self) -> int {
+        self.x
+    }
+}
+
+fn takesInt(n: int) {
+    println(n)
+}
+
+fn main() {
+    let a = .{x: 1}
+    // error: cannot tell which struct `.{...}` builds here
+    takesInt(.{x: 1})
+    // error: `.{...}` builds a struct, but `int` is expected here
+    let n = 3
+    let b = n?.get()
+    // error: `?.` needs an optional value, found `int`
+    let p: ?P = P{x: 1}
+    let c = p?.bump()
+    // error: on the value in `p`: it is not mutable
+    // error: `bump` gives no value, so `?.` has nothing to wrap
+    let r = rc(1)
+    // error: undefined: `rc`
+    // error: built-in types are capitalized: write `Rc`
+    let q = P{1}
+    // error: struct literals name their fields: `Point{x: 1, y: 2}`, or `Point{x, y}`
+    let s = "${1:q}"
+    // error: `{:q}` is not a valid placeholder
+    println(a, b, c, r, q, s)
+}

@@ -1,7 +1,7 @@
 struct S {
-    v Vec[String]
+    v: Vec[String]
 
-    fn add(self inout, s str) {
+    fn add(inout self, s: str) {
         self.v.clear()
         println(s)
     }

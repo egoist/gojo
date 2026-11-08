@@ -11,46 +11,46 @@ use std/io
 // Errors here are io.Error (with an io.ErrorKind to match on).
 pub type Error = io.Error
 
-fn __readFile(path str, out inout Vec[byte]) int
-fn __writeFile(path str, data []byte) int
-fn __getenv(name str, out inout String) bool
-fn __open(path str, mode int) int
-fn __read(fd int, buf inout Vec[byte], max int) int
-fn __write(fd int, data []byte) int
-fn __close(fd int)
-fn __flush(fd int)
-fn __stat(path str, follow bool, size inout int, mtime inout int, kind inout int, mode inout int) int
-fn __readDir(path str, names inout Vec[String]) int
-fn __mkdir(path str) int
-fn __remove(path str) int
-fn __rename(from str, to str) int
-fn __cwd(out inout String) int
-fn __chdir(path str) int
-fn __setenv(name str, value str, unset bool) int
-fn __tempDir(out inout String)
-fn __run(prog str, args []String, input []byte, capture bool, out inout Vec[byte], errout inout Vec[byte], status inout int) int
+fn __readFile(path: str, out: inout Vec[byte]) -> int
+fn __writeFile(path: str, data: []byte) -> int
+fn __getenv(name: str, out: inout String) -> bool
+fn __open(path: str, mode: int) -> int
+fn __read(fd: int, buf: inout Vec[byte], max: int) -> int
+fn __write(fd: int, data: []byte) -> int
+fn __close(fd: int)
+fn __flush(fd: int)
+fn __stat(path: str, follow: bool, size: inout int, mtime: inout int, kind: inout int, mode: inout int) -> int
+fn __readDir(path: str, names: inout Vec[String]) -> int
+fn __mkdir(path: str) -> int
+fn __remove(path: str) -> int
+fn __rename(from: str, to: str) -> int
+fn __cwd(out: inout String) -> int
+fn __chdir(path: str) -> int
+fn __setenv(name: str, value: str, unset: bool) -> int
+fn __tempDir(out: inout String)
+fn __run(prog: str, args: []String, input: []byte, capture: bool, out: inout Vec[byte], errout: inout Vec[byte], status: inout int) -> int
 
-fn check(what str, code int) ! Error {
+fn check(what: str, code: int) ! Error {
     if code != 0 {
         return err(io.fromCode(what, code))
     }
 }
 
 // The command line: the program's name, then its arguments.
-pub fn args() Vec[String]
+pub fn args() -> Vec[String]
 // Ends the program with an exit code, after flushing standard output. Deferred
 // code does not run.
-pub fn exit(code int) never
+pub fn exit(code: int) -> never
 
 // ---------------------------------------------------------------- files
 
 // An open file. It is closed when it goes out of scope.
 pub struct File {
-    fd int
-    owned bool = true
+    fd: int
+    owned: bool = true
 
     // Appends at most `max` bytes to `buf`; returns how many, 0 at the end.
-    pub fn read(self, buf inout Vec[byte], max int) int ! Error {
+    pub fn read(self, buf: inout Vec[byte], max: int) -> int ! Error {
         let n = __read(self.fd, &buf, max)
         if n < 0 {
             return err(io.fromCode("read", -n))
@@ -59,7 +59,7 @@ pub struct File {
     }
 
     // Writes all of `data`.
-    pub fn write(self, data []byte) ! Error {
+    pub fn write(self, data: []byte) ! Error {
         let code = __write(self.fd, data)
         if code < 0 {
             return err(io.fromCode("write", -code))
@@ -67,14 +67,14 @@ pub struct File {
     }
 
     // Writes the bytes of `s`.
-    pub fn writeText(self, s str) ! Error {
+    pub fn writeText(self, s: str) ! Error {
         return self.write(s.bytes())
     }
 
     // Reads to the end.
-    pub fn readAll(self) Vec[byte] ! Error {
+    pub fn readAll(self) -> Vec[byte] ! Error {
         var out = Vec[byte]{}
-        for {
+        loop {
             let n = try self.read(&out, 65536)
             if n == 0 {
                 return out
@@ -83,7 +83,7 @@ pub struct File {
     }
 
     // Reads to the end, as a string.
-    pub fn readText(self) String ! Error {
+    pub fn readText(self) -> String ! Error {
         let b = try self.readAll()
         return String(b)
     }
@@ -93,14 +93,14 @@ pub struct File {
         __flush(self.fd)
     }
 
-    fn drop(self inout) {
+    fn drop(inout self) {
         if self.owned {
             __close(self.fd)
         }
     }
 }
 
-fn openMode(path str, mode int) File ! Error {
+fn openMode(path: str, mode: int) -> File ! Error {
     let fd = __open(path, mode)
     if fd < 0 {
         return err(io.fromCode(path, -fd))
@@ -109,33 +109,33 @@ fn openMode(path str, mode int) File ! Error {
 }
 
 // Opens a file for reading.
-pub fn open(path str) File ! Error {
+pub fn open(path: str) -> File ! Error {
     return openMode(path, 0)
 }
 
 // Creates a file for writing, or empties an existing one.
-pub fn create(path str) File ! Error {
+pub fn create(path: str) -> File ! Error {
     return openMode(path, 1)
 }
 
 // Opens a file for writing at its end, creating it if needed.
-pub fn append(path str) File ! Error {
+pub fn append(path: str) -> File ! Error {
     return openMode(path, 2)
 }
 
 // The standard streams. They are not closed when the `File` is dropped.
-pub fn stdin() File {
+pub fn stdin() -> File {
     return File{fd: 0, owned: false}
 }
-pub fn stdout() File {
+pub fn stdout() -> File {
     return File{fd: 1, owned: false}
 }
-pub fn stderr() File {
+pub fn stderr() -> File {
     return File{fd: 2, owned: false}
 }
 
 // The whole contents of a file.
-pub fn readFile(path str) Vec[byte] ! Error {
+pub fn readFile(path: str) -> Vec[byte] ! Error {
     var buf = Vec[byte]{}
     let code = __readFile(path, &buf)
     if code != 0 {
@@ -146,19 +146,19 @@ pub fn readFile(path str) Vec[byte] ! Error {
 
 // The whole contents of a file, as a string (the bytes aren't checked to be
 // UTF-8).
-pub fn readText(path str) String ! Error {
+pub fn readText(path: str) -> String ! Error {
     let b = try readFile(path)
     return String(b)
 }
 
 // Creates or replaces a file with `data`. Not atomic: write to a temporary
 // name and `rename` it into place for that.
-pub fn writeFile(path str, data []byte) ! Error {
+pub fn writeFile(path: str, data: []byte) ! Error {
     return check(path, __writeFile(path, data))
 }
 
 // Creates or replaces a file with the bytes of `text`.
-pub fn writeText(path str, text str) ! Error {
+pub fn writeText(path: str, text: str) ! Error {
     return writeFile(path, text.bytes())
 }
 
@@ -169,31 +169,31 @@ pub copy enum FileKind { File, Directory, Symlink, Other }
 
 // What `stat` reports about a file.
 pub struct Info {
-    pub kind FileKind
-    pub size int
+    pub kind: FileKind
+    pub size: int
     // last modification, in nanoseconds since 1970 (`time.local(info.modified)`)
-    pub modified int
+    pub modified: int
     // permission bits, like 0o644
-    pub mode int
+    pub mode: int
 
     // Whether it is a directory.
-    pub fn isDir(self) bool {
+    pub fn isDir(self) -> bool {
         return self.kind == .Directory
     }
 
     // Whether it is a regular file.
-    pub fn isFile(self) bool {
+    pub fn isFile(self) -> bool {
         return self.kind == .File
     }
 }
 
-fn statWith(path str, follow bool) Info ! Error {
+fn statWith(path: str, follow: bool) -> Info ! Error {
     var size = 0
     var mtime = 0
     var kind = 0
     var mode = 0
     try check(path, __stat(path, follow, &size, &mtime, &kind, &mode))
-    let k FileKind = match kind {
+    let k: FileKind = match kind {
         0 => .File
         1 => .Directory
         2 => .Symlink
@@ -203,35 +203,35 @@ fn statWith(path str, follow bool) Info ! Error {
 }
 
 // What `path` is; follows symbolic links.
-pub fn stat(path str) Info ! Error {
+pub fn stat(path: str) -> Info ! Error {
     return statWith(path, true)
 }
 
 // Like `stat`, but describes a symbolic link itself.
-pub fn lstat(path str) Info ! Error {
+pub fn lstat(path: str) -> Info ! Error {
     return statWith(path, false)
 }
 
 // Whether `path` names something (following symbolic links). To act on a
 // file, just try it and handle the error: it may change in between.
-pub fn exists(path str) bool {
+pub fn exists(path: str) -> bool {
     return stat(path).isOk()
 }
 
 // The names of the entries in a directory, sorted.
-pub fn readDir(path str) Vec[String] ! Error {
+pub fn readDir(path: str) -> Vec[String] ! Error {
     var names = Vec[String]{}
     try check(path, __readDir(path, &names))
     return names
 }
 
 // Creates a directory; fails if it exists or its parent doesn't.
-pub fn mkdir(path str) ! Error {
+pub fn mkdir(path: str) ! Error {
     return check(path, __mkdir(path))
 }
 
 // Creates a directory and any missing parents; fine if it exists already.
-pub fn mkdirAll(path str) ! Error {
+pub fn mkdirAll(path: str) ! Error {
     if let info = stat(path).ok() {
         if info.isDir() {
             return
@@ -255,13 +255,13 @@ pub fn mkdirAll(path str) ! Error {
 }
 
 // Removes a file or an empty directory.
-pub fn remove(path str) ! Error {
+pub fn remove(path: str) ! Error {
     return check(path, __remove(path))
 }
 
 // Removes a file, or a directory and everything in it. Symbolic links are
 // removed, not followed.
-pub fn removeAll(path str) ! Error {
+pub fn removeAll(path: str) ! Error {
     let info = lstat(path) catch e {
         if e.isNotFound() {
             return
@@ -278,31 +278,31 @@ pub fn removeAll(path str) ! Error {
 
 // Renames or moves a file or directory, replacing `to` if it is a file. Both
 // must be on the same file system.
-pub fn rename(from str, to str) ! Error {
+pub fn rename(from: str, to: str) ! Error {
     return check(from, __rename(from, to))
 }
 
 // The working directory.
-pub fn cwd() String ! Error {
-    var out String = ""
+pub fn cwd() -> String ! Error {
+    var out: String = ""
     try check("getcwd", __cwd(&out))
     return out
 }
 
 // Changes the working directory, for the whole process.
-pub fn chdir(path str) ! Error {
+pub fn chdir(path: str) ! Error {
     return check(path, __chdir(path))
 }
 
 // The directory for temporary files ($TMPDIR, or /tmp).
-pub fn tempDir() String {
-    var out String = ""
+pub fn tempDir() -> String {
+    var out: String = ""
     __tempDir(&out)
     return out
 }
 
 // "a/b" + "c" = "a/b/c".
-pub fn joinPath(a str, b str) String {
+pub fn joinPath(a: str, b: str) -> String {
     if a.len() == 0 || b.startsWith("/") {
         return b.toString()
     }
@@ -313,32 +313,32 @@ pub fn joinPath(a str, b str) String {
 }
 
 // The directory part of a path: "a/b/c" -> "a/b", "c" -> ".", "/c" -> "/".
-pub fn dirName(path str) String {
+pub fn dirName(path: str) -> String {
     var end = path.len()
-    for end > 1 && path[end - 1..end] == "/" {
+    while end > 1 && path[end - 1..end] == "/" {
         end -= 1
     }
     var i = end - 1
-    for i >= 0 && path[i..i + 1] != "/" {
+    while i >= 0 && path[i..i + 1] != "/" {
         i -= 1
     }
     if i < 0 {
-        return ".".toString()
+        return "."
     }
     if i == 0 {
-        return "/".toString()
+        return "/"
     }
     return path[0..i].toString()
 }
 
 // The last part of a path: "a/b/c.txt" -> "c.txt".
-pub fn baseName(path str) String {
+pub fn baseName(path: str) -> String {
     var end = path.len()
-    for end > 1 && path[end - 1..end] == "/" {
+    while end > 1 && path[end - 1..end] == "/" {
         end -= 1
     }
     var i = end - 1
-    for i >= 0 && path[i..i + 1] != "/" {
+    while i >= 0 && path[i..i + 1] != "/" {
         i -= 1
     }
     return path[i + 1..end].toString()
@@ -347,8 +347,8 @@ pub fn baseName(path str) String {
 // ---------------------------------------------------------------- the environment
 
 // The value of an environment variable.
-pub fn getenv(name str) ?String {
-    var out String = ""
+pub fn getenv(name: str) -> ?String {
+    var out: String = ""
     if __getenv(name, &out) {
         return out
     }
@@ -356,12 +356,12 @@ pub fn getenv(name str) ?String {
 }
 
 // Sets an environment variable, for this process and the programs it starts.
-pub fn setenv(name str, value str) ! Error {
+pub fn setenv(name: str, value: str) ! Error {
     return check(name, __setenv(name, value, false))
 }
 
 // Removes an environment variable.
-pub fn unsetenv(name str) ! Error {
+pub fn unsetenv(name: str) ! Error {
     return check(name, __setenv(name, "", true))
 }
 
@@ -370,24 +370,24 @@ pub fn unsetenv(name str) ! Error {
 // What a finished process printed, and how it ended.
 pub struct Output {
     // the exit code, or 128 + the signal that ended it
-    pub status int
-    pub stdout String
-    pub stderr String
+    pub status: int
+    pub stdout: String
+    pub stderr: String
 
     // Whether the process exited with status 0.
-    pub fn ok(self) bool {
+    pub fn ok(self) -> bool {
         return self.status == 0
     }
 }
 
 // Runs a program (looked up in $PATH) and waits for it, collecting what it
 // prints. Fails only if it can't be started: check `status` for how it ended.
-pub fn run(prog str, args []String) Output ! Error {
+pub fn run(prog: str, args: []String) -> Output ! Error {
     return runWithInput(prog, args, "")
 }
 
 // Like `run`, with `input` as the program's standard input.
-pub fn runWithInput(prog str, args []String, input str) Output ! Error {
+pub fn runWithInput(prog: str, args: []String, input: str) -> Output ! Error {
     var out = Vec[byte]{}
     var errout = Vec[byte]{}
     var status = 0
@@ -396,7 +396,7 @@ pub fn runWithInput(prog str, args []String, input str) Output ! Error {
 }
 
 // Runs a program on this process's standard streams and returns its exit code.
-pub fn call(prog str, args []String) int ! Error {
+pub fn call(prog: str, args: []String) -> int ! Error {
     var out = Vec[byte]{}
     var errout = Vec[byte]{}
     var status = 0

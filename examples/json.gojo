@@ -2,13 +2,13 @@
 // again: `gojo run examples/json.gojo [FILE]` (without FILE: a sample).
 use std/{json, os}
 
-fn sample() str {
+fn sample() -> str {
     return `{"name": "gojo", "version": 0.1, "tags": ["fast", "safe", null, true],
         "nested": {"a": [1, 2, {"b": "q\"uote"}], "empty": {}, "none": []}}`
 }
 
 // The number of values in `v`, counting `v` itself.
-fn count(v json.Value) int {
+fn count(v: json.Value) -> int {
     return match v {
         .Arr(items) => {
             var n = 1

@@ -1,7 +1,7 @@
-fn div(a int, b int) int {
+fn div(a: int, b: int) -> int {
     return return a / b
 }
-fn validate(x int) int ! String {
+fn validate(x: int) -> int ! String {
     if x == 2 {
         return return err("bad two")
     }

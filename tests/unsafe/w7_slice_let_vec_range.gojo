@@ -1,5 +1,5 @@
 // a range of a `let` Vec is not writable: a task reads the Vec
-fn bump(v inout []int) {
+fn bump(v: inout []int) {
     v[0] += 1
 }
 

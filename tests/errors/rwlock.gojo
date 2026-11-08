@@ -1,6 +1,6 @@
 // A read lock gives read-only access, and the reference can't leave the block.
 fn main() {
-    let rw = RwLock.new([1, 2, 3])
+    let rw = RwLock([1, 2, 3])
     with v = rw.read() {
         v.push(4)
         // error: cannot call `push` (it modifies its receiver) on reference `v`

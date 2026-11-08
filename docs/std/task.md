@@ -43,7 +43,7 @@ Why a task was cancelled.
 
 ```zig
 pub copy struct Cancelled {
-    pub reason Reason
+    pub reason: Reason
 }
 ```
 
@@ -52,7 +52,7 @@ The error of an operation that stopped because its task was cancelled.
 #### Cancelled.message
 
 ```zig
-pub fn message(self) String
+pub fn message(self) -> String
 ```
 
 "cancelled: a task failed", ...
@@ -60,7 +60,7 @@ pub fn message(self) String
 ### struct Local
 
 ```zig
-pub copy struct Local[T send] {
+pub copy struct Local[T: send] {
     // and private fields
 }
 ```
@@ -72,10 +72,10 @@ deadline budget, a logger) without passing it through every call:
 ```zig
 let requestId = task.local[String]()
 
-fn handle(req Request) {
+fn handle(req: Request) {
     task.with(requestId, req.id.clone(), () => serve(req))
 }
-fn log(msg str) {
+fn log(msg: str) {
     println(requestId.get() ?? String("-"), msg)
 }
 ```
@@ -83,7 +83,7 @@ fn log(msg str) {
 #### Local.get
 
 ```zig
-pub fn get(self) ?T where T: clone
+pub fn get(self) -> ?T where T: clone
 ```
 
 The value bound by the nearest enclosing `with` (a copy), or none.
@@ -93,16 +93,16 @@ The value bound by the nearest enclosing `with` (a copy), or none.
 ```zig
 pub struct Stats {
     // goroutines alive, `main` included
-    pub goroutines int
+    pub goroutines: int
     // threads started to run goroutines (more than maxProcs only while some
     // goroutines are in long C calls)
-    pub threads int
+    pub threads: int
     // goroutines running Gojo code at the same time; defaults to the number of
     // CPUs, or GOJO_MAXPROCS
-    pub maxProcs int
+    pub maxProcs: int
     // parked goroutines whose stacks are put away (copied out, memory given
     // back) until they run again; GOJO_HIBERNATE=0 turns this off
-    pub hibernated int
+    pub hibernated: int
 }
 ```
 
@@ -113,7 +113,7 @@ A snapshot of the scheduler, from `stats`.
 ### cancelled
 
 ```zig
-pub fn cancelled() bool
+pub fn cancelled() -> bool
 ```
 
 Has the current task been cancelled?
@@ -121,7 +121,7 @@ Has the current task been cancelled?
 ### reason
 
 ```zig
-pub fn reason() ?Reason
+pub fn reason() -> ?Reason
 ```
 
 Why the current task was cancelled, or none.
@@ -137,7 +137,7 @@ A checkpoint for long computations: `try task.check()`.
 ### deadline
 
 ```zig
-pub fn deadline() ?int
+pub fn deadline() -> ?int
 ```
 
 The nearest deadline of the current task (`time.now()` scale), or none.
@@ -147,7 +147,7 @@ makes.
 ### shield
 
 ```zig
-pub fn shield[T any](d int, body fn() T) T
+pub fn shield[T](d: int, body: fn() -> T) -> T
 ```
 
 Runs `body` shielded from cancellation for at most `d`: cancelling the
@@ -166,7 +166,7 @@ Let other tasks run.
 ### local
 
 ```zig
-pub fn local[T send]() Local[T]
+pub fn local[T: send]() -> Local[T]
 ```
 
 A new task-local key; declare it at package level: `let k = task.local[T]()`.
@@ -174,7 +174,7 @@ A new task-local key; declare it at package level: `let k = task.local[T]()`.
 ### with
 
 ```zig
-pub fn with[T send, R any](key Local[T], value sink T, body fn() R) R
+pub fn with[T: send, R](key: Local[T], value: sink T, body: fn() -> R) -> R
 ```
 
 Runs `body` with `key` bound to `value`, for it and the tasks it starts.
@@ -192,7 +192,7 @@ stops, on SIGQUIT (Ctrl-\ in a terminal).
 ### stats
 
 ```zig
-pub fn stats() Stats
+pub fn stats() -> Stats
 ```
 
 How many goroutines and threads there are now.
@@ -200,7 +200,7 @@ How many goroutines and threads there are now.
 ### setMaxProcs
 
 ```zig
-pub fn setMaxProcs(n int) int
+pub fn setMaxProcs(n: int) -> int
 ```
 
 Changes how many goroutines run Gojo code at the same time; returns the old value.
@@ -208,7 +208,7 @@ Changes how many goroutines run Gojo code at the same time; returns the old valu
 ### timeout
 
 ```zig
-pub fn timeout[T any](d int, body fn() T) ?T
+pub fn timeout[T](d: int, body: fn() -> T) -> ?T
 ```
 
 Runs `body` with a deadline. When it passes, everything `body` started is
@@ -217,7 +217,7 @@ cancelled, and the result is none. Also none when the caller is cancelled.
 ### map
 
 ```zig
-pub fn map[T send, R send](xs []T, limit int, f send fn(T) R) Vec[R]
+pub fn map[T: send, R: send](xs: []T, limit: int, f: send fn(T) -> R) -> Vec[R]
 ```
 
 Calls `f` on every element, in up to `limit` tasks at once (0: no limit),
@@ -230,7 +230,7 @@ let sizes = task.map(paths, 8, (p) => fileSize(p))
 ### tryMap
 
 ```zig
-pub fn tryMap[T send, R send, E send](xs []T, limit int, f send fn(T) R ! E) Vec[R] ! E
+pub fn tryMap[T: send, R: send, E: send](xs: []T, limit: int, f: send fn(T) -> R ! E) -> Vec[R] ! E
 ```
 
 Like `map` for a function that can fail: the first error cancels the
@@ -239,7 +239,7 @@ calls still running, and is the result.
 ### each
 
 ```zig
-pub fn each[T send](xs []T, limit int, f send fn(T))
+pub fn each[T: send](xs: []T, limit: int, f: send fn(T))
 ```
 
 Calls `f` on every element, in up to `limit` tasks at once (0: no limit).
@@ -247,7 +247,7 @@ Calls `f` on every element, in up to `limit` tasks at once (0: no limit).
 ### race
 
 ```zig
-pub fn race[R send, E send](fs []send fn() R ! E) R ! E
+pub fn race[R: send, E: send](fs: []send fn() -> R ! E) -> R ! E
 ```
 
 Runs every function at once; the first to succeed wins and the others are

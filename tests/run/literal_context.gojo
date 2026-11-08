@@ -1,7 +1,7 @@
 // A literal takes its type from the other operand, also when it sits in an
 // `if`, a `match`, a block or a literal expression on the left.
 fn main() {
-    let v u8 = 10
+    let v: u8 = 10
     let c = v > 3
     let a = (if c { 5 } else { 7 }) +% v
     let b = v +% (if c { 5 } else { 7 })
@@ -13,7 +13,7 @@ fn main() {
     // comparisons too
     println((if c { 9 } else { 99 }) < v, 'a' == 'a')
     // both sides literal: the expected type, else `int`
-    let w u16 = (if c { 600 } else { 700 }) + 1
+    let w: u16 = (if c { 600 } else { 700 }) + 1
     let i = (if c { 2 } else { 3 }) * 1000000000000
     println(w, i)
 }

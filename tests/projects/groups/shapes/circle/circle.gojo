@@ -1,4 +1,4 @@
 // Areas of unit shapes.
-pub fn area() int {
+pub fn area() -> int {
     return 3
 }

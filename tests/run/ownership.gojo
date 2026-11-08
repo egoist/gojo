@@ -1,31 +1,31 @@
 use std/fmt
 
 struct Res {
-    name String
+    name: String
 
-    fn drop(self inout) {
+    fn drop(inout self) {
         println("drop", self.name)
     }
 }
 
-fn make(n str) Res {
+fn make(n: str) -> Res {
     return Res{name: n.toString()}
 }
 
-fn consume(r sink Res) {
+fn consume(r: sink Res) {
     println("consume", r.name)
 }
 
-fn peek(r Res) {
+fn peek(r: Res) {
     println("peek", r.name)
 }
 
 struct Pair {
-    a Res
-    b Res
+    a: Res
+    b: Res
 }
 
-fn pick(flag bool) {
+fn pick(flag: bool) {
     let x = make("x")
     if flag {
         consume(x)
@@ -46,7 +46,7 @@ fn scopes() {
     peek(c)
 }
 
-fn early(n int) int {
+fn early(n: int) -> int {
     let guard = make("guard")
     if n > 0 {
         return n
@@ -65,7 +65,7 @@ fn loops() {
     }
 }
 
-fn takePair(p sink Pair) Res {
+fn takePair(p: sink Pair) -> Res {
     return p.a
 }
 
@@ -85,7 +85,7 @@ fn main() {
     println("popped", popped.isSome())
     var s = make("s1")
     s = make("s2")
-    let names = Vec[String]{"x".toString(), "y".toString()}
+    let names = Vec[String]{"x", "y"}
     let dup = names.clone()
     println(names, dup)
     drop(s)

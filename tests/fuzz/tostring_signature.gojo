@@ -1,24 +1,24 @@
 struct Clicks {
-    n int
+    n: int
 
-    fn toString(self inout) int {
+    fn toString(inout self) -> int {
         self.n += 1
         return self.n
     }
 }
 
 struct Named {
-    s String
+    s: String
 
-    fn toString(self) String {
+    fn toString(self) -> String {
         return "<" + self.s + ">"
     }
 }
 
 struct Odd {
-    x int
+    x: int
 
-    fn message(self, extra int) String {
+    fn message(self, extra: int) -> String {
         return "odd"
     }
 }

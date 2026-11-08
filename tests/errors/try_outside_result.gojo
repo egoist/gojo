@@ -1,4 +1,4 @@
-fn f() int ! String { return 1 }
+fn f() -> int ! String { return 1 }
 fn main() {
     let x = try f()
     _ = x

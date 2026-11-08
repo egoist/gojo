@@ -1,5 +1,5 @@
-fn both(a inout int, b inout int) {}
-fn mixed(a int, b inout Vec[int]) {}
+fn both(a: inout int, b: inout int) {}
+fn mixed(a: int, b: inout Vec[int]) {}
 fn main() {
     var a = 1
     swap(&a, &a)

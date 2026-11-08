@@ -1,12 +1,12 @@
 struct Res {
-    name String
+    name: String
 
-    fn drop(self inout) {
+    fn drop(inout self) {
         println("drop", self.name)
     }
 }
 
-fn find(grid Vec[Vec[int]], target int) ?int {
+fn find(grid: Vec[Vec[int]], target: int) -> ?int {
     var steps = 0
     rows: for row in grid {
         for x in row {
@@ -29,7 +29,7 @@ fn main() {
     outer: for i in 0..3 {
         let _a = Res{name: "a" + String(rune('0' + i))}
         var j = 0
-        for {
+        loop {
             let _b = Res{name: "b" + String(rune('0' + j))}
             j += 1
             if j == 2 {
@@ -41,7 +41,7 @@ fn main() {
         }
     }
 
-    let ch = chan[Res](4)
+    let ch = Chan[Res](4)
     for n in ["x", "skip", "y"] {
         ch.tx <- Res{name: n.clone()}
     }

@@ -1,66 +1,66 @@
 use std/fmt
 
 interface Animal {
-    fn name(self) String
-    fn speak(self) String
+    fn name(self) -> String
+    fn speak(self) -> String
 }
 
 interface Counter {
-    fn bump(self inout) int
+    fn bump(inout self) -> int
 }
 
 struct Dog {
-    n String
+    n: String
 
-    fn name(self) String { return self.n.clone() }
+    fn name(self) -> String { return self.n.clone() }
 
-    fn speak(self) String { return "woof".toString() }
+    fn speak(self) -> String { return "woof" }
 }
 struct Cat {
-    lives int = 9
+    lives: int = 9
 
-    fn name(self) String { return "cat".toString() }
+    fn name(self) -> String { return "cat" }
 
-    fn speak(self) String { return "meow".toString() }
+    fn speak(self) -> String { return "meow" }
 }
 
 struct Clicks {
-    n int
+    n: int
 
-    fn bump(self inout) int {
+    fn bump(inout self) -> int {
         self.n += 1
         return self.n
     }
 }
-fn introduce(a Animal) {
+fn introduce(a: Animal) {
     println(a.name(), "says", a.speak())
 }
 
-fn bumpTwice(c inout Counter) int {
+fn bumpTwice(c: inout Counter) -> int {
     _ = c.bump()
     return c.bump()
 }
 
 struct Point {
-    x int, y int
+    x: int, y: int
 
-    fn toString(self) String {
+    fn toString(self) -> String {
         return fmt.sprint("(", self.x, ",", self.y, ")")
     }
 }
 
 struct Key {
-    id int
-    tag String
+    id: int
+    tag: String
 
-    fn equal(self, o Key) bool { return self.id == o.id }
+    fn equal(self, o: Key) -> bool { return self.id == o.id }
 
-    fn hash(self, h inout Hasher) { h.writeU64(u64(self.id)) }
+    fn hash(self, h: inout Hasher) { h.writeU64(u64(self.id)) }
 }
 
 struct Node {
-    value int
-    parent ?weak[Node]
+    value: int
+    parent: ?Weak[Node]
 }
 
 fn main() {
@@ -71,8 +71,8 @@ fn main() {
     zoo.push(Cat{})
     for a in zoo {
         match a {
-            d Dog => println("dog named", d.n)
-            c Cat => println("cat with", c.lives, "lives")
+            d: Dog => println("dog named", d.n)
+            c: Cat => println("cat with", c.lives, "lives")
             _ => {}
         }
     }
@@ -92,7 +92,7 @@ fn main() {
         println("the appears", n, "times")
     }
     counts["lazy"] = 100
-    let old = counts.insert("end".toString(), 7)
+    let old = counts.insert("end", 7)
     let gone = counts.remove("quick")
     println(old, gone, counts)
     var keys = counts.keys()
@@ -111,14 +111,14 @@ fn main() {
     byKey[Key{id: 1, tag: "b"}] = 20
     println(byKey.len, byKey[Key{id: 1, tag: "zzz"}])
 
-    let root = rc(Node{value: 1, parent: none})
+    let root = Rc(Node{value: 1, parent: none})
     let child = Node{value: 2, parent: root.downgrade()}
     if let p = child.parent {
         if let r = p.upgrade() {
             println("parent value", r.value, root.count())
         }
     }
-    let shared = rc(Vec[int]{1, 2, 3})
+    let shared = Rc(Vec[int]{1, 2, 3})
     let alias = shared.clone()
     println(alias.len, shared.count(), alias[1])
 }

@@ -4,7 +4,7 @@ enum B { Y }
 fn fa() ! A { return err(.X) }
 fn fb() ! B { return err(.Y) }
 
-fn view(s String) {
+fn view(s: String) {
     scope {
         let t = go () => s.asStr()
         // error: a task can't give back the borrowed view `str`

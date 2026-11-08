@@ -1,7 +1,7 @@
-fn id[T](x T) T {
+fn id[T](x: T) -> T {
     return x
 }
-fn get() str {
+fn get() -> str {
     let s = "abc".toString()
     return id(s.asStr())
 }

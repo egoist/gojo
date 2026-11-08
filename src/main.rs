@@ -833,3 +833,4 @@ fn finish(cmd: &str, bin: &Path, opts: &Options, prog_args: &[String], stem: &st
         }
     }
 }
+

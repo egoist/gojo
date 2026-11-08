@@ -1,6 +1,6 @@
 // What a `defer` moves is moved where it runs: at the end of its block, or
 // where a `break`, `continue` or `return` leaves the block.
-fn take(s sink String) {}
+fn take(s: sink String) {}
 
 fn twice() {
     let s = "abc".toString()
@@ -20,7 +20,7 @@ fn after_block() {
 
 fn after_break() {
     let s = "abc".toString()
-    for {
+    loop {
         {
             defer take(s)
             break

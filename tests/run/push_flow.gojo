@@ -1,30 +1,30 @@
 // A push iterator that ignores the Flow its body returns: every way of leaving
 // the loop must still stop the body from running again.
 struct Careless {
-    v Vec[int]
+    v: Vec[int]
 
-    fn each(self, body fn(&int) Flow) {
+    fn each(self, body: fn(&int) -> Flow) {
         for x in self.v {
             _ = body(x)
         }
     }
 }
 
-fn firstAbove(c Careless, n int) int {
+fn firstAbove(c: Careless, n: int) -> int {
     for x in c {
         if x > n { return x }
     }
     return -1
 }
 
-fn check(c Careless) int ! String {
+fn check(c: Careless) -> int ! String {
     for x in c {
         _ = try validate(x)
     }
     return 0
 }
 
-fn validate(x int) int ! String {
+fn validate(x: int) -> int ! String {
     if x == 2 { return err("bad two") }
     println("valid", x)
     return x
@@ -79,7 +79,7 @@ fn main() {
     deferredAtReturn(c)
 }
 
-fn deferredAtReturn(c Careless) {
+fn deferredAtReturn(c: Careless) {
     defer {
         for b in c {
             if b == 2 { break }

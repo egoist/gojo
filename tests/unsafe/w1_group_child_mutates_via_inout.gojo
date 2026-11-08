@@ -1,4 +1,4 @@
-fn bump(v inout Vec[int]) {
+fn bump(v: inout Vec[int]) {
     v.push(1)
 }
 fn main() {

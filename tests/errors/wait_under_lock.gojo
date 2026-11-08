@@ -1,13 +1,13 @@
 // Waiting while a lock is held: every task that wants the lock waits too.
 use std/time
 
-fn work() int {
+fn work() -> int {
     return 1
 }
 
 fn main() {
     let m = Mutex(0)
-    let ch = chan[int](1)
+    let ch = Chan[int](1)
     with v = m.lock() {
         ch.tx <- v
         // error: this send can wait while `m` is locked

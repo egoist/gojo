@@ -1,24 +1,24 @@
 use std/fmt
 
 struct Conn {
-    id int
+    id: int
 
-    fn drop(self inout) {
+    fn drop(inout self) {
         println("close conn", self.id)
     }
 }
 
-fn open(id int, fail bool) Conn ! String {
+fn open(id: int, fail: bool) -> Conn ! String {
     println("open", id)
     errdefer println("rollback", id)
     defer println("leave", id)
     if fail {
-        return err("refused".toString())
+        return err("refused")
     }
     return Conn{id: id}
 }
 
-fn step(n int) int ! String {
+fn step(n: int) -> int ! String {
     errdefer println("undo step", n)
     if n > 2 {
         return err(fmt.sprint("step", n, "failed"))
@@ -26,7 +26,7 @@ fn step(n int) int ! String {
     return n
 }
 
-fn run(limit int) int ! String {
+fn run(limit: int) -> int ! String {
     var total = 0
     for i in 0..limit {
         total += try step(i)

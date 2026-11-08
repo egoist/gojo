@@ -1,6 +1,6 @@
 use shout
 
-pub fn hello(n str) String {
+pub fn hello(n: str) -> String {
     return shout.loud("hello " + n)
 }
 

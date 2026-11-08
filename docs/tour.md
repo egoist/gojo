@@ -8,7 +8,7 @@ compiler checks them without help. Concurrency is Go's `go`, channels and
 
 This tour shows the language by example. Every program here is compiled and
 run by the test suite, and the output shown is what it prints. The complete
-rules are in the [language reference](spec.md) (in Chinese) and the standard
+rules are in the [language reference](spec.md) and the standard
 library is documented in [docs/std](std/README.md).
 
 ## Getting started
@@ -53,8 +53,8 @@ fn main() {
     let name = "Gojo"
     var count = 0
     count += 3
-    let ratio f64 = 0.5
-    let big u64 = 1 << 40
+    let ratio: f64 = 0.5
+    let big: u64 = 1 << 40
     println(name, count, ratio, big)
 
     // conversions are explicit
@@ -62,7 +62,7 @@ fn main() {
     println(total, int(total * 10.0))
 
     // overflow is a panic, not a wrap: `+%`, `-%`, `*%` wrap on purpose
-    let b u8 = 250
+    let b: u8 = 250
     println(b +% 10)
 }
 ```
@@ -74,11 +74,12 @@ Gojo 3 0.5 1099511627776
 ```
 
 Statements end at the end of a line (inside parentheses and brackets, lines
-continue). `if`, `match` and blocks are expressions:
+continue). `if`, `match` and blocks are expressions, and a function body's
+last expression is its result, so `return` is only for leaving early:
 
 ```zig
-fn classify(n int) str {
-    return match n {
+fn classify(n: int) -> str {
+    match n {
         0 => "zero"
         1..=9 => "small"
         _ => if n < 0 { "negative" } else { "big" }
@@ -90,7 +91,7 @@ fn main() {
         println(n, classify(n))
     }
     var i = 0
-    for i < 3 {
+    while i < 3 {
         i += 1
     }
     let parity = if i % 2 == 0 { "even" } else { "odd" }
@@ -106,40 +107,59 @@ fn main() {
 3 odd
 ```
 
-`for` is the only loop: `for x in xs`, `for i, x in xs`, `for i in 0..n`,
-`for k, v in map`, `for cond { }` and `for { }`. Loops can have labels:
-`outer: for ...` and `break outer`.
+`for` iterates: `for x in xs`, `for i, x in xs`, `for i in 0..n`,
+`for k, v in map`. `while cond { }` repeats while a condition holds and
+`loop { }` until a `break`. Loops can have labels: `outer: for ...` and
+`break outer`.
+
+Strings interpolate with `${...}`; a format after a colon pads, aligns or
+picks a base, checked at compile time:
+
+```zig
+fn main() {
+    let name = "Gojo"
+    let items = 3
+    let price = 9.5
+    println("${name}: ${items} items, total ${f64(items) * price:.2}")
+    println("[${name:>8}] [${items:03}] [${255:x}]")
+}
+```
+
+```text
+Gojo: 3 items, total 28.50
+[    Gojo] [003] [ff]
+```
 
 ## Structs, methods and enums
 
-Methods are written inside the type. `self` borrows the value; `self inout`
+Methods are written inside the type. `self` borrows the value; `inout self`
 may change it.
 
 ```zig
 struct Account {
-    owner String
-    balance int = 0
+    owner: String
+    balance: int = 0
     // `?T` fields default to none
-    note ?String
+    note: ?String
 
-    fn deposit(self inout, amount int) {
+    fn deposit(inout self, amount: int) {
         self.balance += amount
     }
 
-    fn describe(self) String {
+    fn describe(self) -> String {
         if let n = self.note {
-            return self.owner + ": " + n
+            return "${self.owner}: ${n}"
         }
-        return self.owner + ": no note"
+        "${self.owner}: no note"
     }
 }
 
 enum Shape {
-    Circle(r f64)
-    Rect(w f64, h f64)
+    Circle(r: f64)
+    Rect(w: f64, h: f64)
 
-    fn area(self) f64 {
-        return match self {
+    fn area(self) -> f64 {
+        match self {
             .Circle(r) => 3.14159 * r * r
             .Rect(w, h) => w * h
         }
@@ -167,14 +187,72 @@ Account{owner: "ada", balance: 50, note: none}
 ```
 
 `match` must cover every case. Where the type is known, a variant can be
-written `.Rect(...)`.
+written `.Rect(...)`, and a struct literal `.{...}`. `Point{x, y}` fills
+fields from variables of the same names, and a type with a `new` function can
+be called directly: `Stack[int]()` is `Stack[int].new()`.
+
+```zig
+struct Options {
+    port: int = 8080
+    verbose: bool = false
+}
+
+struct Point {
+    x: int
+    y: int
+}
+
+fn start(o: Options) {
+    println("port", o.port, "verbose", o.verbose)
+}
+
+fn main() {
+    start(.{})
+    start(.{port: 9000, verbose: true})
+    let x = 1
+    let y = 2
+    println(Point{x, y})
+}
+```
+
+```text
+port 8080 verbose false
+port 9000 verbose true
+Point{x: 1, y: 2}
+```
+
+Tuples group a few values without declaring a struct, and `let` takes them
+apart:
+
+```zig
+fn divmod(a: int, b: int) -> (int, int) {
+    (a / b, a % b)
+}
+
+fn main() {
+    let (q, r) = divmod(17, 5)
+    println(q, r)
+    let pair = (3, "three")
+    println(pair, pair.0, pair.1)
+    match divmod(9, 3) {
+        (n, 0) => println("divides", n, "times")
+        (_, rest) => println("remainder", rest)
+    }
+}
+```
+
+```text
+3 2
+(3, "three") 3 three
+divides 3 times
+```
 
 ## No nil
 
 There is no null pointer. A value that may be missing has type `?T`:
 
 ```zig
-fn find(names []String, want str) ?int {
+fn find(names: []String, want: str) -> ?int {
     for i, n in names {
         if n == want {
             return i
@@ -189,7 +267,7 @@ fn main() {
         println("found at", i)
     }
     println(find(names, "eve") ?? -1)
-    let first ?int = find(names, "ann")
+    let first: ?int = find(names, "ann")
     println(first, first.isSome())
 }
 ```
@@ -201,7 +279,24 @@ some(0) true
 ```
 
 `if let`, `??`, `match` and `try` take a `?T` apart; `unwrap()` panics on
-none.
+none. `if let x { }` unwraps the variable `x` in place, and `?.` reaches into
+an optional value, giving none when there is nothing there:
+
+```zig
+fn main() {
+    let nick: ?String = "ada"
+    if let nick {
+        println("hi,", nick)
+    }
+    let missing: ?String = none
+    println(nick?.len(), missing?.len(), missing?.len() ?? 0)
+}
+```
+
+```text
+hi, ada
+some(3) none 0
+```
 
 ## Errors
 
@@ -211,18 +306,18 @@ accident: discarding one takes `_ = f()`.
 
 ```zig
 enum ConfigError {
-    Missing(key String)
-    BadNumber(key String, text String)
+    Missing(key: String)
+    BadNumber(key: String, text: String)
 
-    fn message(self) String {
-        return match self {
-            .Missing(k) => "missing " + k
-            .BadNumber(k, t) => k + " is not a number: " + t
+    fn message(self) -> String {
+        match self {
+            .Missing(k) => "missing ${k}"
+            .BadNumber(k, t) => "${k} is not a number: ${t}"
         }
     }
 }
 
-fn lookup(lines []String, key str) String ! ConfigError {
+fn lookup(lines: []String, key: str) -> String ! ConfigError {
     for l in lines {
         let parts = l.split("=")
         if parts.len() == 2 && parts[0].trim() == key {
@@ -232,9 +327,9 @@ fn lookup(lines []String, key str) String ! ConfigError {
     return err(.Missing(key.toString()))
 }
 
-fn port(lines []String) int ! ConfigError {
+fn port(lines: []String) -> int ! ConfigError {
     let text = try lookup(lines, "port")
-    return text.parseInt() ?? return err(.BadNumber("port".toString(), text))
+    return text.parseInt() ?? return err(.BadNumber("port", text))
 }
 
 fn main() {
@@ -283,23 +378,23 @@ Parameters borrow by default. `inout` borrows to change (the caller writes
 
 ```zig
 struct Doc {
-    title String
-    words Vec[String] = []
+    title: String
+    words: Vec[String] = []
 
-    fn drop(self inout) {
+    fn drop(inout self) {
         println("freeing", self.title)
     }
 }
 
-fn wordCount(d Doc) int {
+fn wordCount(d: Doc) -> int {
     return d.words.len()
 }
 
-fn addWord(d inout Doc, w str) {
+fn addWord(d: inout Doc, w: str) {
     d.words.push(w.toString())
 }
 
-fn archive(d sink Doc) {
+fn archive(d: sink Doc) {
     println("archiving", d.title)
 }
 
@@ -337,7 +432,7 @@ and while one exists the owner can't change. That is the whole lifetime
 system: no annotations, and no dangling references.
 
 ```zig
-fn firstWord(s str) str {
+fn firstWord(s: str) -> str {
     let i = s.find(" ") ?? s.len()
     return s[0..i]
 }
@@ -400,7 +495,7 @@ exist. A function changes elements through an `inout []T` parameter, called
 with `&v` or with a range of it, `&v[a..b]`:
 
 ```zig
-fn bump(v inout []int) {
+fn bump(v: inout []int) {
     for x in &v {
         x += 100
     }
@@ -422,19 +517,25 @@ fn main() {
 ## Collections and closures
 
 `Vec[T]`, `Map[K, V]` and `Set[T]` are in the prelude, with the usual methods.
-Closures are written `(x) => expr` or `(x) => { ... }`:
+Closures are written `x => expr`, `(a, b) => expr` or `x => { ... }`:
 
 ```zig
 fn main() {
     var xs = [4, 1, 3, 9, 2]
     xs.sort()
-    let evens = xs.filter((x) => x % 2 == 0)
-    let squares = xs.map((x) => x * x)
+    let evens = xs.filter(x => x % 2 == 0)
+    let squares = xs.map(x => x * x)
     println(xs, evens, squares, xs.sum())
 
     var total = 0
-    xs.each((x) => { total += x })
+    xs.each(x => { total += x })
     println(total)
+
+    // a line starting with `.` continues the chain above it
+    let big = xs
+        .filter(x => x > 2)
+        .map(x => x * 10)
+    println(big)
 
     var names = ["eve", "bob", "ann"]
     names.sortBy((a, b) => a.len() < b.len() || (a.len() == b.len() && a < b))
@@ -448,6 +549,7 @@ fn main() {
 ```text
 [1, 2, 3, 4, 9] [2, 4] [1, 4, 9, 16, 81] 19
 19
+[30, 40, 90]
 ann, bob, eve
 2 true
 ```
@@ -461,7 +563,7 @@ variables it uses and may change them. One that is kept (stored, or given to
 Type parameters go in brackets, with constraints:
 
 ```zig
-fn largest[T copy + ordered](xs []T) ?T {
+fn largest[T: copy + ordered](xs: []T) -> ?T {
     if xs.len() == 0 {
         return none
     }
@@ -474,14 +576,14 @@ fn largest[T copy + ordered](xs []T) ?T {
     return m
 }
 
-struct Stack[T any] {
-    items Vec[T] = []
+struct Stack[T] {
+    items: Vec[T] = []
 
-    fn push(self inout, x sink T) {
+    fn push(inout self, x: sink T) {
         self.items.push(x)
     }
 
-    fn pop(self inout) ?T {
+    fn pop(inout self) -> ?T {
         return self.items.pop()
     }
 }
@@ -489,8 +591,8 @@ struct Stack[T any] {
 fn main() {
     println(largest([3, 9, 2]), largest([2.5, 1.5]), largest(Vec[f64]{}))
     var s = Stack[String]{}
-    s.push("x".toString())
-    s.push("y".toString())
+    s.push("x")
+    s.push("y")
     println(s.pop(), s.pop(), s.pop())
 }
 ```
@@ -506,27 +608,27 @@ or a collection) owns what it holds.
 
 ```zig
 interface Shape {
-    fn area(self) f64
-    fn name(self) String
+    fn area(self) -> f64
+    fn name(self) -> String
 }
 
 struct Square {
-    side f64
+    side: f64
 
-    fn area(self) f64 { return self.side * self.side }
+    fn area(self) -> f64 { self.side * self.side }
 
-    fn name(self) String { return "square".toString() }
+    fn name(self) -> String { "square" }
 }
 
 struct Circle {
-    r f64
+    r: f64
 
-    fn area(self) f64 { return 3.0 * self.r * self.r }
+    fn area(self) -> f64 { 3.0 * self.r * self.r }
 
-    fn name(self) String { return "circle".toString() }
+    fn name(self) -> String { "circle" }
 }
 
-fn report(s Shape) {
+fn report(s: Shape) {
     println(s.name(), s.area())
 }
 
@@ -550,21 +652,21 @@ square 4
 
 ## Concurrency
 
-`go` starts a task. `chan[T](n)` makes a channel with room for `n` values,
+`go` starts a task. `Chan[T](n)` makes a channel with room for `n` values,
 and two ends: `tx` sends and `rx` receives (each can be cloned). Sending moves
 the value: the sender can't touch it afterwards. When the last sender is
 dropped the channel closes, and a `for` over the receiver ends.
 
 ```zig
-fn worker(jobs Receiver[int], results Sender[int]) {
+fn worker(jobs: Receiver[int], results: Sender[int]) {
     for j in jobs {
         results <- j * j
     }
 }
 
 fn main() {
-    let jobs = chan[int](10)
-    let results = chan[int](10)
+    let jobs = Chan[int](10)
+    let results = Chan[int](10)
     for _ in 0..3 {
         go worker(jobs.rx.clone(), results.tx.clone())
     }
@@ -591,7 +693,7 @@ whose `join` returns the task's result:
 ```zig
 use std/time
 
-fn lookup(id int) int {
+fn lookup(id: int) -> int {
     time.sleep(time.millisecond)
     return id * 10
 }
@@ -671,14 +773,14 @@ some(42) none
 
 Tasks are scheduled M:N on a thread per CPU, and preempted, so a long
 computation doesn't starve the others. A data race is a compile error: two
-tasks can't use a variable one of them changes, and values with `rc` or raw
+tasks can't use a variable one of them changes, and values with `Rc` or raw
 pointers can't cross to another thread. `par for x in &v { }` runs the
 iterations of a loop on every CPU, each owning its element. Two tasks may
 also change parts of one slice, when the borrow checker can see that the
 ranges don't overlap:
 
 ```zig
-fn fill(v inout []int, x int) {
+fn fill(v: inout []int, x: int) {
     for e in &v {
         e = x
     }
@@ -704,10 +806,8 @@ task sees it. It is read-only; what changes goes in a `Mutex`, an `RwLock`
 (many readers or one writer) or an `Atomic` inside it:
 
 ```zig
-use std/fmt
-
-let hits = Atomic.new(0)
-let names = RwLock.new(Vec[String]{})
+let hits = Atomic(0)
+let names = RwLock(Vec[String]{})
 
 fn main() {
     scope {
@@ -715,7 +815,7 @@ fn main() {
             go () => {
                 _ = hits.add(1)
                 with n = names.write() {
-                    n.push(fmt.sprint("task", i))
+                    n.push("task ${i}")
                 }
             }
         }
@@ -791,7 +891,7 @@ and formatting (`fmt`). See [docs/std](std/README.md), or `gojo doc <module>`.
 its own, so a panicking test fails alone:
 
 ```zig
-fn double(x int) int {
+fn double(x: int) -> int {
     return x * 2
 }
 
@@ -816,7 +916,7 @@ compiler generates the calls from the Gojo declarations.
 
 ```zig
 extern "C" {
-    fn abs(x i32) i32
+    fn abs(x: i32) -> i32
 }
 
 fn main() {
@@ -834,8 +934,7 @@ fn main() {
 - [Examples](../examples): a JSON API server (`todo`), `grep`, an HTTP server
   with cancellation (`http`).
 - [The standard library](std/README.md).
-- [The language reference](spec.md), and the [design notes](design.md), in
-  Chinese.
+- [The language reference](spec.md), and the [design notes](design.md).
 
 ### Known limits of the beta
 

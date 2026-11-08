@@ -1,0 +1,103 @@
+// The newer conveniences: interpolation, leading-dot chains, `x => ...`,
+// `if let x`, `.{...}`, field shorthand, `?.` calls, `T(...)` constructors
+// and `with` bodies that end the function.
+struct Options {
+    port: int = 8080
+    host: String = "localhost"
+    verbose: bool = false
+}
+
+struct Point {
+    x: int
+    y: int
+
+    fn norm1(self) -> int {
+        (if self.x < 0 { -self.x } else { self.x }) + (if self.y < 0 { -self.y } else { self.y })
+    }
+
+    fn label(self) -> ?String {
+        if self.x == 0 && self.y == 0 { none } else { "(${self.x}, ${self.y})" }
+    }
+}
+
+struct Counter {
+    items: Vec[int] = []
+
+    fn new() -> Counter {
+        Counter{items: [0]}
+    }
+}
+
+fn describe(o: Options) -> String {
+    "${o.host}:${o.port}${if o.verbose { " (verbose)" } else { "" }}"
+}
+
+fn origin() -> ?Point {
+    .{x: 0, y: 0}
+}
+
+fn total(m: Mutex[Vec[int]]) -> int {
+    with v = m.lock() {
+        return v.sum()
+    }
+}
+
+fn main() {
+    // interpolation, with formats and escapes
+    let name = "Gojo"
+    let n = 42
+    println("hello, ${name}! n = ${n}, n * 2 = ${n * 2}")
+    println("|${n:>6}|${n:<6}|${3.14159:.2}|${255:x}|${7:03}|")
+    println("{braces} stay, \${this} is literal, nested: ${"[${name}]"}")
+    let words = ["a", "bb", "ccc"]
+    println("lengths: ${words.map(w => w.len())}")
+
+    // leading-dot chains and one-parameter closures
+    let squares = [1, 2, 3, 4, 5, 6]
+        .filter(x => x % 2 == 0)
+    // comments between steps are fine
+        .map(x => x * x)
+    println(squares)
+
+    // `if let x` unwraps `x` in place
+    let maybe: ?int = 7
+    if let maybe {
+        println("got", maybe + 1)
+    }
+    let missing: ?String = none
+    if let missing {
+        println(missing)
+    } else {
+        println("missing is none")
+    }
+
+    // `.{...}` takes its type from the context; `P{x, y}` names fields by variables
+    println(describe(.{}), describe(.{port: 9000, verbose: true}))
+    let x = 3
+    let y = -4
+    let p = Point{x, y}
+    let q: Point = .{x, y: 1}
+    var pts = Vec[Point]{}
+    pts.push(.{x: 1, y: 1})
+    println(p, q, pts, p.norm1(), origin())
+
+    // `?.` calls methods on optional values
+    let some_p: ?Point = p
+    let no_p: ?Point = none
+    println(some_p?.norm1(), no_p?.norm1(), some_p?.label(), origin()?.label())
+    println(no_p?.norm1() ?? -1)
+
+    // `T(...)` calls `T.new(...)`
+    let c = Counter()
+    let hits = Atomic(0)
+    _ = hits.add(5)
+    let cache = RwLock(Map[String, int]{})
+    with m = cache.write() {
+        m["k"] = 1
+    }
+    with m = cache.read() {
+        println(c.items, hits.load(), m)
+    }
+    let shared = Arc(Mutex([1, 2, 3]))
+    println(total(shared), Rc("rc"))
+}

@@ -1,5 +1,5 @@
 fn main() {
-    var fs = Vec[fn() int]{}
+    var fs = Vec[fn() -> int]{}
     {
         let s = "abc".toString()
         let v = s.asStr()

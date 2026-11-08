@@ -1,0 +1,8 @@
+// Built-ins that were renamed say what to write now.
+fn main() {
+    let c = chan[int](1)
+    // error: channels are made with `Chan[T](n)`
+    var w: Vec[weak[int]] = []
+    // error: built-in types are capitalized: write `Weak`
+    println(c, w)
+}

@@ -1,7 +1,7 @@
-fn take(s sink String) {}
+fn take(s: sink String) {}
 fn main() {
     let s = "abc".toString()
-    for {
+    loop {
         take(s)
         break
     }

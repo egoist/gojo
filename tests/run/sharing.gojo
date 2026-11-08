@@ -2,12 +2,12 @@
 use std/time
 
 struct Account {
-    name String
-    balance int
+    name: String
+    balance: int
 }
 
 // both locks or neither, in one order whatever the arguments' order
-fn transfer(from Mutex[Account], to Mutex[Account], amount int) {
+fn transfer(from: Mutex[Account], to: Mutex[Account], amount: int) {
     with a, b = lock(from, to) {
         a.balance -= amount
         b.balance += amount
@@ -15,21 +15,21 @@ fn transfer(from Mutex[Account], to Mutex[Account], amount int) {
 }
 
 send interface Job {
-    fn run(self) int
+    fn run(self) -> int
 }
 
 struct Square {
-    n int
+    n: int
 
-    fn run(self) int {
+    fn run(self) -> int {
         return self.n * self.n
     }
 }
 
 struct Wait {
-    ms int
+    ms: int
 
-    fn run(self) int {
+    fn run(self) -> int {
         time.sleep(self.ms * time.millisecond)
         return self.ms
     }
@@ -52,7 +52,7 @@ fn main() {
     }
 
     // many tasks change one counter without a lock
-    let hits = Atomic.new(0)
+    let hits = Atomic(0)
     var xs = Vec[int]{}
     for i in 0..10000 {
         xs.push(i)
@@ -73,11 +73,11 @@ fn main() {
     }
     println(hits.load(), hits.swap(7), hits.load())
     println(hits.compareSwap(7, 9), hits.compareSwap(7, 10), hits.load())
-    let small = Atomic.new(u8(250))
+    let small = Atomic(u8(250))
     println(small.add(10))
 
     // interface values that cross tasks
-    let jobs = chan[Job](4)
+    let jobs = Chan[Job](4)
     jobs.tx <- Square{n: 3}
     jobs.tx <- Wait{ms: 1}
     jobs.tx <- Square{n: 4}

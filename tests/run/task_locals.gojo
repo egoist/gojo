@@ -5,11 +5,11 @@ use std/{task, time}
 let requestId = task.local[String]()
 let depth = task.local[int]()
 
-fn log(msg str) {
+fn log(msg: str) {
     println(requestId.get() ?? String("-"), depth.get() ?? 0, msg)
 }
 
-fn handle(id int) {
+fn handle(id: int) {
     task.with(requestId, String("req-") + String(["a", "b"][id]), () => {
         log("start")
         scope {

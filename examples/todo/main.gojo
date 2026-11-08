@@ -12,12 +12,12 @@
 use std/{fmt, http, io, json, net, os, time}
 
 struct Todo {
-    id int
-    title String
-    done bool = false
-    created String
+    id: int
+    title: String
+    done: bool = false
+    created: String
 
-    fn toJson(self) json.Value {
+    fn toJson(self) -> json.Value {
         var v = json.object()
         v.set("id", json.integer(self.id))
         v.set("title", json.string(self.title))
@@ -28,12 +28,12 @@ struct Todo {
 }
 
 struct Store {
-    todos Vec[Todo] = []
-    next int = 1
+    todos: Vec[Todo] = []
+    next: int = 1
     // where to save, if anywhere
-    file String = ""
+    file: String = ""
 
-    fn find(self, id int) int {
+    fn find(self, id: int) -> int {
         for i, t in self.todos {
             if t.id == id {
                 return i
@@ -42,7 +42,7 @@ struct Store {
         return -1
     }
 
-    fn toJson(self) json.Value {
+    fn toJson(self) -> json.Value {
         var items = json.array()
         for t in self.todos {
             items.push(t.toJson())
@@ -68,7 +68,7 @@ struct Store {
         }
     }
 
-    fn load(self inout) ! io.Error {
+    fn load(inout self) ! io.Error {
         if !os.exists(self.file) {
             return
         }
@@ -91,14 +91,14 @@ struct Store {
     }
 }
 
-fn problem(status int, msg str) http.Response {
+fn problem(status: int, msg: str) -> http.Response {
     var v = json.object()
     v.set("error", json.string(msg))
     return http.json(status, v.encode())
 }
 
 // The request's body as a JSON object, or the response explaining why not.
-fn body(req http.Request) json.Value ! http.Response {
+fn body(req: http.Request) -> json.Value ! http.Response {
     let v = json.parse(req.text()) catch e {
         return err(problem(400, e.message()))
     }
@@ -109,9 +109,9 @@ fn body(req http.Request) json.Value ! http.Response {
 }
 
 struct Api {
-    store Mutex[Store]
+    store: Mutex[Store]
 
-    fn serve(self, req http.Request) http.Response {
+    fn serve(self, req: http.Request) -> http.Response {
         let seg = req.segments()
         if seg.len() == 0 || seg[0] != "todos" || seg.len() > 2 {
             return problem(404, "no such resource")
@@ -132,18 +132,18 @@ struct Api {
         }
     }
 
-    fn list(self) http.Response {
+    fn list(self) -> http.Response {
         with s = self.store.lock() {
             return http.json(200, s.toJson().encode())
         }
         return problem(500, "unreachable")
     }
 
-    fn create(self, req http.Request) http.Response {
+    fn create(self, req: http.Request) -> http.Response {
         let v = body(req) catch r {
             return r
         }
-        var title = "".toString()
+        var title: String = ""
         if let t = v.get("title") {
             title = (t.str() ?? "").trim().toString()
         } else {
@@ -165,7 +165,7 @@ struct Api {
         return problem(500, "unreachable")
     }
 
-    fn show(self, id int) http.Response {
+    fn show(self, id: int) -> http.Response {
         with s = self.store.lock() {
             let i = s.find(id)
             if i < 0 {
@@ -176,7 +176,7 @@ struct Api {
         return problem(500, "unreachable")
     }
 
-    fn update(self, id int, req http.Request) http.Response {
+    fn update(self, id: int, req: http.Request) -> http.Response {
         let v = body(req) catch r {
             return r
         }
@@ -201,7 +201,7 @@ struct Api {
         return problem(500, "unreachable")
     }
 
-    fn remove(self, id int) http.Response {
+    fn remove(self, id: int) -> http.Response {
         with s = self.store.lock() {
             let i = s.find(id)
             if i < 0 {
@@ -217,7 +217,7 @@ struct Api {
 
 // ---------------------------------------------------------------- the self-test
 
-fn call(base str, method str, path str, data str) String {
+fn call(base: str, method: str, path: str, data: str) -> String {
     let r = http.request(method, base + path, Vec[http.Header]{}, data.bytes()) catch e {
         return "failed: " + e.message()
     }

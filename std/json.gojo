@@ -16,15 +16,15 @@ use std/fmt
 // `json.string(s)`...) or with the variants, and read one with the methods.
 pub enum Value {
     Null
-    Bool(b bool)
-    Int(i int)
-    Num(f f64)
-    Str(s String)
-    Arr(items Vec[Value])
-    Obj(fields Map[String, Value])
+    Bool(b: bool)
+    Int(i: int)
+    Num(f: f64)
+    Str(s: String)
+    Arr(items: Vec[Value])
+    Obj(fields: Map[String, Value])
 
     // Whether this is `null`.
-    pub fn isNull(self) bool {
+    pub fn isNull(self) -> bool {
         return match self {
             .Null => true
             _ => false
@@ -32,7 +32,7 @@ pub enum Value {
     }
 
     // Whether this is an object.
-    pub fn isObject(self) bool {
+    pub fn isObject(self) -> bool {
         return match self {
             .Obj(_) => true
             _ => false
@@ -40,7 +40,7 @@ pub enum Value {
     }
 
     // Whether this is an array.
-    pub fn isArray(self) bool {
+    pub fn isArray(self) -> bool {
         return match self {
             .Arr(_) => true
             _ => false
@@ -48,7 +48,7 @@ pub enum Value {
     }
 
     // The value of `true` or `false`.
-    pub fn boolean(self) ?bool {
+    pub fn boolean(self) -> ?bool {
         return match self {
             .Bool(b) => some(b)
             _ => none
@@ -56,7 +56,7 @@ pub enum Value {
     }
 
     // An integer (also a float with no fractional part that fits).
-    pub fn int(self) ?int {
+    pub fn int(self) -> ?int {
         return match self {
             .Int(i) => some(i)
             .Num(f) => if isWhole(f) { some(int(f)) } else { none }
@@ -65,7 +65,7 @@ pub enum Value {
     }
 
     // A number, integer or not.
-    pub fn num(self) ?f64 {
+    pub fn num(self) -> ?f64 {
         return match self {
             .Int(i) => some(f64(i))
             .Num(f) => some(f)
@@ -74,7 +74,7 @@ pub enum Value {
     }
 
     // The text of a string.
-    pub fn str(self) ?str {
+    pub fn str(self) -> ?str {
         return match self {
             .Str(s) => some(s.asStr())
             _ => none
@@ -82,7 +82,7 @@ pub enum Value {
     }
 
     // The value at `key` of an object.
-    pub fn get(self, key str) yield ?&Value {
+    pub fn get(self, key: str) yield ?&Value {
         match self {
             .Obj(fields) => {
                 if let v = fields.get(key.toString()) {
@@ -95,7 +95,7 @@ pub enum Value {
     }
 
     // Element `i` of an array.
-    pub fn at(self, i int) yield ?&Value {
+    pub fn at(self, i: int) yield ?&Value {
         match self {
             .Arr(items) => {
                 if i >= 0 && i < items.len() {
@@ -108,7 +108,7 @@ pub enum Value {
     }
 
     // Elements of an array, members of an object, or 0.
-    pub fn len(self) int {
+    pub fn len(self) -> int {
         return match self {
             .Arr(items) => items.len()
             .Obj(fields) => fields.len()
@@ -117,7 +117,7 @@ pub enum Value {
     }
 
     // The keys of an object, in order.
-    pub fn keys(self) Vec[String] {
+    pub fn keys(self) -> Vec[String] {
         return match self {
             .Obj(fields) => fields.keys()
             _ => []
@@ -125,7 +125,7 @@ pub enum Value {
     }
 
     // Sets a member of an object (does nothing to other values).
-    pub fn set(self inout, key str, v sink Value) {
+    pub fn set(inout self, key: str, v: sink Value) {
         match self {
             .Obj(fields) => {
                 _ = fields.insert(key.toString(), v)
@@ -135,7 +135,7 @@ pub enum Value {
     }
 
     // Appends to an array (does nothing to other values).
-    pub fn push(self inout, v sink Value) {
+    pub fn push(inout self, v: sink Value) {
         match self {
             .Arr(items) => items.push(v)
             _ => {}
@@ -143,58 +143,58 @@ pub enum Value {
     }
 
     // Compact JSON text.
-    pub fn encode(self) String {
-        var out = "".toString()
+    pub fn encode(self) -> String {
+        var out: String = ""
         write(&out, self, -1, 0)
         return out
     }
 
     // JSON text indented by two spaces.
-    pub fn pretty(self) String {
-        var out = "".toString()
+    pub fn pretty(self) -> String {
+        var out: String = ""
         write(&out, self, 2, 0)
         return out
     }
 }
 
-fn isWhole(f f64) bool {
+fn isWhole(f: f64) -> bool {
     return f >= -9.0e18 && f <= 9.0e18 && f64(int(f)) == f
 }
 
 // Values to build documents with; `array()` and `object()` are empty (add to
 // them with `push` and `set`).
-pub fn null() Value {
+pub fn null() -> Value {
     return .Null
 }
-pub fn boolean(b bool) Value {
+pub fn boolean(b: bool) -> Value {
     return .Bool(b)
 }
-pub fn integer(i int) Value {
+pub fn integer(i: int) -> Value {
     return .Int(i)
 }
-pub fn number(f f64) Value {
+pub fn number(f: f64) -> Value {
     return .Num(f)
 }
-pub fn string(s str) Value {
+pub fn string(s: str) -> Value {
     return .Str(s.toString())
 }
-pub fn array() Value {
+pub fn array() -> Value {
     return .Arr(Vec[Value]{})
 }
-pub fn object() Value {
+pub fn object() -> Value {
     return .Obj(Map[String, Value]{})
 }
 
 // ---------------------------------------------------------------- encoding
 
-fn newline(out inout String, indent int, level int) {
+fn newline(out: inout String, indent: int, level: int) {
     if indent >= 0 {
         out.push("\n")
         out.push(" ".repeat(indent * level))
     }
 }
 
-fn write(out inout String, v Value, indent int, level int) {
+fn write(out: inout String, v: Value, indent: int, level: int) {
     match v {
         .Null => out.push("null")
         .Bool(b) => out.push(if b { "true" } else { "false" })
@@ -243,7 +243,7 @@ fn write(out inout String, v Value, indent int, level int) {
     }
 }
 
-fn quote(out inout String, s str) {
+fn quote(out: inout String, s: str) {
     out.push("\"")
     for r in s.runes() {
         match r {
@@ -265,8 +265,8 @@ fn quote(out inout String, s str) {
 }
 
 // Quotes a string as JSON.
-pub fn quoted(s str) String {
-    var out = "".toString()
+pub fn quoted(s: str) -> String {
+    var out: String = ""
     quote(&out, s)
     return out
 }
@@ -275,13 +275,13 @@ pub fn quoted(s str) String {
 
 // Why `parse` failed, and where.
 pub struct Error {
-    pub msg String
+    pub msg: String
     // where, from 1
-    pub line int
-    pub column int
+    pub line: int
+    pub column: int
 
     // The message, with the line and column.
-    pub fn message(self) String {
+    pub fn message(self) -> String {
         return fmt.format("json: {} at line {}, column {}", self.msg, self.line, self.column)
     }
 }
@@ -290,10 +290,10 @@ pub struct Error {
 pub const maxDepth = 500
 
 struct Parser {
-    b Vec[byte]
-    pos int = 0
+    b: Vec[byte]
+    pos: int = 0
 
-    fn fail(self, msg str) Error {
+    fn fail(self, msg: str) -> Error {
         var line = 1
         var col = 1
         for i in 0..self.pos {
@@ -310,8 +310,8 @@ struct Parser {
         return Error{msg: msg.toString(), line: line, column: col}
     }
 
-    fn space(self inout) {
-        for self.pos < self.b.len() {
+    fn space(inout self) {
+        while self.pos < self.b.len() {
             let c = self.b[self.pos]
             if c != 32 && c != 9 && c != 10 && c != 13 {
                 return
@@ -320,14 +320,14 @@ struct Parser {
         }
     }
 
-    fn peek(self) int {
+    fn peek(self) -> int {
         if self.pos < self.b.len() {
             return int(self.b[self.pos])
         }
         return -1
     }
 
-    fn word(self inout, w str, v sink Value) Value ! Error {
+    fn word(inout self, w: str, v: sink Value) -> Value ! Error {
         let wb = w.bytes()
         for i in 0..wb.len() {
             if self.pos + i >= self.b.len() || self.b[self.pos + i] != wb[i] {
@@ -338,7 +338,7 @@ struct Parser {
         return v
     }
 
-    fn value(self inout, depth int) Value ! Error {
+    fn value(inout self, depth: int) -> Value ! Error {
         if depth > maxDepth {
             return err(self.fail("nested too deeply"))
         }
@@ -352,7 +352,7 @@ struct Parser {
                 self.pos += 1
                 return .Obj(fields)
             }
-            for {
+            loop {
                 self.space()
                 if self.peek() != 34 {
                     return err(self.fail("expected a string key"))
@@ -385,7 +385,7 @@ struct Parser {
                 self.pos += 1
                 return .Arr(items)
             }
-            for {
+            loop {
                 items.push(try self.value(depth + 1))
                 self.space()
                 let d = self.peek()
@@ -420,15 +420,15 @@ struct Parser {
         return err(self.fail("unexpected character"))
     }
 
-    fn digits(self inout) int {
+    fn digits(inout self) -> int {
         let start = self.pos
-        for self.pos < self.b.len() && self.b[self.pos] >= 48 && self.b[self.pos] <= 57 {
+        while self.pos < self.b.len() && self.b[self.pos] >= 48 && self.b[self.pos] <= 57 {
             self.pos += 1
         }
         return self.pos - start
     }
 
-    fn number(self inout) Value ! Error {
+    fn number(inout self) -> Value ! Error {
         let start = self.pos
         if self.peek() == 45 {
             self.pos += 1
@@ -475,7 +475,7 @@ struct Parser {
         return err(self.fail("bad number"))
     }
 
-    fn hex4(self inout) int ! Error {
+    fn hex4(inout self) -> int ! Error {
         var v = 0
         for _ in 0..4 {
             let c = self.peek()
@@ -490,10 +490,10 @@ struct Parser {
         return v
     }
 
-    fn string(self inout) String ! Error {
+    fn string(inout self) -> String ! Error {
         self.pos += 1
         var out = Vec[byte]{}
-        for {
+        loop {
             if self.pos >= self.b.len() {
                 return err(self.fail("unterminated string"))
             }
@@ -512,7 +512,7 @@ struct Parser {
             }
             let e = self.peek()
             self.pos += 1
-            var piece = "".toString()
+            var piece: String = ""
             match e {
                 34 => piece.push("\"")
                 92 => piece.push("\\")
@@ -557,7 +557,7 @@ struct Parser {
 }
 
 // Parses one JSON value (with nothing but white space after it).
-pub fn parse(text str) Value ! Error {
+pub fn parse(text: str) -> Value ! Error {
     var p = Parser{b: text.bytes().toVec()}
     let v = try p.value(0)
     p.space()

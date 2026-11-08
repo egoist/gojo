@@ -1,9 +1,9 @@
 // TCP: an echo server and its clients, all goroutines in one process.
 use std/{fmt, net, task, time}
 
-fn serve(c net.Conn) {
+fn serve(c: net.Conn) {
     var buf = Vec[byte]{}
-    for {
+    loop {
         buf.clear()
         let n = c.read(&buf, 4096) catch _e {
             return
@@ -15,7 +15,7 @@ fn serve(c net.Conn) {
     }
 }
 
-fn client(port int, id int) String ! net.Error {
+fn client(port: int, id: int) -> String ! net.Error {
     let c = try net.dial(fmt.sprint("127.0.0.1:", port))
     let msg = fmt.sprint("client", id)
     try c.writeText(msg)
@@ -34,7 +34,7 @@ fn main() {
     scope g {
         go () => {
             scope {
-                for {
+                loop {
                     let c = ln.accept() catch e {
                         println("accept stopped, cancelled:", e.isCancelled())
                         break

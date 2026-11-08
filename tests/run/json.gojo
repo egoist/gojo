@@ -1,7 +1,7 @@
 // json: parsing, building, encoding, errors.
 use std/json
 
-fn show(text str) {
+fn show(text: str) {
     let v = json.parse(text) catch e {
         println("error:", e.message())
         return
