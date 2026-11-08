@@ -115,9 +115,9 @@ function transform(tree: Root, out: RenderedMarkdown, shiki: Highlighter, file: 
       parent.children[index] = codeBlock(node, shiki)
       return "skip"
     }
+    // Not skipped: the visit goes on into the table, whose cells may have links.
     if (node.tagName === "table") {
       parent.children[index] = { type: "element", tagName: "div", properties: { className: ["table-wrap"] }, children: [node] }
-      return "skip"
     }
   })
 
