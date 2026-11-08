@@ -1525,6 +1525,24 @@ static void *worker_main(void *p) {
     return NULL;
 }
 
+// Starts a detached runtime thread with a small stack. glibc carves static TLS
+// out of the requested size and fails with EINVAL when it doesn't fit (zig's
+// debug builds, for one, link a UBSan runtime with 256 KB of TLS, and C
+// libraries can bring more), so the size doubles until the thread starts.
+static bool start_thread(void *(*fn)(void *), void *arg) {
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+    int r = EINVAL;
+    for (size_t size = 256 << 10; size <= (64u << 20) && r == EINVAL; size *= 2) {
+        if (pthread_attr_setstacksize(&attr, size) != 0) continue;
+        pthread_t t;
+        r = pthread_create(&t, &attr, fn, arg);
+    }
+    pthread_attr_destroy(&attr);
+    return r == 0;
+}
+
 // Called with s_lock held. The new worker starts out spinning.
 void gojo_start_worker(void) {
     gojo_worker *w = calloc(1, sizeof *w);
@@ -1534,13 +1552,7 @@ void gojo_start_worker(void) {
     GOJO_ADD(&s_nspinning, 1);
     __atomic_store_n(&s_workers[w->id], w, __ATOMIC_RELEASE);
     GOJO_ADD(&s_nstarted, 1);
-    pthread_t t;
-    pthread_attr_t attr;
-    pthread_attr_init(&attr);
-    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
-    pthread_attr_setstacksize(&attr, 256 << 10);
-    if (pthread_create(&t, &attr, worker_main, w) != 0) gojo_panic("cannot start a worker thread", "<runtime>");
-    pthread_attr_destroy(&attr);
+    if (!start_thread(worker_main, w)) gojo_panic("cannot start a worker thread", "<runtime>");
 }
 
 // ------------------------------------------------------------------ stack overflow
@@ -3116,13 +3128,7 @@ static void ensure_poller(void) {
         epoll_ctl(s_poll_fd, EPOLL_CTL_ADD, s_timer_fd, &ev);
 #endif
         if (s_poll_fd < 0) gojo_panic("cannot create the event queue", "<runtime>");
-        pthread_t t;
-        pthread_attr_t attr;
-        pthread_attr_init(&attr);
-        pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
-        pthread_attr_setstacksize(&attr, 256 << 10);
-        if (pthread_create(&t, &attr, poller_main, NULL) != 0) gojo_panic("cannot start the poller thread", "<runtime>");
-        pthread_attr_destroy(&attr);
+        if (!start_thread(poller_main, NULL)) gojo_panic("cannot start the poller thread", "<runtime>");
         GOJO_STORE(&s_poller_started, 1);
     }
     pthread_mutex_unlock(&s_lock);

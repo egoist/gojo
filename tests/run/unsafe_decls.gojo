@@ -1,6 +1,8 @@
 // `unsafe send`, static linking, and functions exported to C.
+// (sqrt, not cbrt: IEEE 754 requires sqrt to round exactly, and glibc's cbrt
+// gives 3.0000000000000004 for 27.)
 extern "C" static "m" {
-    fn cbrt(x: f64) -> f64
+    fn sqrt(x: f64) -> f64
 }
 
 extern "C" {
@@ -30,7 +32,7 @@ extern "C" fn sumPair(p: Pair) -> f64 {
 }
 
 fn main() {
-    println(unsafe { cbrt(27.0) })
+    println(unsafe { sqrt(9.0) })
     println(gojoTwice(unsafe { abs(-21) }))
     println(sumPair(Pair{a: 1, b: 2.5}))
 
