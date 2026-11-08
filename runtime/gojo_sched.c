@@ -929,6 +929,10 @@ static gojo_g *g_new_slot(void) {
     return g;
 }
 
+#ifdef GOJO_TYSAN_ON
+void *(*volatile gojo_tysan_memset)(void *, int, size_t) = memset;
+#endif
+
 // TypeSanitizer's mmap interceptor clears the shadow of the whole mapping,
 // eight bytes of it per byte mapped, so every 2 MB goroutine stack would cost
 // 16 MB of memory at once (and the main goroutine's 1 GB stack 8 GB). A stack
@@ -988,11 +992,13 @@ static void g_prepare(gojo_g *g) {
 #if defined(__aarch64__)
     uint8_t *sp = top - GOJO_CTX_FRAME;
     memset(sp, 0, GOJO_CTX_FRAME);
+    GOJO_UNTYPE(sp, GOJO_CTX_FRAME);
     ((void **)sp)[GOJO_CTX_RET_SLOT] = (void *)g_entry;
 #else
     // on entry to g_entry: (rsp + 8) must be 16-byte aligned
     uint8_t *sp = top - 8 - GOJO_CTX_FRAME;
     memset(sp, 0, GOJO_CTX_FRAME);
+    GOJO_UNTYPE(sp, GOJO_CTX_FRAME);
     ((void **)sp)[GOJO_CTX_RET_SLOT] = (void *)g_entry;
     unsigned int mxcsr = 0;
     unsigned short fcw = 0;
@@ -1515,6 +1521,10 @@ static void g_entry(void) {
 
 static void worker_init(gojo_worker *w) {
     pthread_cond_init(&w->cv, NULL);
+    // a new thread's TLS can sit where an earlier mapping held other types
+    // (glibc maps thread stacks behind TypeSanitizer's back)
+    GOJO_UNTYPE(&t_worker, sizeof t_worker);
+    GOJO_UNTYPE(&t_alt_stack, sizeof t_alt_stack);
     t_worker = w;
     w->rng = ((uint64_t)w->id + 1) * 0x9E3779B97F4A7C15ULL ^ (uint64_t)gojo_time_now();
     if (!w->rng) w->rng = 1;

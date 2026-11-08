@@ -1121,7 +1121,9 @@ pub fn compile(pattern: str) -> Regex ! Error {
     }
     let (meta, prefix) = analyze(g)
     let ncap = p.names.len()
-    return Regex{src: pattern.toString(), code: g.code, classes: g.classes, meta, prefix, ncap, names: Arc(Names{list: p.names})}
+    // (copies, not moves: a header moved out of a `Prog` keeps its type for
+    // TypeSanitizer, which would then flag every read through a `Regex`)
+    return Regex{src: pattern.toString(), code: g.code.clone(), classes: g.classes.clone(), meta, prefix, ncap, names: Arc(Names{list: p.names})}
 }
 
 // The compiled form of `pattern`, which must be valid: for patterns written

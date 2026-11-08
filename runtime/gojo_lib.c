@@ -1429,6 +1429,10 @@ int64_t gojo_os___signalCode(int64_t signo) {
     return -1;
 }
 
+// glibc declares it only with _GNU_SOURCE; glibc 2.29+, musl and macOS 10.15+
+// have it
+int posix_spawn_file_actions_addchdir_np(posix_spawn_file_actions_t *, const char *);
+
 // modes: 0 inherit, 1 pipe, 2 /dev/null, 3 (stderr) as stdout. `env` holds
 // "K=V" strings, used when `setEnv`. Our pipe ends go to fds (3 ints, -1
 // for none). Returns an errno.

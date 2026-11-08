@@ -2154,7 +2154,7 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
             let c = self.cty(&gd.ty);
             let init = self.instance(gd.init, vec![]);
             let _ = writeln!(self.protos, "static {} *{}(void);", c, n);
-            let _ = writeln!(self.bodies, "static {c} gval_{g};\nstatic gojo_once gonce_{g};\nstatic void ginit_{g}(void) {{ gval_{g} = {init}(); }}\nstatic {c} *{n}(void) {{\n    if (__builtin_expect(__atomic_load_n(&gonce_{g}.state, __ATOMIC_ACQUIRE) != 2, 0)) gojo_once_run(&gonce_{g}, ginit_{g}, {name});\n    return &gval_{g};\n}}", c = c, g = g, init = init, n = n, name = c_string(&gd.name));
+            let _ = writeln!(self.bodies, "static {c} gval_{g};\nstatic gojo_once gonce_{g};\nstatic void ginit_{g}(void) {{ GOJO_UNTYPE(&gval_{g}, sizeof gval_{g}); gval_{g} = {init}(); }}\nstatic {c} *{n}(void) {{\n    if (__builtin_expect(__atomic_load_n(&gonce_{g}.state, __ATOMIC_ACQUIRE) != 2, 0)) gojo_once_run(&gonce_{g}, ginit_{g}, {name});\n    return &gval_{g};\n}}", c = c, g = g, init = init, n = n, name = c_string(&gd.name));
         }
         n
     }

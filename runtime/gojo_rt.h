@@ -141,7 +141,19 @@ void *gojo_box_refill(size_t cls);
 // TypeSanitizer only forgets a block's type when it is freed
 #if __has_feature(type_sanitizer)
 #define GOJO_NO_BOX_POOL 1
+#define GOJO_TYSAN_ON 1
 #endif
+#endif
+// Forgets the types TypeSanitizer has recorded for memory about to be written
+// as something else (a recycled stack, a new thread's TLS, a global's first
+// value, which clang may store field by field). Its memset interceptor does
+// that; the call goes through a volatile pointer so that the compiler can't
+// turn it into plain stores, which it doesn't see.
+#ifdef GOJO_TYSAN_ON
+extern void *(*volatile gojo_tysan_memset)(void *, int, size_t);
+#define GOJO_UNTYPE(p, n) gojo_tysan_memset((p), 0, (n))
+#else
+#define GOJO_UNTYPE(p, n) ((void)0)
 #endif
 #if defined(__SANITIZE_ADDRESS__)
 #define GOJO_NO_BOX_POOL 1
