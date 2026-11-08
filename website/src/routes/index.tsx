@@ -3,7 +3,6 @@ import ArrowRightIcon from "lucide-solid/icons/arrow-right"
 import { For, Show, createMemo, createSignal } from "solid-js"
 
 import { InstallCommand } from "@/components/install-command"
-import { Seal, gPath } from "@/components/logo"
 import { getHome } from "@/lib/home"
 import { site } from "@/lib/site"
 import { button } from "@/lib/ui"
@@ -63,14 +62,6 @@ function Home() {
   return (
     <main>
       <section class="relative overflow-hidden px-4 py-20 sm:px-10 md:py-28">
-        <svg
-          aria-hidden="true"
-          viewBox="0 0 32 32"
-          class="pointer-events-none absolute top-36 right-8 hidden size-[22rem] lg:block"
-        >
-          <path d={gPath} fill="none" stroke-width="4.4" class="stroke-foreground/[0.045]" />
-          <Seal class="fill-brand/70" />
-        </svg>
         <div class="relative">
           <a href={`${site.repo}/releases`} class="label inline-flex items-center gap-2 hover:text-foreground">
             <span class="size-1.5 rounded-full bg-brand" />v{__GOJO_VERSION__} beta · macOS, Linux

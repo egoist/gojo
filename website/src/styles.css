@@ -22,10 +22,10 @@
   --color-background: var(--background);
 }
 
-/* Neutral, with one accent: the vermillion of the mark's seal. */
+/* Neutral, with one accent: the blue of the mascot's flame. */
 :root {
-  --brand: oklch(0.655 0.205 35);
-  --brand-ink: oklch(0.55 0.19 33);
+  --brand: oklch(0.71 0.15 245);
+  --brand-ink: oklch(0.52 0.16 250);
   --code: oklch(0.985 0 0);
   --background: oklch(1 0 0);
   --foreground: oklch(0.145 0 0);
@@ -40,8 +40,8 @@
 }
 
 .dark {
-  --brand: oklch(0.7 0.19 38);
-  --brand-ink: oklch(0.77 0.15 42);
+  --brand: oklch(0.74 0.14 243);
+  --brand-ink: oklch(0.8 0.11 240);
   --code: oklch(0.165 0 0);
   --background: oklch(0.145 0 0);
   --foreground: oklch(0.985 0 0);
