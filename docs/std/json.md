@@ -15,11 +15,45 @@ println(out.encode())          // {"ok":true}
 Objects keep their keys in insertion order. Integers that fit in `int` stay
 exact (`Int`); other numbers are `Num` (f64).
 
+Any type converts to and from JSON text directly, without a `Value` in
+between:
+
+```gojo
+struct User { name: String, age: int, tags: Vec[String] = [], boss: ?String }
+let text = json.encode(User{name: "Ann", age: 30})
+// {"name":"Ann","age":30,"tags":[],"boss":null}
+let u = try json.decode[User](`{"name": "Bo", "age": 7}`)
+// tags and boss were left out: their defaults, [] and none
+```
+
+The JSON form of a type:
+
+```gojo
+struct                 an object with its fields' names as keys
+Vec, array, Set, tuple an array
+Map[K, V]              an object; keys that are integers or enums
+                       without data are written as strings
+?T                     null, or the value
+enum without data      the variant's name as a string: "Red"
+other enums            "Leaf" for a variant without fields,
+                       {"Circle": {"r": 1.5}} for one with fields
+numbers, bool, String  themselves (NaN and infinity become null)
+json.Value             any JSON
+Box, Rc, Arc, Cell     what they hold
+```
+
+Decoding skips keys that aren't fields, and takes a field that is left out
+from its default value (`none` for an optional field); any other missing
+field is an error. Errors say where, and in which value: `expected an
+integer, found a string (in .users[2].age) at line 4, column 12`. A type
+that has no JSON form (a function, an interface, a lock...) is a compile
+error at the `encode` or `decode` that needs it.
+
 **Constants:** [`maxDepth`](#maxdepth)
 
 **Types:** [`enum Value`](#enum-value), [`struct Error`](#struct-error)
 
-**Functions:** [`null, boolean, integer, number, string, array, object`](#null-boolean-integer-number-string-array-object), [`quoted`](#quoted), [`parse`](#parse)
+**Functions:** [`null, boolean, integer, number, string, array, object`](#null-boolean-integer-number-string-array-object), [`quoted`](#quoted), [`encode`](#encode), [`encodePretty`](#encodepretty), [`decode`](#decode), [`toValue`](#tovalue), [`fromValue`](#fromvalue), [`parse`](#parse)
 
 ## Constants
 
@@ -215,6 +249,46 @@ pub fn quoted(s: str) -> String
 ```
 
 Quotes a string as JSON.
+
+### encode
+
+```gojo
+pub fn encode[T](v: T) -> String
+```
+
+The JSON text of any value, compact.
+
+### encodePretty
+
+```gojo
+pub fn encodePretty[T](v: T) -> String
+```
+
+The JSON text of any value, indented by two spaces.
+
+### decode
+
+```gojo
+pub fn decode[T](text: str) -> T ! Error
+```
+
+The value of type `T` that the JSON `text` describes: `json.decode[Config](text)`.
+
+### toValue
+
+```gojo
+pub fn toValue[T](v: T) -> Value
+```
+
+Any value as a `Value` tree, to inspect or change before encoding.
+
+### fromValue
+
+```gojo
+pub fn fromValue[T](v: Value) -> T ! Error
+```
+
+The value of type `T` that a `Value` tree describes.
 
 ### parse
 

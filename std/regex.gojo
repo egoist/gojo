@@ -1,0 +1,1498 @@
+// Regular expressions with the syntax of RE2 (as in Go and Rust). Matching
+// takes time linear in the length of the text whatever the pattern, so a
+// pattern from a user can't hang the program; in exchange there are no
+// backreferences and no lookaround.
+//
+//   let date = regex.mustCompile(`(?P<y>\d{4})-(?P<m>\d\d)-(?P<d>\d\d)`)
+//   date.isMatch("due 2026-11-08")                   // true
+//   if let c = date.captures("due 2026-11-08") {
+//       c.name("y")                                  // some("2026")
+//   }
+//   date.replaceAll("2026-11-08", `$d/$m/$y`)        // "08/11/2026"
+//   regex.mustCompile(`\s*,\s*`).split("a , b,c")    // ["a", "b", "c"]
+//
+// Offsets are byte offsets into the text, as everywhere for `str`, and a
+// match is a `Span`: `re.find(s)?.of(s)` is its text. A compiled `Regex` can
+// be shared by every task, so a package-level `let` compiles it once:
+//
+//   let word = regex.mustCompile(`\w+`)
+//
+// Syntax:
+//
+//   x            the character x; `\` before punctuation makes it literal
+//   \n \t \r \f \v \a \x7F \x{10FFFF}   escapes; \Q...\E is literal text
+//   .            any character but \n (any at all with the s flag)
+//   [abc] [^a-z] a class; inside, also \d, \pL and [:alpha:] (ASCII)
+//   \d \w \s     ASCII digit, word character [0-9A-Za-z_], space [\t\n\f\r ]
+//   \D \W \S     anything else
+//   \pL \p{Lu}   Unicode: L Lu Ll N Nd P S Cc White_Space (and the long
+//                names, Letter...); \PL \P{Lu} anything else
+//   x* x+ x?     repetition, as many as possible; x{n} x{n,} x{n,m} (n, m
+//                at most 1000); with a ? after them, as few as possible
+//   xy x|y       sequence, alternatives (the first that matches wins)
+//   (x) (?P<name>x) (?<name>x)   capture groups; (?:x) doesn't capture
+//   ^ $          start and end of the text (of a line, with the m flag)
+//   \A \z        start and end of the text
+//   \b \B        an ASCII word boundary, and anything else
+//   (?flags) (?flags:x)   set flags for the rest of the group, or for x;
+//                `-` turns them off: i case-insensitive (Unicode simple
+//                folding), m multi-line, s `.` matches \n, U swaps greedy
+//                and lazy
+
+// A pattern that can't be compiled.
+pub struct Error {
+    pub msg: String
+    pub pattern: String
+    // the byte offset of the problem in the pattern
+    pub offset: int
+
+    pub fn message(self) -> String {
+        return "regex: ${self.msg} at offset ${self.offset} in `${self.pattern}`"
+    }
+}
+
+fn __exec(code: []i32, classes: []i32, meta: []i32, prefix: str, text: str, pos: int, nslots: int, caps: inout Vec[int]) -> bool
+fn __fold(r: rune) -> rune
+fn __bits(r: rune) -> int
+
+// instructions, as runtime/gojo_text.c runs them
+const MATCH = 0
+const CHAR = 1
+const FOLD = 2
+const ANY = 3
+const ANYNL = 4
+const CLASS = 5
+const SPLIT = 6
+const JMP = 7
+const SAVE = 8
+const ASSERT = 9
+
+// assertions
+const BOT = 1
+const EOT = 2
+const BOL = 4
+const EOL = 8
+const WORD = 16
+const NOTWORD = 32
+
+// flags
+const FI = 1
+const FM = 2
+const FS = 4
+const FU = 8
+
+const maxInst = 100000
+const maxRepeat = 1000
+const maxDepth = 250
+const maxRune = 0x10FFFF
+
+// ---------------------------------------------------------------- parsing
+
+// A set of characters: ranges, Unicode properties (a `runeBits` mask, or
+// minus one for "doesn't have it").
+struct Class {
+    ranges: Vec[(rune, rune)] = Vec[(rune, rune)]{}
+    props: Vec[int] = Vec[int]{}
+    negated: bool = false
+    fold: bool = false
+}
+
+enum Node {
+    Empty
+    Lit(r: rune, fold: bool)
+    Any(nl: bool)
+    Cls(c: Class)
+    Assert(mask: int)
+    Group(inner: Box[Node], index: int)
+    Cat(items: Vec[Node])
+    Alt(items: Vec[Node])
+    Rep(inner: Box[Node], min: int, max: int, greedy: bool)
+}
+
+struct Parser {
+    pos: int = 0
+    flags: int = 0
+    depth: int = 0
+    // the name of each group ("" for none), the whole match first
+    names: Vec[String]
+
+    fn fail(self, s: str, msg: str, at: int) -> Error {
+        return Error{msg: msg.toString(), pattern: s.toString(), offset: at}
+    }
+
+    fn next(inout self, s: str) -> rune {
+        let (r, n) = s.runeAt(self.pos)
+        self.pos += n
+        return r
+    }
+
+    fn at(self, s: str, c: byte) -> bool {
+        return self.pos < s.len() && s.bytes()[self.pos] == c
+    }
+
+    // x|y|...
+    fn parseAlt(inout self, s: str) -> Node ! Error {
+        var items = Vec[Node]{}
+        loop {
+            items.push(try self.parseCat(s))
+            if !self.at(s, '|') {
+                break
+            }
+            self.pos += 1
+        }
+        if items.len() == 1 {
+            return items.pop().unwrap()
+        }
+        return Node.Alt(items)
+    }
+
+    // xyz...
+    fn parseCat(inout self, s: str) -> Node ! Error {
+        var items = Vec[Node]{}
+        while self.pos < s.len() {
+            let c = s.bytes()[self.pos]
+            if c == '|' || c == ')' {
+                break
+            }
+            let at = self.pos
+            if self.quantifier(s) != none {
+                return err(self.fail(s, "nothing to repeat before `${s[at..self.pos]}`", at))
+            }
+            if s[self.pos..].startsWith("\\Q") {
+                // literal text up to \E; a quantifier after it applies to its
+                // last character
+                self.pos += 2
+                let end = s[self.pos..].find("\\E") ?? (s.len() - self.pos)
+                let rs = s[self.pos..self.pos + end].runes()
+                self.pos = min(self.pos + end + 2, s.len())
+                for k, r in rs {
+                    if k + 1 < rs.len() {
+                        items.push(self.lit(r))
+                    } else {
+                        items.push(try self.parseRepeat(s, self.lit(r)))
+                    }
+                }
+                continue
+            }
+            let atom = try self.parseAtom(s) ?? continue
+            items.push(try self.parseRepeat(s, atom))
+        }
+        if items.isEmpty() {
+            return Node.Empty
+        }
+        if items.len() == 1 {
+            return items.pop().unwrap()
+        }
+        return Node.Cat(items)
+    }
+
+    // A quantifier after `atom`, if there is one.
+    fn parseRepeat(inout self, s: str, atom: sink Node) -> Node ! Error {
+        let start = self.pos
+        let rep = self.quantifier(s) ?? return atom
+        let (min, max) = rep
+        if min > maxRepeat || max > maxRepeat {
+            return err(self.fail(s, "a repeat count is larger than ${maxRepeat}", start))
+        }
+        if max >= 0 && max < min {
+            return err(self.fail(s, "the repeat count's maximum is below its minimum", start))
+        }
+        var greedy = self.flags & FU == 0
+        if self.at(s, '?') {
+            self.pos += 1
+            greedy = !greedy
+        }
+        let again = self.pos
+        if self.quantifier(s) != none {
+            return err(self.fail(s, "a repetition of a repetition (write a group around the first: `(?:x*)*`)", again))
+        }
+        return Node.Rep(Box(atom), min, max, greedy)
+    }
+
+    // `*`, `+`, `?`, `{n}`, `{n,}` or `{n,m}` at pos, as (min, max) with -1
+    // for no maximum; none, with pos unchanged, when there is none there (a
+    // `{` that doesn't start a count is a literal).
+    fn quantifier(inout self, s: str) -> ?(int, int) {
+        if self.pos >= s.len() {
+            return none
+        }
+        let b = s.bytes()
+        let c = b[self.pos]
+        if c == '*' {
+            self.pos += 1
+            return (0, -1)
+        }
+        if c == '+' {
+            self.pos += 1
+            return (1, -1)
+        }
+        if c == '?' {
+            self.pos += 1
+            return (0, 1)
+        }
+        if c != '{' {
+            return none
+        }
+        var i = self.pos + 1
+        let lo = digits(b, &i) ?? return none
+        var hi = lo
+        if i < b.len() && b[i] == ',' {
+            i += 1
+            if i < b.len() && b[i] == '}' {
+                hi = -1
+            } else {
+                hi = digits(b, &i) ?? return none
+            }
+        }
+        if i >= b.len() || b[i] != '}' {
+            return none
+        }
+        self.pos = i + 1
+        return (lo, hi)
+    }
+
+    // One item; none for a group that only sets flags, `(?i)`.
+    fn parseAtom(inout self, s: str) -> ?Node ! Error {
+        let start = self.pos
+        let c = self.next(s)
+        if c == '(' {
+            return try self.parseGroup(s, start)
+        }
+        if c == '[' {
+            return Node.Cls(try self.parseClass(s, start))
+        }
+        if c == '.' {
+            return Node.Any(self.flags & FS != 0)
+        }
+        if c == '^' {
+            return Node.Assert(if self.flags & FM != 0 { BOL } else { BOT })
+        }
+        if c == '$' {
+            return Node.Assert(if self.flags & FM != 0 { EOL } else { EOT })
+        }
+        if c == '\\' {
+            return try self.parseEscape(s, start)
+        }
+        return self.lit(c)
+    }
+
+    fn lit(self, r: rune) -> Node {
+        // only letters have other cases among ASCII characters; anything
+        // else may (`ß` and `ẞ`, the Kelvin sign and `k`)
+        let fold = self.flags & FI != 0 && (r >= 128 || (r | 32 >= 'a' && r | 32 <= 'z'))
+        return Node.Lit(if fold { __fold(r) } else { r }, fold)
+    }
+
+    // After `(`.
+    fn parseGroup(inout self, s: str, start: int) -> ?Node ! Error {
+        self.depth += 1
+        if self.depth > maxDepth {
+            return err(self.fail(s, "groups are nested more than ${maxDepth} deep", start))
+        }
+        let saved = self.flags
+        var index = -1
+        if self.at(s, '?') {
+            self.pos += 1
+            let rest = s[self.pos..]
+            if rest.startsWith("P<") || (rest.startsWith("<") && !rest.startsWith("<=") && !rest.startsWith("<!")) {
+                self.pos += if rest.startsWith("P") { 2 } else { 1 }
+                let close = s[self.pos..].find(">") ?? return err(self.fail(s, "a group name has no closing >", start))
+                let name = s[self.pos..self.pos + close]
+                if !validName(name) {
+                    return err(self.fail(s, "invalid group name `${name}` (use letters, digits and _)", self.pos))
+                }
+                if self.names.contains(name.toString()) {
+                    return err(self.fail(s, "two groups are named `${name}`", self.pos))
+                }
+                index = self.names.len()
+                self.names.push(name.toString())
+                self.pos += close + 1
+            } else {
+                var flags = self.flags
+                var on = true
+                loop {
+                    if self.pos >= s.len() {
+                        return err(self.fail(s, "a group has no closing )", start))
+                    }
+                    let c = s.bytes()[self.pos]
+                    self.pos += 1
+                    var bit = 0
+                    if c == 'i' {
+                        bit = FI
+                    } else if c == 'm' {
+                        bit = FM
+                    } else if c == 's' {
+                        bit = FS
+                    } else if c == 'U' {
+                        bit = FU
+                    } else if c == '-' && on {
+                        on = false
+                        continue
+                    } else if (c == ')' || c == ':') && !on && s.bytes()[self.pos - 2] == '-' {
+                        return err(self.fail(s, "a - in a group without a flag after it", self.pos - 2))
+                    } else if c == ')' {
+                        // (?i): for the rest of the enclosing group
+                        self.flags = flags
+                        self.depth -= 1
+                        return none
+                    } else if c == ':' {
+                        self.flags = flags
+                        break
+                    } else if c == '=' || c == '!' || c == '<' {
+                        return err(self.fail(s, "lookaround isn't supported", start))
+                    } else {
+                        let (_, n) = s.runeAt(self.pos - 1)
+                        return err(self.fail(s, "unknown flag `${s[self.pos - 1..self.pos - 1 + n]}` in a group (flags are i, m, s and U)", self.pos - 1))
+                    }
+                    flags = if on { flags | bit } else { flags & ~bit }
+                }
+            }
+        } else {
+            index = self.names.len()
+            self.names.push("")
+        }
+        let inner = try self.parseAlt(s)
+        if !self.at(s, ')') {
+            return err(self.fail(s, "a group has no closing )", start))
+        }
+        self.pos += 1
+        self.flags = saved
+        self.depth -= 1
+        if index < 0 {
+            return inner
+        }
+        return Node.Group(Box(inner), index)
+    }
+
+    // After `\`, outside a class.
+    fn parseEscape(inout self, s: str, start: int) -> Node ! Error {
+        if self.pos >= s.len() {
+            return err(self.fail(s, "a \\ at the end of the pattern", start))
+        }
+        let c = self.next(s)
+        if c == 'A' {
+            return Node.Assert(BOT)
+        }
+        if c == 'z' {
+            return Node.Assert(EOT)
+        }
+        if c == 'b' {
+            return Node.Assert(WORD)
+        }
+        if c == 'B' {
+            return Node.Assert(NOTWORD)
+        }
+        if isSet(c) {
+            var cls = Class{fold: self.flags & FI != 0}
+            try self.addSet(s, c, &cls, start)
+            return Node.Cls(cls)
+        }
+        return self.lit(try self.escapeRune(s, c, start))
+    }
+
+    // The character an escape `\c` (after the `c`) stands for.
+    fn escapeRune(inout self, s: str, c: rune, start: int) -> rune ! Error {
+        if c == 'n' {
+            return '\n'
+        }
+        if c == 't' {
+            return '\t'
+        }
+        if c == 'r' {
+            return '\r'
+        }
+        if c == 'f' {
+            return rune(12)
+        }
+        if c == 'v' {
+            return rune(11)
+        }
+        if c == 'a' {
+            return rune(7)
+        }
+        if c == 'x' {
+            var lo = self.pos
+            var hi = self.pos + 2
+            if self.at(s, '{') {
+                let close = s[self.pos..].find("}") ?? return err(self.fail(s, "\\x{ has no closing }", start))
+                lo = self.pos + 1
+                hi = self.pos + close
+                self.pos = hi + 1
+            } else {
+                if hi > s.len() {
+                    return err(self.fail(s, "\\x needs two hex digits", start))
+                }
+                self.pos = hi
+            }
+            let ds = s[lo..hi]
+            let v = if ds.len() > 0 && ds.len() <= 6 && !ds.startsWith("+") && !ds.startsWith("-") { int.parseRadix(ds, 16) } else { none }
+            if let n = v {
+                if n <= maxRune && (n < 0xD800 || n > 0xDFFF) {
+                    return rune(n)
+                }
+            }
+            return err(self.fail(s, "invalid character code in \\x", start))
+        }
+        if c >= '0' && c <= '9' {
+            // octal, up to three digits (\0, \012); \1 alone would be a
+            // backreference
+            let b = s.bytes()
+            if c > '7' || (c != '0' && !isOctal(b, self.pos)) {
+                return err(self.fail(s, "backreferences aren't supported", start))
+            }
+            var v = int(c - '0')
+            for _ in 0..2 {
+                if !isOctal(b, self.pos) {
+                    break
+                }
+                v = v * 8 + int(b[self.pos] - '0')
+                self.pos += 1
+            }
+            return rune(v)
+        }
+        if c < 128 && c > 32 && !rune(c).isAlphanumeric() {
+            return c
+        }
+        return err(self.fail(s, "unknown escape `\\${s[start + 1..self.pos]}`", start))
+    }
+
+    // `\d`, `\pL` and the like, into `cls`.
+    fn addSet(inout self, s: str, c: rune, cls: inout Class, start: int) ! Error {
+        if c == 'p' || c == 'P' {
+            if self.pos >= s.len() {
+                return err(self.fail(s, "\\${s[start + 1..self.pos]} needs a class name", start))
+            }
+            var lo = self.pos
+            var hi = self.pos
+            if self.at(s, '{') {
+                let close = s[self.pos..].find("}") ?? return err(self.fail(s, "\\p{ has no closing }", start))
+                lo = self.pos + 1
+                hi = self.pos + close
+                self.pos = hi + 1
+            } else {
+                let (_, n) = s.runeAt(self.pos)
+                hi = self.pos + n
+                self.pos = hi
+            }
+            let mask = propMask(s[lo..hi])
+            if mask == 0 {
+                return err(self.fail(s, "unknown Unicode class `${s[lo..hi]}` (known: L, Lu, Ll, N, Nd, P, S, Cc, White_Space)", start))
+            }
+            // under (?i), upper and lower case are the same class (as in Go)
+            let m = if cls.fold && (mask == 2 || mask == 4) { 6 } else { mask }
+            cls.props.push(if c == 'p' { m } else { -m })
+            return
+        }
+        let lower = c | 32
+        let rs: Vec[rune] = if lower == 'd' { [48, 57] } else if lower == 'w' { [48, 57, 65, 90, 95, 95, 97, 122] } else { [9, 10, 12, 13, 32, 32] }
+        addRanges(&cls, rs, c != lower)
+    }
+
+    // After `[`.
+    fn parseClass(inout self, s: str, start: int) -> Class ! Error {
+        var cls = Class{fold: self.flags & FI != 0}
+        if self.at(s, '^') {
+            cls.negated = true
+            self.pos += 1
+        }
+        var first = true
+        loop {
+            if self.pos >= s.len() {
+                return err(self.fail(s, "a class has no closing ]", start))
+            }
+            if self.at(s, ']') && !first {
+                self.pos += 1
+                break
+            }
+            first = false
+            if s[self.pos..].startsWith("[:") {
+                if let end = s[self.pos + 2..].find(":]") {
+                    let name = s[self.pos + 2..self.pos + 2 + end]
+                    let neg = name.startsWith("^")
+                    let rs = posixRanges(if neg { name[1..] } else { name }) ?? return err(self.fail(s, "unknown class `[:${name}:]`", self.pos))
+                    addRanges(&cls, rs, neg)
+                    self.pos += end + 4
+                    continue
+                }
+            }
+            let at = self.pos
+            let lo = try self.classRune(s, &cls, true) ?? continue
+            if self.at(s, '-') && self.pos + 1 < s.len() && s.bytes()[self.pos + 1] != ']' {
+                self.pos += 1
+                let hi = (try self.classRune(s, &cls, false)).unwrap()
+                if hi < lo {
+                    return err(self.fail(s, "the range `${s[at..self.pos]}` is backwards", at))
+                }
+                pushRange(&cls, lo, hi)
+            } else {
+                pushRange(&cls, lo, lo)
+            }
+        }
+        return cls
+    }
+
+    // One character in a class; none for a set like `\d`, added to `cls`
+    // (which `sets` allows).
+    fn classRune(inout self, s: str, cls: inout Class, sets: bool) -> ?rune ! Error {
+        let at = self.pos
+        let c = self.next(s)
+        if c != '\\' {
+            return c
+        }
+        if self.pos >= s.len() {
+            return err(self.fail(s, "a \\ at the end of the pattern", at))
+        }
+        let e = self.next(s)
+        if isSet(e) {
+            if !sets {
+                return err(self.fail(s, "a range can't end with `\\${s[at + 1..self.pos]}`", at))
+            }
+            try self.addSet(s, e, &cls, at)
+            return none
+        }
+        return try self.escapeRune(s, e, at)
+    }
+}
+
+fn isOctal(b: []byte, i: int) -> bool {
+    return i < b.len() && b[i] >= '0' && b[i] <= '7'
+}
+
+fn isSet(c: rune) -> bool {
+    let l = c | 32
+    return l == 'd' || l == 'w' || l == 's' || l == 'p'
+}
+
+// A count in a quantifier; none for no digits, or a leading 0 (then the `{`
+// is a literal, as in Go).
+fn digits(b: []byte, i: inout int) -> ?int {
+    let st = i
+    if i + 1 < b.len() && b[i] == '0' && b[i + 1] >= '0' && b[i + 1] <= '9' {
+        return none
+    }
+    var v = 0
+    while i < b.len() && b[i] >= '0' && b[i] <= '9' {
+        if v < 1000000 {
+            v = v * 10 + int(b[i] - '0')
+        }
+        i += 1
+    }
+    if i == st {
+        return none
+    }
+    return v
+}
+
+fn validName(name: str) -> bool {
+    if name.isEmpty() || (name.bytes()[0] >= '0' && name.bytes()[0] <= '9') {
+        return false
+    }
+    for c in name.bytes() {
+        if !isWordByte(c) {
+            return false
+        }
+    }
+    return true
+}
+
+fn isWordByte(c: byte) -> bool {
+    return (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_'
+}
+
+fn propMask(name: str) -> int {
+    if name == "L" || name == "Letter" {
+        return 1
+    }
+    if name == "Lu" || name == "Uppercase_Letter" {
+        return 2
+    }
+    if name == "Ll" || name == "Lowercase_Letter" {
+        return 4
+    }
+    if name == "Nd" || name == "Decimal_Number" {
+        return 8
+    }
+    if name == "N" || name == "Number" {
+        return 16
+    }
+    if name == "P" || name == "Punctuation" {
+        return 32
+    }
+    if name == "White_Space" {
+        return 64
+    }
+    if name == "Cc" || name == "Control" {
+        return 128
+    }
+    if name == "S" || name == "Symbol" {
+        return 256
+    }
+    return 0
+}
+
+// The ASCII ranges of a POSIX class, as lo, hi pairs.
+fn posixRanges(name: str) -> ?Vec[rune] {
+    let rs: Vec[rune] = if name == "alnum" {
+        [48, 57, 65, 90, 97, 122]
+    } else if name == "alpha" {
+        [65, 90, 97, 122]
+    } else if name == "ascii" {
+        [0, 127]
+    } else if name == "blank" {
+        [9, 9, 32, 32]
+    } else if name == "cntrl" {
+        [0, 31, 127, 127]
+    } else if name == "digit" {
+        [48, 57]
+    } else if name == "graph" {
+        [33, 126]
+    } else if name == "lower" {
+        [97, 122]
+    } else if name == "print" {
+        [32, 126]
+    } else if name == "punct" {
+        [33, 47, 58, 64, 91, 96, 123, 126]
+    } else if name == "space" {
+        [9, 13, 32, 32]
+    } else if name == "upper" {
+        [65, 90]
+    } else if name == "word" {
+        [48, 57, 65, 90, 95, 95, 97, 122]
+    } else if name == "xdigit" {
+        [48, 57, 65, 70, 97, 102]
+    } else {
+        return none
+    }
+    return rs
+}
+
+// Sorted lo, hi pairs into `cls`, or everything else with `neg`. In a class
+// that ignores case, the set is closed under case folding before it is
+// negated, as in Go: `(?i)\W` matches neither `k` nor the Kelvin sign.
+fn addRanges(cls: inout Class, rs: []rune, neg: bool) {
+    var set = Vec[(rune, rune)]{}
+    var i = 0
+    while i < rs.len() {
+        set.push((rs[i], rs[i + 1]))
+        i += 2
+    }
+    if cls.fold && neg {
+        var more = Vec[(rune, rune)]{}
+        for p in set {
+            var r = p.0
+            while r <= p.1 {
+                for v in [__fold(r), r.toUpper(), r.toLower()] {
+                    more.push((v, v))
+                }
+                // the characters outside ASCII whose case folds into it
+                let f = __fold(r)
+                if f == 'k' {
+                    more.push((0x212A, 0x212A))
+                } else if f == 's' {
+                    more.push((0x17F, 0x17F))
+                }
+                r += 1
+            }
+        }
+        set.extend(more)
+        normalize(&set)
+    }
+    if !neg {
+        cls.ranges.extend(set)
+        return
+    }
+    var next: rune = 0
+    for p in set {
+        if p.0 > next {
+            cls.ranges.push((next, p.0 - 1))
+        }
+        next = p.1 + 1
+    }
+    if next <= rune(maxRune) {
+        cls.ranges.push((next, rune(maxRune)))
+    }
+}
+
+// lo..=hi into `cls`, with the case-folded form of each character when the
+// class ignores case. (The VM also folds the character it tests, so a
+// character matches when any character of its case-fold orbit is in.)
+fn pushRange(cls: inout Class, lo: rune, hi: rune) {
+    cls.ranges.push((lo, hi))
+    if !cls.fold {
+        return
+    }
+    // every character with a case is below U+1E944
+    var r = lo
+    let end = min(hi, 0x1E943)
+    while r <= end{
+        let f = __fold(r)
+        if f != r && (f < lo || f > hi) {
+            cls.ranges.push((f, f))
+        }
+        r += 1
+    }
+}
+
+// Sorted, with overlapping and adjacent ranges merged.
+fn normalize(rs: inout Vec[(rune, rune)]) {
+    rs.sortByKey(p => p.0)
+    var out = Vec[(rune, rune)]{}
+    for p in rs {
+        let n = out.len()
+        if n > 0 && p.0 <= out[n - 1].1 + 1 {
+            if p.1 > out[n - 1].1 {
+                out[n - 1].1 = p.1
+            }
+        } else {
+            out.push(p)
+        }
+    }
+    rs = out
+}
+
+// Mirrors rx_in_ranges in the runtime.
+fn classHas(rs: [](rune, rune), props: []int, r: rune) -> bool {
+    if inRanges(rs, r) {
+        return true
+    }
+    let bits = __bits(r)
+    for p in props {
+        if (p > 0 && bits & p != 0) || (p < 0 && bits & -p == 0) {
+            return true
+        }
+    }
+    return false
+}
+
+fn inRanges(rs: [](rune, rune), r: rune) -> bool {
+    var lo = 0
+    var hi = rs.len()
+    while lo < hi{
+        let m = (lo + hi) / 2
+        if r < rs[m].0 {
+            hi = m
+        } else if r > rs[m].1 {
+            lo = m + 1
+        } else {
+            return true
+        }
+    }
+    return false
+}
+
+// ---------------------------------------------------------------- compiling
+
+// A Thompson NFA as instructions of three `i32`s: op, x, y.
+struct Prog {
+    code: Vec[i32] = Vec[i32]{}
+    classes: Vec[i32] = Vec[i32]{}
+    tooBig: bool = false
+
+    fn pc(self) -> int {
+        return self.code.len() / 3
+    }
+
+    fn emit(inout self, op: int, x: int, y: int) -> int {
+        let pc = self.pc()
+        if pc >= maxInst {
+            self.tooBig = true
+            return pc
+        }
+        self.code.push(i32(op))
+        self.code.push(i32(x))
+        self.code.push(i32(y))
+        return pc
+    }
+
+    fn set(inout self, pc: int, x: int, y: int) {
+        if pc < self.pc() {
+            self.code[3 * pc + 1] = i32(x)
+            self.code[3 * pc + 2] = i32(y)
+        }
+    }
+
+    fn split(inout self, pc: int, body: int, out: int, greedy: bool) {
+        if greedy {
+            self.set(pc, body, out)
+        } else {
+            self.set(pc, out, body)
+        }
+    }
+
+    fn gen(inout self, n: Node) {
+        if self.tooBig {
+            return
+        }
+        match n {
+            .Empty => {}
+            .Lit(r, fold) => {
+                self.emit(if fold { FOLD } else { CHAR }, int(r), 0)
+            }
+            .Any(nl) => {
+                self.emit(if nl { ANY } else { ANYNL }, 0, 0)
+            }
+            .Cls(c) => self.genClass(c)
+            .Assert(m) => {
+                self.emit(ASSERT, m, 0)
+            }
+            .Group(inner, index) => {
+                self.emit(SAVE, 2 * index, 0)
+                self.gen(inner)
+                self.emit(SAVE, 2 * index + 1, 0)
+            }
+            .Cat(items) => {
+                for it in items {
+                    self.gen(it)
+                }
+            }
+            .Alt(items) => {
+                var jumps = Vec[int]{}
+                for i, it in items {
+                    if i + 1 < items.len() {
+                        let s = self.emit(SPLIT, 0, 0)
+                        self.gen(it)
+                        jumps.push(self.emit(JMP, 0, 0))
+                        self.set(s, s + 1, self.pc())
+                    } else {
+                        self.gen(it)
+                    }
+                }
+                let end = self.pc()
+                for j in jumps {
+                    self.set(j, end, 0)
+                }
+            }
+            .Rep(inner, lo, hi, greedy) => self.genRep(inner, lo, hi, greedy)
+        }
+    }
+
+    fn genRep(inout self, n: Node, lo: int, hi: int, greedy: bool) {
+        if hi < 0 {
+            if lo == 0 && nullable(n) {
+                // (x+)?, so that an empty iteration still counts, as in Go
+                // (its captures are kept, and the priorities stay right)
+                let q = self.emit(SPLIT, 0, 0)
+                let l = self.pc()
+                self.gen(n)
+                let s = self.emit(SPLIT, 0, 0)
+                self.split(s, l, s + 1, greedy)
+                self.split(q, q + 1, self.pc(), greedy)
+                return
+            }
+            if lo == 0 {
+                // L: split body, out; body; jmp L
+                let l = self.emit(SPLIT, 0, 0)
+                self.gen(n)
+                self.emit(JMP, l, 0)
+                self.split(l, l + 1, self.pc(), greedy)
+                return
+            }
+            // lo - 1 copies, then L: body; split L, out
+            for _ in 0..lo - 1 {
+                self.gen(n)
+                if self.tooBig {
+                    return
+                }
+            }
+            let l = self.pc()
+            self.gen(n)
+            let s = self.emit(SPLIT, 0, 0)
+            self.split(s, l, s + 1, greedy)
+            return
+        }
+        for _ in 0..lo {
+            self.gen(n)
+            if self.tooBig {
+                return
+            }
+        }
+        // x{0,k}: split body, end; body; split body, end; body...
+        var holes = Vec[int]{}
+        for _ in lo..hi {
+            holes.push(self.emit(SPLIT, 0, 0))
+            self.gen(n)
+            if self.tooBig {
+                return
+            }
+        }
+        let end = self.pc()
+        for s in holes {
+            self.split(s, s + 1, end, greedy)
+        }
+    }
+
+    // A class as the VM reads it: the ASCII bitmap (the final answer for
+    // ASCII), negated, fold, the properties and the ranges.
+    fn genClass(inout self, c: Class) {
+        var rs = c.ranges.clone()
+        normalize(&rs)
+        if !c.negated && c.props.isEmpty() && rs.len() == 1 && rs[0].0 == rs[0].1 {
+            let r = rs[0].0
+            self.emit(if c.fold { FOLD } else { CHAR }, int(if c.fold { __fold(r) } else { r }), 0)
+            return
+        }
+        let off = self.classes.len()
+        var words = [0, 0, 0, 0]
+        for b in 0..128 {
+            let r = rune(b)
+            let has = classHas(rs, c.props, r) || (c.fold && classHas(rs, c.props, __fold(r)))
+            if has != c.negated {
+                words[b / 32] |= 1 << (b % 32)
+            }
+        }
+        for w in words {
+            self.classes.push(i32Bits(w))
+        }
+        self.classes.push(if c.negated { 1 } else { 0 })
+        self.classes.push(if c.fold { 1 } else { 0 })
+        self.classes.push(i32(c.props.len()))
+        for p in c.props {
+            self.classes.push(i32(p))
+        }
+        self.classes.push(i32(rs.len()))
+        for p in rs {
+            self.classes.push(p.0)
+            self.classes.push(p.1)
+        }
+        self.emit(CLASS, off, 0)
+    }
+}
+
+// Whether `n` can match the empty string.
+fn nullable(n: Node) -> bool {
+    return match n {
+        .Empty => true
+        .Lit(_, _) => false
+        .Any(_) => false
+        .Cls(_) => false
+        .Assert(_) => true
+        .Group(inner, _) => nullable(inner)
+        .Cat(items) => items.all(it => nullable(it))
+        .Alt(items) => items.any(it => nullable(it))
+        .Rep(inner, lo, _, _) => lo == 0 || nullable(inner)
+    }
+}
+
+// A 32-bit pattern (0 to 2^32 - 1) as an `i32`.
+fn i32Bits(w: int) -> i32 {
+    return i32(if w >= 1 << 31 { w - (1 << 32) } else { w })
+}
+
+fn setByte(words: inout Vec[int], b: int) {
+    words[b / 32] |= 1 << (b % 32)
+}
+
+// Facts for the VM's fast paths: [anchored, literal, hasFirst, the bitmap of
+// bytes a match can start with (8 words)], and a prefix every match starts
+// with. A literal pattern is all prefix, found with a plain substring search.
+fn analyze(g: Prog) -> (Vec[i32], String) {
+    let code = g.code[..]
+    var prefix: String = ""
+    var literal = true
+    var anchored = false
+    var pc = 0
+    loop {
+        let op = int(code[3 * pc])
+        let x = int(code[3 * pc + 1])
+        if op == SAVE {
+            if x > 1 {
+                literal = false
+            }
+        } else if op == ASSERT {
+            literal = false
+            if x == BOT {
+                anchored = true
+            }
+        } else if op == CHAR {
+            prefix.pushRune(rune(x))
+        } else {
+            if op != MATCH {
+                literal = false
+            }
+            break
+        }
+        pc += 1
+    }
+
+    // the bytes a match can start with, unless it can be empty
+    let ninst = g.pc()
+    var words = [0, 0, 0, 0, 0, 0, 0, 0]
+    var hasFirst = true
+    var seen = Vec[bool]{}
+    seen.resize(ninst, false)
+    var stack = [0]
+    loop {
+        let at = stack.pop() ?? break
+        if seen[at] {
+            continue
+        }
+        seen[at] = true
+        let op = int(code[3 * at])
+        let x = int(code[3 * at + 1])
+        let y = int(code[3 * at + 2])
+        if op == SPLIT {
+            stack.push(y)
+            stack.push(x)
+        } else if op == JMP {
+            stack.push(x)
+        } else if op == SAVE || op == ASSERT {
+            stack.push(at + 1)
+        } else if op == CHAR || op == FOLD {
+            if x < 128 {
+                setByte(&words, x)
+                if op == FOLD && x >= 'a' && x <= 'z' {
+                    setByte(&words, x - 32)
+                }
+            }
+            if x >= 128 || op == FOLD {
+                if op == CHAR && x != 0xFFFD {
+                    setByte(&words, if x < 0x800 { 0xC0 | (x >> 6) } else if x < 0x10000 { 0xE0 | (x >> 12) } else { 0xF0 | (x >> 18) })
+                } else {
+                    // other characters fold to this one (`K` to `k`), and
+                    // U+FFFD stands for invalid bytes
+                    for b in 128..256 {
+                        setByte(&words, b)
+                    }
+                }
+            }
+        } else if op == CLASS {
+            let c = g.classes[x..]
+            for i in 0..4 {
+                words[i] |= int(c[i]) & 0xFFFFFFFF
+            }
+            let np = int(c[6])
+            let nr = int(c[7 + np])
+            if c[4] != 0 || c[5] != 0 || np > 0 || (nr > 0 && c[7 + np + 2 * nr] >= 128) {
+                for b in 128..256 {
+                    setByte(&words, b)
+                }
+            }
+        } else {
+            // a match can be empty, or start with any character
+            hasFirst = false
+            break
+        }
+    }
+    if hasFirst && prefix.isEmpty() {
+        // a single possible first byte works as a one-byte prefix (memchr)
+        var count = 0
+        var only = 0
+        for b in 0..128 {
+            if (words[b / 32] >> (b % 32)) & 1 != 0 {
+                count += 1
+                only = b
+            }
+        }
+        for b in 128..256 {
+            if (words[b / 32] >> (b % 32)) & 1 != 0 {
+                count += 2
+            }
+        }
+        if count == 1 {
+            prefix.pushRune(rune(only))
+        }
+    }
+    var meta = Vec[i32]{}
+    meta.push(if anchored { 1 } else { 0 })
+    meta.push(if literal { 1 } else { 0 })
+    meta.push(if hasFirst { 1 } else { 0 })
+    for w in words {
+        meta.push(i32Bits(w))
+    }
+    return (meta, prefix)
+}
+
+// ---------------------------------------------------------------- the API
+
+// The compiled form of `pattern`.
+pub fn compile(pattern: str) -> Regex ! Error {
+    var p = Parser{names: [""]}
+    let root = try p.parseAlt(pattern)
+    if p.pos < pattern.len() {
+        return err(p.fail(pattern, "a ) without a matching (", p.pos))
+    }
+    var g = Prog{}
+    g.emit(SAVE, 0, 0)
+    g.gen(root)
+    g.emit(SAVE, 1, 0)
+    g.emit(MATCH, 0, 0)
+    if g.tooBig {
+        return err(p.fail(pattern, "the pattern is too large: it compiles to more than ${maxInst} instructions", 0))
+    }
+    let (meta, prefix) = analyze(g)
+    let ncap = p.names.len()
+    // (copies, not moves: a header moved out of a `Prog` keeps its type for
+    // TypeSanitizer, which would then flag every read through a `Regex`)
+    return Regex{src: pattern.toString(), code: g.code.clone(), classes: g.classes.clone(), meta, prefix, ncap, names: Arc(Names{list: p.names})}
+}
+
+// The compiled form of `pattern`, which must be valid: for patterns written
+// in the program, as in a package-level `let`. Panics with the error.
+pub fn mustCompile(pattern: str) -> Regex {
+    return compile(pattern) catch e {
+        panic(e.message())
+    }
+}
+
+// Whether `pattern` matches somewhere in `text`, compiling it each time (keep
+// a `Regex` to match many times).
+pub fn isMatch(pattern: str, text: str) -> bool ! Error {
+    return (try compile(pattern)).isMatch(text)
+}
+
+// `s` with the characters that mean something in a pattern escaped, so the
+// result matches `s` literally: `escape("1.5*")` is `1\.5\*`.
+pub fn escape(s: str) -> String {
+    var out: String = ""
+    var last = 0
+    for i, c in s.bytes() {
+        if "\\.+*?()|[]{}^$".bytes().contains(c) {
+            out.push(s[last..i])
+            out.push("\\")
+            last = i
+        }
+    }
+    out.push(s[last..])
+    return out
+}
+
+// A compiled regular expression. It holds no state while matching, so tasks
+// can share one.
+pub struct Regex {
+    src: String
+    code: Vec[i32]
+    classes: Vec[i32]
+    meta: Vec[i32]
+    prefix: String
+    // capture groups, the whole match included
+    ncap: int
+    names: Arc[Names]
+
+    // The pattern it was compiled from.
+    pub fn toString(self) -> String {
+        return self.src.clone()
+    }
+
+    // The number of capture groups, not counting the whole match.
+    pub fn groupCount(self) -> int {
+        return self.ncap - 1
+    }
+
+    // The number of the group named `name`.
+    pub fn groupIndex(self, name: str) -> ?int {
+        return groupOf(name, self.names.list)
+    }
+
+    fn exec(self, text: str, pos: int, nslots: int, caps: inout Vec[int]) -> bool {
+        return __exec(self.code, self.classes, self.meta, self.prefix, text, pos, nslots, &caps)
+    }
+
+    // Whether it matches somewhere in `text`.
+    pub fn isMatch(self, text: str) -> bool {
+        var caps = Vec[int]{}
+        return self.exec(text, 0, 0, &caps)
+    }
+
+    // The leftmost match, as a span of `text`.
+    pub fn find(self, text: str) -> ?Span {
+        return self.findAt(text, 0)
+    }
+
+    // The leftmost match that starts at or after byte `start`. The text
+    // before `start` still counts for `^`, `\b` and the like.
+    pub fn findAt(self, text: str, start: int) -> ?Span {
+        if start < 0 || start > text.len() {
+            panic("regex: findAt: start ${start} is out of range for a text of length ${text.len()}")
+        }
+        var caps = Vec[int]{}
+        if !self.exec(text, start, 2, &caps) {
+            return none
+        }
+        return Span{lo: caps[0], hi: caps[1]}
+    }
+
+    // The text of the leftmost match.
+    pub fn findText(self, text: str) -> ?str {
+        let m = self.find(text) ?? return none
+        return text[m.lo..m.hi]
+    }
+
+    // Every match, left to right, without overlaps. An empty match right
+    // after another match doesn't count.
+    pub fn findAll(self, text: str) -> Vec[Span] {
+        var out = Vec[Span]{}
+        self.each(text, 2, -1, caps => {
+            out.push(Span{lo: caps[0], hi: caps[1]})
+        })
+        return out
+    }
+
+    // The text of every match.
+    pub fn findAllText(self, text: str) -> Vec[String] {
+        var out = Vec[String]{}
+        self.each(text, 2, -1, caps => {
+            out.push(text[caps[0]..caps[1]].toString())
+        })
+        return out
+    }
+
+    // The leftmost match and its groups.
+    pub fn captures(self, text: str) -> ?Captures {
+        var caps = Vec[int]{}
+        if !self.exec(text, 0, 2 * self.ncap, &caps) {
+            return none
+        }
+        return self.capturesOf(text, caps)
+    }
+
+    // Every match (as `findAll`) with its groups.
+    pub fn capturesAll(self, text: str) -> Vec[Captures] {
+        var out = Vec[Captures]{}
+        self.each(text, 2 * self.ncap, -1, caps => {
+            out.push(self.capturesOf(text, caps))
+        })
+        return out
+    }
+
+    fn capturesOf(self, text: str, caps: []int) -> Captures {
+        return Captures{buf: text[caps[0]..caps[1]].toString(), offs: caps.toVec(), names: self.names.clone()}
+    }
+
+    // `text` with the leftmost match replaced by `template`, in which `$1`
+    // or `${1}` is the text of group 1, `$name` or `${name}` that of a named
+    // group, and `$$` a `$`. A group that doesn't exist or didn't take part
+    // is empty. Write a template with `${...}` as a raw string, so that it
+    // isn't interpolation: `` re.replace(s, `${y}`) ``.
+    pub fn replace(self, text: str, template: str) -> String {
+        return self.replaceN(text, template, 1)
+    }
+
+    // `text` with every match replaced by `template` (as in `replace`).
+    pub fn replaceAll(self, text: str, template: str) -> String {
+        return self.replaceN(text, template, -1)
+    }
+
+    // `text` with at most `n` matches replaced (all of them when `n` < 0).
+    pub fn replaceN(self, text: str, template: str, n: int) -> String {
+        var out: String = ""
+        if n == 0 {
+            out.push(text)
+            return out
+        }
+        var last = 0
+        let plain = template.find("$") == none
+        self.each(text, if plain { 2 } else { 2 * self.ncap }, n, caps => {
+            out.push(text[last..caps[0]])
+            if plain {
+                out.push(template)
+            } else {
+                expandInto(&out, template, text, 0, caps, self.names.list)
+            }
+            last = caps[1]
+        })
+        out.push(text[last..])
+        return out
+    }
+
+    // `text` with every match replaced by what `f` gives for it.
+    //
+    //   re.replaceAllWith(s, c => c.text().toUpper())
+    pub fn replaceAllWith(self, text: str, f: fn(Captures) -> String) -> String {
+        var out: String = ""
+        var last = 0
+        self.each(text, 2 * self.ncap, -1, caps => {
+            out.push(text[last..caps[0]])
+            out.push(f(self.capturesOf(text, caps)))
+            last = caps[1]
+        })
+        out.push(text[last..])
+        return out
+    }
+
+    // The pieces of `text` between the matches.
+    pub fn split(self, text: str) -> Vec[String] {
+        return self.splitN(text, -1)
+    }
+
+    // At most `n` pieces (all of them when `n` < 0); the last holds the rest
+    // of the text.
+    pub fn splitN(self, text: str, n: int) -> Vec[String] {
+        var out = Vec[String]{}
+        if n == 0 {
+            return out
+        }
+        var last = 0
+        self.each(text, 2, if n < 0 { -1 } else { n - 1 }, caps => {
+            out.push(text[last..caps[0]].toString())
+            last = caps[1]
+        })
+        out.push(text[last..].toString())
+        return out
+    }
+
+    // Calls `f` with the capture offsets of each match, at most `limit`
+    // (none: < 0).
+    fn each(self, text: str, nslots: int, limit: int, f: fn([]int)) {
+        var caps = Vec[int]{}
+        var pos = 0
+        var last = -1
+        var n = 0
+        while pos <= text.len() && n != limit{
+            if !self.exec(text, pos, nslots, &caps) {
+                break
+            }
+            if caps[0] == caps[1] && caps[0] == last {
+                // an empty match where the last match ended: try one
+                // character further on
+                if pos >= text.len() {
+                    break
+                }
+                let (_, w) = text.runeAt(pos)
+                pos += w
+                continue
+            }
+            n += 1
+            f(caps)
+            last = caps[1]
+            pos = caps[1]
+        }
+    }
+}
+
+// Group names, shared by a `Regex` and its `Captures`.
+struct Names {
+    list: Vec[String]
+}
+
+fn groupOf(name: str, names: []String) -> ?int {
+    if name.isEmpty() {
+        return none
+    }
+    if let i = name.parseInt() {
+        if i >= 0 && i < names.len() && name.bytes()[0] != '+' && name.bytes()[0] != '-' {
+            return i
+        }
+        return none
+    }
+    return names.findIndex(n => n == name)
+}
+
+// `template` with `$` references to the groups of a match appended to `out`;
+// `caps` are offsets into the text that `text` starts at offset `base` of.
+fn expandInto(out: inout String, template: str, text: str, base: int, caps: []int, names: []String) {
+    let b = template.bytes()
+    var i = 0
+    loop {
+        let d = template.findFrom("$", i) ?? break
+        out.push(template[i..d])
+        i = d + 1
+        if i >= b.len() {
+            out.push("$")
+            break
+        }
+        if b[i] == '$' {
+            out.push("$")
+            i += 1
+            continue
+        }
+        var lo = i
+        var hi = i
+        if b[i] == '{' {
+            let close = template.findFrom("}", i) ?? -1
+            if close < 0 {
+                out.push("$")
+                continue
+            }
+            lo = i + 1
+            hi = close
+            i = close + 1
+        } else if b[i] >= '0' && b[i] <= '9' {
+            while i < b.len() && b[i] >= '0' && b[i] <= '9' {
+                i += 1
+            }
+            hi = i
+        } else {
+            while i < b.len() && isWordByte(b[i]) {
+                i += 1
+            }
+            hi = i
+        }
+        if hi == lo {
+            out.push("$")
+            continue
+        }
+        let g = groupOf(template[lo..hi], names) ?? continue
+        if 2 * g + 1 < caps.len() && caps[2 * g] >= 0 {
+            out.push(text[caps[2 * g] - base..caps[2 * g + 1] - base])
+        }
+    }
+    out.push(template[i..])
+}
+
+// A match and the text of its capture groups. It owns a copy of the matched
+// text, so it can outlive the text that was searched.
+pub struct Captures {
+    // the whole match
+    buf: String
+    // the start and end of each group in the text searched, -1 for a group
+    // that didn't take part
+    offs: Vec[int]
+    names: Arc[Names]
+
+    // The text of the whole match.
+    pub fn text(self) -> str {
+        return self.buf.asStr()
+    }
+
+    // The text of group `i` (0 is the whole match), or none when there is
+    // no such group or it didn't take part in the match: `(a)|b` on "b".
+    pub fn get(self, i: int) -> ?str {
+        let sp = self.span(i) ?? return none
+        let base = self.offs[0]
+        return self.buf[sp.lo - base..sp.hi - base]
+    }
+
+    // The text of the group named `name`.
+    pub fn name(self, name: str) -> ?str {
+        let i = groupOf(name, self.names.list) ?? return none
+        return self.get(i)
+    }
+
+    // Where group `i` is in the text that was searched.
+    pub fn span(self, i: int) -> ?Span {
+        if i < 0 || 2 * i + 1 >= self.offs.len() || self.offs[2 * i] < 0 {
+            return none
+        }
+        return Span{lo: self.offs[2 * i], hi: self.offs[2 * i + 1]}
+    }
+
+    // The number of groups, the whole match included.
+    pub fn len(self) -> int {
+        return self.offs.len() / 2
+    }
+
+    // `template` with `$1`, `${name}` and `$$` replaced, as in
+    // `Regex.replace`.
+    pub fn expand(self, template: str) -> String {
+        var out: String = ""
+        expandInto(&out, template, self.buf, self.offs[0], self.offs, self.names.list)
+        return out
+    }
+
+    // The groups' texts: `["2026-11-08", "2026", none]`.
+    pub fn toString(self) -> String {
+        var out: String = "["
+        for i in 0..self.len() {
+            if i > 0 {
+                out.push(", ")
+            }
+            if let t = self.get(i) {
+                out.push("\"${t}\"")
+            } else {
+                out.push("none")
+            }
+        }
+        out.push("]")
+        return out
+    }
+}

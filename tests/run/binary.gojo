@@ -1,0 +1,51 @@
+// binary: fixed-size numbers in both byte orders, and varints.
+use std/{binary, hex}
+
+fn main() {
+    var out = Vec[byte]{}
+    binary.big.appendU32(&out, 0xCAFEBABE)
+    binary.little.appendI16(&out, -2)
+    binary.big.appendF64(&out, 1.5)
+    binary.little.appendF32(&out, -0.25)
+    binary.big.appendI64(&out, -9223372036854775807 - 1)
+    println(hex.encode(out))
+    println(binary.big.u32(out), binary.little.u32(out), binary.little.i16(out[4..]), binary.little.u16(out[4..]))
+    println(binary.big.f64(out[6..]), binary.little.f32(out[14..]), binary.big.i64(out[18..]), binary.big.u64(out[18..]))
+
+    // writing in place, into part of a buffer
+    var b = [byte(0), 0, 0, 0, 0, 0, 0]
+    binary.little.putI32(&b[1..], -100000)
+    binary.big.putU16(&b[5..], 0xABCD)
+    println(hex.encode(b), binary.little.i32(b[1..]), binary.big.i16(b[5..]))
+
+    // varints: small numbers are short, either sign
+    var v = Vec[byte]{}
+    for x in [0, 1, 127, 128, 300, 16384] {
+        binary.appendUvarint(&v, u64(x))
+    }
+    binary.appendUvarint(&v, 18446744073709551615)
+    for x in [0, -1, 1, -64, 64, -9223372036854775807 - 1, 9223372036854775807] {
+        binary.appendVarint(&v, x)
+    }
+    println(hex.encode(v))
+    var pos = 0
+    var us = Vec[u64]{}
+    for _ in 0..7 {
+        let (x, n) = binary.uvarint(v[pos..]).unwrap()
+        us.push(x)
+        pos += n
+    }
+    var ss = Vec[i64]{}
+    while pos < v.len() {
+        let (x, n) = binary.varint(v[pos..]).unwrap()
+        ss.push(x)
+        pos += n
+    }
+    println(us, ss)
+
+    // cut short, too long, or over 64 bits
+    for t in ["", "80", "8080", "ffffffffffffffffff01", "ffffffffffffffffff02", "ffffffffffffffffffff01", "ffffffffffffffff7f"] {
+        print(binary.uvarint(hex.decode(t).unwrap()), " ")
+    }
+    println()
+}

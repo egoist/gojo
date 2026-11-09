@@ -43,6 +43,12 @@ pub struct Listener {
         return __port(self.fd)
     }
 
+    // The socket's file descriptor, for system calls this module doesn't
+    // wrap. It stays owned by the listener.
+    pub fn rawFd(self) -> int {
+        return self.fd
+    }
+
     fn drop(inout self) {
         __close(self.fd)
     }
@@ -96,6 +102,12 @@ pub struct Conn {
         __shutdownWrite(self.fd)
     }
 
+    // The socket's file descriptor, for system calls this module doesn't
+    // wrap (and for `tls`). It stays owned by the connection.
+    pub fn rawFd(self) -> int {
+        return self.fd
+    }
+
     fn drop(inout self) {
         __close(self.fd)
     }
@@ -117,4 +129,113 @@ pub fn dial(addr: str) -> Conn ! Error {
         return err(fail("dial " + addr, -fd))
     }
     return Conn{fd: fd}
+}
+
+fn __udpListen(addr: str) -> int
+fn __udpDial(addr: str) -> int
+fn __sendTo(fd: int, data: []byte, addr: str) -> int
+fn __recvFrom(fd: int, buf: inout Vec[byte], max: int, from: inout String) -> int
+fn __lookup(host: str, out: inout Vec[String]) -> int
+
+// A UDP socket, from `listenUdp` or `dialUdp`. Each send is one datagram and
+// each receive returns one. Closed when dropped.
+//
+//   let sock = try net.listenUdp(":5353")
+//   var buf = Vec[byte]{}
+//   let (n, from) = try sock.recvFrom(&buf, 1500)
+//   try sock.sendTo(buf[..n], from)
+pub struct UdpSocket {
+    fd: int
+
+    // Sends `data` as one datagram to `addr` ("host:port"). Literal IP
+    // addresses are used as they are; names are looked up on every call.
+    pub fn sendTo(self, data: []byte, addr: str) ! Error {
+        if addr.len == 0 {
+            return err(fail("send to ``", 22))
+        }
+        let n = __sendTo(self.fd, data, addr)
+        if n < 0 {
+            return err(fail("send to " + addr, -n))
+        }
+    }
+
+    // Waits for the next datagram, appends up to `max` of its bytes to `buf`
+    // (the rest of a longer one is dropped), and returns how many with the
+    // sender's address, which `sendTo` takes back.
+    pub fn recvFrom(self, buf: inout Vec[byte], max: int) -> (int, String) ! Error {
+        var from = String("")
+        let n = __recvFrom(self.fd, &buf, max, &from)
+        if n < 0 {
+            return err(fail("receive", -n))
+        }
+        return (n, from)
+    }
+
+    // Sends `data` as one datagram to the peer given to `dialUdp`.
+    pub fn send(self, data: []byte) ! Error {
+        let n = __sendTo(self.fd, data, "")
+        if n < 0 {
+            return err(fail("send", -n))
+        }
+    }
+
+    // Like `recvFrom` without the sender; after `dialUdp` only the peer's
+    // datagrams arrive.
+    pub fn recv(self, buf: inout Vec[byte], max: int) -> int ! Error {
+        var from = String("")
+        let n = __recvFrom(self.fd, &buf, max, &from)
+        if n < 0 {
+            return err(fail("receive", -n))
+        }
+        return n
+    }
+
+    // The local port; useful after `listenUdp(":0")`.
+    pub fn port(self) -> int {
+        return __port(self.fd)
+    }
+
+    // The socket's file descriptor, for options this module doesn't wrap
+    // (broadcast, multicast). It stays owned by the socket.
+    pub fn rawFd(self) -> int {
+        return self.fd
+    }
+
+    fn drop(inout self) {
+        __close(self.fd)
+    }
+}
+
+// Binds a UDP socket to "host:port"; ":port" takes IPv4 and IPv6 on all
+// interfaces, ":0" picks a free port.
+pub fn listenUdp(addr: str) -> UdpSocket ! Error {
+    let fd = __udpListen(addr)
+    if fd < 0 {
+        return err(fail("listen udp " + addr, -fd))
+    }
+    return UdpSocket{fd: fd}
+}
+
+// A UDP socket that talks to `addr` alone, through `send` and `recv`. Nothing
+// is sent until you send; errors such as an unreachable port show up on later
+// calls.
+pub fn dialUdp(addr: str) -> UdpSocket ! Error {
+    let fd = __udpDial(addr)
+    if fd < 0 {
+        return err(fail("dial udp " + addr, -fd))
+    }
+    return UdpSocket{fd: fd}
+}
+
+// The IP addresses of `host`, IPv4 ones first, from the system resolver
+// (/etc/hosts, then DNS). A literal address comes back as it is. An unknown
+// host is an error whose `isNotFound()` is true.
+pub fn lookup(host: str) -> Vec[String] ! Error {
+    var out = Vec[String]{}
+    return match __lookup(host, &out) {
+        0 => out
+        1 => err(io.newError(.NotFound, "lookup " + host + ": no such host"))
+        2 => err(io.newError(.TimedOut, "lookup " + host + ": the resolver is not answering; try again"))
+        _ => err(io.newError(.Other, "lookup " + host + ": the resolver failed"))
+    }
 }

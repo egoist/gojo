@@ -90,7 +90,14 @@ fn collect(src: &str, items: &[Item], out: &mut Vec<Decl>) {
                 let owner = f.recv.as_ref().map(|r| &r.ty).or(f.owner.as_ref());
                 match owner {
                     Some(t) => {
-                        let shown = src[t.span.lo as usize..t.span.hi as usize].to_string();
+                        let mut shown = src[t.span.lo as usize..t.span.hi as usize].to_string();
+                        if !f.ext_tparams.is_empty() {
+                            let ps: Vec<String> = f.ext_tparams.iter().map(|tp| {
+                                let bs: Vec<&str> = tp.bounds.iter().map(|b| &src[b.span.lo as usize..b.span.hi as usize]).collect();
+                                format!("{}: {}", tp.name, bs.join(" + "))
+                            }).collect();
+                            shown = ps.join(", ");
+                        }
                         let key = match &t.kind {
                             TypeExprKind::Named { path, .. } => path.last().cloned().unwrap_or_default(),
                             _ => shown.clone(),

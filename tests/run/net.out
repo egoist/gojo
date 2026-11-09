@@ -5,3 +5,9 @@ scope done
 50 client 0 client 9
 read timed out true fast true
 dial failed: true
+udp echo 5 hello
+udp from 2 pi true
+udp recv timed out true
+send to no port: Invalid argument
+true ["::1"]
+lookup no-such-host.invalid: no such host true

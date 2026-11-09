@@ -10,14 +10,26 @@
 #include <sys/wait.h>
 #include <sys/stat.h>
 #include <ctype.h>
+#ifdef __APPLE__
+#include <sys/random.h>
+#endif
 
 static int g_argc;
 static void box_tls_setup(void);
 static char **g_argv;
 
+uint64_t gojo_hash_seed = 0x9e3779b97f4a7c15ULL;
+uint64_t gojo_prelude___hashMix(uint64_t h, uint64_t x) { return gojo_hash_mix(h, x); }
+
 void gojo_rt_init(int argc, char **argv) {
     g_argc = argc;
     g_argv = argv;
+    // a fresh hash key per process (a fixed one for replayable GOJO_SEED runs)
+    const char *seed = getenv("GOJO_SEED");
+    uint64_t k = 0;
+    if (seed && *seed) k = strtoull(seed, NULL, 10) * 0x9e3779b97f4a7c15ULL + 1;
+    else if (getentropy(&k, sizeof k) != 0) k = (uint64_t)time(NULL) ^ ((uint64_t)getpid() << 32) ^ (uint64_t)(uintptr_t)&k;
+    gojo_hash_seed = k;
     setvbuf(stdout, NULL, _IOFBF, 1 << 16);
     box_tls_setup();
 }
@@ -211,23 +223,52 @@ int gojo_str_cmp(gojo_str a, gojo_str b) {
     return a.len < b.len ? -1 : a.len > b.len ? 1 : 0;
 }
 
+// wyhash (final version 4), keyed with gojo_hash_seed
+static inline uint64_t wy_r8(const uint8_t *p) { uint64_t v; memcpy(&v, p, 8); return v; }
+static inline uint64_t wy_r4(const uint8_t *p) { uint32_t v; memcpy(&v, p, 4); return v; }
+static const uint64_t wy_secret[4] = { 0x2d358dccaa6c78a5ULL, 0x8bb84b93962eacc9ULL, 0x4b33a62ed433d4a3ULL, 0x4d5a2da51de1aa47ULL };
+
 uint64_t gojo_str_hash(gojo_str s) {
-    // 8 bytes per step, then a final avalanche
-    uint64_t h = 0x9e3779b97f4a7c15ULL ^ (uint64_t)s.len;
     const uint8_t *p = s.ptr;
-    int64_t n = s.len;
-    while (n >= 8) {
-        uint64_t w;
-        memcpy(&w, p, 8);
-        h = (h ^ w) * 0xbf58476d1ce4e5b9ULL;
-        h ^= h >> 31;
-        p += 8;
-        n -= 8;
+    uint64_t len = (uint64_t)s.len, seed = gojo_hash_seed, a, b;
+    seed ^= gojo_wymix(seed ^ wy_secret[0], wy_secret[1]);
+    if (len <= 16) {
+        if (len >= 4) {
+            a = (wy_r4(p) << 32) | wy_r4(p + ((len >> 3) << 2));
+            b = (wy_r4(p + len - 4) << 32) | wy_r4(p + len - 4 - ((len >> 3) << 2));
+        } else if (len > 0) {
+            a = ((uint64_t)p[0] << 16) | ((uint64_t)p[len >> 1] << 8) | p[len - 1];
+            b = 0;
+        } else {
+            a = b = 0;
+        }
+    } else {
+        uint64_t i = len;
+        if (i > 48) {
+            uint64_t s1 = seed, s2 = seed;
+            do {
+                seed = gojo_wymix(wy_r8(p) ^ wy_secret[1], wy_r8(p + 8) ^ seed);
+                s1 = gojo_wymix(wy_r8(p + 16) ^ wy_secret[2], wy_r8(p + 24) ^ s1);
+                s2 = gojo_wymix(wy_r8(p + 32) ^ wy_secret[3], wy_r8(p + 40) ^ s2);
+                p += 48;
+                i -= 48;
+            } while (i > 48);
+            seed ^= s1 ^ s2;
+        }
+        while (i > 16) {
+            seed = gojo_wymix(wy_r8(p) ^ wy_secret[1], wy_r8(p + 8) ^ seed);
+            i -= 16;
+            p += 16;
+        }
+        a = wy_r8(p + i - 16);
+        b = wy_r8(p + i - 8);
     }
-    uint64_t w = 0;
-    for (int64_t i = 0; i < n; i++) w |= (uint64_t)p[i] << (8 * i);
-    h = (h ^ w) * 0x94d049bb133111ebULL;
-    return gojo_hash_u64(h);
+    a ^= wy_secret[1];
+    b ^= seed;
+    __uint128_t r = (__uint128_t)a * b;
+    a = (uint64_t)r;
+    b = (uint64_t)(r >> 64);
+    return gojo_wymix(a ^ wy_secret[0] ^ len, b ^ wy_secret[1]);
 }
 
 gojo_string gojo_str_concat(gojo_str a, gojo_str b) {
@@ -282,10 +323,25 @@ gojo_string gojo_rune_to_string(int32_t r) {
     return s;
 }
 
+// glibc declares it only with _GNU_SOURCE; every libc we target has it
+void *memmem(const void *, size_t, const void *, size_t);
+
+// memchr finds candidates for the first byte, a vectorized scan in libc; a
+// long needle goes to memmem (two-way: linear time whatever the text)
 static int64_t str_find(gojo_str s, gojo_str sub, int64_t from) {
     if (sub.len == 0) return from;
-    for (int64_t i = from; i + sub.len <= s.len; i++)
-        if (s.ptr[i] == sub.ptr[0] && memcmp(s.ptr + i, sub.ptr, (size_t)sub.len) == 0) return i;
+    if (sub.len > s.len - from) return -1;
+    if (sub.len > 16) {
+        const uint8_t *q = memmem(s.ptr + from, (size_t)(s.len - from), sub.ptr, (size_t)sub.len);
+        return q ? (int64_t)(q - s.ptr) : -1;
+    }
+    const uint8_t *p = s.ptr + from, *end = s.ptr + s.len - sub.len + 1;
+    while (p < end) {
+        p = memchr(p, sub.ptr[0], (size_t)(end - p));
+        if (!p) return -1;
+        if (memcmp(p, sub.ptr, (size_t)sub.len) == 0) return (int64_t)(p - s.ptr);
+        p++;
+    }
     return -1;
 }
 
@@ -293,6 +349,7 @@ bool gojo_str_contains(gojo_str s, gojo_str sub) { return str_find(s, sub, 0) >=
 bool gojo_str_startsWith(gojo_str s, gojo_str p) { return p.len <= s.len && memcmp(s.ptr, p.ptr, (size_t)p.len) == 0; }
 bool gojo_str_endsWith(gojo_str s, gojo_str p) { return p.len <= s.len && memcmp(s.ptr + s.len - p.len, p.ptr, (size_t)p.len) == 0; }
 int64_t gojo_prelude___strFind(gojo_str s, gojo_str sub) { return str_find(s, sub, 0); }
+int64_t gojo_prelude___strFindFrom(gojo_str s, gojo_str sub, int64_t from) { return str_find(s, sub, from); }
 
 static bool is_space(uint8_t c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\v' || c == '\f'; }
 
@@ -370,16 +427,6 @@ gojo_vec gojo_str_fields(gojo_str s) {
     return v;
 }
 
-gojo_string gojo_str_toUpper(gojo_str s) {
-    gojo_string r = gojo_string_from(s);
-    for (int64_t i = 0; i < r.len; i++) r.ptr[i] = (uint8_t)toupper(r.ptr[i]);
-    return r;
-}
-gojo_string gojo_str_toLower(gojo_str s) {
-    gojo_string r = gojo_string_from(s);
-    for (int64_t i = 0; i < r.len; i++) r.ptr[i] = (uint8_t)tolower(r.ptr[i]);
-    return r;
-}
 gojo_string gojo_str_toString(gojo_str s) { return gojo_string_from(s); }
 
 gojo_string gojo_str_repeat(gojo_str s, int64_t n) {
@@ -478,11 +525,20 @@ void gojo_fmt_f64(gojo_string *b, double v) {
     char buf[64];
     if (isnan(v)) { gojo_fmt_cstr(b, "NaN"); return; }
     if (isinf(v)) { gojo_fmt_cstr(b, v > 0 ? "+Inf" : "-Inf"); return; }
-    // shortest digit count that round-trips
-    int p = 1;
+    // the shortest digit count that round-trips. When it is at most 15,
+    // rounding to 15 digits gives exactly those digits then zeros (a normal
+    // double's half-ulp is below half a unit in the 15th digit); otherwise
+    // the nearest 16-digit decimal round-trips if any does, and 17 always
+    // does. Subnormals have less precision: they count up from 1.
+    int p = fabs(v) < 2.2250738585072014e-308 ? 1 : 15;
     for (; p < 17; p++) {
         snprintf(buf, sizeof buf, "%.*e", p - 1, v);
         if (strtod(buf, NULL) == v) break;
+    }
+    if (p == 15) {
+        // drop the trailing zeros of the mantissa
+        char *e = strchr(buf, 'e');
+        while (p > 1 && e[-1] == '0') { e--; p--; }
     }
     snprintf(buf, sizeof buf, "%.*e", p - 1, v);
     int exp = atoi(strchr(buf, 'e') + 1);
@@ -508,7 +564,7 @@ void gojo_fmt_radix(gojo_string *b, int64_t v, bool is_signed, int64_t radix, bo
     }
     char buf[72];
     int n = 0;
-    const char *digits = upper ? "0123456789ABCDEF" : "0123456789abcdef";
+    const char *digits = upper ? "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ" : "0123456789abcdefghijklmnopqrstuvwxyz";
     do {
         buf[n++] = digits[u % (uint64_t)radix];
         u /= (uint64_t)radix;

@@ -1,0 +1,34 @@
+// Methods of `str` and `String` beyond the basics.
+fn main() {
+    let s = "a=b=c"
+    println(s.rfind("="), s.rfind("x"), s.find("="), "".rfind(""), "abc".rfind(""))
+    println("aaaa".count("aa"), "héllo".count(""), "abcabc".count("bc"), "".count("x"))
+    println(s.splitN("=", 2), s.splitN("=", 1), s.splitN("=", 0), s.splitN("=", 9), "héj".splitN("", 2), "ab".splitN("", 5))
+    println("key=value=x".splitOnce("="), "novalue".splitOnce("="), "=".splitOnce("="))
+    println("prefix-body".trimPrefix("prefix-"), "body".trimPrefix("x"), "file.tar.gz".trimSuffix(".gz"), "a".trimSuffix("abc"))
+    println("--a-b--".trimChars("-"), "xyhixy".trimChars("xy"), "ééaé".trimChars("é"), "----".trimChars("-").len(), "abc".trimChars(""))
+    println("Hello".equalFold("hELLO"), "Σίσυφος".equalFold("ΣΊΣΥΦΟΣ"), "Straße".equalFold("STRASSE"), "a".equalFold("ab"), "K".equalFold("\u{212A}"))
+    println("héllo wörld".toUpper(), "ÀÉÎ ΣΩ".toLower(), "abc".toUpper())
+    println("héllo".runeCount(), "héllo".len(), "abc".isAscii(), "abé".isAscii())
+    let good: Vec[byte] = [0xC3, 0xA9]
+    let overlong: Vec[byte] = [0xC0, 0x80]
+    let surrogate: Vec[byte] = [0xED, 0xA0, 0x80]
+    let cut: Vec[byte] = [0xE2, 0x82]
+    println("ok".isValidUtf8(), String(good).isValidUtf8(), String(overlong).isValidUtf8(), String(surrogate).isValidUtf8(), String(cut).isValidUtf8())
+
+    var t: String = "héllo"
+    t.insert(0, ">")
+    t.insert(t.len(), "<")
+    t.insert(4, "é")
+    println(t)
+    t.truncate(4)
+    println(t, t.len())
+    t.truncate(10)
+    println(t)
+    println(t.pop(), t.pop(), t.pop(), t.pop(), t)
+    var u: String = ""
+    u.reserve(100)
+    println(u.cap() >= 100, u.len())
+    var w: String = "日本"
+    println(w.pop(), w)
+}

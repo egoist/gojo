@@ -1,0 +1,42 @@
+// Hexadecimal: bytes as pairs of hex digits, and back.
+//
+//   hex.encode("hi".bytes())          // "6869"
+//   let key = try hex.decode("DEADbeef")
+
+// Text that isn't hex: a character that isn't a hex digit, or an odd number
+// of digits.
+pub struct Error {
+    pub msg: String
+    // the byte offset of the problem in the text
+    pub offset: int
+
+    pub fn message(self) -> String {
+        return "hex: ${self.msg} at offset ${self.offset}"
+    }
+}
+
+fn __encode(data: []byte, upper: bool) -> String
+fn __decode(s: str, out: inout Vec[byte]) -> int
+
+// The bytes as lower-case hex digits, two per byte.
+pub fn encode(data: []byte) -> String {
+    return __encode(data, false)
+}
+
+// The bytes as upper-case hex digits.
+pub fn encodeUpper(data: []byte) -> String {
+    return __encode(data, true)
+}
+
+// The bytes the hex digits stand for (in either case).
+pub fn decode(s: str) -> Vec[byte] ! Error {
+    var out = Vec[byte]{}
+    let at = __decode(s, &out)
+    if at >= s.len() {
+        return err(Error{msg: "odd number of digits", offset: at})
+    }
+    if at >= 0 {
+        return err(Error{msg: "not a hex digit", offset: at})
+    }
+    return out
+}

@@ -1,0 +1,662 @@
+// Command-line parsing: declare the options and arguments, then read them
+// back by name, typed. `--help` and the error messages come for free.
+//
+//   var cli = flag.command("grep", "Search files for a regular expression.")
+//   cli.bool("-i, --ignore-case", "match without regard to case")
+//   cli.int("-C, --context N", 0, "show N lines around each match")
+//   cli.strings("-e, --exclude GLOB", "skip files that match GLOB")
+//   cli.arg("pattern", "the regular expression")
+//   cli.rest("file", "files to search (default: standard input)")
+//   let m = cli.parseOrExit()
+//   m.bool("ignore-case")   m.int("context")   m.list("exclude")
+//   m.string("pattern")     m.list("file")
+//
+// A spec names a short form, a long form or both, then a placeholder for the
+// value of options that take one: `"-v"`, `"--dry-run"`, `"-o, --output
+// FILE"`. An option is read back by its long name without the dashes, or its
+// short letter when it has no long one.
+//
+// The command line follows the usual conventions: `-abc` for several short
+// options, `-C3` or `-C 3`, `--context=3` or `--context 3`, options anywhere
+// among the arguments, and `--` before arguments that start with `-`.
+// Subcommands (`cli.subcommand(...)`) see the options of the commands above
+// them as well as their own.
+use std/os
+
+// Why parsing stopped: a mistake on the command line, or `--help` /
+// `--version`, whose text is the message.
+pub struct Error {
+    pub kind: ErrorKind
+    pub msg: String
+    // the name of the command, as in usage: "git remote"
+    pub command: String
+
+    pub fn message(self) -> String {
+        return match self.kind {
+            .Usage => "${self.command}: ${self.msg}"
+            _ => self.msg.clone()
+        }
+    }
+}
+
+pub copy enum ErrorKind {
+    // a mistake: an unknown option, a missing or bad value...
+    Usage
+    // `-h` or `--help`: the message is the help
+    Help
+    // `--version`: the message is the version
+    Version
+}
+
+copy enum Kind { Bool, Int, Float, Str, List }
+
+enum Val {
+    B(b: bool)
+    I(i: int)
+    F(f: f64)
+    S(s: String)
+    L(items: Vec[String])
+}
+
+struct Spec {
+    short: String
+    long: String
+    // the placeholder for the value: "N"
+    value: String
+    help: String
+    kind: Kind
+    initial: Val
+
+    // the name it is read back by
+    fn key(self) -> str {
+        return if self.long.isEmpty() { self.short.asStr() } else { self.long.asStr() }
+    }
+
+    // "-C, --context N"
+    fn label(self) -> String {
+        var out: String = if self.short.isEmpty() { "    " } else { "-${self.short}" }
+        if !self.long.isEmpty() {
+            out.push(if self.short.isEmpty() { "--" } else { ", --" })
+            out.push(self.long)
+        }
+        if !self.value.isEmpty() {
+            out.push(" ")
+            out.push(self.value)
+        }
+        return out
+    }
+}
+
+copy enum Arity { One, Optional, Rest }
+
+struct ArgSpec {
+    name: String
+    help: String
+    arity: Arity
+
+    // "<pattern>", "[dir]", "[file...]"
+    fn label(self) -> String {
+        return match self.arity {
+            .One => "<${self.name}>"
+            .Optional => "[${self.name}]"
+            .Rest => "[${self.name}...]"
+        }
+    }
+}
+
+// A command: its options, arguments and subcommands.
+pub struct Command {
+    name: String
+    about: String
+    ver: String = ""
+    flags: Vec[Spec] = Vec[Spec]{}
+    args: Vec[ArgSpec] = Vec[ArgSpec]{}
+    subs: Vec[Command] = Vec[Command]{}
+
+    // Makes `--version` print `name version`.
+    pub fn version(inout self, v: str) {
+        self.ver = v.toString()
+    }
+
+    // An option without a value: true when it is given.
+    pub fn bool(inout self, spec: str, help: str) {
+        self.declare(spec, help, .Bool, .B(false))
+    }
+
+    // An option with an integer value; `initial` when it isn't given.
+    pub fn int(inout self, spec: str, initial: int, help: str) {
+        self.declare(spec, help, .Int, .I(initial))
+    }
+
+    // An option with a number value.
+    pub fn float(inout self, spec: str, initial: f64, help: str) {
+        self.declare(spec, help, .Float, .F(initial))
+    }
+
+    // An option with a text value.
+    pub fn string(inout self, spec: str, initial: str, help: str) {
+        self.declare(spec, help, .Str, .S(initial.toString()))
+    }
+
+    // An option that can be given several times, each with a value: `-I a
+    // -I b` reads back as `["a", "b"]`.
+    pub fn strings(inout self, spec: str, help: str) {
+        self.declare(spec, help, .List, .L(Vec[String]{}))
+    }
+
+    // A required argument, in order after the ones before it.
+    pub fn arg(inout self, name: str, help: str) {
+        self.addArg(name, help, .One)
+    }
+
+    // An argument that may be left out (after the required ones).
+    pub fn optionalArg(inout self, name: str, help: str) {
+        self.addArg(name, help, .Optional)
+    }
+
+    // Any number of arguments, after all the others.
+    pub fn rest(inout self, name: str, help: str) {
+        self.addArg(name, help, .Rest)
+    }
+
+    // A subcommand: `git commit`. A command with subcommands takes no
+    // arguments of its own.
+    pub fn subcommand(inout self, cmd: sink Command) {
+        if !self.args.isEmpty() {
+            panic("flag: ${self.name} has arguments, so it can't have subcommands")
+        }
+        if self.subs.any(c => c.name == cmd.name) {
+            panic("flag: ${self.name} has two subcommands named ${cmd.name}")
+        }
+        self.subs.push(cmd)
+    }
+
+    fn declare(inout self, spec: str, help: str, kind: Kind, initial: sink Val) {
+        var short: String = ""
+        var long: String = ""
+        var value: String = ""
+        for part in spec.replace(",", " ").fields() {
+            if part.startsWith("--") && long.isEmpty() && part.len() > 2 {
+                long = part[2..].toString()
+            } else if part.startsWith("-") && !part.startsWith("--") && short.isEmpty() && part.runeCount() == 2 {
+                short = part[1..].toString()
+            } else if !part.startsWith("-") && value.isEmpty() && (long.len() > 0 || short.len() > 0) {
+                value = part.clone()
+            } else {
+                panic("flag: bad option spec `${spec}` (write it as \"-o, --output FILE\")")
+            }
+        }
+        if short.isEmpty() && long.isEmpty() {
+            panic("flag: bad option spec `${spec}` (write it as \"-o, --output FILE\")")
+        }
+        let isBool = match kind {
+            .Bool => true
+            _ => false
+        }
+        if isBool && !value.isEmpty() {
+            panic("flag: the bool option `${spec}` can't take a value")
+        }
+        if !isBool && value.isEmpty() {
+            value = if long.isEmpty() { "VALUE" } else { long.toUpper() }
+        }
+        if short == "h" || long == "help" || (long == "version" && !self.ver.isEmpty()) {
+            panic("flag: `${spec}` is taken by the built-in -h, --help and --version")
+        }
+        for f in self.flags {
+            if (!short.isEmpty() && f.short == short) || (!long.isEmpty() && f.long == long) {
+                panic("flag: ${self.name} declares `${spec}` twice")
+            }
+        }
+        self.flags.push(Spec{short, long, value, help: help.toString(), kind, initial})
+    }
+
+    fn addArg(inout self, name: str, help: str, arity: Arity) {
+        if !self.subs.isEmpty() {
+            panic("flag: ${self.name} has subcommands, so it can't have arguments")
+        }
+        if let last = self.args.last() {
+            let bad = match (last.arity, arity) {
+                (.Rest, _) => true
+                (.Optional, .One) => true
+                _ => false
+            }
+            if bad {
+                panic("flag: the argument ${name} of ${self.name} can't come after ${last.label()}")
+            }
+        }
+        self.args.push(ArgSpec{name: name.toString(), help: help.toString(), arity})
+    }
+
+    // The help text: what `--help` prints.
+    pub fn help(self) -> String {
+        return self.helpFor(self.name, Vec[Spec]{})
+    }
+
+    fn helpFor(self, path: str, inherited: []Spec) -> String {
+        var out: String = ""
+        if !self.about.isEmpty() {
+            out.push("${self.about}\n\n")
+        }
+        out.push("Usage: ${path}")
+        if !self.flags.isEmpty() || !inherited.isEmpty() {
+            out.push(" [options]")
+        }
+        if !self.subs.isEmpty() {
+            out.push(" <command>")
+        }
+        for a in self.args {
+            out.push(" ")
+            out.push(a.label())
+        }
+        out.push("\n")
+        var argRows = Vec[(String, String)]{}
+        for a in self.args {
+            argRows.push((a.label(), a.help.clone()))
+        }
+        var optRows = Vec[(String, String)]{}
+        for f in self.flags {
+            optRows.push((f.label(), describe(f)))
+        }
+        for f in inherited {
+            optRows.push((f.label(), describe(f)))
+        }
+        optRows.push(("-h, --help", "show this help"))
+        if !self.ver.isEmpty() {
+            optRows.push(("    --version", "show the version"))
+        }
+        var cmdRows = Vec[(String, String)]{}
+        for c in self.subs {
+            cmdRows.push((c.name.clone(), c.about.clone()))
+        }
+        // the left column, as wide as its widest entry (up to a point)
+        var width = 0
+        for r in argRows {
+            width = max(width, r.0.runeCount())
+        }
+        for r in optRows {
+            width = max(width, r.0.runeCount())
+        }
+        for r in cmdRows {
+            width = max(width, r.0.runeCount())
+        }
+        width = min(width, 28)
+        writeSection(&out, "Arguments", argRows, width)
+        writeSection(&out, "Options", optRows, width)
+        writeSection(&out, "Commands", cmdRows, width)
+        if !self.subs.isEmpty() {
+            out.push("\nRun '${path} <command> --help' for the options of a command.\n")
+        }
+        return out
+    }
+
+    // Parses `args`, the command line without the program name.
+    pub fn parse(self, args: []String) -> Matches ! Error {
+        var m = Matches{}
+        try self.parseInto(args, 0, self.name, Vec[Spec]{}, &m)
+        return m
+    }
+
+    // Parses the program's command line. On `--help` or `--version` prints
+    // the text and exits with 0; on a mistake prints it, with a hint to use
+    // `--help`, and exits with 2.
+    pub fn parseOrExit(self) -> Matches {
+        let all = os.args()
+        return self.parse(all[1..]) catch e {
+            match e.kind {
+                .Usage => {
+                    eprintln(e.message())
+                    eprintln("Run '${e.command} --help' for usage.")
+                    os.exit(2)
+                }
+                _ => {
+                    print(e.msg)
+                    os.exit(0)
+                }
+            }
+        }
+    }
+
+    fn fail(self, path: str, msg: sink String) -> Error {
+        return Error{kind: .Usage, msg, command: path.toString()}
+    }
+
+    fn parseInto(self, args: []String, start: int, path: str, inherited: []Spec, m: inout Matches) ! Error {
+        for f in self.flags {
+            m.vals[f.key().toString()] = f.initial.clone()
+        }
+        var positional = Vec[String]{}
+        var only = false
+        var i = start
+        while i < args.len() {
+            let a = args[i].asStr()
+            i += 1
+            if only || a == "-" || !a.startsWith("-") {
+                if !only && !self.subs.isEmpty() && positional.isEmpty() {
+                    let k = self.subs.findIndex(c => c.name == a) ?? return err(self.fail(path, "unknown command `${a}`${suggest(a, self.subs.map(c => c.name.clone()), "")}"))
+                    var all = Vec[Spec]{}
+                    for f in self.flags {
+                        all.push(f.clone())
+                    }
+                    for f in inherited {
+                        all.push(f.clone())
+                    }
+                    m.cmd = if m.cmd.isEmpty() { a.toString() } else { "${m.cmd} ${a}" }
+                    return self.subs[k].parseInto(args, i, "${path} ${a}", all, &m)
+                }
+                positional.push(a.toString())
+                continue
+            }
+            if a == "--" {
+                only = true
+                continue
+            }
+            if a.startsWith("--") {
+                let body = a[2..]
+                let eq = body.find("=")
+                let name = if let e = eq { body[..e] } else { body }
+                if name == "help" {
+                    return err(Error{kind: .Help, msg: self.helpFor(path, inherited), command: path.toString()})
+                }
+                if name == "version" && !self.ver.isEmpty() {
+                    return err(Error{kind: .Version, msg: "${path} ${self.ver}\n", command: path.toString()})
+                }
+                let spec = self.find(inherited, name, true) ?? return err(self.fail(path, "unknown option --${name}${suggest(name, self.longNames(inherited), "--")}"))
+                if let e = eq {
+                    try self.set(path, spec, a[..e + 2], some(body[e + 1..]), &m)
+                } else if spec.kind == Kind.Bool {
+                    try self.set(path, spec, a, none, &m)
+                } else {
+                    if i >= args.len() {
+                        return err(self.fail(path, "${a} needs a value (${spec.value})"))
+                    }
+                    try self.set(path, spec, a, some(args[i].asStr()), &m)
+                    i += 1
+                }
+                continue
+            }
+            // -abc, -C3, -C 3
+            var j = 1
+            while j < a.len() {
+                let (_, n) = a.runeAt(j)
+                let letter = a[j..j + n]
+                j += n
+                if letter == "h" {
+                    return err(Error{kind: .Help, msg: self.helpFor(path, inherited), command: path.toString()})
+                }
+                let spec = self.find(inherited, letter, false) ?? return err(self.fail(path, "unknown option -${letter}"))
+                if spec.kind == Kind.Bool {
+                    try self.set(path, spec, "-${letter}", none, &m)
+                    continue
+                }
+                if j < a.len() {
+                    try self.set(path, spec, "-${letter}", some(a[j..]), &m)
+                } else if i < args.len() {
+                    try self.set(path, spec, "-${letter}", some(args[i].asStr()), &m)
+                    i += 1
+                } else {
+                    return err(self.fail(path, "-${letter} needs a value (${spec.value})"))
+                }
+                break
+            }
+        }
+        if !self.subs.isEmpty() {
+            return err(self.fail(path, "missing command (one of ${self.subs.map(c => c.name.clone()).join(", ")})"))
+        }
+        // the arguments, in order
+        var k = 0
+        for a in self.args {
+            match a.arity {
+                .One => {
+                    if k >= positional.len() {
+                        return err(self.fail(path, "missing argument ${a.label()}"))
+                    }
+                    m.vals[a.name.clone()] = .S(positional[k].clone())
+                    m.seen.insert(a.name.clone())
+                    k += 1
+                }
+                .Optional => {
+                    if k < positional.len() {
+                        m.vals[a.name.clone()] = .S(positional[k].clone())
+                        m.seen.insert(a.name.clone())
+                        k += 1
+                    } else {
+                        m.vals[a.name.clone()] = .S("")
+                    }
+                }
+                .Rest => {
+                    let restVals = positional[k..].toVec()
+                    if !restVals.isEmpty() {
+                        m.seen.insert(a.name.clone())
+                    }
+                    m.vals[a.name.clone()] = .L(restVals)
+                    k = positional.len()
+                }
+            }
+        }
+        if k < positional.len() {
+            return err(self.fail(path, "unexpected argument `${positional[k]}`"))
+        }
+        return
+    }
+
+    // The option named `name` (long or short), its own or one inherited from
+    // the commands above.
+    fn find(self, inherited: []Spec, name: str, long: bool) -> ?Spec {
+        for f in self.flags {
+            if (long && f.long == name) || (!long && f.short == name) {
+                return f.clone()
+            }
+        }
+        for f in inherited {
+            if (long && f.long == name) || (!long && f.short == name) {
+                return f.clone()
+            }
+        }
+        return none
+    }
+
+    fn longNames(self, inherited: []Spec) -> Vec[String] {
+        var out = ["help"]
+        if !self.ver.isEmpty() {
+            out.push("version")
+        }
+        for f in self.flags {
+            out.push(f.long.clone())
+        }
+        for f in inherited {
+            out.push(f.long.clone())
+        }
+        return out
+    }
+
+    // Stores the value `text` of `spec`, as it was written (`given`).
+    fn set(self, path: str, spec: Spec, given: str, text: ?str, m: inout Matches) ! Error {
+        let key = spec.key().toString()
+        m.seen.insert(key.clone())
+        let v = text ?? ""
+        match spec.kind {
+            .Bool => {
+                if text == none {
+                    m.vals[key] = .B(true)
+                } else if v == "true" || v == "1" || v == "yes" {
+                    m.vals[key] = .B(true)
+                } else if v == "false" || v == "0" || v == "no" {
+                    m.vals[key] = .B(false)
+                } else {
+                    return err(self.fail(path, "${given} takes no value (or true or false), not `${v}`"))
+                }
+            }
+            .Int => {
+                let n = int.parse(v) ?? return err(self.fail(path, "${given} needs an integer, not `${v}`"))
+                m.vals[key] = .I(n)
+            }
+            .Float => {
+                let f = v.parseFloat() ?? return err(self.fail(path, "${given} needs a number, not `${v}`"))
+                m.vals[key] = .F(f)
+            }
+            .Str => {
+                m.vals[key] = .S(v.toString())
+            }
+            .List => {
+                var items = Vec[String]{}
+                match m.vals.remove(key.clone()) {
+                    some(.L(xs)) => items = xs
+                    _ => {}
+                }
+                items.push(v.toString())
+                m.vals[key] = .L(items)
+            }
+        }
+        return
+    }
+}
+
+// "match without regard to case (default: 3)"
+fn describe(f: Spec) -> String {
+    var out = f.help.clone()
+    let shown: String = match f.initial {
+        .I(i) => if i != 0 { "${i}" } else { "" }
+        .F(x) => if x != 0.0 { "${x}" } else { "" }
+        .S(s) => if !s.isEmpty() { s.clone() } else { "" }
+        _ => ""
+    }
+    if !shown.isEmpty() {
+        out.push(" (default: ${shown})")
+    }
+    return out
+}
+
+fn writeSection(out: inout String, title: str, rows: [](String, String), width: int) {
+    if rows.isEmpty() {
+        return
+    }
+    out.push("\n${title}:\n")
+    for r in rows {
+        out.push("  ")
+        out.push(r.0)
+        let w = r.0.runeCount()
+        if w > width {
+            // too wide: the help goes on the next line
+            out.push("\n")
+            out.push(" ".repeat(width + 4))
+        } else {
+            out.push(" ".repeat(width - w + 2))
+        }
+        out.push(r.1)
+        out.push("\n")
+    }
+}
+
+// " (did you mean --context?)" when one of `names` is close to `name`.
+fn suggest(name: str, names: []String, prefix: str) -> String {
+    var best: String = ""
+    var bestD = max(1, min(3, name.runeCount() / 3 + 1))
+    for n in names {
+        if n.isEmpty() {
+            continue
+        }
+        let d = distance(name, n)
+        if d < bestD || (d == bestD && best.isEmpty()) {
+            best = n.clone()
+            bestD = d
+        }
+    }
+    if best.isEmpty() {
+        return ""
+    }
+    return " (did you mean ${prefix}${best}?)"
+}
+
+// The Levenshtein distance between `a` and `b`, in characters.
+fn distance(a: str, b: str) -> int {
+    let x = a.runes()
+    let y = b.runes()
+    var prev = Vec[int]{}
+    for j in 0..y.len() + 1 {
+        prev.push(j)
+    }
+    var cur = Vec[int]{}
+    cur.resize(y.len() + 1, 0)
+    for i in 1..x.len() + 1 {
+        cur[0] = i
+        for j in 1..y.len() + 1 {
+            let cost = if x[i - 1] == y[j - 1] { 0 } else { 1 }
+            cur[j] = min(min(prev[j] + 1, cur[j - 1] + 1), prev[j - 1] + cost)
+        }
+        swap(&prev, &cur)
+    }
+    return prev[y.len()]
+}
+
+// A command with no options or arguments yet: `name` is how it is invoked,
+// `about` what it does.
+pub fn command(name: str, about: str) -> Command {
+    return Command{name: name.toString(), about: about.toString()}
+}
+
+// The options and arguments of a parsed command line, by name. Reading a
+// name that wasn't declared, or as the wrong type, is a bug and panics.
+pub struct Matches {
+    vals: Map[String, Val] = Map[String, Val]{}
+    seen: Set[String] = Set[String]{}
+    cmd: String = ""
+
+    fn val(self, name: str, want: str) -> Val {
+        if let v = self.vals.get(name.toString()) {
+            return v.clone()
+        }
+        panic("flag: there is no ${want} named `${name}` (or its command wasn't the one run)")
+    }
+
+    // The value of a bool option.
+    pub fn bool(self, name: str) -> bool {
+        return match self.val(name, "bool option") {
+            .B(b) => b
+            _ => panic("flag: `${name}` isn't a bool option")
+        }
+    }
+
+    // The value of an integer option.
+    pub fn int(self, name: str) -> int {
+        return match self.val(name, "int option") {
+            .I(i) => i
+            _ => panic("flag: `${name}` isn't an int option")
+        }
+    }
+
+    // The value of a number option.
+    pub fn float(self, name: str) -> f64 {
+        return match self.val(name, "float option") {
+            .F(f) => f
+            _ => panic("flag: `${name}` isn't a float option")
+        }
+    }
+
+    // The value of a text option or an argument ("" for an optional
+    // argument that was left out).
+    pub fn string(self, name: str) -> String {
+        return match self.val(name, "string option or argument") {
+            .S(s) => s
+            _ => panic("flag: `${name}` isn't a string option or a single argument")
+        }
+    }
+
+    // The values of a `strings` option, or the `rest` arguments.
+    pub fn list(self, name: str) -> Vec[String] {
+        return match self.val(name, "strings option or rest argument") {
+            .L(items) => items
+            _ => panic("flag: `${name}` isn't a strings option or a rest argument")
+        }
+    }
+
+    // Whether the option or argument was on the command line.
+    pub fn given(self, name: str) -> bool {
+        return self.seen.contains(name.toString())
+    }
+
+    // The subcommand that was run ("" for none), with its parents for
+    // nested ones: "remote add".
+    pub fn command(self) -> str {
+        return self.cmd.asStr()
+    }
+}

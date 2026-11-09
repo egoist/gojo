@@ -125,6 +125,9 @@ pub fn generate(prog: &Program, tfuncs: &[TFunc], sm: &SourceMap, tests: Option<
     if let Some(msg) = g.runaway.take() {
         return Err(msg);
     }
+    if let Some(msg) = g.json_err.take() {
+        return Err(msg);
+    }
     if let Some(t) = g.too_large.first() {
         return Err(format!("the type `{}` is too large: values can be at most {} bytes; use a `Vec` for large data", prog.show(t), MAX_VALUE_BYTES));
     }
@@ -176,6 +179,10 @@ enum Cl {
     DropTemp(String, Ty),
     /// drop guarded by a flag variable
     DropFlag(String, Ty, String),
+    /// A temporary of a branch's value (see `SK::Tail`): declared at the top of
+    /// the function with a flag, so the enclosing statement can drop it after
+    /// the branch's C block has closed.
+    DropLater(String, Ty, String),
     Defer(TBlock),
     /// Runs only on error returns.
     ErrDefer(TBlock),
@@ -190,6 +197,11 @@ enum SK {
     /// A loop body with its loop id.
     Loop(u32),
     Stmt,
+    /// The value of a branch (a block's last expression, a match arm, the right
+    /// side of `??`) whose type may hold a view: the view may point into the
+    /// branch's temporaries, so they live until the enclosing statement is done
+    /// (`out.push(if c { "${x}" } else { "" })`).
+    Tail,
     Func,
 }
 
@@ -206,6 +218,8 @@ struct Fs<'a> {
     tf: &'a TFunc,
     subst: HashMap<TParamId, Ty>,
     out: String,
+    /// Declarations emitted at the top of the body, before `out`.
+    decls: String,
     ind: usize,
     scopes: Vec<Scope>,
     repr: HashMap<LocalId, Repr>,
@@ -280,6 +294,12 @@ struct Gen<'a> {
     too_large: Vec<Ty>,
     /// A generic function or type instantiating itself without end.
     runaway: Option<String>,
+    /// A type `json.encode` / `json.decode` can't handle (the first one).
+    json_err: Option<String>,
+    /// The `json.encode` / `json.decode` call being generated, and the
+    /// fields leading to the type at hand, for that error.
+    json_site: (Span, &'static str),
+    json_ctx: Vec<String>,
     size_memo: HashMap<Ty, u128>,
 }
 
@@ -310,6 +330,9 @@ impl<'a> Gen<'a> {
             pending_lb: None,
             too_large: vec![],
             runaway: None,
+            json_err: None,
+            json_site: (Span::default(), "encode"),
+            json_ctx: vec![],
             size_memo: HashMap::new(),
         }
     }
@@ -983,7 +1006,7 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
         let (sig, ps) = self.fn_signature(f, &subst, &name);
         let _ = writeln!(self.protos, "{};", sig);
         let ret = if fd.yields.is_some() { fd.ret.subst(&subst) } else { fd.ret.subst(&subst) };
-        let mut fs = Fs { tf, subst, out: String::new(), ind: 1, scopes: vec![], repr: HashMap::new(), flagged: HashSet::new(), flags: HashMap::new(), ret, yields: fd.yields.is_some(), err_mode: None, loop_labels: vec![], lb: None, line: (u32::MAX, 0), tscopes: HashMap::new(), bce: vec![], bce_steady: HashMap::new() };
+        let mut fs = Fs { tf, subst, out: String::new(), decls: String::new(), ind: 1, scopes: vec![], repr: HashMap::new(), flagged: HashSet::new(), flags: HashMap::new(), ret, yields: fd.yields.is_some(), err_mode: None, loop_labels: vec![], lb: None, line: (u32::MAX, 0), tscopes: HashMap::new(), bce: vec![], bce_steady: HashMap::new() };
         collect_moves_block(&tf.body, &mut fs.flagged, tf);
         fs.scopes.push(Scope { kind: SK::Func, items: vec![], wait: None });
         let mut lids = vec![];
@@ -1008,11 +1031,14 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
         }
         let body = tf.body.clone();
         self.line_directive(&mut fs, body.span);
-        if self.may_recurse.contains(&f) {
+        // the prelude's lazy-chain steps only call the closure they are given,
+        // which polls in its own body if it can recurse
+        let lazy_step = self.prog.func(f).pkg == self.prog.prelude && self.prog.func(f).name.starts_with("__lazy");
+        if self.may_recurse.contains(&f) && !lazy_step {
             self.emit(&mut fs, "GOJO_POLL();");
         }
         self.fn_body(&mut fs, &body);
-        let _ = writeln!(self.bodies, "{} {{\n{}}}\n{}", sig, fs.out, C_LINE_MARK);
+        let _ = writeln!(self.bodies, "{} {{\n{}{}}}\n{}", sig, fs.decls, fs.out, C_LINE_MARK);
     }
 
     fn fn_body(&mut self, fs: &mut Fs, body: &TBlock) {
@@ -1113,6 +1139,21 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
         fs.scopes.pop();
     }
 
+    /// The scope for the value of a branch of type `t`.
+    fn push_value_scope(&mut self, fs: &mut Fs, t: &Ty) {
+        self.push_scope(fs, if t.contains_view() { SK::Tail } else { SK::Stmt });
+    }
+
+    /// Like `pop_scope`, but returns the branch-value temporaries (`DropLater`)
+    /// instead of dropping them; the caller hands them to the enclosing scope.
+    fn pop_scope_keeping_later(&mut self, fs: &mut Fs) -> Vec<Cl> {
+        let items = std::mem::take(&mut fs.scopes.last_mut().unwrap().items);
+        let (later, now) = items.into_iter().partition(|c| matches!(c, Cl::DropLater(..)));
+        fs.scopes.last_mut().unwrap().items = now;
+        self.pop_scope(fs);
+        later
+    }
+
     fn emit_scope_cleanups(&mut self, fs: &mut Fs, idx: usize) {
         self.emit_scope_cleanups_at(fs, idx, false)
     }
@@ -1152,6 +1193,12 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
             Cl::DropFlag(n, t, flag) => {
                 let d = self.drop_fn(t);
                 self.emit(fs, &format!("if ({}) {}(&{});", flag, d, n));
+            }
+            Cl::DropLater(n, t, flag) => {
+                // the flag lives as long as the function: clear it for the next
+                // time the statement runs (in a loop) and takes another branch
+                let d = self.drop_fn(t);
+                self.emit(fs, &format!("if ({}) {{ {}(&{}); {} = 0; }}", flag, d, n, flag));
             }
             Cl::Defer(b) => {
                 self.emit(fs, "{");
@@ -1279,6 +1326,13 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
     fn materialize(&mut self, fs: &mut Fs, s: &str, t: &Ty, owned: bool) -> String {
         let c = self.cty(t);
         let n = self.tmp();
+        if owned && self.needs_drop(t) && fs.scopes.last().unwrap().kind == SK::Tail {
+            let f = self.tmp();
+            let _ = writeln!(fs.decls, "    {} {}; bool {} = 0;", c, n, f);
+            self.emit(fs, &format!("{} = {}; {} = 1;", n, s, f));
+            self.register(fs, Cl::DropLater(n.clone(), t.clone(), f));
+            return n;
+        }
         self.emit(fs, &format!("{} {} = {};", c, n, s));
         if owned && self.needs_drop(t) {
             self.register_stmt(fs, Cl::DropTemp(n.clone(), t.clone()));
@@ -1766,19 +1820,21 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
         for s in &b.stmts {
             self.stmt(fs, s);
         }
+        let mut later = vec![];
         if let Some(v) = &b.value {
-            self.push_scope(fs, SK::Stmt);
-            let s = self.expr(fs, v);
             let t = self.sub(fs, &v.ty);
+            self.push_value_scope(fs, &t);
+            let s = self.expr(fs, v);
             match dest {
                 Some(d) if v.ty != Ty::Never && t != Ty::Unit => self.emit(fs, &format!("{} = {};", d, s)),
                 _ => self.discard(fs, &s, &t, v.is_place()),
             }
-            self.pop_scope(fs);
+            later = self.pop_scope_keeping_later(fs);
         }
         self.pop_scope(fs);
         fs.ind -= 1;
         self.emit(fs, "}");
+        fs.scopes.last_mut().unwrap().items.extend(later);
     }
 
     fn assign(&mut self, fs: &mut Fs, place: &TExpr, op: Option<BinOp>, value: &TExpr, span: Span) {
@@ -2119,7 +2175,7 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
             let c = self.cty(&gd.ty);
             let init = self.instance(gd.init, vec![]);
             let _ = writeln!(self.protos, "static {} *{}(void);", c, n);
-            let _ = writeln!(self.bodies, "static {c} gval_{g};\nstatic gojo_once gonce_{g};\nstatic void ginit_{g}(void) {{ gval_{g} = {init}(); }}\nstatic {c} *{n}(void) {{\n    if (__builtin_expect(__atomic_load_n(&gonce_{g}.state, __ATOMIC_ACQUIRE) != 2, 0)) gojo_once_run(&gonce_{g}, ginit_{g}, {name});\n    return &gval_{g};\n}}", c = c, g = g, init = init, n = n, name = c_string(&gd.name));
+            let _ = writeln!(self.bodies, "static {c} gval_{g};\nstatic gojo_once gonce_{g};\nstatic void ginit_{g}(void) {{ GOJO_UNTYPE(&gval_{g}, sizeof gval_{g}); gval_{g} = {init}(); }}\nstatic {c} *{n}(void) {{\n    if (__builtin_expect(__atomic_load_n(&gonce_{g}.state, __ATOMIC_ACQUIRE) != 2, 0)) gojo_once_run(&gonce_{g}, ginit_{g}, {name});\n    return &gval_{g};\n}}", c = c, g = g, init = init, n = n, name = c_string(&gd.name));
         }
         n
     }
@@ -2585,9 +2641,10 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
                     }
                 }
                 self.block_into(fs, handler, r.as_deref());
-                self.pop_scope(fs);
+                let later = self.pop_scope_keeping_later(fs);
                 fs.ind -= 1;
                 self.emit(fs, "}");
+                fs.scopes.last_mut().unwrap().items.extend(later);
                 r.unwrap_or_else(|| "0".into())
             }
             TK::Coalesce { l, r } => {
@@ -2604,14 +2661,15 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
                 let val = if flat { tv.clone() } else { self.oval(&lt, &tv) };
                 self.emit(fs, &format!("if ({}) {} = {}; else {{", cond, res, val));
                 fs.ind += 1;
-                self.push_scope(fs, SK::Stmt);
+                self.push_value_scope(fs, &t);
                 let rv = self.expr(fs, r);
                 if r.ty != Ty::Never {
                     self.emit(fs, &format!("{} = {};", res, rv));
                 }
-                self.pop_scope(fs);
+                let later = self.pop_scope_keeping_later(fs);
                 fs.ind -= 1;
                 self.emit(fs, "}");
+                fs.scopes.last_mut().unwrap().items.extend(later);
                 res
             }
             TK::OptField { base, index } => {
@@ -3414,7 +3472,7 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
         let ret = fty.ret.clone();
         let rc = self.ret_cty(&ret);
         let mut ps = vec!["void *envp".to_string()];
-        let mut nfs = Fs { tf: fs.tf, subst: fs.subst.clone(), out: String::new(), ind: 1, scopes: vec![], repr: HashMap::new(), flagged: fs.flagged.clone(), flags: HashMap::new(), ret: ret.clone(), yields: false, err_mode: None, loop_labels: vec![], lb: None, line: (u32::MAX, 0), tscopes: HashMap::new(), bce: vec![], bce_steady: HashMap::new() };
+        let mut nfs = Fs { tf: fs.tf, subst: fs.subst.clone(), out: String::new(), decls: String::new(), ind: 1, scopes: vec![], repr: HashMap::new(), flagged: fs.flagged.clone(), flags: HashMap::new(), ret: ret.clone(), yields: false, err_mode: None, loop_labels: vec![], lb: None, line: (u32::MAX, 0), tscopes: HashMap::new(), bce: vec![], bce_steady: HashMap::new() };
         if let (Some(lid), Some(_)) = (c.loop_body, &lbp) {
             // `return` / `try` in the body act on the enclosing function
             nfs.ret = fs.ret.clone();
@@ -3475,7 +3533,7 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
         } else {
             self.fn_body(&mut nfs, &body);
         }
-        let _ = writeln!(self.bodies, "{} {{\n{}}}\n{}", sig, nfs.out, C_LINE_MARK);
+        let _ = writeln!(self.bodies, "{} {{\n{}{}}}\n{}", sig, nfs.decls, nfs.out, C_LINE_MARK);
         // environment value
         if let Some((ctlp, retp)) = &lbp {
             let mut inits = vec![];
@@ -3648,15 +3706,16 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
                     }
                 }
             }
-            self.push_scope(fs, SK::Stmt);
-            let bv = self.expr(fs, &arm.body);
             let bt = self.sub(fs, &arm.body.ty);
+            self.push_value_scope(fs, &bt);
+            let bv = self.expr(fs, &arm.body);
             match &res {
                 Some(r) if arm.body.ty != Ty::Never => self.emit(fs, &format!("{} = {};", r, bv)),
                 _ => self.discard(fs, &bv, &bt, arm.body.is_place()),
             }
+            let later = self.pop_scope_keeping_later(fs);
             self.pop_scope(fs);
-            self.pop_scope(fs);
+            fs.scopes.last_mut().unwrap().items.extend(later);
             self.emit(fs, &format!("goto {};", end));
             if guard_open {
                 fs.ind -= 1;
@@ -4389,6 +4448,14 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
                 _ => Ty::Unit,
             }
         };
+        if let Some(r) = self.num_intrinsic(fs, &qn, targs, args) {
+            return r;
+        }
+        if self.prog.packages[fd.pkg as usize].is_std {
+            if let Some(r) = self.json_intrinsic(fs, &qn, targs, args, sp) {
+                return r;
+            }
+        }
         match qn.as_str() {
             "prelude.panic" => {
                 let a = self.expr(fs, &args[0].e);
@@ -4482,10 +4549,10 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
             }
             "Hasher.write" => {
                 let t = targs.last().cloned().unwrap();
-                let h = self.expr(fs, &args[0].e);
+                let h = self.addr(fs, &args[0].e);
                 let x = self.addr(fs, &args[1].e);
                 let hf = self.hash_fn(&t);
-                self.emit(fs, &format!("({})->f_state = (({})->f_state ^ {}({})) * 1099511628211ULL;", h, h, hf, x));
+                self.emit(fs, &format!("({})->f_state = gojo_hash_mix(({})->f_state, {}({}));", h, h, hf, x));
                 "0".into()
             }
             q if q.starts_with("Vec.") => self.vec_intrinsic(fs, &q[4..], &elem(&recv_ty), args, ret, &l),
@@ -4688,7 +4755,7 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
                 let c = self.expr(fs, &args[0].e);
                 format!("gojo_chan_len({})", c)
             }
-            "math.sqrt" | "math.pow" | "math.floor" | "math.ceil" | "math.round" | "math.sin" | "math.cos" | "math.tan" | "math.atan2" | "math.log" | "math.exp" => {
+            "math.sqrt" | "math.pow" | "math.floor" | "math.ceil" | "math.round" | "math.sin" | "math.cos" | "math.tan" | "math.atan2" | "math.log" | "math.exp" | "math.trunc" | "math.cbrt" | "math.hypot" | "math.fmod" | "math.asin" | "math.acos" | "math.atan" | "math.sinh" | "math.cosh" | "math.tanh" | "math.log2" | "math.log10" | "math.log1p" | "math.expm1" => {
                 let vs = self.arg_vals(fs, args);
                 format!("{}({})", &qn[5..], vs.join(", "))
             }
@@ -4700,7 +4767,16 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
                 let vs = self.arg_vals(fs, args);
                 format!("isnan({})", vs[0])
             }
+            "math.isInf" => {
+                let vs = self.arg_vals(fs, args);
+                format!("(isinf({}) != 0)", vs[0])
+            }
+            "math.isFinite" => {
+                let vs = self.arg_vals(fs, args);
+                format!("(isfinite({}) != 0)", vs[0])
+            }
             "math.inf" => "INFINITY".into(),
+            "math.nan" => "NAN".into(),
             "os.exit" => {
                 let vs = self.arg_vals(fs, args);
                 self.emit(fs, &format!("gojo_os_exit({});", vs[0]));
@@ -4727,6 +4803,88 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
                 self.finish_call(fs, call, ret)
             }
         }
+    }
+
+    /// The bit-level and checked integer operations and the float functions
+    /// behind the methods of `extend T: Integer` / `extend T: Float`, for the
+    /// concrete type in `targs[0]`.
+    fn num_intrinsic(&mut self, fs: &mut Fs, qn: &str, targs: &[Ty], args: &[TArg]) -> Option<String> {
+        let name = qn.strip_prefix("prelude.__")?;
+        let t = targs.first()?.clone();
+        let c = self.cty(&t);
+        if name == "toString" {
+            let v = self.expr(fs, &args[0].e);
+            let x = self.tmp();
+            self.emit(fs, &format!("{} {} = {};", c, x, v));
+            let f = self.fmt_fn(&t);
+            let r = self.tmp();
+            self.emit(fs, &format!("gojo_string {} = {{0}}; {}(&{}, &{}, 0);", r, f, r, x));
+            return Some(r);
+        }
+        if let Some(op) = name.strip_prefix("f_") {
+            let f32 = t == Ty::F32;
+            let vs = self.arg_vals(fs, args);
+            return Some(match op {
+                "isnan" | "isinf" => format!("({}({}) != 0)", op, vs[0]),
+                "parse" => {
+                    let d = self.tmp();
+                    let ok = self.tmp();
+                    self.emit(fs, &format!("double {} = 0; bool {} = gojo_prelude___parseFloat({}, &{}); if ({}) *({}) = ({}){};", d, ok, vs[0], d, ok, vs[1], c, d));
+                    ok
+                }
+                _ => format!("{}{}({})", op, if f32 { "f" } else { "" }, vs.join(", ")),
+            });
+        }
+        let Ty::Int(k) = t else { return None };
+        let bits = k.bits();
+        let ut = format!("uint{}_t", bits);
+        let (min, max) = if k.signed() { (format!("INT{}_MIN", bits), format!("INT{}_MAX", bits)) } else { ("0".to_string(), format!("UINT{}_MAX", bits)) };
+        let r = match name {
+            "countOnes" | "leadingZeros" | "trailingZeros" | "bitsOf" | "rotateLeft" | "swapBytes" | "minOf" | "maxOf" | "addOverflows" | "subOverflows" | "mulOverflows" | "parseRadix" | "formatRadix" => {
+                let vs = self.arg_vals(fs, args);
+                match name {
+                    "countOnes" => format!("((int64_t)__builtin_popcountll((uint64_t)({})({})))", ut, vs[0]),
+                    "leadingZeros" | "trailingZeros" => {
+                        let u = self.tmp();
+                        self.emit(fs, &format!("{} {} = ({})({});", ut, u, ut, vs[0]));
+                        if name == "leadingZeros" {
+                            format!("({} ? (int64_t)__builtin_clzll((uint64_t){}) - {} : {})", u, u, 64 - bits, bits)
+                        } else {
+                            format!("({} ? (int64_t)__builtin_ctzll((uint64_t){}) : {})", u, u, bits)
+                        }
+                    }
+                    "bitsOf" => format!("((int64_t){})", bits),
+                    "rotateLeft" => {
+                        let u = self.tmp();
+                        let n = self.tmp();
+                        self.emit(fs, &format!("{} {} = ({})({}); int64_t {} = (({}) % {} + {}) % {};", ut, u, ut, vs[0], n, vs[1], bits, bits, bits));
+                        format!("(({})({} ? ({})(({} << {}) | ({} >> ({} - {}))) : {}))", c, n, ut, u, n, u, bits, n, u)
+                    }
+                    "swapBytes" => match bits {
+                        8 => vs[0].clone(),
+                        _ => format!("(({})__builtin_bswap{}((uint{}_t)({})))", c, bits, bits, vs[0]),
+                    },
+                    "minOf" => format!("(({}){})", c, min),
+                    "maxOf" => format!("(({}){})", c, max),
+                    "addOverflows" => format!("__builtin_add_overflow({}, {}, {})", vs[0], vs[1], vs[2]),
+                    "subOverflows" => format!("__builtin_sub_overflow({}, {}, {})", vs[0], vs[1], vs[2]),
+                    "mulOverflows" => format!("__builtin_mul_overflow({}, {}, {})", vs[0], vs[1], vs[2]),
+                    "parseRadix" => {
+                        let u = self.tmp();
+                        let ok = self.tmp();
+                        self.emit(fs, &format!("uint64_t {} = 0; bool {} = gojo_parse_int({}, {}, {}, (uint64_t){}, &{}); if ({}) *({}) = ({}){};", u, ok, vs[0], vs[1], k.signed(), max, u, ok, vs[2], c, u));
+                        ok
+                    }
+                    _ => {
+                        let r = self.tmp();
+                        self.emit(fs, &format!("gojo_string {} = {{0}}; gojo_fmt_radix(&{}, (int64_t)({}), {}, {}, false);", r, r, vs[0], k.signed(), vs[1]));
+                        r
+                    }
+                }
+            }
+            _ => return None,
+        };
+        Some(r)
     }
 
     /// Pointer to the Mutex struct behind a (possibly arc-wrapped) receiver expression.
@@ -5942,6 +6100,653 @@ static void intro_{m}({c} *a, int64_t n, int depth) {{\n    while (n > 24) {{\n 
         }
         b.push_str("}\n");
         self.bodies.push_str(&b);
+        name
+    }
+}
+
+// ------------------------------------------------------------------
+// JSON: `json.encode` and `json.decode` of any type
+// ------------------------------------------------------------------
+//
+// One encoder and one decoder per type, like the `fmt_` helpers: the
+// encoder writes compact JSON straight into a String, and the decoder pulls
+// tokens from the text (runtime/gojo_lib.c) straight into the value, with no
+// tree in between. Structs are objects with their fields' names as keys,
+// enums without data are strings, other enums are a string for a variant
+// without fields and `{"Variant": {fields}}` for one with fields, tuples
+// and sets are arrays, `?T` is null or the value, and `json.Value` is any
+// JSON. A decoder leaves nothing to drop when it fails.
+
+impl<'a> Gen<'a> {
+    fn json_intrinsic(&mut self, fs: &mut Fs, qn: &str, targs: &[Ty], args: &[TArg], sp: Span) -> Option<String> {
+        let op = match qn {
+            "json.encode" | "json.encodePretty" | "json.toValue" => "encode",
+            "json.decode" | "json.fromValue" => "decode",
+            _ => return None,
+        };
+        let t = targs[0].clone();
+        self.json_site = (sp, op);
+        self.json_ctx.clear();
+        let r = self.tmp();
+        match qn {
+            "json.encode" | "json.encodePretty" | "json.toValue" => {
+                let f = self.jenc_fn(&t);
+                let p = self.addr(fs, &args[0].e);
+                self.emit(fs, &format!("gojo_string {} = {{0}}; {}(&{}, {});", r, f, r, p));
+                if qn == "json.encodePretty" {
+                    let q = self.tmp();
+                    self.emit(fs, &format!("gojo_string {q} = {{0}}; gojo_json___indent(gojo_string_view(&{r}), 2, &{q}); free({r}.ptr);"));
+                    return Some(q);
+                }
+                if qn == "json.toValue" {
+                    // what the encoder wrote, read back as a tree
+                    let vt = self.json_value_ty();
+                    let res = self.jdec_call(fs, &vt, &format!("gojo_string_view(&{})", r));
+                    let l = self.loc(sp);
+                    self.emit(fs, &format!("free({r}.ptr); if (!{res}.ok) gojo_panic(\"json.toValue: the value is nested too deep\", {l});"));
+                    return Some(format!("{}.u.val", res));
+                }
+                Some(r)
+            }
+            _ => {
+                if qn == "json.fromValue" {
+                    let vt = self.json_value_ty();
+                    let (f, _) = self.printing_method(&vt, "encode").expect("json.Value.encode");
+                    let p = self.addr(fs, &args[0].e);
+                    self.emit(fs, &format!("gojo_string {} = {}({});", r, f, p));
+                    let res = self.jdec_call(fs, &t, &format!("gojo_string_view(&{})", r));
+                    self.emit(fs, &format!("free({}.ptr);", r));
+                    return Some(res);
+                }
+                let text = self.expr(fs, &args[0].e);
+                self.emit(fs, &format!("gojo_str {} = {};", r, text));
+                Some(self.jdec_call(fs, &t, &r))
+            }
+        }
+    }
+
+    fn json_value_ty(&self) -> Ty {
+        let pkg = self.prog.packages.iter().find(|p| p.is_std && p.name == "json").expect("std/json");
+        let Some(Sym::Type(d)) = pkg.items.get("Value") else { unreachable!() };
+        Ty::Adt(*d, std::rc::Rc::new(vec![]))
+    }
+
+    /// Decodes a `t` from the C `gojo_str` expression `text` (evaluated
+    /// once): the C name of a `t ! json.Error` result.
+    fn jdec_call(&mut self, fs: &mut Fs, t: &Ty, text: &str) -> String {
+        let pkg = self.prog.packages.iter().find(|p| p.is_std && p.name == "json").expect("std/json");
+        let Some(Sym::Type(ed)) = pkg.items.get("Error") else { unreachable!() };
+        let et = Ty::Adt(*ed, std::rc::Rc::new(vec![]));
+        let rt = Ty::Result(std::rc::Rc::new(t.clone()), std::rc::Rc::new(et));
+        let rc = self.cty(&rt);
+        let tf: &'a TFunc = self.tf[&fs.tf.func];
+        let f = self.jdec_fn(tf, t);
+        let c = self.cty(t);
+        let drop = if self.needs_drop(t) { format!(" else {}(&v);", self.drop_fn(t)) } else { String::new() };
+        let r = self.tmp();
+        self.emit(fs, &format!("{rc} {r}; {{ gojo_str s = {text}; gojo_jdec d; gojo_jdec_init(&d, s); {c} v; if ({f}(&d, &v)) {{ if (gojo_jdec_end(&d)) {{ {r}.ok = 1; {r}.u.val = v; }}{drop} }} if (d.errpos >= 0) {{ gojo_string msg = {{0}}; int64_t at = gojo_jdec_result(&d, &msg), line, col; gojo_jdec_linecol(s, at, &line, &col); {r}.ok = 0; {r}.u.err.f_msg = msg; {r}.u.err.f_line = line; {r}.u.err.f_column = col; }} gojo_jdec_free(&d); }}"));
+        r
+    }
+
+    fn is_json_value(&self, t: &Ty) -> bool {
+        match t {
+            Ty::Adt(d, _) => {
+                let def = self.prog.def(*d);
+                let pkg = &self.prog.packages[def.pkg as usize];
+                def.name == "Value" && pkg.name == "json" && pkg.is_std
+            }
+            _ => false,
+        }
+    }
+
+    /// Records that `t` can't go to or from JSON (the first such type).
+    fn json_bad(&mut self, t: &Ty, why: &str) {
+        if self.json_err.is_some() {
+            return;
+        }
+        let (sp, op) = self.json_site;
+        let at = if (sp.file as usize) < self.sm.files.len() {
+            let f = self.sm.file(sp.file);
+            let (l, c) = f.line_col(sp.lo);
+            format!("{}:{}:{}: ", f.path, l, c)
+        } else {
+            String::new()
+        };
+        let via = if self.json_ctx.is_empty() { String::new() } else { format!(" (in {})", self.json_ctx.join(" in ")) };
+        self.json_err = Some(format!("{}`json.{}` can't handle `{}`{}: {}", at, op, self.prog.show(t), via, why));
+    }
+
+    fn json_unsupported(&self, t: &Ty) -> &'static str {
+        match t {
+            Ty::Result(..) => "a result has no JSON form (use a struct or an enum)",
+            Ty::Iface(..) => "an interface value could be any type (use an enum)",
+            Ty::Func(_) => "a function has no JSON form",
+            Ty::Ptr(_) => "a raw pointer has no JSON form",
+            Ty::Weak(_) => "a weak reference has no JSON form",
+            Ty::Mutex(_) | Ty::MutexRef(_) => "a lock has no JSON form (convert what it guards)",
+            Ty::Sender(_) | Ty::Receiver(_) => "a channel has no JSON form",
+            Ty::Iso(_) => "an isolated value has no JSON form (take it out first)",
+            _ => "it has no JSON form",
+        }
+    }
+
+    /// `static void jenc_M(gojo_string *b, T *p)`: `*p` as compact JSON.
+    fn jenc_fn(&mut self, t: &Ty) -> String {
+        if self.runaway_type(t) {
+            return "gojo_runaway".into();
+        }
+        let m = self.mangle(t);
+        let name = format!("jenc_{}", m);
+        let c = self.cty(t);
+        let sig = format!("static void {}(gojo_string *b, {} *p)", name, c);
+        if !self.helper_header(&name, &sig) {
+            return name;
+        }
+        let mut b = format!("{} {{\n", sig);
+        match t {
+            Ty::Unit => b.push_str("    (void)p; gojo_fmt_cstr(b, \"null\");\n"),
+            Ty::Bool => b.push_str("    gojo_fmt_cstr(b, *p ? \"true\" : \"false\");\n"),
+            Ty::Int(k) => {
+                if k.signed() {
+                    b.push_str("    gojo_fmt_i64(b, (int64_t)*p);\n")
+                } else {
+                    b.push_str("    gojo_fmt_u64(b, (uint64_t)*p);\n")
+                }
+            }
+            Ty::F32 | Ty::F64 => b.push_str("    gojo_jenc_f64(b, (double)*p);\n"),
+            Ty::Str => b.push_str("    gojo_jenc_str(b, *p);\n"),
+            Ty::String => b.push_str("    gojo_jenc_str(b, gojo_string_view(p));\n"),
+            Ty::Vec(el) | Ty::Slice(el) => {
+                let el = (**el).clone();
+                let ec = self.cty(&el);
+                let f = self.jenc_fn(&el);
+                let _ = writeln!(b, "    gojo_string_push_byte(b, '[');\n    for (int64_t i = 0; i < p->len; i++) {{ if (i) gojo_string_push_byte(b, ','); {}(b, &(({} *)p->ptr)[i]); }}\n    gojo_string_push_byte(b, ']');", f, ec);
+            }
+            Ty::Array(el, n) => {
+                let el = (**el).clone();
+                let f = self.jenc_fn(&el);
+                let _ = writeln!(b, "    gojo_string_push_byte(b, '[');\n    for (int64_t i = 0; i < {}; i++) {{ if (i) gojo_string_push_byte(b, ','); {}(b, &p->a[i]); }}\n    gojo_string_push_byte(b, ']');", n, f);
+            }
+            Ty::Map(k, v) => {
+                let (k, v) = ((**k).clone(), (**v).clone());
+                let (ent, _) = self.map_ent(&k, &v);
+                let fk = self.jkeyenc_fn(&k);
+                let fv = self.jenc_fn(&v);
+                let _ = writeln!(b, "    gojo_string_push_byte(b, '{{');\n    int first = 1;\n    for (int64_t i = 0; i < p->n_entries; i++) {{ {e} *e = (({e} *)p->entries) + i; if (!e->live) continue; if (!first) gojo_string_push_byte(b, ','); first = 0; {fk}(b, &e->k); gojo_string_push_byte(b, ':'); {fv}(b, &e->v); }}\n    gojo_string_push_byte(b, '}}');", e = ent, fk = fk, fv = fv);
+            }
+            Ty::Option(inner) => {
+                let inner = (**inner).clone();
+                let f = self.jenc_fn(&inner);
+                let _ = writeln!(b, "    if ({}) {}(b, &{}); else gojo_fmt_cstr(b, \"null\");", self.osome(t, "(*p)"), f, self.oval(t, "(*p)"));
+            }
+            Ty::Box(inner) => {
+                let inner = (**inner).clone();
+                let f = self.jenc_fn(&inner);
+                let _ = writeln!(b, "    {}(b, *p);", f);
+            }
+            Ty::Rc(inner) | Ty::Arc(inner) => {
+                let inner = (**inner).clone();
+                self.ensure_rcbox(&inner);
+                let f = self.jenc_fn(&inner);
+                let _ = writeln!(b, "    {}(b, &(*p)->val);", f);
+            }
+            Ty::Cell(inner) => {
+                let inner = (**inner).clone();
+                let f = self.jenc_fn(&inner);
+                let _ = writeln!(b, "    {}(b, p);", f);
+            }
+            Ty::Adt(d, args) if self.is_json_value(t) => {
+                let _ = (d, args);
+                let (f, _) = self.printing_method(t, "encode").expect("json.Value.encode");
+                let _ = writeln!(b, "    gojo_string s = {}(p);\n    gojo_string_push(b, gojo_string_view(&s));\n    free(s.ptr);", f);
+            }
+            Ty::Adt(d, args) => {
+                let def = self.prog.def(*d).clone();
+                match &def.kind {
+                    TypeDefKind::Struct { .. } => {
+                        let fsx = self.prog.field_tys(*d, args);
+                        if def.newtype {
+                            let f = self.jenc_fn(&fsx[0].1);
+                            let _ = writeln!(b, "    {}(b, &p->f_{});", f, fsx[0].0);
+                        } else if Some(*d) == self.prog.prelude_type("Set") && fsx.len() == 1 && matches!(fsx[0].1, Ty::Map(..)) {
+                            let Ty::Map(k, v) = fsx[0].1.clone() else { unreachable!() };
+                            let (ent, _) = self.map_ent(&k, &v);
+                            let fk = self.jenc_fn(&k);
+                            let _ = writeln!(b, "    gojo_string_push_byte(b, '[');\n    int first = 1;\n    for (int64_t i = 0; i < p->f_{f}.n_entries; i++) {{ {e} *e = (({e} *)p->f_{f}.entries) + i; if (!e->live) continue; if (!first) gojo_string_push_byte(b, ','); first = 0; {fk}(b, &e->k); }}\n    gojo_string_push_byte(b, ']');", f = fsx[0].0, e = ent, fk = fk);
+                        } else if def.tuple {
+                            b.push_str("    gojo_string_push_byte(b, '[');\n");
+                            for (i, (fname, ft)) in fsx.iter().enumerate() {
+                                let f = self.jenc_fn(ft);
+                                let _ = writeln!(b, "    {}{}(b, &p->f_{});", if i > 0 { "gojo_string_push_byte(b, ','); " } else { "" }, f, fname);
+                            }
+                            b.push_str("    gojo_string_push_byte(b, ']');\n");
+                        } else {
+                            b.push_str("    gojo_string_push_byte(b, '{');\n");
+                            for (i, (fname, ft)) in fsx.iter().enumerate() {
+                                self.json_ctx.push(format!("field `{}` of `{}`", fname, def.name));
+                                let f = self.jenc_fn(ft);
+                                self.json_ctx.pop();
+                                let key = format!("{}\"{}\":", if i > 0 { "," } else { "" }, fname);
+                                let _ = writeln!(b, "    gojo_fmt_cstr(b, {}); {}(b, &p->f_{});", c_string(&key), f, fname);
+                            }
+                            b.push_str("    gojo_string_push_byte(b, '}');\n");
+                        }
+                    }
+                    TypeDefKind::Enum { variants } => {
+                        b.push_str("    switch (p->tag) {\n");
+                        for (vi, v) in variants.iter().enumerate() {
+                            let fsx = self.prog.variant_tys(*d, args, vi);
+                            if fsx.is_empty() {
+                                let _ = writeln!(b, "    case {}: gojo_fmt_cstr(b, {}); break;", vi, c_string(&format!("\"{}\"", v.name)));
+                                continue;
+                            }
+                            let _ = write!(b, "    case {}: gojo_fmt_cstr(b, {});", vi, c_string(&format!("{{\"{}\":{{", v.name)));
+                            for (i, (fname, ft)) in fsx.iter().enumerate() {
+                                self.json_ctx.push(format!("field `{}` of `{}.{}`", fname, def.name, v.name));
+                                let f = self.jenc_fn(ft);
+                                self.json_ctx.pop();
+                                let key = format!("{}\"{}\":", if i > 0 { "," } else { "" }, fname);
+                                let _ = write!(b, " gojo_fmt_cstr(b, {}); {}(b, &p->u.v{}.f_{});", c_string(&key), f, vi, fname);
+                            }
+                            b.push_str(" gojo_fmt_cstr(b, \"}}\"); break;\n");
+                        }
+                        b.push_str("    default: break;\n    }\n");
+                    }
+                    _ => self.json_bad(t, "it has no JSON form"),
+                }
+            }
+            _ => {
+                let why = self.json_unsupported(t);
+                self.json_bad(t, why);
+            }
+        }
+        b.push_str("}\n");
+        self.bodies.push_str(&b);
+        name
+    }
+
+    /// The types a map key can be: written as a JSON string.
+    fn json_key_ok(&self, k: &Ty) -> bool {
+        match k {
+            Ty::String | Ty::Str | Ty::Int(_) => true,
+            Ty::Adt(d, args) => {
+                let def = self.prog.def(*d);
+                if def.newtype {
+                    return self.json_key_ok(&self.prog.field_tys(*d, args)[0].1);
+                }
+                def.is_simple_enum()
+            }
+            _ => false,
+        }
+    }
+
+    /// `static void jkey_M(gojo_string *b, K *p)`: a map key as a JSON string.
+    fn jkeyenc_fn(&mut self, k: &Ty) -> String {
+        if !self.json_key_ok(k) {
+            self.json_bad(k, "a map key must be a string, an integer or an enum without data");
+            return "gojo_runaway".into();
+        }
+        let name = format!("jkey_{}", self.mangle(k));
+        let c = self.cty(k);
+        let sig = format!("static void {}(gojo_string *b, {} *p)", name, c);
+        if !self.helper_header(&name, &sig) {
+            return name;
+        }
+        let mut b = format!("{} {{\n", sig);
+        match k {
+            Ty::Int(_) => {
+                let f = self.jenc_fn(k);
+                let _ = writeln!(b, "    gojo_string_push_byte(b, '\"'); {}(b, p); gojo_string_push_byte(b, '\"');", f);
+            }
+            Ty::Adt(d, args) if self.prog.def(*d).newtype => {
+                let (fname, ft) = self.prog.field_tys(*d, args)[0].clone();
+                let f = self.jkeyenc_fn(&ft);
+                let _ = writeln!(b, "    {}(b, &p->f_{});", f, fname);
+            }
+            _ => {
+                let f = self.jenc_fn(k);
+                let _ = writeln!(b, "    {}(b, p);", f);
+            }
+        }
+        b.push_str("}\n");
+        self.bodies.push_str(&b);
+        name
+    }
+
+    /// `static bool jkd_M(gojo_jdec *d, gojo_str s, K *out)`: a map key from
+    /// the text of a JSON key.
+    fn jkeydec_fn(&mut self, k: &Ty) -> String {
+        if !self.json_key_ok(k) || *k == Ty::Str {
+            self.json_bad(k, if *k == Ty::Str { "a `str` is a view of other memory: decode into a `String`" } else { "a map key must be a string, an integer or an enum without data" });
+            return "gojo_runaway".into();
+        }
+        let name = format!("jkd_{}", self.mangle(k));
+        let c = self.cty(k);
+        let sig = format!("static bool {}(gojo_jdec *d, gojo_str s, {} *out)", name, c);
+        if !self.helper_header(&name, &sig) {
+            return name;
+        }
+        let mut b = format!("{} {{\n", sig);
+        match k {
+            Ty::String => b.push_str("    (void)d; *out = gojo_string_from(s);\n    return true;\n"),
+            Ty::Int(_) => {
+                // the key's text, read as a JSON number
+                let f = self.jdec_scalar(k);
+                let _ = writeln!(b, "    gojo_jdec kd; gojo_jdec_init(&kd, s);\n    bool ok = {}(&kd, out) && kd.pos == kd.len;\n    gojo_jdec_free(&kd);\n    if (!ok) return gojo_jdec_fail_str(d, \"the key \\\"\", s, {});\n    return true;", f, c_string(&format!("\" isn't a valid `{}`", self.prog.show(k))));
+            }
+            Ty::Adt(d, args) if self.prog.def(*d).newtype => {
+                let (fname, ft) = self.prog.field_tys(*d, args)[0].clone();
+                let f = self.jkeydec_fn(&ft);
+                let _ = writeln!(b, "    return {}(d, s, &out->f_{});", f, fname);
+            }
+            Ty::Adt(d, _) => {
+                let def = self.prog.def(*d).clone();
+                for (vi, v) in def.variants().iter().enumerate() {
+                    let _ = writeln!(b, "    if (s.len == {} && memcmp(s.ptr, {}, {}) == 0) {{ memset(out, 0, sizeof *out); out->tag = {}; return true; }}", v.name.len(), c_string(&v.name), v.name.len(), vi);
+                }
+                let names: Vec<&str> = def.variants().iter().map(|v| v.name.as_str()).collect();
+                let _ = writeln!(b, "    return gojo_jdec_fail_str(d, \"unknown key \\\"\", s, {});", c_string(&format!("\" (a `{}`: one of {})", def.name, names.join(", "))));
+            }
+            _ => unreachable!(),
+        }
+        b.push_str("}\n");
+        self.bodies.push_str(&b);
+        name
+    }
+
+    /// The decoder of a number or bool type (no allocation, no tf needed).
+    fn jdec_scalar(&mut self, t: &Ty) -> String {
+        let name = format!("jdec_{}", self.mangle(t));
+        let c = self.cty(t);
+        let sig = format!("static bool {}(gojo_jdec *d, {} *out)", name, c);
+        if !self.helper_header(&name, &sig) {
+            return name;
+        }
+        let mut b = format!("{} {{\n", sig);
+        match t {
+            Ty::Bool => b.push_str("    return gojo_jdec_bool(d, out);\n"),
+            Ty::Int(k) => {
+                let bits = k.bits();
+                let ty = c_string(&self.prog.show(t));
+                if k.signed() {
+                    let _ = writeln!(b, "    int64_t v;\n    if (!gojo_jdec_i64(d, &v, INT{bits}_MIN, INT{bits}_MAX, {ty})) return false;\n    *out = ({c})v;\n    return true;");
+                } else {
+                    let _ = writeln!(b, "    uint64_t v;\n    if (!gojo_jdec_u64(d, &v, UINT{bits}_MAX, {ty})) return false;\n    *out = ({c})v;\n    return true;");
+                }
+            }
+            Ty::F64 => b.push_str("    return gojo_jdec_f64(d, out);\n"),
+            Ty::F32 => b.push_str("    return gojo_jdec_f32(d, out);\n"),
+            _ => unreachable!(),
+        }
+        b.push_str("}\n");
+        self.bodies.push_str(&b);
+        name
+    }
+
+    /// `static bool jdec_M(gojo_jdec *d, T *out)`: reads a `t`; on success
+    /// `*out` holds it, on failure there is nothing to drop and `d` has the
+    /// error. `tf` is any function, for generating field defaults.
+    fn jdec_fn(&mut self, tf: &'a TFunc, t: &Ty) -> String {
+        if self.runaway_type(t) {
+            return "gojo_runaway".into();
+        }
+        if matches!(t, Ty::Bool | Ty::Int(_) | Ty::F32 | Ty::F64) {
+            return self.jdec_scalar(t);
+        }
+        let m = self.mangle(t);
+        let name = format!("jdec_{}", m);
+        let c = self.cty(t);
+        let sig = format!("static bool {}(gojo_jdec *d, {} *out)", name, c);
+        if !self.helper_header(&name, &sig) {
+            return name;
+        }
+        let mut b = format!("{} {{\n", sig);
+        match t {
+            Ty::Unit => b.push_str("    if (!gojo_jdec_null(d)) return gojo_jdec_expected(d, \"null\");\n    memset(out, 0, sizeof *out);\n    return true;\n"),
+            Ty::String => b.push_str("    return gojo_jdec_str(d, out);\n"),
+            Ty::Vec(el) => {
+                let el = (**el).clone();
+                let ec = self.cty(&el);
+                let f = self.jdec_fn(tf, &el);
+                let dv = self.drop_fn(t);
+                let _ = writeln!(b, "    if (!gojo_jdec_open(d, '[')) return false;\n    gojo_vec v = {{0}};\n    for (int64_t i = 0;; i++) {{\n        int r = gojo_jdec_item(d, i);\n        if (r == 0) break;\n        if (r < 0) goto fail;\n        gojo_vec_reserve(&v, 1, sizeof({ec}));\n        if (!{f}(d, (({ec} *)v.ptr) + v.len)) {{ gojo_jdec_at_index(d, i); goto fail; }}\n        v.len++;\n    }}\n    *out = v;\n    return true;\nfail:\n    {dv}(&v);\n    return false;");
+            }
+            Ty::Array(el, n) => {
+                let el = (**el).clone();
+                let f = self.jdec_fn(tf, &el);
+                let drop = if self.needs_drop(&el) { format!("for (int64_t k = 0; k < got; k++) {}(&a.a[k]);", self.drop_fn(&el)) } else { String::new() };
+                let _ = writeln!(b, "    if (!gojo_jdec_open(d, '[')) return false;\n    {c} a;\n    int64_t got = 0;\n    for (int64_t i = 0;; i++) {{\n        int r = gojo_jdec_item(d, i);\n        if (r == 0) break;\n        if (r < 0) goto fail;\n        if (i >= {n}) {{ gojo_jdec_fail(d, {more}); goto fail; }}\n        if (!{f}(d, &a.a[i])) {{ gojo_jdec_at_index(d, i); goto fail; }}\n        got++;\n    }}\n    if (got < {n}) {{ gojo_jdec_fail(d, {fewer}); goto fail; }}\n    *out = a;\n    return true;\nfail:\n    {drop}\n    return false;", more = c_string(&format!("more than {} elements", n)), fewer = c_string(&format!("fewer than {} elements", n)));
+            }
+            Ty::Map(k, v) => {
+                let (k, v) = ((**k).clone(), (**v).clone());
+                let (ent, mm) = self.map_ent(&k, &v);
+                let kc = self.cty(&k);
+                let vc = self.cty(&v);
+                let fk = self.jkeydec_fn(&k);
+                let fv = self.jdec_fn(tf, &v);
+                let dm = self.drop_fn(t);
+                let dk = if self.needs_drop(&k) { format!("{}(&kv);", self.drop_fn(&k)) } else { String::new() };
+                let dv = if self.needs_drop(&v) { format!("{}(&e->v);", self.drop_fn(&v)) } else { String::new() };
+                // the key's text for the path of an error: a String key is
+                // its own text; other keys keep a copy (the view is reused)
+                let (keep, path, free) = if k == Ty::String {
+                    (String::new(), "gojo_jdec_at_key(d, kv.ptr, kv.len);".to_string(), String::new())
+                } else {
+                    ("gojo_string kt = gojo_string_from(key);".to_string(), "gojo_jdec_at_key(d, kt.ptr, kt.len);".to_string(), "free(kt.ptr);".to_string())
+                };
+                let _ = writeln!(b, "    if (!gojo_jdec_open(d, '{{')) return false;\n    gojo_map m = {{0}};\n    for (int64_t i = 0;; i++) {{\n        gojo_str key;\n        int r = gojo_jdec_key(d, i, &key);\n        if (r == 0) break;\n        if (r < 0) goto fail;\n        {kc} kv;\n        if (!{fk}(d, key, &kv)) goto fail;\n        {keep}\n        {vc} vv;\n        if (!{fv}(d, &vv)) {{ {path} {dk} {free} goto fail; }}\n        {free}\n        bool ex;\n        {ent} *e = ms_{mm}(&m, &kv, &ex);\n        if (ex) {{ {dv} {dk} }} else e->k = kv;\n        e->v = vv;\n    }}\n    *out = m;\n    return true;\nfail:\n    {dm}(&m);\n    return false;");
+            }
+            Ty::Option(inner) => {
+                let inner = (**inner).clone();
+                let ic = self.cty(&inner);
+                let f = self.jdec_fn(tf, &inner);
+                let z = self.zero(t);
+                let set = self.oset(t, "(*out)", "v");
+                let _ = writeln!(b, "    if (gojo_jdec_null(d)) {{ *out = {z}; return true; }}\n    {ic} v;\n    if (!{f}(d, &v)) return false;\n    {set}\n    return true;");
+            }
+            Ty::Box(inner) => {
+                let inner = (**inner).clone();
+                let ic = self.cty(&inner);
+                let f = self.jdec_fn(tf, &inner);
+                let _ = writeln!(b, "    {ic} v;\n    if (!{f}(d, &v)) return false;\n    {ic} *bx = gojo_box_alloc(sizeof({ic}));\n    *bx = v;\n    *out = bx;\n    return true;");
+            }
+            Ty::Rc(inner) | Ty::Arc(inner) => {
+                let inner = (**inner).clone();
+                let ic = self.cty(&inner);
+                let bx = self.ensure_rcbox(&inner);
+                let f = self.jdec_fn(tf, &inner);
+                let _ = writeln!(b, "    {ic} v;\n    if (!{f}(d, &v)) return false;\n    {bx} *r = gojo_box_alloc(sizeof({bx}));\n    r->strong = 1; r->weak = 0; r->val = v;\n    *out = r;\n    return true;");
+            }
+            Ty::Cell(inner) => {
+                let inner = (**inner).clone();
+                let f = self.jdec_fn(tf, &inner);
+                let _ = writeln!(b, "    return {}(d, out);", f);
+            }
+            Ty::Adt(..) if self.is_json_value(t) => {
+                // any JSON: checked by skipping it, then parsed by json.parse
+                let Some(Sym::Func(pf)) = self.prog.packages.iter().find(|p| p.is_std && p.name == "json").and_then(|p| p.items.get("parse").cloned()) else { unreachable!() };
+                let pr = self.prog.func(pf).ret.clone();
+                let rc = self.cty(&pr);
+                let f = self.instance(pf, vec![]);
+                let de = match &pr {
+                    Ty::Result(_, e) if self.needs_drop(e) => format!("{}(&r.u.err);", self.drop_fn(e)),
+                    _ => String::new(),
+                };
+                let _ = writeln!(b, "    if (gojo_jdec_peek(d) < 0) return gojo_jdec_expected(d, \"a value\");\n    int64_t lo = d->pos;\n    if (!gojo_jdec_skip(d)) return false;\n    gojo_str s = {{ d->s + lo, d->pos - lo }};\n    {rc} r = {f}(s);\n    if (!r.ok) {{ {de} d->pos = lo; return gojo_jdec_fail(d, \"invalid JSON\"); }}\n    *out = r.u.val;\n    return true;");
+            }
+            Ty::Adt(d, args) => {
+                let def = self.prog.def(*d).clone();
+                match &def.kind {
+                    TypeDefKind::Struct { .. } => {
+                        let fsx = self.prog.field_tys(*d, args);
+                        if def.newtype {
+                            let f = self.jdec_fn(tf, &fsx[0].1);
+                            let _ = writeln!(b, "    return {}(d, &out->f_{});", f, fsx[0].0);
+                        } else if Some(*d) == self.prog.prelude_type("Set") && fsx.len() == 1 && matches!(fsx[0].1, Ty::Map(..)) {
+                            let Ty::Map(k, v) = fsx[0].1.clone() else { unreachable!() };
+                            let (ent, mm) = self.map_ent(&k, &v);
+                            let kc = self.cty(&k);
+                            let fk = self.jdec_fn(tf, &k);
+                            let dm = self.drop_fn(&fsx[0].1);
+                            let dk = if self.needs_drop(&k) { format!("{}(&kv);", self.drop_fn(&k)) } else { String::new() };
+                            let _ = writeln!(b, "    if (!gojo_jdec_open(d, '[')) return false;\n    gojo_map m = {{0}};\n    for (int64_t i = 0;; i++) {{\n        int r = gojo_jdec_item(d, i);\n        if (r == 0) break;\n        if (r < 0) goto fail;\n        {kc} kv;\n        if (!{fk}(d, &kv)) {{ gojo_jdec_at_index(d, i); goto fail; }}\n        bool ex;\n        {ent} *e = ms_{mm}(&m, &kv, &ex);\n        if (ex) {{ {dk} }} else {{ e->k = kv; e->v = true; }}\n    }}\n    out->f_{f} = m;\n    return true;\nfail:\n    {dm}(&m);\n    return false;", f = fsx[0].0);
+                        } else if def.tuple {
+                            let n = fsx.len();
+                            b.push_str("    if (!gojo_jdec_open(d, '[')) return false;\n    int64_t got = 0;\n    int r;\n");
+                            for (i, (fname, ft)) in fsx.iter().enumerate() {
+                                let fc = self.cty(ft);
+                                let f = self.jdec_fn(tf, ft);
+                                let _ = writeln!(b, "    {fc} v{i};\n    r = gojo_jdec_item(d, {i});\n    if (r < 0) goto fail;\n    if (r == 0) {{ gojo_jdec_fail(d, {few}); goto fail; }}\n    if (!{f}(d, &v{i})) {{ gojo_jdec_at_index(d, {i}); goto fail; }}\n    got++;\n    out->f_{fname} = v{i};", few = c_string(&format!("expected {} elements, found {}", n, i)));
+                            }
+                            let _ = writeln!(b, "    r = gojo_jdec_item(d, {n});\n    if (r < 0) goto fail;\n    if (r > 0) {{ gojo_jdec_fail(d, {more}); goto fail; }}\n    return true;\nfail:", more = c_string(&format!("more than {} elements", n)));
+                            for (i, (fname, ft)) in fsx.iter().enumerate() {
+                                if self.needs_drop(ft) {
+                                    let df = self.drop_fn(ft);
+                                    let _ = writeln!(b, "    if (got > {}) {}(&out->f_{});", i, df, fname);
+                                }
+                            }
+                            b.push_str("    return false;\n");
+                        } else {
+                            let fields: Vec<(String, Ty, Option<usize>)> = fsx.iter().enumerate().map(|(i, (n, t))| (n.clone(), t.clone(), def.fields()[i].default.as_ref().map(|_| i))).collect();
+                            let targets: Vec<String> = fsx.iter().map(|(n, _)| format!("out->f_{}", n)).collect();
+                            self.jdec_object(tf, &mut b, &def.name, *d, args, &fields, &targets, "");
+                        }
+                    }
+                    TypeDefKind::Enum { variants } => {
+                        let names: Vec<String> = variants.iter().map(|v| v.name.clone()).collect();
+                        let simple = def.is_simple_enum();
+                        let what = c_string(&format!("{} (a `{}`: one of {})", if simple { "a string" } else { "a string or an object" }, def.name, names.join(", ")));
+                        let unknown = c_string(&format!("\" (a `{}`: one of {})", def.name, names.join(", ")));
+                        let _ = writeln!(b, "    int c = gojo_jdec_peek(d);\n    gojo_str s;\n    if (c == '\"') {{\n        if (!gojo_jdec_strview(d, &s)) return false;");
+                        for (vi, v) in variants.iter().enumerate() {
+                            let m = format!("s.len == {} && memcmp(s.ptr, {}, {}) == 0", v.name.len(), c_string(&v.name), v.name.len());
+                            if v.fields.is_empty() {
+                                let _ = writeln!(b, "        if ({}) {{ memset(out, 0, sizeof *out); out->tag = {}; return true; }}", m, vi);
+                            } else {
+                                let _ = writeln!(b, "        if ({}) return gojo_jdec_fail(d, {});", m, c_string(&format!("the variant `{}` of `{}` has fields: write {{\"{}\": {{...}}}}", v.name, def.name, v.name)));
+                            }
+                        }
+                        let _ = writeln!(b, "        return gojo_jdec_fail_str(d, \"unknown variant \\\"\", s, {unknown});\n    }}");
+                        if !simple {
+                            let _ = writeln!(b, "    if (c == '{{') {{\n        if (!gojo_jdec_open(d, '{{')) return false;\n        int r = gojo_jdec_key(d, 0, &s);\n        if (r < 0) return false;\n        if (r == 0) return gojo_jdec_fail(d, {empty});\n        bool ok;", empty = c_string(&format!("an empty object isn't a `{}`", def.name)));
+                            for (vi, v) in variants.iter().enumerate() {
+                                let f = self.jdec_variant(tf, &def, *d, args, vi);
+                                let null = if v.fields.is_empty() { format!("if (gojo_jdec_null(d)) {{ memset(out, 0, sizeof *out); out->tag = {}; ok = true; }} else ", vi) } else { String::new() };
+                                let _ = writeln!(b, "        if (s.len == {n} && memcmp(s.ptr, {q}, {n}) == 0) {{ {null}ok = {f}(d, out); if (!ok) {{ gojo_jdec_at_key(d, (const uint8_t *){q}, {n}); return false; }} }} else", n = v.name.len(), q = c_string(&v.name));
+                            }
+                            let dr = if self.needs_drop(t) { format!("{}(out);", self.drop_fn(t)) } else { String::new() };
+                            let _ = writeln!(b, "        return gojo_jdec_fail_str(d, \"unknown variant \\\"\", s, {unknown});\n        r = gojo_jdec_key(d, 1, &s);\n        if (r != 0) {{ if (r > 0) gojo_jdec_fail(d, {one}); {dr} return false; }}\n        return true;\n    }}", one = c_string(&format!("an object holding a `{}` has a single key, the variant", def.name)));
+                        }
+                        let _ = writeln!(b, "    return gojo_jdec_expected(d, {});", what);
+                    }
+                    _ => self.json_bad(t, "it has no JSON form"),
+                }
+            }
+            Ty::Str | Ty::Slice(_) => self.json_bad(t, "a view of other memory can't be decoded: use `String` or `Vec`"),
+            _ => {
+                let why = self.json_unsupported(t);
+                self.json_bad(t, why);
+            }
+        }
+        b.push_str("}\n");
+        self.bodies.push_str(&b);
+        name
+    }
+
+    /// `static bool jdecv_M_i(gojo_jdec *d, T *out)`: the object of fields of
+    /// variant `vi`, into `*out`.
+    fn jdec_variant(&mut self, tf: &'a TFunc, def: &TypeDef, d: DefId, args: &std::rc::Rc<Vec<Ty>>, vi: usize) -> String {
+        let t = Ty::Adt(d, args.clone());
+        let name = format!("jdecv_{}_{}", self.mangle(&t), vi);
+        let c = self.cty(&t);
+        let sig = format!("static bool {}(gojo_jdec *d, {} *out)", name, c);
+        if !self.helper_header(&name, &sig) {
+            return name;
+        }
+        let fsx = self.prog.variant_tys(d, args, vi);
+        let fields: Vec<(String, Ty, Option<usize>)> = fsx.iter().map(|(n, t)| (n.clone(), t.clone(), None)).collect();
+        let targets: Vec<String> = fsx.iter().map(|(n, _)| format!("out->u.v{}.f_{}", vi, n)).collect();
+        let mut b = format!("{} {{\n", sig);
+        let owner = format!("{}.{}", def.name, def.variants()[vi].name);
+        self.jdec_object(tf, &mut b, &owner, d, args, &fields, &targets, &format!("memset(out, 0, sizeof *out); out->tag = {};", vi));
+        b.push_str("}\n");
+        self.bodies.push_str(&b);
+        name
+    }
+
+    /// The body of a decoder of an object whose keys are `fields`: each is
+    /// read into a local, and on success stored to its target. A field left
+    /// out takes its default (`Some(i)`: field `i` of struct `d` has one),
+    /// or none for an optional field; any other is an error. Unknown keys
+    /// are skipped, and a repeated key keeps its last value.
+    #[allow(clippy::too_many_arguments)]
+    fn jdec_object(&mut self, tf: &'a TFunc, b: &mut String, owner: &str, d: DefId, args: &std::rc::Rc<Vec<Ty>>, fields: &[(String, Ty, Option<usize>)], targets: &[String], init: &str) {
+        b.push_str("    if (!gojo_jdec_open(d, '{')) return false;\n");
+        let mut decs = vec![];
+        let mut drops = vec![];
+        for (i, (fname, ft, _)) in fields.iter().enumerate() {
+            let fc = self.cty(ft);
+            let _ = writeln!(b, "    {} v{}; bool h{} = false;", fc, i, i);
+            self.json_ctx.push(format!("field `{}` of `{}`", fname, owner));
+            decs.push(self.jdec_fn(tf, ft));
+            self.json_ctx.pop();
+            drops.push(if self.needs_drop(ft) { Some(self.drop_fn(ft)) } else { None });
+        }
+        b.push_str("    for (int64_t i = 0;; i++) {\n        gojo_str key;\n        int r = gojo_jdec_key(d, i, &key);\n        if (r == 0) break;\n        if (r < 0) goto fail;\n");
+        for (i, (fname, _, _)) in fields.iter().enumerate() {
+            let again = match &drops[i] {
+                Some(df) => format!("if (h{i}) {{ {df}(&v{i}); h{i} = false; }} "),
+                None => String::new(),
+            };
+            let _ = writeln!(b, "        if (key.len == {n} && memcmp(key.ptr, {q}, {n}) == 0) {{ {again}if (!{f}(d, &v{i})) {{ gojo_jdec_at_key(d, (const uint8_t *){q}, {n}); goto fail; }} h{i} = true; continue; }}", n = fname.len(), q = c_string(fname), f = decs[i]);
+        }
+        b.push_str("        if (!gojo_jdec_skip(d)) goto fail;\n    }\n");
+        for (i, (fname, ft, dflt)) in fields.iter().enumerate() {
+            let fill = if let Some(fi) = dflt {
+                let f = self.jdflt_fn(tf, d, args, *fi);
+                format!("v{} = {}();", i, f)
+            } else if matches!(ft, Ty::Option(_)) {
+                format!("v{} = {};", i, self.zero(ft))
+            } else {
+                format!("{{ gojo_jdec_fail(d, {}); goto fail; }}", c_string(&format!("missing field `{}` of `{}`", fname, owner)))
+            };
+            let _ = writeln!(b, "    if (!h{i}) {fill}");
+        }
+        if !init.is_empty() {
+            let _ = writeln!(b, "    {}", init);
+        }
+        for (i, tg) in targets.iter().enumerate() {
+            let _ = writeln!(b, "    {} = v{};", tg, i);
+        }
+        b.push_str("    return true;\nfail:\n");
+        for (i, df) in drops.iter().enumerate() {
+            if let Some(df) = df {
+                let _ = writeln!(b, "    if (h{i}) {df}(&v{i});");
+            }
+        }
+        b.push_str("    return false;\n");
+    }
+
+    /// `static T dflt_M_i(void)`: the default value of field `i` of struct
+    /// `d`, its expression generated in a function of its own.
+    fn jdflt_fn(&mut self, tf: &'a TFunc, d: DefId, args: &std::rc::Rc<Vec<Ty>>, i: usize) -> String {
+        let st = Ty::Adt(d, args.clone());
+        let name = format!("dflt_{}_{}", self.mangle(&st), i);
+        let ft = self.prog.field_tys(d, args)[i].1.clone();
+        let c = self.cty(&ft);
+        let sig = format!("static {} {}(void)", c, name);
+        if !self.helper_header(&name, &sig) {
+            return name;
+        }
+        let mut nfs = Fs { tf, subst: HashMap::new(), out: String::new(), decls: String::new(), ind: 1, scopes: vec![], repr: HashMap::new(), flagged: HashSet::new(), flags: HashMap::new(), ret: ft.clone(), yields: false, err_mode: None, loop_labels: vec![], lb: None, line: (u32::MAX, 0), tscopes: HashMap::new(), bce: vec![], bce_steady: HashMap::new() };
+        nfs.scopes.push(Scope { kind: SK::Func, items: vec![], wait: None });
+        self.push_scope(&mut nfs, SK::Block);
+        let v = self.field_default(&mut nfs, d, args.as_slice(), i);
+        let r = self.tmp();
+        self.emit(&mut nfs, &format!("{} {} = {};", c, r, v));
+        self.cleanup_to(&mut nfs, 0);
+        self.emit(&mut nfs, &format!("return {};", r));
+        let _ = writeln!(self.bodies, "{} {{\n{}{}}}\n{}", sig, nfs.decls, nfs.out, C_LINE_MARK);
         name
     }
 }

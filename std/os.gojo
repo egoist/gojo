@@ -29,6 +29,15 @@ fn __chdir(path: str) -> int
 fn __setenv(name: str, value: str, unset: bool) -> int
 fn __tempDir(out: inout String)
 fn __run(prog: str, args: []String, input: []byte, capture: bool, out: inout Vec[byte], errout: inout Vec[byte], status: inout int) -> int
+fn __spawn(prog: str, args: []String, env: []String, setEnv: bool, dir: str, modes: []int, fds: inout Vec[int], pid: inout int) -> int
+fn __wait(pid: int) -> int
+fn __tryWait(pid: int) -> int
+fn __kill(pid: int, sig: int) -> int
+fn __environ(out: inout Vec[String])
+fn __notify(sigs: []int, fds: inout Vec[int]) -> int
+fn __unnotify(sigs: []int, wfd: int)
+fn __signalCode(signo: int) -> int
+fn __getpid() -> int
 
 fn check(what: str, code: int) ! Error {
     if code != 0 {
@@ -402,4 +411,353 @@ pub fn call(prog: str, args: []String) -> int ! Error {
     var status = 0
     try check(prog, __run(prog, args, "".bytes(), false, &out, &errout, &status))
     return status
+}
+
+// This process's ID.
+pub fn pid() -> int {
+    return __getpid()
+}
+
+// The environment variables of this process, as (name, value) pairs.
+pub fn environ() -> Vec[(String, String)] {
+    var all = Vec[String]{}
+    __environ(&all)
+    var out = Vec[(String, String)]{}
+    for kv in all {
+        if let (k, v) = kv.splitOnce("=") {
+            out.push((k.toString(), v.toString()))
+        }
+    }
+    return out
+}
+
+// How a child's standard stream is set up.
+pub copy enum Stdio {
+    // this process's own stream
+    Inherit
+    // a pipe: the `Process` holds the other end as a `File`
+    Pipe
+    // nothing: reads see the end at once, writes go nowhere
+    Null
+    // for stderr: wherever stdout goes (`2>&1`)
+    Stdout
+}
+
+// A program to start, and how: build one with `command`, adjust it, then
+// `start`, `run` or `output` it (as often as needed).
+//
+//   var c = os.command("git", ["log", "--oneline"])
+//   c.dir("/src/app")
+//   c.env("GIT_PAGER", "cat")
+//   let out = try c.output()          // waits; out.stdout, out.status
+//
+//   var sort = os.command("sort", [])
+//   sort.stdin = .Pipe
+//   sort.stdout = .Pipe
+//   var p = try sort.start()
+//   if let w = p.stdin { try w.writeText("b\na\n") }
+//   p.stdin = none                    // closes it: sort sees the end
+//   let sorted = try p.stdout?.readText()
+//   let status = try p.wait()
+pub struct Command {
+    prog: String
+    args: Vec[String]
+    // changes to the environment, in order; none removes the variable
+    envs: Vec[(String, ?String)] = Vec[(String, ?String)]{}
+    cleared: bool = false
+    workDir: String = ""
+    pub stdin: Stdio = .Inherit
+    pub stdout: Stdio = .Inherit
+    pub stderr: Stdio = .Inherit
+
+    // Adds an argument.
+    pub fn arg(inout self, a: str) {
+        self.args.push(a.toString())
+    }
+
+    // Sets an environment variable for the child.
+    pub fn env(inout self, name: str, value: str) {
+        self.envs.push((name.toString(), some(value.toString())))
+    }
+
+    // Removes an environment variable for the child.
+    pub fn unsetEnv(inout self, name: str) {
+        self.envs.push((name.toString(), none))
+    }
+
+    // Starts the child with no environment variables but those set with
+    // `env`.
+    pub fn clearEnv(inout self) {
+        self.cleared = true
+        self.envs.clear()
+    }
+
+    // Runs the child in directory `path`.
+    pub fn dir(inout self, path: str) {
+        self.workDir = path.toString()
+    }
+
+    // Starts the child without waiting for it.
+    pub fn start(self) -> Process ! Error {
+        var env = Vec[String]{}
+        let setEnv = self.cleared || !self.envs.isEmpty()
+        if setEnv {
+            var vars = Map[String, String]{}
+            if !self.cleared {
+                for kv in environ() {
+                    vars[kv.0.clone()] = kv.1.clone()
+                }
+            }
+            for e in self.envs {
+                if let v = e.1 {
+                    vars[e.0.clone()] = v.clone()
+                } else {
+                    _ = vars.remove(e.0.clone())
+                }
+            }
+            for k, v in vars {
+                env.push("${k}=${v}")
+            }
+        }
+        let modes = [int(self.stdin), int(self.stdout), int(self.stderr)]
+        if self.stdin == Stdio.Stdout || self.stdout == Stdio.Stdout {
+            panic("os: only stderr can go where stdout goes")
+        }
+        var fds = Vec[int]{}
+        var pid = 0
+        try check(self.prog, __spawn(self.prog, self.args, env, setEnv, self.workDir, modes, &fds, &pid))
+        return Process{pid, stdin: pipeEnd(fds[0]), stdout: pipeEnd(fds[1]), stderr: pipeEnd(fds[2])}
+    }
+
+    // Starts the child and waits for it: its status (the exit code, or 128 +
+    // the signal that ended it).
+    pub fn run(self) -> int ! Error {
+        var p = try self.start()
+        return try p.wait()
+    }
+
+    // Starts the child with its output piped (unless set otherwise), and
+    // waits for it, collecting what it prints. Stdin is empty unless set.
+    pub fn output(self) -> Output ! Error {
+        var c = self.clone()
+        if c.stdin == Stdio.Inherit {
+            c.stdin = .Null
+        }
+        c.stdout = .Pipe
+        if c.stderr != Stdio.Stdout {
+            c.stderr = .Pipe
+        }
+        var p = try c.start()
+        var out = Vec[byte]{}
+        var errout = Vec[byte]{}
+        // both at once, so that neither pipe fills up and stalls the child
+        try scope {
+            go () => {
+                if let f = p.stderr {
+                    errout = try f.readAll()
+                }
+            }
+            if let f = p.stdout {
+                out = try f.readAll()
+            }
+        }
+        let status = try p.wait()
+        return Output{status, stdout: String(out), stderr: String(errout)}
+    }
+}
+
+fn pipeEnd(fd: int) -> ?File {
+    if fd < 0 {
+        return none
+    }
+    return File{fd}
+}
+
+// A program to run, with these arguments (looked up in $PATH unless it holds
+// a `/`). Its standard streams are this process's unless set otherwise.
+pub fn command(prog: str, args: []String) -> Command {
+    return Command{prog: prog.toString(), args: args.toVec()}
+}
+
+// A started child process. Its pipe ends close when they are dropped (set
+// `stdin` to none to let the child see the end of its input). Wait for it:
+// a child that is dropped while still running is left running.
+pub struct Process {
+    pid: int
+    pub stdin: ?File
+    pub stdout: ?File
+    pub stderr: ?File
+    status: ?int
+
+    // The process ID.
+    pub fn id(self) -> int {
+        return self.pid
+    }
+
+    // Closes stdin, then waits for the child to end: its status (the exit
+    // code, or 128 + the signal that ended it). Cancelling the task stops
+    // the wait (`isCancelled()`), not the child.
+    pub fn wait(inout self) -> int ! Error {
+        if let st = self.status {
+            return st
+        }
+        self.stdin = none
+        let st = __wait(self.pid)
+        if st < 0 {
+            return err(io.fromCode("wait", -st))
+        }
+        self.status = st
+        return st
+    }
+
+    // The status if the child has ended, without waiting.
+    pub fn tryWait(inout self) -> ?int {
+        if self.status == none {
+            let st = __tryWait(self.pid)
+            if st >= 0 {
+                self.status = st
+            }
+        }
+        return self.status
+    }
+
+    // Sends the child a signal (`.Term` asks it to stop).
+    pub fn signal(self, sig: Signal) ! Error {
+        if self.status != none {
+            return
+        }
+        try check("kill", __kill(self.pid, int(sig)))
+    }
+
+    // Ends the child at once (SIGKILL); wait for it afterwards.
+    pub fn kill(self) ! Error {
+        return self.signal(.Kill)
+    }
+
+    fn drop(inout self) {
+        // reap it if it is done already, so it doesn't linger as a zombie
+        _ = self.tryWait()
+    }
+}
+
+// The POSIX signals, by name.
+pub copy enum Signal {
+    Hup
+    Int
+    Quit
+    Kill
+    Term
+    Usr1
+    Usr2
+    Winch
+    Pipe
+    Alrm
+    Chld
+    Cont
+    Stop
+    Tstp
+}
+
+// Starts listening for these signals: each one that arrives is delivered to
+// `Signals.next` instead of having its usual effect. Ctrl-C (`.Int`) and
+// `.Term` then no longer shut the program down; when the `Signals` is
+// dropped, they do again.
+//
+//   var sigs = try os.notify([.Hup, .Term])
+//   loop {
+//       match try sigs.next() {
+//           .Hup => reload()
+//           _ => break
+//       }
+//   }
+pub fn notify(sigs: []Signal) -> Signals ! Error {
+    var codes = Vec[int]{}
+    for s in sigs {
+        if s == Signal.Kill || s == Signal.Stop {
+            panic("os.notify: SIGKILL and SIGSTOP can't be caught")
+        }
+        codes.push(int(s))
+    }
+    var fds = Vec[int]{}
+    let e = __notify(codes, &fds)
+    if e != 0 {
+        if fds.len() == 2 {
+            __unnotify(codes, fds[1])
+            drop(File{fd: fds[0]})
+        }
+        return err(io.fromCode("notify", e))
+    }
+    return Signals{codes, r: File{fd: fds[0]}, w: fds[1]}
+}
+
+// Signals as they arrive; see `notify`.
+pub struct Signals {
+    codes: Vec[int]
+    r: File
+    w: int
+
+    // Waits for the next signal. Cancelling the task stops the wait.
+    pub fn next(self) -> Signal ! Error {
+        var b = Vec[byte]{}
+        loop {
+            b.clear()
+            let n = try self.r.read(&b, 1)
+            if n == 1 {
+                let code = __signalCode(int(b[0]))
+                if code >= 0 {
+                    return signalOf(code)
+                }
+            }
+        }
+    }
+
+    fn drop(inout self) {
+        __unnotify(self.codes, self.w)
+    }
+}
+
+fn signalOf(code: int) -> Signal {
+    let all = [Signal.Hup, .Int, .Quit, .Kill, .Term, .Usr1, .Usr2, .Winch, .Pipe, .Alrm, .Chld, .Cont, .Stop, .Tstp]
+    return all[code]
+}
+
+// What `walk` does after visiting a path.
+pub copy enum Walk {
+    // go on (into it, for a directory)
+    Continue
+    // don't go into this directory
+    SkipDir
+    // stop the walk
+    Stop
+}
+
+// Visits `root` and everything below it, depth first, a directory's entries
+// in name order after the directory itself. Symbolic links are visited, not
+// followed. An entry that can't be read ends the walk with its error.
+//
+//   try os.walk("src", (p, info) => {
+//       if info.isDir() && os.baseName(p) == ".git" { return .SkipDir }
+//       if p.endsWith(".gojo") { files.push(p.toString()) }
+//       return .Continue
+//   })
+pub fn walk(root: str, visit: fn(str, Info) -> Walk) ! Error {
+    _ = try walkIn(root, visit)
+}
+
+// false when the walk stops
+fn walkIn(path: str, visit: fn(str, Info) -> Walk) -> bool ! Error {
+    let info = try lstat(path)
+    match visit(path, info) {
+        .Stop => return false
+        .SkipDir => return true
+        .Continue => {}
+    }
+    if info.isDir() {
+        for name in try readDir(path) {
+            if !(try walkIn(joinPath(path, name), visit)) {
+                return false
+            }
+        }
+    }
+    return true
 }

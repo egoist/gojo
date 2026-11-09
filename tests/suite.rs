@@ -62,7 +62,9 @@ fn asan_command(bin: &Path) -> Command {
     c
 }
 
-/// Every program in tests/run, and every single-file example, prints its `.out`.
+/// Every program in tests/run, and every single-file example, prints its `.out`:
+/// as built, and with the bounds checks the compiler removed put back
+/// (`--verify-bce`), where one that fails is a compiler bug.
 #[test]
 fn run_programs() {
     let mut failures = vec![];
@@ -71,10 +73,12 @@ fn run_programs() {
             failures.push(format!("{}: no .out file", f.display()));
             continue;
         };
-        let out = Command::new(gojo()).arg("run").arg(&f).output().unwrap();
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        if stdout != expected {
-            failures.push(format!("{}:\n--- expected\n{}\n--- got\n{}\n--- stderr\n{}", f.display(), expected, stdout, String::from_utf8_lossy(&out.stderr)));
+        for flags in [&[][..], &["--verify-bce"][..]] {
+            let out = Command::new(gojo()).arg("run").args(flags).arg(&f).output().unwrap();
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            if stdout != expected {
+                failures.push(format!("{} {:?}:\n--- expected\n{}\n--- got\n{}\n--- stderr\n{}", f.display(), flags, expected, stdout, String::from_utf8_lossy(&out.stderr)));
+            }
         }
     }
     if !failures.is_empty() {
@@ -109,14 +113,20 @@ fn compile_errors() {
     }
 }
 
+/// Every program in tests/panic panics as its `// panic:` lines say, as built
+/// and with `--verify-bce` (see `run_programs`).
 #[test]
 fn runtime_panics() {
     let mut failures = vec![];
-    for f in files("tests/panic") {
+    for (f, flags) in files("tests/panic").into_iter().flat_map(|f| [(f.clone(), &[][..]), (f, &["--verify-bce"][..])]) {
         let src = std::fs::read_to_string(&f).unwrap();
         let wanted: Vec<String> = src.lines().filter_map(|l| l.trim().strip_prefix("// panic: ").map(|s| s.to_string())).collect();
-        let out = Command::new(gojo()).arg("run").arg(&f).output().unwrap();
+        let out = Command::new(gojo()).arg("run").args(flags).arg(&f).output().unwrap();
         let stderr = String::from_utf8_lossy(&out.stderr);
+        if stderr.contains("bounds check the compiler removed") {
+            failures.push(format!("{} {:?}: {}", f.display(), flags, stderr));
+            continue;
+        }
         if out.status.code() != Some(2) {
             failures.push(format!("{}: expected exit code 2, got {:?}\n{}", f.display(), out.status.code(), stderr));
             continue;
@@ -609,11 +619,10 @@ fn c_call_locs<'a>(c: &'a str, pat: &str) -> Vec<&'a str> {
     out
 }
 
-/// Bounds-check elimination. tests/run/bce.gojo marks every index and slice
+/// Bounds-check elimination: tests/run/bce.gojo marks every index and slice
 /// `// bce: proven` (the compiler removes its check) or `// bce: checked`, in
-/// order along the line, and the generated C must agree. Then every program
-/// runs with the removed checks put back (`--verify-bce`), where one that
-/// fails is a compiler bug, and must behave as without.
+/// order along the line, and the generated C must agree. (`run_programs` and
+/// `runtime_panics` also run every program with the removed checks put back.)
 #[test]
 fn bounds_check_elimination() {
     use std::collections::BTreeMap;
@@ -655,27 +664,6 @@ fn bounds_check_elimination() {
     }
     if !failures.is_empty() {
         panic!("bounds checks in tests/run/bce.gojo:\n{}", failures.join("\n"));
-    }
-    // every program, with the removed checks kept
-    for f in files("tests/run").into_iter().chain(files("examples")) {
-        let Ok(expected) = std::fs::read_to_string(f.with_extension("out")) else { continue };
-        let out = Command::new(gojo()).arg("run").arg("--verify-bce").arg(&f).output().unwrap();
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        if stdout != expected {
-            failures.push(format!("{}:\n--- expected\n{}\n--- got\n{}\n--- stderr\n{}", f.display(), expected, stdout, String::from_utf8_lossy(&out.stderr)));
-        }
-    }
-    for f in files("tests/panic") {
-        let src = std::fs::read_to_string(&f).unwrap();
-        let out = Command::new(gojo()).arg("run").arg("--verify-bce").arg(&f).output().unwrap();
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        let wanted = src.lines().filter_map(|l| l.trim().strip_prefix("// panic: "));
-        if out.status.code() != Some(2) || stderr.contains("internal error") || wanted.into_iter().any(|w| !stderr.contains(w)) {
-            failures.push(format!("{}: {:?}\n{}", f.display(), out.status.code(), stderr));
-        }
-    }
-    if !failures.is_empty() {
-        panic!("{} program(s) failed with --verify-bce:\n{}", failures.len(), failures.join("\n"));
     }
 }
 

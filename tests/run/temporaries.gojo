@@ -20,8 +20,62 @@ fn main() {
     let b = text().unwrap()
     let c = String(bytes()).len() + String(try_or_empty()).len()
     println(a.len(), b.len(), c)
+    main2()
 }
 
 fn try_or_empty() -> Vec[byte] {
     return tryBytes() catch _e { Vec[byte]{} }
+}
+
+// A branch's value can view a temporary made in the branch: the temporary
+// lives until the statement is done, not just until the branch ends.
+enum Val { Num(f64), Null }
+
+fn twice(a: str, b: str) -> String {
+    return "${a}${b}"
+}
+
+fn check(ok: bool) -> int ! String {
+    if ok { return 1 }
+    return err("no")
+}
+
+fn pick(s: str, ok: bool) -> str ! String {
+    if ok { return s }
+    return err("no")
+}
+
+fn branches(x: f64, v: Val, o: ?str, ok: bool) -> String ! String {
+    var out: String = ""
+    out.push(if x > 0.0 { "${x}" } else { "null" })
+    out.push(",")
+    match v {
+        .Num(n) => out.push(if n > 0.0 { "${n}" } else { "null" }),
+        .Null => out.push("null"),
+    }
+    out.push(",")
+    out.push(match v { .Num(n) => "${n}", .Null => "null" })
+    out.push(",")
+    out.push(o ?? "${x}")
+    out.push(",")
+    out.push({ "${x}" })
+    out.push(",")
+    out.push(if x > 0.0 { if x > 1.0 { "big ${x}" } else { "small ${x}" } } else { "null" })
+    out.push(",")
+    out.push(pick("p", ok) catch _e { "${x}" })
+    out.push(",")
+    // the statement leaves early after the branch made its temporary
+    out.push(twice(if x > 0.0 { "${x}" } else { "null" }, "${try check(ok)}"))
+    return out
+}
+
+fn main2() {
+    println(branches(0.5, .Num(0.25), none, true).unwrap())
+    println(branches(2.0, .Null, "o", false) catch e { e })
+    // the same statement in a loop, alternating branches
+    var line: String = ""
+    for i in 0..6 {
+        line.push(if i % 2 == 0 { "${i}" } else { "-" })
+    }
+    println(line)
 }

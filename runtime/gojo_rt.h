@@ -157,7 +157,19 @@ void *gojo_box_refill(size_t cls);
 // TypeSanitizer only forgets a block's type when it is freed
 #if __has_feature(type_sanitizer)
 #define GOJO_NO_BOX_POOL 1
+#define GOJO_TYSAN_ON 1
 #endif
+#endif
+// Forgets the types TypeSanitizer has recorded for memory about to be written
+// as something else (a recycled stack, a new thread's TLS, a global's first
+// value, which clang may store field by field). Its memset interceptor does
+// that; the call goes through a volatile pointer so that the compiler can't
+// turn it into plain stores, which it doesn't see.
+#ifdef GOJO_TYSAN_ON
+extern void *(*volatile gojo_tysan_memset)(void *, int, size_t);
+#define GOJO_UNTYPE(p, n) gojo_tysan_memset((p), 0, (n))
+#else
+#define GOJO_UNTYPE(p, n) ((void)0)
 #endif
 #if defined(__SANITIZE_ADDRESS__)
 #define GOJO_NO_BOX_POOL 1
@@ -229,6 +241,53 @@ gojo_string gojo_str_replace(gojo_str s, gojo_str from, gojo_str to);
 gojo_vec gojo_str_runes(gojo_str s);
 bool gojo_prelude___parseInt(gojo_str s, int64_t *out);
 bool gojo_prelude___parseFloat(gojo_str s, double *out);
+int64_t gojo_prelude___strRFind(gojo_str s, gojo_str sub);
+int64_t gojo_prelude___strFindFrom(gojo_str s, gojo_str sub, int64_t from);
+int64_t gojo_prelude___decodeAt(gojo_str s, int64_t i);
+int32_t gojo_regex___fold(int32_t r);
+int64_t gojo_regex___bits(int32_t r);
+bool gojo_regex___exec(gojo_slice code, gojo_slice classes, gojo_slice meta, gojo_str prefix, gojo_str text, int64_t pos, int64_t nslots, gojo_vec *caps);
+int64_t gojo_str_count(gojo_str s, gojo_str sub);
+gojo_vec gojo_str_splitN(gojo_str s, gojo_str sep, int64_t n);
+gojo_str gojo_str_trimChars(gojo_str s, gojo_str chars);
+bool gojo_str_equalFold(gojo_str a, gojo_str b);
+int64_t gojo_str_runeCount(gojo_str s);
+bool gojo_str_isAscii(gojo_str s);
+bool gojo_str_isValidUtf8(gojo_str s);
+void gojo_prelude___stringInsert(gojo_string *s, int64_t at, gojo_str t);
+void gojo_prelude___stringSetLen(gojo_string *s, int64_t n);
+int64_t gojo_prelude___stringPopRune(gojo_string *s);
+void gojo_String_reserve(gojo_string *s, int64_t n);
+int64_t gojo_String_cap(gojo_string *s);
+int64_t gojo_prelude___runeBits(int32_t r);
+int32_t gojo_prelude___runeUpper(int32_t r);
+int32_t gojo_prelude___runeLower(int32_t r);
+bool gojo_parse_int(gojo_str s, int64_t radix, bool is_signed, uint64_t max, uint64_t *out);
+uint64_t gojo_rand___next(void);
+int64_t gojo_rand___secureFill(gojo_vec *v, int64_t n);
+gojo_string gojo_hex___encode(gojo_slice d, bool upper);
+int64_t gojo_hex___decode(gojo_str s, gojo_vec *out);
+gojo_string gojo_base64___encode(gojo_slice d, bool url, bool pad);
+int64_t gojo_base64___decode(gojo_str s, bool url, gojo_vec *out);
+gojo_string gojo_url___escape(gojo_str s, int64_t mode);
+bool gojo_url___unescape(gojo_str s, bool plus, bool lenient, gojo_string *out);
+void gojo_crypto___init(gojo_vec *st, int64_t algo);
+void gojo_crypto___update(gojo_vec *st, gojo_slice data);
+void gojo_crypto___finish(gojo_vec *st, gojo_vec *out);
+bool gojo_crypto___equal(gojo_slice a, gojo_slice b);
+uint32_t gojo_crc32_update(uint32_t crc, gojo_slice data);
+int64_t gojo_tls___client(int64_t fd, gojo_str name, gojo_str ca, bool verify, gojo_string *msg);
+int64_t gojo_tls___serverCtx(gojo_str cert, gojo_str key, gojo_string *msg);
+void gojo_tls___freeCtx(int64_t ctx);
+int64_t gojo_tls___server(int64_t ctx, int64_t fd, gojo_string *msg);
+int64_t gojo_tls___handshake(int64_t h, gojo_string *msg);
+int64_t gojo_tls___read(int64_t h, gojo_vec *buf, int64_t max, gojo_string *msg);
+int64_t gojo_tls___write(int64_t h, gojo_slice data, gojo_string *msg);
+void gojo_tls___close(int64_t h);
+uint64_t gojo_prelude___f64Bits(double x);
+double gojo_prelude___f64FromBits(uint64_t b);
+uint32_t gojo_prelude___f32Bits(float x);
+float gojo_prelude___f32FromBits(uint32_t b);
 
 // ---- formatting
 void gojo_fmt_i64(gojo_string *b, int64_t v);
@@ -254,11 +313,19 @@ void *gojo_map_slot(gojo_map *m, const gojo_map_desc *d, const void *key, bool *
 bool gojo_map_remove(gojo_map *m, const gojo_map_desc *d, const void *key, void *out_entry);
 void gojo_map_free(gojo_map *m);
 void gojo_map_reserve1(gojo_map *m, size_t esize);
-static inline uint64_t gojo_hash_u64(uint64_t x) {
-    x ^= x >> 33; x *= 0xff51afd7ed558ccdULL; x ^= x >> 33; x *= 0xc4ceb9fe1a85ec53ULL; x ^= x >> 33;
-    return x;
+// Hashes are keyed with a random seed chosen at startup, so the keys of a
+// Map built from untrusted input (headers, JSON objects) can't be picked to
+// collide: the wyhash mix, a 64x64->128 bit multiply folded to 64 bits.
+extern uint64_t gojo_hash_seed;
+static inline uint64_t gojo_wymix(uint64_t a, uint64_t b) {
+    __uint128_t r = (__uint128_t)a * b;
+    return (uint64_t)r ^ (uint64_t)(r >> 64);
 }
-static inline uint64_t gojo_hash_mix(uint64_t h, uint64_t x) { return gojo_hash_u64(h ^ (x + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2))); }
+static inline uint64_t gojo_hash_u64(uint64_t x) {
+    return gojo_wymix(x ^ 0x2d358dccaa6c78a5ULL, gojo_hash_seed ^ 0x8bb84b93962eacc9ULL);
+}
+static inline uint64_t gojo_hash_mix(uint64_t h, uint64_t x) { return gojo_wymix(h ^ 0x4b33a62ed433d4a3ULL, x ^ gojo_hash_seed); }
+uint64_t gojo_prelude___hashMix(uint64_t h, uint64_t x);
 
 // A fact for the optimizer, e.g. that a loop's block end is within the loop.
 #if defined(__clang__)
@@ -386,6 +453,16 @@ int64_t gojo_net___write(int64_t fd, gojo_slice data);
 void gojo_net___close(int64_t fd);
 void gojo_net___shutdownWrite(int64_t fd);
 int64_t gojo_net___port(int64_t fd);
+int64_t gojo_net___udpListen(gojo_str addr);
+int64_t gojo_net___udpDial(gojo_str addr);
+int64_t gojo_net___sendTo(int64_t fd, gojo_slice data, gojo_str addr);
+int64_t gojo_net___recvFrom(int64_t fd, gojo_vec *buf, int64_t max, gojo_string *from);
+int64_t gojo_net___lookup(gojo_str host, gojo_vec *out);
+bool gojo_http___readable(int64_t fd);
+uint64_t gojo_binary___load(gojo_slice b, int64_t n, bool big);
+int64_t gojo_binary___signed(uint64_t u, int64_t n);
+uint64_t gojo_binary___bits(int64_t v);
+void gojo_binary___append(gojo_vec *out, uint64_t v, int64_t n, bool big);
 
 // ---- os / time / ffi
 void gojo_rt_init(int argc, char **argv);
@@ -427,5 +504,53 @@ void gojo_sim_point(void);
 void gojo_task_dump(void);
 void *gojo_dlsym(const char *lib, const char *name);
 int gojo_run_test(void (*fn)(void), const char *name);
+
+// ---- json (runtime/gojo_lib.c)
+typedef struct {
+    const uint8_t *s;
+    int64_t len, pos;
+    int64_t depth;
+    // -1 while there is no error
+    int64_t errpos;
+    gojo_string err, path, buf, kbuf;
+} gojo_jdec;
+void gojo_jenc_str(gojo_string *b, gojo_str s);
+void gojo_jenc_f64(gojo_string *b, double v);
+void gojo_json___indent(gojo_str s, int64_t indent, gojo_string *out);
+void gojo_json___quote(gojo_string *b, gojo_str s);
+void gojo_jdec_init(gojo_jdec *d, gojo_str s);
+void gojo_jdec_free(gojo_jdec *d);
+bool gojo_jdec_fail(gojo_jdec *d, const char *msg);
+bool gojo_jdec_expected(gojo_jdec *d, const char *what);
+bool gojo_jdec_fail_str(gojo_jdec *d, const char *a, gojo_str s, const char *b);
+bool gojo_jdec_null(gojo_jdec *d);
+bool gojo_jdec_bool(gojo_jdec *d, bool *out);
+bool gojo_jdec_i64(gojo_jdec *d, int64_t *out, int64_t lo, int64_t hi, const char *ty);
+bool gojo_jdec_u64(gojo_jdec *d, uint64_t *out, uint64_t hi, const char *ty);
+bool gojo_jdec_f64(gojo_jdec *d, double *out);
+bool gojo_jdec_f32(gojo_jdec *d, float *out);
+bool gojo_jdec_str(gojo_jdec *d, gojo_string *out);
+int gojo_jdec_peek(gojo_jdec *d);
+bool gojo_jdec_strview(gojo_jdec *d, gojo_str *out);
+bool gojo_jdec_open(gojo_jdec *d, uint8_t c);
+int gojo_jdec_item(gojo_jdec *d, int64_t i);
+int gojo_jdec_key(gojo_jdec *d, int64_t i, gojo_str *key);
+bool gojo_jdec_skip(gojo_jdec *d);
+bool gojo_jdec_end(gojo_jdec *d);
+void gojo_jdec_at_key(gojo_jdec *d, const uint8_t *k, int64_t n);
+void gojo_jdec_at_index(gojo_jdec *d, int64_t i);
+int64_t gojo_jdec_result(gojo_jdec *d, gojo_string *msg);
+void gojo_jdec_linecol(gojo_str s, int64_t pos, int64_t *line, int64_t *col);
+
+// ---- processes and signals (runtime/gojo_lib.c)
+int64_t gojo_os___signalCode(int64_t signo);
+int64_t gojo_os___getpid(void);
+int64_t gojo_os___spawn(gojo_str prog, gojo_slice args, gojo_slice env, bool setEnv, gojo_str dir, gojo_slice modes, gojo_vec *fds, int64_t *pid);
+int64_t gojo_os___wait(int64_t pid);
+int64_t gojo_os___tryWait(int64_t pid);
+int64_t gojo_os___kill(int64_t pid, int64_t code);
+void gojo_os___environ(gojo_vec *out);
+int64_t gojo_os___notify(gojo_slice codes, gojo_vec *fds);
+void gojo_os___unnotify(gojo_slice codes, int64_t wfd);
 
 #endif

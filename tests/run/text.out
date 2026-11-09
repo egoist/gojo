@@ -1,0 +1,16 @@
+some(3) none some(1) some(0) some(3)
+2 6 2 0
+["a", "b=c"] ["a=b=c"] [] ["a", "b", "c"] ["h", "éj"] ["a", "b"]
+some(("key", "value=x")) none some(("", ""))
+body body file.tar a
+a-b hi a 0 abc
+true true false false true
+HÉLLO WÖRLD àéî σω ABC
+5 6 true false
+true true false false false
+>hééllo<
+>hé 4
+>hé
+some(233) some(104) some(62) none 
+true 0
+some(26412) 日

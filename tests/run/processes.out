@@ -1,0 +1,22 @@
+apple
+fig
+pear
+sort: 0 some(0)
+3 false out
+hello there
+in the directory
+ err
+
+out
+err
+hello there
+in the directory
+[] [1] []
+0 1
+not started: true
+terminated: 143
+timed out: true true
+killed: 137
+got Usr1 Hup
+["/", "/a/", "/a/b/", "/a/b/x.txt", "/note.txt"]
+2 true

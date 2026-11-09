@@ -12,9 +12,9 @@ println(d.format("%Y-%m-%d %H:%M"))
 
 **Constants:** [`nanosecond, microsecond, millisecond, second, minute, hour`](#nanosecond-microsecond-millisecond-second-minute-hour)
 
-**Types:** [`struct Date`](#struct-date), [`struct ParseError`](#struct-parseerror)
+**Types:** [`struct Ticker`](#struct-ticker), [`struct Date`](#struct-date), [`struct ParseError`](#struct-parseerror)
 
-**Functions:** [`sleep`](#sleep), [`now`](#now), [`since`](#since), [`unixNanos`](#unixnanos), [`unix`](#unix), [`formatDuration`](#formatduration), [`dayName`](#dayname), [`monthName`](#monthname), [`at`](#at), [`utc`](#utc), [`local`](#local), [`date`](#date), [`parseIso`](#parseiso)
+**Functions:** [`sleep`](#sleep), [`now`](#now), [`since`](#since), [`unixNanos`](#unixnanos), [`unix`](#unix), [`formatDuration`](#formatduration), [`parseDuration`](#parseduration), [`ticker`](#ticker), [`dayName`](#dayname), [`monthName`](#monthname), [`at`](#at), [`utc`](#utc), [`local`](#local), [`date`](#date), [`parseIso`](#parseiso)
 
 ## Constants
 
@@ -32,6 +32,59 @@ pub const hour = 3600000000000
 Durations are integer nanoseconds.
 
 ## Types
+
+### struct Ticker
+
+```gojo
+pub struct Ticker {
+    // and private fields
+}
+```
+
+Ticks every `period` at fixed instants, `start + n * period`, so a slow
+tick doesn't push the later ones back; ticks that are missed are skipped.
+
+```gojo
+var tick = time.ticker(time.second)
+loop {
+    tick.wait()                  // or, among other things to wait for:
+    ...                          // select { time.at(tick.deadline()) => { tick.advance(); ... } }
+}
+```
+
+#### Ticker.deadline
+
+```gojo
+pub fn deadline(self) -> int
+```
+
+The instant (on the `now()` scale) of the next tick.
+
+#### Ticker.advance
+
+```gojo
+pub fn advance(inout self) -> int
+```
+
+Moves on to the first tick after now: how many ticks have passed (0
+when the next one hasn't come yet, more than 1 when some were missed).
+
+#### Ticker.wait
+
+```gojo
+pub fn wait(inout self) -> int
+```
+
+Waits for the next tick, then `advance`s: how many ticks passed. 0
+when the task was cancelled while waiting.
+
+#### Ticker.reset
+
+```gojo
+pub fn reset(inout self)
+```
+
+Starts again: the next tick is one period from now.
 
 ### struct Date
 
@@ -168,6 +221,24 @@ pub fn formatDuration(d: int) -> String
 ```
 
 "1.5s", "250ms", "3µs", "2h5m0s".
+
+### parseDuration
+
+```gojo
+pub fn parseDuration(s: str) -> int ! ParseError
+```
+
+A duration written as `formatDuration` writes one, or as Go does: a
+sequence of numbers (decimals allowed) each with a unit, ns, us (or µs),
+ms, s, m or h, and an optional sign: "1.5s", "2h45m", "-250ms", "0".
+
+### ticker
+
+```gojo
+pub fn ticker(period: int) -> Ticker
+```
+
+A ticker whose first tick is one `period` from now.
 
 ### dayName
 

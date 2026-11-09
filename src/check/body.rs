@@ -56,6 +56,10 @@ pub struct FnCx {
     pub shadow_ok: Option<String>,
     /// The value expected from the `with` body being checked (`let n = with ...`).
     pub with_value: Option<Expect>,
+    /// Lazy chains with `flatMap` being checked (lazy.rs): the labels of
+    /// their innermost and outermost loops, and the user's label. A `break`
+    /// in the body leaves the outermost; `continue label`, the innermost.
+    pub lazy_loops: Vec<(String, String, Option<String>)>,
 }
 
 /// A `scope` block being checked.
@@ -107,9 +111,9 @@ pub enum PathRes {
     Value,
 }
 
-struct PInfo {
+pub(super) struct PInfo {
     root: Option<LocalId>,
-    owned: bool,
+    pub(super) owned: bool,
     mutable: bool,
     desc: String,
 }
@@ -139,6 +143,7 @@ impl FnCx {
             locked: vec![],
             call_owner: None,
             loop_body_next: None,
+            lazy_loops: vec![],
             defer_depth: 0,
             shadow_ok: None,
             with_value: None,
@@ -771,7 +776,7 @@ impl Checker {
     // Places and use modes
     // ------------------------------------------------------------------
 
-    fn place_info(&self, cx: &FnCx, e: &TExpr) -> Option<PInfo> {
+    pub(super) fn place_info(&self, cx: &FnCx, e: &TExpr) -> Option<PInfo> {
         match &e.kind {
             TK::Global(g) => Some(PInfo { root: None, owned: false, mutable: false, desc: format!("package-level value `{}`", self.prog.globals[*g as usize].name) }),
             TK::Local(id) => {
@@ -1305,7 +1310,8 @@ impl Checker {
                             Some(t) => t.clone(),
                             None => self.resolve(cx, &te.ty),
                         };
-                        if ty.has_vars() {
+                        // (a lazy chain's accumulator gets its type from the loop after it)
+                        if ty.has_vars() && !name.starts_with("__lz") {
                             self.err(*name_span, format!("cannot infer the type of `{}`; add a type annotation", name));
                         }
                         let ty = if ty == Ty::Never { Ty::Unit } else { ty };
@@ -1440,6 +1446,17 @@ impl Checker {
             StmtKind::Break(label) | StmtKind::Continue(label) => {
                 let is_break = matches!(s.kind, StmtKind::Break(_));
                 let word = if is_break { "break" } else { "continue" };
+                // in a lazy chain's body: see FnCx::lazy_loops
+                let redirect = match label {
+                    None if is_break => cx.lazy_loops.iter().rev().find(|r| cx.loops.last().and_then(|l| l.0.as_deref()) == Some(r.0.as_str())).map(|r| r.1.clone()),
+                    Some((l, _)) if !is_break => cx.lazy_loops.iter().rev().find(|r| r.2.as_deref() == Some(l.as_str())).map(|r| r.0.clone()),
+                    _ => None,
+                };
+                if let Some(target) = redirect {
+                    if let Some((_, id)) = cx.loops.iter().rev().find(|(n, _)| n.as_deref() == Some(target.as_str())) {
+                        return Some(if is_break { TStmt::Break(*id, sp) } else { TStmt::Continue(*id, sp) });
+                    }
+                }
                 let id = match label {
                     None => match cx.loops.last() {
                         Some((_, id)) => *id,
@@ -1716,6 +1733,9 @@ impl Checker {
     }
 
     fn for_in(&mut self, cx: &mut FnCx, first: &(String, Span), second: Option<&(String, Span)>, iter: &Expr, by_ref: bool, body: &ast::Block, sp: Span) -> Option<TStmt> {
+        if let Some(r) = self.lazy_for(cx, first, second, iter, by_ref, body, sp) {
+            return r;
+        }
         if let ExprKind::Range { lo, hi, inclusive } = &iter.kind {
             let l = self.expr(cx, lo, None);
             let l = self.value(cx, l);
@@ -3779,6 +3799,11 @@ impl Checker {
     fn call(&mut self, cx: &mut FnCx, callee: &Expr, args: &[Expr], sp: Span, expect: Option<&Ty>) -> TExpr {
         // builtins some/ok/err
         if let ExprKind::Ident(n) = &callee.kind {
+            if n.starts_with("__lazy") && self.lookup_local_quiet(cx, n).is_none() {
+                if let Some(r) = self.lazy_intrinsic(cx, n, args, sp, expect) {
+                    return r;
+                }
+            }
             if self.lookup_local_quiet(cx, n).is_none() {
                 match n.as_str() {
                     "some" | "ok" | "err" => return self.ctor_call(cx, n, args, sp, expect),
@@ -3798,6 +3823,9 @@ impl Checker {
             return self.opt_call(cx, base, name, callee.span, args, sp);
         }
         if let ExprKind::Field(base, name, nsp) = &callee.kind {
+            if let Some(r) = self.lazy_terminal(cx, base, name, args, sp, expect) {
+                return r;
+            }
             // package function / variant constructor / static
             let br = self.resolve_path(cx, base);
             match br {
@@ -4735,6 +4763,9 @@ impl Checker {
         let mut d = Diag::new(nsp, format!("type `{}` has no method `{}`", s, name));
         if name == "len" || name == "size" || name == "length" {
             d = d.note(None, "use `.len` or `.len()`");
+        }
+        if name == "iter" {
+            d = d.note(None, super::lazy::CONSUME_NOTE);
         }
         let is_chan = matches!(bty, Ty::Sender(_) | Ty::Receiver(_)) || matches!(&bty, Ty::Adt(dd, _) if Some(*dd) == self.prog.prelude_type("Chan"));
         if bty == Ty::Str && self.prog.methods.contains_key(&(TyKey::String, name.to_string())) {

@@ -412,9 +412,19 @@ impl Parser {
     fn item(&mut self) -> PResult<Vec<Item>> {
         let lo = self.span();
         if self.is_kw(Kw::Extend) {
-            // `extend Type { func ... }`
+            // `extend Type { func ... }`, or `extend T: Integer { ... }` for
+            // every built-in type in a type set
             self.bump();
-            let owner = self.ty()?;
+            let mut ext = vec![];
+            let owner = if matches!(self.peek(), Tok::Ident(_)) && matches!(self.peek_at(1), Tok::P(":")) {
+                let (name, span) = self.ident()?;
+                self.bump();
+                let bounds = self.bound_list()?;
+                ext.push(TParam { name: name.clone(), bounds, is_int: false, span });
+                TypeExpr { kind: TypeExprKind::Named { path: vec![name], args: vec![] }, span }
+            } else {
+                self.ty()?
+            };
             self.expect_p("{")?;
             self.skip_nl();
             let mut out = vec![];
@@ -430,6 +440,7 @@ impl Parser {
                 }
                 let mut f = self.func_decl(Some(&owner))?;
                 f.is_unsafe = is_unsafe;
+                f.ext_tparams = ext.clone();
                 out.push(Item { kind: ItemKind::Func(f), is_pub, span: self.sp_from(mlo) });
                 self.skip_nl();
             }
@@ -849,6 +860,7 @@ impl Parser {
             is_extern_c: false,
             is_unsafe: false,
             owner: assoc_owner,
+            ext_tparams: vec![],
             span: self.sp_from(lo),
         })
     }

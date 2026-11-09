@@ -1,5 +1,5 @@
 // HTTP/1.1: a server built on tasks, scopes and cancellation, and a
-// small client. Plain HTTP only (no TLS).
+// small client, over plain TCP or TLS (`serveTls`, `https://` URLs).
 //
 //   struct Hello {
 //       fn serve(self, req: http.Request) -> http.Response {
@@ -12,11 +12,38 @@
 //   }
 //
 // Every connection is a task in the server's scope, so cancelling the task
-// that runs `serve` cancels the requests in flight. Every request runs under a
+// that runs `serve` cancels the requests in flight (their clients get 503).
+// A connection carries requests one after another while the client keeps it
+// open (`Options.keepAlive`, `Options.idleTimeout`); the client side reuses
+// connections too. `Request.route` matches paths like "/todos/:id". Every request runs under a
 // deadline (`Options.deadline`): a handler still running then is cancelled and
 // the client gets 504. A client that hangs up cancels its request too: the
 // handler's blocking calls return early.
-use std/{fmt, io, net, task, time}
+use std/{fmt, io, net, task, time, tls}
+
+// A connection, plain or encrypted.
+enum Stream {
+    Plain(net.Conn)
+    Secure(tls.Conn)
+
+    fn read(self, buf: inout Vec[byte], max: int) -> int ! io.Error {
+        return match self {
+            Plain(c) => c.read(&buf, max)
+            Secure(c) => c.read(&buf, max)
+        }
+    }
+
+    fn write(self, data: []byte) ! io.Error {
+        return match self {
+            Plain(c) => c.write(data)
+            Secure(c) => c.write(data)
+        }
+    }
+
+    fn writeText(self, s: str) ! io.Error {
+        return self.write(s.bytes())
+    }
+}
 
 // A header line. Names are matched without regard to case.
 pub struct Header {
@@ -80,6 +107,119 @@ pub struct Request {
     pub fn text(self) -> String {
         return String(self.body.clone())
     }
+
+    // Matches the request against a method ("" for any; "GET" also matches
+    // HEAD) and a path pattern of literal segments, `:name` for any one
+    // segment and a final `*name` for the rest of the path (maybe empty).
+    // Some(params) with the segments captured, decoded; none if it doesn't
+    // match. Empty segments are ignored, so "/todos/" matches "/todos".
+    //
+    //   fn serve(self, req: http.Request) -> http.Response {
+    //       if let p = req.route("GET", "/todos/:id") {
+    //           return self.show(p.int("id") ?? 0)
+    //       }
+    //       if let p = req.route("GET", "/files/*path") {
+    //           return self.file(p.get("path"))
+    //       }
+    //       return http.text(404, "not found\n")
+    //   }
+    pub fn route(self, method: str, pattern: str) -> ?Params {
+        if method.len() > 0 && method != self.method && !(method == "GET" && self.method == "HEAD") {
+            return none
+        }
+        let path = self.path.asStr()
+        var params = Params{}
+        var pi = 0
+        var xi = 0
+        loop {
+            let (ps, pe) = nextSegment(pattern, pi)
+            let (xs, xe) = nextSegment(path, xi)
+            if ps < 0 {
+                return if xs < 0 { some(params) } else { none }
+            }
+            let seg = pattern[ps..pe]
+            if seg.startsWith("*") {
+                params.add(seg[1..], if xs < 0 { "" } else { path[xs..] })
+                return some(params)
+            }
+            if xs < 0 {
+                return none
+            }
+            let got = path[xs..xe]
+            if seg.startsWith(":") {
+                params.add(seg[1..], got)
+            } else if seg != got && (!got.contains("%") || decodePath(got) != seg) {
+                return none
+            }
+            pi = pe
+            xi = xe
+        }
+    }
+}
+
+// Where the next non-empty `/`-separated segment of `s` at or after `from`
+// starts and ends; (-1, -1) when there is none.
+fn nextSegment(s: str, from: int) -> (int, int) {
+    let b = s.bytes()
+    var i = from
+    while i < b.len() && b[i] == 47 {
+        i += 1
+    }
+    if i == b.len() {
+        return (-1, -1)
+    }
+    var j = i
+    while j < b.len() && b[j] != 47 {
+        j += 1
+    }
+    return (i, j)
+}
+
+// The segments `Request.route` captured, by name.
+pub struct Params {
+    names: Vec[String] = []
+    values: Vec[String] = []
+
+    fn add(inout self, name: str, raw: str) {
+        self.names.push(name.toString())
+        self.values.push(if raw.contains("%") { decodePath(raw) } else { raw.toString() })
+    }
+
+    // The value captured as `name`; "" if the pattern has no such name.
+    pub fn get(self, name: str) -> str {
+        for i in 0..self.names.len() {
+            if self.names[i] == name {
+                return self.values[i].asStr()
+            }
+        }
+        return ""
+    }
+
+    // The value captured as `name`, as an integer; none if it isn't one.
+    pub fn int(self, name: str) -> ?int {
+        return self.get(name).parseInt()
+    }
+}
+
+// Percent-decoding for paths, where `+` stands for itself; malformed escapes
+// are kept as they are.
+fn decodePath(s: str) -> String {
+    let b = s.bytes()
+    var out = Vec[byte]{}
+    var i = 0
+    while i < b.len() {
+        if b[i] == 37 && i + 2 < b.len() {
+            let v = hexValue(s[i + 1..i + 3])
+            if v >= 0 {
+                out.push(u8(v))
+                i += 3
+                continue
+            }
+        }
+        out.push(b[i])
+        i += 1
+    }
+    return String(out)
 }
 
 // What a handler answers, and what the client gets back. Content-Length and
@@ -160,6 +300,10 @@ pub struct Options {
     pub deadline: int = 30 * time.second
     // the largest request body accepted
     pub maxBody: int = 8 * 1024 * 1024
+    // whether a connection may carry more than one request (HTTP keep-alive)
+    pub keepAlive: bool = true
+    // how long a connection may wait for its next request before it is closed
+    pub idleTimeout: int = 60 * time.second
 }
 
 // What happened to the requests a server has handled (see `serveCounting`):
@@ -212,7 +356,7 @@ fn hexValue(s: str) -> int {
 }
 
 // Reads from `c` into `buf` until it holds `n` bytes; false if the peer closed first.
-fn fillTo(c: net.Conn, buf: inout Vec[byte], n: int) -> bool {
+fn fillTo(c: Stream, buf: inout Vec[byte], n: int) -> bool {
     while buf.len() < n{
         let got = c.read(&buf, 65536) catch _e { 0 }
         if got == 0 {
@@ -224,7 +368,7 @@ fn fillTo(c: net.Conn, buf: inout Vec[byte], n: int) -> bool {
 
 // The head ("METHOD /path HTTP/1.1" or "HTTP/1.1 200 OK", then headers) up to
 // the blank line, and where the body starts. -1: closed; -2: too big.
-fn readHead(c: net.Conn, buf: inout Vec[byte]) -> int {
+fn readHead(c: Stream, buf: inout Vec[byte]) -> int {
     var from = 0
     loop {
         let at = findBytes(buf, "\r\n\r\n", from)
@@ -255,8 +399,9 @@ fn parseHeaders(lines: []String) -> Vec[Header] {
     return hs
 }
 
-// The body after the head at `start`. Err: the status to answer with.
-fn readBody(c: net.Conn, buf: inout Vec[byte], start: int, hs: []Header, max: int) -> Vec[byte] ! int {
+// The body after the head at `start`; `end` is set to where the message ends
+// in `buf` (what follows is the next message). Err: the status to answer with.
+fn readBody(c: Stream, buf: inout Vec[byte], start: int, hs: []Header, max: int, end: inout int) -> Vec[byte] ! int {
     if let te = findHeader(hs, "Transfer-Encoding") {
         if te.toLower() != "chunked" {
             return err(501)
@@ -281,14 +426,26 @@ fn readBody(c: net.Conn, buf: inout Vec[byte], start: int, hs: []Header, max: in
             }
             pos = eol + 2
             if size == 0 {
-                return out
+                // trailer lines, then the blank line
+                loop {
+                    var tl = findBytes(buf, "\r\n", pos)
+                    while tl < 0 {
+                        if buf.len() - pos > 8192 || !fillTo(c, &buf, buf.len() + 1) {
+                            return err(400)
+                        }
+                        tl = findBytes(buf, "\r\n", pos)
+                    }
+                    if tl == pos {
+                        end = pos + 2
+                        return out
+                    }
+                    pos = tl + 2
+                }
             }
             if !fillTo(c, &buf, pos + size + 2) {
                 return err(400)
             }
-            for i in pos..pos + size {
-                out.push(buf[i])
-            }
+            out.extendFromSlice(buf[pos..pos + size])
             pos += size + 2
         }
     }
@@ -302,12 +459,15 @@ fn readBody(c: net.Conn, buf: inout Vec[byte], start: int, hs: []Header, max: in
     if !fillTo(c, &buf, start + len) {
         return err(400)
     }
+    end = start + len
     return buf[start..start + len].toVec()
 }
 
-// Err: the status to answer with, or 0 when the client went away.
-fn readRequest(c: net.Conn, max: int) -> Request ! int {
-    var buf = Vec[byte]{}
+// The next request on `c`, and whether the client wants the connection kept
+// for another one. `buf` holds what was read past the previous request and is
+// left holding what follows this one. Err: the status to answer with, or 0
+// when the client went away.
+fn readRequest(c: Stream, buf: inout Vec[byte], max: int) -> (Request, bool) ! int {
     let start = readHead(c, &buf)
     if start == -1 {
         return err(0)
@@ -322,7 +482,12 @@ fn readRequest(c: net.Conn, max: int) -> Request ! int {
         return err(400)
     }
     let hs = parseHeaders(lines[1..])
-    let body = try readBody(c, &buf, start, hs, max)
+    var end = 0
+    let body = try readBody(c, &buf, start, hs, max, &end)
+    _ = buf.drain(0, end)
+    // HTTP/1.1 keeps the connection unless told otherwise; 1.0 only when asked
+    let conn = (findHeader(hs, "Connection") ?? "").toLower()
+    let keep = if parts[2] == "HTTP/1.0" { conn.contains("keep-alive") } else { !conn.contains("close") }
     let target = parts[1].clone()
     var path = target.clone()
     var q: String = ""
@@ -330,7 +495,7 @@ fn readRequest(c: net.Conn, max: int) -> Request ! int {
         path = target[0..i].toString()
         q = target[i + 1..].toString()
     }
-    return Request{method: parts[0].clone(), path: path, rawQuery: q, headers: hs, body: body}
+    return (Request{method: parts[0].clone(), path: path, rawQuery: q, headers: hs, body: body}, keep)
 }
 
 // `s` with line breaks made spaces: a header set from user input can't end
@@ -352,44 +517,83 @@ fn safeInHead(s: str) -> bool {
     return true
 }
 
-fn writeResponse(c: net.Conn, r: Response) {
+// Writes `r`; `withBody` is false for an answer to HEAD. False if the write
+// failed.
+fn writeResponse(c: Stream, r: Response, keep: bool, withBody: bool) -> bool {
     var head = fmt.format("HTTP/1.1 {} {}\r\n", r.status, statusText(r.status))
     for h in r.headers {
         if h.name.toLower() != "content-length" && h.name.toLower() != "connection" {
             head.push(fmt.format("{}: {}\r\n", oneLine(h.name), oneLine(h.value)))
         }
     }
-    head.push(fmt.format("Content-Length: {}\r\nConnection: close\r\n\r\n", r.body.len()))
-    c.writeText(head) catch _e {
-        return
+    head.push(fmt.format("Content-Length: {}\r\nConnection: {}\r\n\r\n", r.body.len(), if keep { "keep-alive" } else { "close" }))
+    // small answers go out in one write
+    if withBody && r.body.len() <= 16384 {
+        var all = head.bytes().toVec()
+        all.extendFromSlice(r.body)
+        return c.write(all).isOk()
     }
-    c.write(r.body) catch _e {}
+    if c.writeText(head).isErr() {
+        return false
+    }
+    return !withBody || c.write(r.body).isOk()
 }
 
 // ---------------------------------------------------------------- serving
 
-fn handleConn[H: Handler + send](c: net.Conn, h: H, opts: Options) -> Outcome {
-    let req = readRequest(c, opts.maxBody) catch status {
+// Serves the requests on one connection, one after another, while the client
+// keeps it open (keep-alive) and sends the next within `opts.idleTimeout`.
+fn serveConn[H: Handler + send](c: Stream, h: H, opts: Options, stats: Mutex[Stats]) {
+    var buf = Vec[byte]{}
+    var first = true
+    loop {
+        // wait for the next request, but not forever
+        if buf.len() == 0 {
+            let got = task.timeout(opts.idleTimeout, () => c.read(&buf, 65536) catch _e { 0 }) ?? 0
+            if got == 0 {
+                // a client that hung up before asking anything
+                if first && !task.cancelled() {
+                    count(stats, .HungUp)
+                }
+                return
+            }
+        }
+        first = false
+        let (o, keep) = handleOne(c, &buf, h, opts)
+        count(stats, o)
+        if !keep || task.cancelled() {
+            return
+        }
+    }
+}
+
+// Reads, handles and answers one request; whether the connection can carry
+// another.
+fn handleOne[H: Handler + send](c: Stream, buf: inout Vec[byte], h: H, opts: Options) -> (Outcome, bool) {
+    let (req, wantsKeep) = readRequest(c, &buf, opts.maxBody) catch status {
         if task.cancelled() {
-            return .Stopped
+            return (.Stopped, false)
         }
         if status == 0 {
-            return .HungUp
+            return (.HungUp, false)
         }
-        writeResponse(c, text(status, statusText(status)))
-        return .Rejected
+        // what follows a malformed request can't be trusted: close
+        _ = writeResponse(c, text(status, statusText(status)), false, true)
+        return (.Rejected, false)
     }
     if task.cancelled() {
-        return .Stopped
+        _ = writeResponse(c, stopping(), false, true)
+        return (.Stopped, false)
     }
     // each task writes its own variable
     var result = Response{status: 0}
     var hungUp = false
+    var early = Vec[byte]{}
     scope s {
-        // the watcher: a read that returns 0 means the client hung up
+        // the watcher: a read that returns 0 means the client hung up. Bytes it
+        // gets are the start of the next request (pipelining): they are kept.
         go () => {
-            var probe = Vec[byte]{}
-            let n = c.read(&probe, 1) catch _e { -1 }
+            let n = c.read(&early, 1) catch _e { -1 }
             if n == 0 && !task.cancelled() {
                 hungUp = true
                 s.cancel()
@@ -404,18 +608,24 @@ fn handleConn[H: Handler + send](c: net.Conn, h: H, opts: Options) -> Outcome {
         }
     }
     if hungUp {
-        return .HungUp
+        return (.HungUp, false)
     }
-    // the server is stopping: drop the request
+    // the server is stopping: drop the request, and say so (a client must
+    // not take the closed connection for a stale one and send it again)
     if task.cancelled() {
-        return .Stopped
+        _ = writeResponse(c, stopping(), false, true)
+        return (.Stopped, false)
     }
-    if result.status != 0 {
-        writeResponse(c, result)
-        return .Served
+    buf.extend(early)
+    let timedOut = result.status == 0
+    if timedOut {
+        result = text(504, "the request took too long\n")
     }
-    writeResponse(c, text(504, "the request took too long\n"))
-    return .TimedOut
+    let keep = wantsKeep && opts.keepAlive && (result.header("Connection") ?? "").toLower() != "close"
+    if !writeResponse(c, result, keep, req.method != "HEAD") {
+        return (.HungUp, false)
+    }
+    return (if timedOut { .TimedOut } else { .Served }, keep)
 }
 
 // Serves until the calling task is cancelled; then cancels the requests in
@@ -433,18 +643,45 @@ pub fn serveCounting[H: Handler + send](ln: net.Listener, h: H, opts: Options, s
                 break
             }
             // `c` moves into the task; `h`, `opts` and `stats` are borrowed
-            go () => {
-                let o = handleConn(c, h, opts)
-                with s = stats.lock() {
-                    match o {
-                        .Served => s.served += 1
-                        .TimedOut => s.timedOut += 1
-                        .HungUp => s.hungUp += 1
-                        .Stopped => s.stopped += 1
-                        .Rejected => s.rejected += 1
-                    }
-                }
+            go serveConn(Stream.Plain(c), h, opts, stats)
+        }
+    }
+}
+
+// Serves HTTPS, as `serve` serves HTTP: `ln` from
+// `tls.listen(":8443", "cert.pem", "key.pem")`. Each connection's TLS
+// handshake runs in its own task.
+pub fn serveTls[H: Handler + send](ln: tls.Listener, h: H, opts: Options) {
+    let stats = Mutex(Stats{})
+    serveTlsCounting(ln, h, opts, stats)
+}
+
+// Like `serveTls`, counting what happened to the requests in `stats`.
+pub fn serveTlsCounting[H: Handler + send](ln: tls.Listener, h: H, opts: Options, stats: Mutex[Stats]) {
+    scope {
+        loop {
+            let c = ln.accept() catch _e {
+                break
             }
+            go serveConn(Stream.Secure(c), h, opts, stats)
+        }
+    }
+}
+
+fn stopping() -> Response {
+    var r = text(503, "the server is shutting down\n")
+    r.setHeader("Retry-After", "1")
+    return r
+}
+
+fn count(stats: Mutex[Stats], o: Outcome) {
+    with s = stats.lock() {
+        match o {
+            .Served => s.served += 1
+            .TimedOut => s.timedOut += 1
+            .HungUp => s.hungUp += 1
+            .Stopped => s.stopped += 1
+            .Rejected => s.rejected += 1
         }
     }
 }
@@ -456,15 +693,16 @@ fn badUrl(url: str, why: str) -> io.Error {
 }
 
 // Sends a request and reads the whole response. `url` is
-// "http://host[:port]/path?query".
+// "http://host[:port]/path?query" or "https://...", whose server certificate
+// is checked against the system's roots. Connections are kept and reused by
+// later requests to the same server (for a few seconds); a `Connection: close`
+// header opts out.
 pub fn request(method: str, url: str, headers: []Header, body: []byte) -> Response ! io.Error {
-    if url.startsWith("https://") {
-        return err(badUrl(url, "https is not supported (there is no TLS yet)"))
+    let secure = url.startsWith("https://")
+    if !secure && !url.startsWith("http://") {
+        return err(badUrl(url, "expected http:// or https://"))
     }
-    if !url.startsWith("http://") {
-        return err(badUrl(url, "expected http://"))
-    }
-    let rest = url[7..]
+    let rest = url[if secure { 8 } else { 7 }..]
     let slash = rest.find("/") ?? rest.len()
     let hostPort = rest[0..slash]
     let target = if slash < rest.len() { rest[slash..].toString() } else { "/" }
@@ -482,43 +720,185 @@ pub fn request(method: str, url: str, headers: []Header, body: []byte) -> Respon
             return err(io.newError(.InvalidInput, fmt.format("bad header `{}`: a name is one word without `:`, and neither names nor values may hold line breaks", oneLine(h.name))))
         }
     }
-    let addr = if hostPort.contains(":") { hostPort.toString() } else { hostPort + ":80" }
-    let c = try net.dial(addr)
-    var head = fmt.format("{} {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\nContent-Length: {}\r\n", method, target, hostPort, body.len())
+    let hasPort = if hostPort.startsWith("[") { hostPort.contains("]:") } else { hostPort.contains(":") }
+    let addr = if hasPort { hostPort.toString() } else { hostPort + if secure { ":443" } else { ":80" } }
+    var head = fmt.format("{} {} HTTP/1.1\r\nHost: {}\r\nContent-Length: {}\r\n", method, target, hostPort, body.len())
     for h in headers {
         head.push(fmt.format("{}: {}\r\n", h.name, h.value))
     }
     head.push("\r\n")
-    try c.writeText(head)
-    try c.write(body)
+    let key = (if secure { "https://" } else { "http://" }) + addr
+    let pooled = !(findHeader(headers, "Connection") ?? "").toLower().contains("close")
+    let noBody = method == "HEAD"
+    // a kept connection first; the server may have closed it meanwhile, so a
+    // request that can safely be sent twice gets a second try on a new one
+    if pooled {
+        if let c = takeIdle(key) {
+            match exchange(c, head, body, noBody) {
+                ok(got) => {
+                    let (resp, keep) = got
+                    if keep {
+                        putIdle(key, c)
+                    }
+                    return resp
+                }
+                err(f) => {
+                    match f {
+                        Stale(e) => {
+                            if !idempotent(method) {
+                                return err(e.clone())
+                            }
+                        }
+                        Broken(e) => return err(e.clone())
+                    }
+                }
+            }
+        }
+    }
+    let c = if secure { Stream.Secure(try tls.dial(addr)) } else { Stream.Plain(try net.dial(addr)) }
+    match exchange(c, head, body, noBody) {
+        ok(got) => {
+            let (resp, keep) = got
+            if keep && pooled {
+                putIdle(key, c)
+            }
+            return resp
+        }
+        err(f) => {
+            return err(match f {
+                Stale(e) => e.clone()
+                Broken(e) => e.clone()
+            })
+        }
+    }
+}
+
+fn idempotent(method: str) -> bool {
+    return method == "GET" || method == "HEAD" || method == "OPTIONS" || method == "PUT" || method == "DELETE" || method == "TRACE"
+}
+
+// How an exchange failed: Stale when nothing came back (the server may have
+// closed a kept connection), Broken otherwise.
+enum Fail {
+    Stale(io.Error)
+    Broken(io.Error)
+}
+
+// Sends one request on `c` and reads the response; whether `c` can carry
+// another request.
+fn exchange(c: Stream, head: str, body: []byte, noBody: bool) -> (Response, bool) ! Fail {
+    var msg = head.bytes().toVec()
+    msg.extendFromSlice(body)
+    c.write(msg) catch e {
+        return err(.Stale(e))
+    }
     var buf = Vec[byte]{}
     let start = readHead(c, &buf)
+    if start == -1 {
+        let e = io.newError(.UnexpectedEof, "the server closed the connection without answering")
+        return err(if buf.len() == 0 { .Stale(e) } else { .Broken(e) })
+    }
     if start < 0 {
-        return err(io.newError(.UnexpectedEof, "the server closed the connection without answering"))
+        return err(.Broken(io.newError(.InvalidInput, "the response head is over 64 KiB")))
     }
     let lines = String(buf[0..start - 4].toVec()).split("\r\n")
     let parts = lines[0].split(" ")
     let status = if parts.len() >= 2 { parts[1].parseInt() ?? 0 } else { 0 }
     if status == 0 {
-        return err(io.newError(.InvalidInput, "not an HTTP response: " + lines[0]))
+        return err(.Broken(io.newError(.InvalidInput, "not an HTTP response: " + lines[0])))
     }
     let hs = parseHeaders(lines[1..])
+    let conn = (findHeader(hs, "Connection") ?? "").toLower()
+    var keep = if parts[0] == "HTTP/1.0" { conn.contains("keep-alive") } else { !conn.contains("close") }
     var b = Vec[byte]{}
-    if findHeader(hs, "Content-Length") != none || findHeader(hs, "Transfer-Encoding") != none {
-        b = readBody(c, &buf, start, hs, 1 << 40) catch _status {
-            return err(io.newError(.UnexpectedEof, "the response body ended early"))
+    if noBody || status < 200 || status == 204 || status == 304 {
+        keep = keep && buf.len() == start
+    } else if findHeader(hs, "Content-Length") != none || findHeader(hs, "Transfer-Encoding") != none {
+        var end = 0
+        b = readBody(c, &buf, start, hs, 1 << 40, &end) catch _status {
+            return err(.Broken(io.newError(.UnexpectedEof, "the response body ended early")))
         }
+        keep = keep && end == buf.len()
     } else {
         // until the server closes the connection
         loop {
-            let n = try c.read(&buf, 65536)
+            let n = c.read(&buf, 65536) catch e {
+                return err(.Broken(e))
+            }
             if n == 0 {
                 break
             }
         }
         b = buf[start..].toVec()
+        keep = false
     }
-    return Response{status: status, headers: hs, body: b}
+    return (Response{status: status, headers: hs, body: b}, keep)
+}
+
+// Connections the client keeps for later requests to the same server.
+struct IdleConn {
+    key: String
+    conn: Stream
+    since: int
+}
+
+let idleConns = Mutex(Vec[IdleConn]{})
+const maxIdle = 64
+const maxIdlePerServer = 8
+// servers commonly close idle connections after 5 to 75 seconds
+const idleFor = 4 * 1000000000
+
+fn __readable(fd: int) -> bool
+
+fn rawFd(c: Stream) -> int {
+    return match c {
+        Plain(p) => p.rawFd()
+        Secure(t) => t.rawFd()
+    }
+}
+
+// A kept connection to `key`, if one is still usable.
+fn takeIdle(key: str) -> ?Stream {
+    let now = time.now()
+    var found: ?Stream = none
+    var stale = Vec[IdleConn]{}
+    with pool = idleConns.lock() {
+        var i = pool.len() - 1
+        while i >= 0 {
+            if now - pool[i].since > idleFor {
+                stale.push(pool.remove(i))
+            } else if found == none && pool[i].key == key {
+                found = some(pool.remove(i).conn)
+            }
+            i -= 1
+        }
+    }
+    // a kept connection with something to read has been closed by the server
+    // (or is out of step with it): don't use it
+    if let c = found {
+        if !__readable(rawFd(c)) {
+            return some(c)
+        }
+    }
+    return none
+}
+
+fn putIdle(key: str, c: sink Stream) {
+    var out: ?IdleConn = none
+    with pool = idleConns.lock() {
+        var same = 0
+        for ic in pool {
+            if ic.key == key {
+                same += 1
+            }
+        }
+        if same < maxIdlePerServer {
+            if pool.len() >= maxIdle {
+                out = some(pool.remove(0))
+            }
+            pool.push(IdleConn{key: key.toString(), conn: c, since: time.now()})
+        }
+    }
 }
 
 // A GET request.

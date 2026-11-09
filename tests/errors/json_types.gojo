@@ -1,0 +1,12 @@
+// A type with no JSON form is an error at the encode or decode that needs it.
+use std/json
+
+struct Job {
+    name: String
+    run: fn(int) -> int
+}
+
+fn main() {
+    println(json.encode(Job{name: "x", run: x => x}))
+    // error: `json.encode` can't handle `fn(int) -> int` (in field `run` of `Job`): a function has no JSON form
+}
