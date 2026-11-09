@@ -30,7 +30,8 @@ What the round of work that followed this note did with each proposal, in the su
 | P6 mode-polymorphic projections | Not done: a receiver is written without `&`, so `ref self` would have to infer the mode from how the result is used, and a reader (or agent) could no longer tell from a call whether it writes | — |
 | P7 `restrict` on `inout` | Measured, not kept: the machine code of every benchmark was identical (after inlining the C compiler already knows) | — |
 | P7 task stack offsets | Measured, not kept: no change on the 100k-chain benchmark | — |
-| P2 view collections | Done, with two review rounds | spec 5.4 |
+| P2 view collections | Done, with two review rounds; view structs may hold view collections and owned data (moved, not copied), as sketched above | spec 5.4 |
+| L1, the long-lived case | Lifted without lifetime names for its common shape: a struct keeps views of its own heap-owning field (`words: Vec[str] of text`), which is frozen, and is then an ordinary value: returned, stored, sent. Views into data some *other* value owns still can't be kept past the variables holding them | spec 5.4 |
 | P3 field reflection | Done: `static for`, `x.[f]`, `static T{}`, `static if`. `json` stays compiler-generated: reflection has no enum variants yet, which a library encoder needs | spec 9.1 |
 | P4 generators | Done: `gen fn`, `yield` to a `for` loop (the frame stays on the stack, so a generator is consumed by a loop, not stored) | spec 7.3 |
 | P5 `requires`, `checkfree`, `gojo claims` | Done | spec 14 |

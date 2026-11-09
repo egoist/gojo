@@ -311,6 +311,11 @@ pub struct TParamInfo {
 pub struct FieldInfo {
     pub name: String,
     pub ty: Ty,
+    /// `of f`: the views it holds point into field `f` of the same value,
+    /// which is frozen (spec 5.4).
+    pub of: Option<usize>,
+    /// Some other field's views point into this one: it can't change.
+    pub frozen: bool,
     pub default: Option<TExpr>,
     pub is_pub: bool,
     /// Declared `pub` (`is_pub` also holds for every field of a standard
@@ -608,6 +613,8 @@ impl Program {
     pub fn owning_view(&self, t: &Ty) -> bool {
         match t {
             Ty::Vec(_) | Ty::Map(..) => self.is_view(t),
+            // a view struct holding a view collection or owned data
+            Ty::Adt(d, _) => self.def(*d).view && !self.def(*d).is_copy,
             Ty::Option(a) => self.owning_view(a),
             Ty::Result(a, b) => self.owning_view(a) || self.owning_view(b),
             _ => false,

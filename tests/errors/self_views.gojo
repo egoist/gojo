@@ -1,0 +1,59 @@
+// The views a field declared `of text` holds point into `text` of the same
+// value, and no further: the value carries them wherever it goes.
+struct Doc {
+    text: String
+    words: Vec[str] of text
+    first: str of text
+
+    fn add(inout self, s: str) {
+        self.words.push(s)
+    }
+
+    // a view of a value that is gone when the function returns
+    fn take(sink self) -> str {
+        return self.first
+    }
+}
+
+fn make(t: sink String) -> Doc {
+    return Doc{text: t, words: t.splitViews(" "), first: ""}
+}
+
+fn wrong(t: sink String, u: String) -> Doc {
+    return Doc{text: t, words: u.splitViews(" "), first: ""}
+}
+
+fn fill(out: inout Vec[str], src: str) {
+    out.push(src)
+}
+
+fn keepWords() -> Vec[str] {
+    let d = make("x y".toString())
+    return d.words
+}
+
+fn main() {
+    let other = "zz".toString()
+    var d = make("a b".toString())
+    var d2 = make("c d".toString())
+    d.first = other.asStr()
+    d.words.push(d2.first)
+    fill(&d.words, other)
+    let w = d.word0()
+    d = d2
+    println(w, d.words.len(), keepWords(), wrong("q".toString(), "r".toString()).first)
+}
+
+extend Doc {
+    fn word0(self) -> str {
+        return self.words[0]
+    }
+}
+// error: `words` may hold only views of `text` of the same value (`of text`), and this views `s`
+// error: returns a view of `self`, which is dropped when the function returns
+// error: `words` may hold only views of `t`, which goes into `text`, and this one views `u`
+// error: returns a view of `d`, which is dropped when the function returns
+// error: `first` may hold only views of `text` of the same value (`of text`), and this views `other`
+// error: `words` may hold only views of `text` of the same value (`of text`), and this views `d2.text`
+// error: `words` may hold only views of `text` of the same value (`of text`), and this views `other`
+// error: cannot modify `d` while it is borrowed by `w`

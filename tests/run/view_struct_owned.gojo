@@ -1,0 +1,55 @@
+// A view struct may hold view collections and owned data: it is then moved,
+// not copied, and its memory is freed at its last use.
+enum Kind {
+    Word
+    Num
+}
+
+view struct Token {
+    kind: Kind
+    text: str
+}
+
+struct Node {
+    first: int
+    count: int
+}
+
+// views of the source, the tokens, and owned nodes, together
+view struct Ast {
+    src: str
+    toks: Vec[Token]
+    nodes: Vec[Node]
+    name: String
+}
+
+fn tokenize(src: str) -> Vec[Token] of src {
+    var out = Vec[Token]{}
+    for w in src.splitViews(" ") {
+        let k = if w.len() > 0 && w.bytes()[0] >= 48 && w.bytes()[0] <= 57 { Kind.Num } else { Kind.Word }
+        out.push(Token{kind: k, text: w})
+    }
+    return out
+}
+
+fn parse(src: str) -> Ast of src {
+    let toks = tokenize(src)
+    var nodes = Vec[Node]{}
+    nodes.push(Node{first: 0, count: toks.len()})
+    return Ast{src, toks, nodes, name: "main".toString()}
+}
+
+fn main() {
+    let text = "let x 42 y".toString()
+    var ast = parse(text)
+    for t in ast.toks {
+        println(t.text, match t.kind {
+            Word => "word"
+            Num => "num"
+        })
+    }
+    ast.toks.push(Token{kind: .Word, text: text[0..3]})
+    println(ast.toks.len(), ast.nodes[0].count, ast.name, ast.src)
+    let moved = ast
+    println(moved.toks[4].text)
+}

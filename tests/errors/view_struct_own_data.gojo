@@ -1,0 +1,31 @@
+// A view struct's owned data belongs to the variable holding it: a view of
+// it borrows the variable, and can't go into the struct's own view fields.
+view struct Ast {
+    src: str
+    toks: Vec[str]
+    name: String
+
+    fn nm(self) -> str {
+        return self.name.asStr()
+    }
+
+    fn fill(inout self) {
+        self.toks.push(self.name.asStr())
+    }
+}
+
+fn get(text: str) -> str {
+    let ast = Ast{src: text, toks: Vec[str]{}, name: "n".toString()}
+    return ast.nm()
+}
+
+fn main() {
+    let text = "abc".toString()
+    var ast = Ast{src: text, toks: Vec[str]{}, name: "n".toString()}
+    let n = ast.nm()
+    ast = Ast{src: text, toks: Vec[str]{}, name: "m".toString()}
+    println(n, get(text))
+}
+// error: cannot store a view of `self.name` in `self`, which holds that data itself
+// error: returns a view of `ast`, which is dropped when the function returns
+// error: cannot modify `ast` while it is borrowed by `n`
