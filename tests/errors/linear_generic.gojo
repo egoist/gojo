@@ -1,0 +1,71 @@
+linear struct Tx {
+    id: int
+
+    fn commit(sink self) {
+        println("commit", self.id)
+    }
+
+    fn rollback(sink self) {
+        println("rollback", self.id)
+    }
+}
+
+fn begin(id: int) -> Tx {
+    return Tx{id}
+}
+
+interface Named {
+    fn name(self) -> String
+}
+
+linear struct Tn {
+    fn name(self) -> String {
+        return "tn"
+    }
+
+    fn end(sink self) {}
+}
+
+struct Plain[T] {
+    v: T
+}
+
+fn keep[T: any](x: sink T) {
+    println("kept")
+}
+
+fn wrap[T](x: sink T) -> ?T {
+    return some(x)
+}
+
+fn outer[U: any](u: sink U) -> ?U {
+    return wrap(u)
+}
+
+fn show(n: Named) {
+    println(n.name())
+}
+
+fn main() {
+    let _p = Plain[Tx]{v: begin(1)}
+    let _n: Named = Tn{}
+    show(Tn{})
+    let _m: Map[String, Tx] = [:]
+    let _arr: [2]Tx = [begin(1), begin(2)]
+    let _b = Box(begin(3))
+    let t = begin(5)
+    match begin(6) {
+        x => println(x.id)
+    }
+    t.commit()
+}
+// error: `x` is not consumed: the linear `T` would be dropped where the function ends
+// error: `wrap` may drop its `T` values, and `U` is linear
+// error: `Plain[Tx]` may drop its `T` values, and `Tx` is linear
+// error: only a type parameter declared `any` (`Plain[T: any]`) takes linear types
+// error: an interface value can't hold the linear `Tn`
+// error: this linear `Tn` is dropped at the end of the statement
+// error: `Map[String, Tx]` would drop the linear `Tx` it holds
+// error: `[2]Tx` would drop the linear `Tx` it holds
+// error: `Box[Tx]` would drop the linear `Tx` it holds
+// error: this arm drops the matched linear `Tx`

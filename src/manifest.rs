@@ -407,6 +407,18 @@ pub struct Manifest {
     /// Member directories of a workspace (globs expanded).
     pub members: Vec<PathBuf>,
     pub unsafe_policy: UnsafePolicy,
+    pub authority: AuthorityPolicy,
+}
+
+/// The `[authority]` table: which kinds of I/O a dependency may do (see
+/// `authority`). Only the manifest of the package being built counts.
+#[derive(Clone, Debug, Default)]
+pub struct AuthorityPolicy {
+    /// Package name (or `*`: every dependency not listed), where it is, and
+    /// the kinds it may use.
+    pub grants: Vec<(String, Span, Vec<String>)>,
+    /// Where the table is, when there is one.
+    pub span: Option<Span>,
 }
 
 impl Manifest {
@@ -472,7 +484,7 @@ pub fn from_text(sm: &mut SourceMap, root: &Path, name: String, text: String) ->
     let file = sm.add(name, text.clone());
     let top = parse_toml(file, &text).map_err(|d| vec![d])?;
     let mut diags = vec![];
-    let mut m = Manifest { root: root.to_path_buf(), file, package: None, dependencies: vec![], members: vec![], unsafe_policy: UnsafePolicy::default() };
+    let mut m = Manifest { root: root.to_path_buf(), file, package: None, dependencies: vec![], members: vec![], unsafe_policy: UnsafePolicy::default(), authority: AuthorityPolicy::default() };
     let whole = Span::new(file, 0, 0);
     for (k, ksp, v) in &top {
         match (k.as_str(), &v.v) {
@@ -480,8 +492,9 @@ pub fn from_text(sm: &mut SourceMap, root: &Path, name: String, text: String) ->
             ("dependencies", V::Table(t)) => m.dependencies = check_dependencies(root, t, &mut diags),
             ("workspace", V::Table(t)) => m.members = check_workspace(root, t, &mut diags),
             ("unsafe", V::Table(t)) => m.unsafe_policy = check_unsafe(t, *ksp, &mut diags),
-            ("package" | "dependencies" | "workspace" | "unsafe", _) => diags.push(Diag::new(*ksp, format!("`{}` must be a table: `[{}]`", k, k))),
-            _ => diags.push(Diag::new(*ksp, format!("unknown section `{}` (gojo.toml has [package], [dependencies], [unsafe] and [workspace])", k))),
+            ("authority", V::Table(t)) => m.authority = check_authority(t, *ksp, &mut diags),
+            ("package" | "dependencies" | "workspace" | "unsafe" | "authority", _) => diags.push(Diag::new(*ksp, format!("`{}` must be a table: `[{}]`", k, k))),
+            _ => diags.push(Diag::new(*ksp, format!("unknown section `{}` (gojo.toml has [package], [dependencies], [unsafe], [authority] and [workspace])", k))),
         }
     }
     if m.package.is_none() && m.members.is_empty() && diags.is_empty() {
@@ -492,6 +505,9 @@ pub fn from_text(sm: &mut SourceMap, root: &Path, name: String, text: String) ->
     }
     if let (None, Some(sp)) = (&m.package, m.unsafe_policy.span) {
         diags.push(Diag::new(sp, "[unsafe] belongs to a [package]: each member of a workspace has its own"));
+    }
+    if let (None, Some(sp)) = (&m.package, m.authority.span) {
+        diags.push(Diag::new(sp, "[authority] belongs to a [package]: each member of a workspace has its own"));
     }
     if diags.is_empty() { Ok(m) } else { Err(diags) }
 }
@@ -601,6 +617,34 @@ fn check_unsafe(t: &[(String, Span, Val)], sp: Span, diags: &mut Vec<Diag>) -> U
             ("forbid", _) => diags.push(Diag::new(v.span, "`forbid` is `true` or `false`")),
             _ => diags.push(Diag::new(*ksp, format!("unknown key `{}` in [unsafe] (known: allow, forbid)", k))),
         }
+    }
+    p
+}
+
+fn check_authority(t: &[(String, Span, Val)], sp: Span, diags: &mut Vec<Diag>) -> AuthorityPolicy {
+    let mut p = AuthorityPolicy { span: Some(sp), ..AuthorityPolicy::default() };
+    let kinds = crate::authority::KINDS.iter().map(|(k, _)| format!("\"{}\"", k)).collect::<Vec<_>>().join(", ");
+    for (k, ksp, v) in t {
+        if k != "*" && !valid_package_name(k) {
+            diags.push(Diag::new(*ksp, format!("`{}` is not a package name ([authority] lists dependencies by the name in their gojo.toml, or `\"*\"` for every one not listed)", k)));
+            continue;
+        }
+        let V::Array(items) = &v.v else {
+            diags.push(Diag::new(v.span, format!("`{}` takes a list of what it may do: `{} = [\"net\"]` (known: {}), or `[]` for nothing", k, if k == "*" { "\"*\"" } else { k }, kinds)));
+            continue;
+        };
+        let mut granted: Vec<String> = vec![];
+        for it in items {
+            let Some(s) = string_of(it, k, diags) else { continue };
+            if !crate::authority::KINDS.iter().any(|(n, _)| *n == s) {
+                diags.push(Diag::new(it.span, format!("unknown authority `{}` (known: {})", s, kinds)));
+            } else if granted.iter().any(|g| g == s) {
+                diags.push(Diag::new(it.span, format!("`{}` is listed twice", s)));
+            } else {
+                granted.push(s.to_string());
+            }
+        }
+        p.grants.push((k.clone(), *ksp, granted));
     }
     p
 }
@@ -773,6 +817,26 @@ mod tests {
         }
         for bad in ["1.0", "01.0.0", "1.0.0-", "v1.0.0", "1.0.0-a..b", "1.0.x"] {
             assert!(!valid_version(bad), "{}", bad);
+        }
+    }
+
+    #[test]
+    fn authority_table() {
+        let mut sm = SourceMap::default();
+        let root = Path::new("/nonexistent");
+        let m = from_text(&mut sm, root, "a.toml".into(), "[package]\nname = \"app\"\n[authority]\nleftpad = []\n\"@c/s3\" = [\"net\", \"fs\"]\n\"*\" = [\"env\"]\n".into()).unwrap_or_else(|d| panic!("{}", d[0].msg));
+        let g: Vec<(&str, Vec<&str>)> = m.authority.grants.iter().map(|(n, _, k)| (n.as_str(), k.iter().map(|s| s.as_str()).collect())).collect();
+        assert_eq!(g, vec![("leftpad", vec![]), ("@c/s3", vec!["net", "fs"]), ("*", vec!["env"])]);
+        for (bad, msg) in [
+            ("[package]\nname = \"app\"\n[authority]\nx = [\"disk\"]\n", "unknown authority `disk`"),
+            ("[package]\nname = \"app\"\n[authority]\nx = [\"net\", \"net\"]\n", "listed twice"),
+            ("[package]\nname = \"app\"\n[authority]\nx = \"net\"\n", "takes a list"),
+            ("[package]\nname = \"app\"\n[authority]\nX = []\n", "not a package name"),
+            ("authority = 1\n[package]\nname = \"app\"\n", "must be a table"),
+            ("[workspace]\nmembers = []\n[authority]\nx = []\n", "belongs to a [package]"),
+        ] {
+            let errs = from_text(&mut sm, root, "b.toml".into(), bad.into()).err().unwrap_or_else(|| panic!("{:?} should be rejected", bad));
+            assert!(errs.iter().any(|d| d.msg.contains(msg)), "{:?}: {:?}", bad, errs.iter().map(|d| &d.msg).collect::<Vec<_>>());
         }
     }
 }

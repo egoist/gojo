@@ -1,0 +1,10 @@
+gen fn noType(n: int) {
+    yield n
+}
+
+fn main() {
+    for x in noType(1) {
+        println(x)
+    }
+}
+// error: a `gen fn` says what it yields: `gen fn noType(...) -> T`

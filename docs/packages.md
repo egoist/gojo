@@ -177,6 +177,42 @@ forbid = true         # and none in this package itself
   agents can prefer safe packages before adding one.
 - The standard library is trusted, and isn't listed.
 
+## What a dependency may do
+
+Outside `unsafe` code, a package reaches the file system, the environment,
+other programs and the network only through a few functions of the standard
+library. A program can say which of these each dependency may call:
+
+```toml
+[authority]
+leftpad = []              # pure: none of it
+"@aws/s3" = ["net"]
+"*" = []                  # every dependency not listed (optional)
+```
+
+- **The kinds** are `fs` (opening, reading, writing, listing and removing
+  files, the working directory), `env` (environment variables), `process`
+  (running programs, signals) and `net` (sockets, DNS, `http.get` and
+  friends). The standard streams, `os.args`, `os.exit` and the clocks are
+  free.
+- **It is checked against calls,** in the package's code and in every package
+  it depends on, directly or not: a dependency acts for whoever calls it, so
+  `"@aws/s3" = ["net"]` also keeps the packages `@aws/s3` uses off the disk.
+  The error names the function, the package, and the line to add.
+- **Values handed in aren't limited.** A package with no `fs` may still write
+  to the `os.File` or `io.Writer` its caller passes it, or serve on the
+  `net.Listener` it is given: authority is delegated by passing values, the
+  object-capability way, with no capability parameters threaded through every
+  signature (Austral's root capability, Eio's `env`, Mog's `requires`).
+- **Opt-in.** Packages that are not listed (and the package being built) may
+  do anything, so libraries that do I/O carry no annotations. Only the
+  manifest being built counts, like `[unsafe]`.
+- **`gojo authority`** lists what each dependency does, with the call sites,
+  whether the table allows it, and the table that grants exactly that
+  (`--json` for tools); it fails when the table doesn't hold.
+- `unsafe` code can do anything, so `[unsafe] allow` is the bigger grant: an
+  allowed package's C calls are not checked against `[authority]`.
+
 ## Building and caching
 
 - **The cache is content-addressed:** `~/.cache/gojo/pkg/<sha256>/`, written
@@ -218,9 +254,9 @@ forbid = true         # and none in this package itself
 ## Decisions to confirm
 
 1. **`gojo.toml` + `gojo.lock`, with short names in source** (Cargo/JSR).
-   Decided: the standard library is `std/...`, and permissions are not part
-   of the design (Cargo manages without them, and they add friction to every
-   package that does I/O).
+   Decided: the standard library is `std/...`. Permissions are opt-in
+   (`[authority]` limits a dependency only when the program asks), so
+   packages that do I/O carry no annotations.
 2. **A PubGrub solver with Cargo-style ranges,** major versions coexisting.
    The compiler has no third-party dependencies, so this means writing the
    solver (and a TOML subset parser) in-tree; I estimate 1,500–2,000 lines.
@@ -235,7 +271,8 @@ forbid = true         # and none in this package itself
 1. **The fix and local packages.** Done: the link-name check, `gojo.toml`
    (with `gojo-fuzz toml`), path dependencies, `exports`, workspaces,
    `gojo init`, `gojo doc <dependency>`, the `std/` imports, and the
-   `[unsafe]` policy with `gojo unsafe`.
+   `[unsafe]` policy with `gojo unsafe`, the `[authority]` table with
+   `gojo authority`.
 2. **Resolution and git sources.**
    - Semver and ranges, the PubGrub solver with explained failures.
    - `gojo.lock`, the content-addressed cache with SHA-256 (in-tree).

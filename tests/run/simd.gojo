@@ -1,0 +1,48 @@
+// std/simd: fixed-width vectors (lane-wise methods the C compiler vectorizes).
+
+use std/simd.{Simd}
+
+fn dotScalar(a: []f32, b: []f32) -> f32 {
+    var s: f32 = 0.0
+    for i in 0..a.len() {
+        s += a[i] * b[i]
+    }
+    return s
+}
+
+fn dotSimd(a: []f32, b: []f32) -> f32
+    requires a.len() == b.len()
+{
+    var acc = Simd[f32, 8].splat(0.0)
+    var i = 0
+    while i + 8 <= a.len() {
+        acc = Simd[f32, 8].load(a, i).mulAdd(Simd[f32, 8].load(b, i), acc)
+        i += 8
+    }
+    var s = acc.sum()
+    while i < a.len() {
+        s += a[i] * b[i]
+        i += 1
+    }
+    return s
+}
+
+fn main() {
+    var a: Vec[f32] = []
+    var b: Vec[f32] = []
+    for i in 0..4096 {
+        a.push(f32(i % 7) * 0.5)
+        b.push(f32(i % 3) * 0.25)
+    }
+    var t1: f32 = 0.0
+    var t2: f32 = 0.0
+    for _ in 0..3 {
+        t1 += dotScalar(a, b)
+        t2 += dotSimd(a, b)
+    }
+    println(t1, t2)
+    let x = Simd[int, 4]{lanes: [1, 5, 3, 7]}
+    let y = Simd[int, 4].splat(4)
+    let m = x.lt(y)
+    println(m.count(), m.bits(), Simd[int, 4].select(m, x, y).lanes, x.hmax(), x.add(y).lanes)
+}

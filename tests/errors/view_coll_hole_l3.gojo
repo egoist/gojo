@@ -1,0 +1,10 @@
+fn main() {
+    var ws: Vec[str] = []
+    var s = "hello world".toString()
+    scope {
+        go () => { ws.push(s.asStr()) }
+    }
+    s.push("defghijklmnopqrstuvwxyz0123456789")
+    println(ws)
+}
+// error: `s` does not live long enough: `ws` would still view it after it is dropped

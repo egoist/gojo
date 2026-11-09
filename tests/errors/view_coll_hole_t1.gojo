@@ -1,0 +1,10 @@
+fn main() {
+    let text = "hello world".toString()
+    var best = ""
+    for w in text.toUpper().splitViews(" ") {
+        best = w
+    }
+    let junk = "XXXXXXXXXXXXXXXXXXXXXXX".toString()
+    println(best, junk)
+}
+// error: `w` does not live long enough: `best` would still view it after it is dropped

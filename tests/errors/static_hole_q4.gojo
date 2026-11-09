@@ -1,0 +1,18 @@
+fn asT[T](s: String) -> T {
+    static if T is str {
+        return s
+    } else {
+        panic("no")
+    }
+}
+
+fn make[T]() -> T {
+    let s: String = "a long string that lives on the heap ${1}"
+    return asT(s)
+}
+
+fn main() {
+    let v: str = make()
+    println(v)
+}
+// error: `static if T is str`: the pattern can't be a view; in that arm a `T` could then be a view the borrow checker doesn't see. Match a value instead: `static if let v: str = x`

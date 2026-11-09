@@ -1,0 +1,31 @@
+linear struct Tx {
+    id: int
+    name: String
+
+    fn commit(sink self) {
+        println("commit", self.id)
+    }
+
+    fn rollback(sink self) {
+        println("rollback", self.id)
+    }
+}
+
+fn begin(id: int) -> Tx {
+    return Tx{id: id, name: "tx" + "{id}"}
+}
+linear struct Pool {
+    a: Tx
+    b: Tx
+
+    fn close(sink self) {
+        self.a.rollback()
+        self.b.rollback()
+    }
+}
+fn main() {
+    let p = Pool{a: begin(1), b: begin(2)}
+    defer p.close()
+    p.a.commit()
+}
+// error: `p.b` may not be consumed on every path: the linear `Tx` would be dropped where its block ends

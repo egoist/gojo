@@ -1,0 +1,7 @@
+copy linear struct P {
+    x: int
+}
+
+fn main() {
+}
+// error: a `linear` type is never copied: it can't be `copy` too

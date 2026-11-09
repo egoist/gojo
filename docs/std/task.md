@@ -18,7 +18,7 @@ fail with an error whose `isCancelled()` is true.
 
 **Types:** [`enum Reason`](#enum-reason), [`struct Cancelled`](#struct-cancelled), [`struct Local`](#struct-local), [`struct Stats`](#struct-stats)
 
-**Functions:** [`cancelled`](#cancelled), [`reason`](#reason), [`check`](#check), [`deadline`](#deadline), [`shield`](#shield), [`yieldNow`](#yieldnow), [`local`](#local), [`with`](#with), [`dump`](#dump), [`stats`](#stats), [`setMaxProcs`](#setmaxprocs), [`timeout`](#timeout), [`map`](#map), [`tryMap`](#trymap), [`each`](#each), [`race`](#race)
+**Functions:** [`cancelled`](#cancelled), [`reason`](#reason), [`check`](#check), [`deadline`](#deadline), [`shield`](#shield), [`yieldNow`](#yieldnow), [`local`](#local), [`with`](#with), [`dump`](#dump), [`stats`](#stats), [`setMaxProcs`](#setmaxprocs), [`timeout`](#timeout), [`map`](#map), [`each`](#each), [`race`](#race)
 
 ## Types
 
@@ -217,32 +217,28 @@ cancelled, and the result is none. Also none when the caller is cancelled.
 ### map
 
 ```gojo
-pub fn map[T: send, R: send](xs: []T, limit: int, f: send fn(T) -> R) -> Vec[R]
+pub fn map[T: send, R: send, E: send](xs: []T, limit: int, f: send fn(T) -> R ! E) -> Vec[R] ! E
 ```
 
 Calls `f` on every element, in up to `limit` tasks at once (0: no limit),
-and gives the results in the order of `xs`.
+and gives the results in the order of `xs`. When `f` can fail, the first
+error cancels the calls still running, and is the result; when it can't
+(`E` is then `never`), the result is just the vector.
 
 ```gojo
-let sizes = task.map(paths, 8, (p) => fileSize(p))
+let sizes = task.map(paths, 8, p => fileSize(p))      // Vec[int]
+let pages = try task.map(urls, 8, u => http.get(u))   // Vec[Page] ! http.Error
 ```
-
-### tryMap
-
-```gojo
-pub fn tryMap[T: send, R: send, E: send](xs: []T, limit: int, f: send fn(T) -> R ! E) -> Vec[R] ! E
-```
-
-Like `map` for a function that can fail: the first error cancels the
-calls still running, and is the result.
 
 ### each
 
 ```gojo
-pub fn each[T: send](xs: []T, limit: int, f: send fn(T))
+pub fn each[T: send, E: send](xs: []T, limit: int, f: send fn(T) ! E) ! E
 ```
 
 Calls `f` on every element, in up to `limit` tasks at once (0: no limit).
+When `f` can fail, the first error cancels the calls still running, and is
+the result.
 
 ### race
 

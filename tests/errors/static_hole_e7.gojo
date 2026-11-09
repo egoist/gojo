@@ -1,0 +1,40 @@
+linear struct Tx {
+    id: int
+
+    fn commit(sink self) {
+        println("commit", self.id)
+    }
+}
+
+linear enum E {
+    A(t: Tx, n: int)
+}
+
+fn num(fail: bool) -> int ! String {
+    if fail {
+        return err("fail")
+    }
+    return 5
+}
+
+fn mk(fail: bool) -> (Tx, int) ! String {
+    return (Tx{id: 1}, try num(fail))
+}
+
+fn mk2(fail: bool) -> E ! String {
+    return E.A(Tx{id: 1}, try num(fail))
+}
+
+fn mk3(fail: bool) -> ?Tx ! String {
+    return some(Tx{id: try num(fail)})
+}
+
+fn main() {
+    let p = mk(true) catch e {
+        println(e)
+        return
+    }
+    let (t, _) = p
+    t.commit()
+}
+// error: if this may leave early (a `try` failing), the linear `Tx` made before it in the same expression is dropped

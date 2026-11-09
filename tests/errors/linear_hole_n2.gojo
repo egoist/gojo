@@ -1,0 +1,35 @@
+linear struct Tx {
+    id: int
+    name: String
+
+    fn commit(sink self) {
+        println("commit", self.id)
+    }
+
+    fn rollback(sink self) {
+        println("rollback", self.id)
+    }
+}
+
+fn begin(id: int) -> Tx {
+    return Tx{id: id, name: "tx" + "{id}"}
+}
+linear struct E {
+    code: int
+
+    fn message(self) -> String {
+        return "E"
+    }
+
+    fn end(sink self) {
+        println("end E")
+    }
+}
+fn f() -> int ! E {
+    return err(E{code: 1})
+}
+fn main() {
+    let x = f() catch { 0 }
+    println(x)
+}
+// error: this `catch` drops the linear error `E`

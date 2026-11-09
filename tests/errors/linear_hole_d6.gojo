@@ -1,0 +1,29 @@
+linear struct Tx {
+    id: int
+    name: String
+
+    fn commit(sink self) {
+        println("commit", self.id)
+    }
+
+    fn rollback(sink self) {
+        println("rollback", self.id)
+    }
+}
+
+fn begin(id: int) -> Tx {
+    return Tx{id: id, name: "tx" + "{id}"}
+}
+fn each(xs: []int, f: fn(int)) {
+    for x in xs {
+        f(x)
+    }
+}
+fn main() {
+    var t = begin(1)
+    each([2, 3], x => {
+        t = begin(x)
+    })
+    t.commit()
+}
+// error: assigning here drops the linear `Tx` that was there

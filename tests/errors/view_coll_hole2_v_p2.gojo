@@ -1,0 +1,9 @@
+fn main() {
+    var d: Vec[str] = []
+    var s = "hello".toString()
+    var ws: Vec[Vec[str]] = [[s.asStr()]]
+    match ws.pop() { some(x) => d.extend(x), none => {} }
+    s.push("defghijklmnopqrstuvwxyz0123456789")
+    println(d)
+}
+// error: `s` does not live long enough: `d` would still view it after it is dropped

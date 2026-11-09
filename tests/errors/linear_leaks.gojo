@@ -1,0 +1,94 @@
+linear struct Tx {
+    id: int
+
+    fn commit(sink self) {
+        println("commit", self.id)
+    }
+
+    fn rollback(sink self) {
+        println("rollback", self.id)
+    }
+}
+
+fn begin(id: int) -> Tx {
+    return Tx{id}
+}
+
+fn leak1() {
+    let _tx = begin(1)
+}
+fn leak2(c: bool) {
+    let tx = begin(1)
+    if c {
+        tx.commit()
+    }
+}
+fn leak3() {
+    begin(1)
+    _ = begin(2)
+    println(begin(3).id)
+}
+fn leak4(c: bool) -> int {
+    let tx = begin(1)
+    if c {
+        return 1
+    }
+    tx.commit()
+    return 0
+}
+fn leak5() {
+    var tx = begin(1)
+    tx = begin(2)
+    tx.commit()
+}
+fn leak6() {
+    let tx = begin(1)
+    let f = () => println(tx.id)
+    f()
+    tx.commit()
+}
+fn leak7() {
+    let r: Rc[Tx] = Rc(begin(1))
+    println(r.id)
+    drop(begin(2))
+    var v: Vec[Tx] = []
+    v.push(begin(3))
+    v.clear()
+}
+fn leak8(t: sink Tx) {
+    println(t.id)
+}
+fn leak9() {
+    for i in 0..3 {
+        let tx = begin(i)
+        if i == 1 {
+            continue
+        }
+        tx.commit()
+    }
+}
+fn leak10() -> int ! String {
+    let tx = begin(1)
+    let n = try parse()
+    tx.commit()
+    return n
+}
+fn parse() -> int ! String {
+    return 1
+}
+fn main() {
+}
+// error: `_tx` is not consumed: the linear `Tx` would be dropped where its block ends
+// error: `tx` may not be consumed on every path: the linear `Tx` would be dropped where its block ends
+// error: this linear `Tx` is thrown away
+// error: this linear `Tx` is dropped at the end of the statement: it is only borrowed here
+// error: `tx` is not consumed: the linear `Tx` would be dropped by this `return`
+// error: assigning to `tx` drops the linear `Tx` it still holds
+// error: a closure can't capture the linear `tx`
+// error: `Rc[Tx]` would drop the linear `Tx` it holds
+// error: `drop` may drop its `T` values, and `Tx` is linear
+// error: `clear` may drop its `T` values, and `Tx` is linear
+// error: `t` is not consumed: the linear `Tx` would be dropped where the function ends
+// error: `tx` is not consumed: the linear `Tx` would be dropped by this `continue`
+// error: `tx` is not consumed: the linear `Tx` would be dropped when this `try` returns the error
+// error: `Tx` is linear: call `commit` or `rollback`

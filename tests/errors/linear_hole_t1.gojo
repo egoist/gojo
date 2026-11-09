@@ -1,0 +1,28 @@
+linear struct Tx {
+    id: int
+    name: String
+
+    fn commit(sink self) {
+        println("commit", self.id)
+    }
+
+    fn rollback(sink self) {
+        println("rollback", self.id)
+    }
+}
+
+fn begin(id: int) -> Tx {
+    return Tx{id: id, name: "tx" + "{id}"}
+}
+struct Factory {
+    n: int
+
+    fn new() -> Vec[Tx] {
+        return [begin(1), begin(2)]
+    }
+}
+fn main() {
+    let v = Factory.new()
+    println(v.len())
+}
+// error: `v` is not consumed: the linear `Vec[Tx]` would be dropped where its block ends

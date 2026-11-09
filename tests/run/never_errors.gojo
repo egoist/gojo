@@ -1,0 +1,30 @@
+struct Bad {
+    msg: String
+}
+
+fn apply[E](x: int, f: fn(int) -> int ! E) -> int ! E {
+    let y = try f(x)
+    return y + 1
+}
+
+fn half(x: int) -> int ! Bad {
+    if x % 2 == 1 {
+        return err(Bad{msg: "odd"})
+    }
+    return x / 2
+}
+
+fn main() {
+    let a = apply(1, x => x * 2)
+    println(a + 1)
+    let b = apply(4, half) catch _e { -1 }
+    let c = apply(3, half) catch e {
+        println(e.msg)
+        -2
+    }
+    println(b, c)
+    let d: int ! Bad = apply(5, x => x)
+    println(d catch _e { 0 })
+    let v = [1, 2, 3].map(x => apply(x, y => y * 10))
+    println(v)
+}

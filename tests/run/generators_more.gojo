@@ -1,0 +1,111 @@
+// Generators whose calls take closures, loops nested in those closures,
+// values moved into a generator, and generators in `extend` blocks.
+linear struct Tx {
+    id: int
+
+    fn commit(sink self) {
+        println("commit", self.id)
+    }
+}
+
+gen fn mapped(n: int, f: fn(int) -> int) -> int {
+    for i in 0..n {
+        yield f(i)
+    }
+}
+
+// a `return` in the argument closure returns from the closure
+fn find(limit: int) -> int {
+    outer: for k in 0..3 {
+        for x in mapped(5, y => {
+            if y == 4 {
+                return 0
+            }
+            y * 10 + k
+        }) {
+            if x == 21 {
+                return x
+            }
+            if x == 30 {
+                continue outer
+            }
+            if x > limit {
+                break outer
+            }
+        }
+    }
+    return -1
+}
+
+// takes the transaction and commits it when the loop is done with it
+gen fn one(x: sink Tx) -> int {
+    defer x.commit()
+    yield x.id
+}
+
+gen fn safe(n: int) -> int ! never {
+    yield n
+}
+
+struct Bag {
+    xs: Vec[int]
+}
+
+extend Bag {
+    gen fn doubled(self) -> int {
+        for x in self.xs {
+            yield x * 2
+        }
+    }
+
+    checkfree fn first(self) -> int {
+        if self.xs.len() == 0 {
+            return 0
+        }
+        return self.xs[0]
+    }
+}
+
+checkfree gen fn items(xs: []int) -> int {
+    for i in 0..xs.len() {
+        yield xs[i]
+    }
+}
+
+fn at(v: []int, i: int) requires i >= 0 && i < v.len() {
+    println("at", v[i])
+}
+
+fn main() {
+    println(find(100), find(15))
+    var total = 0
+    for x in mapped(4, y => {
+        var s = 0
+        for z in mapped(y, w => w) {
+            s += z
+        }
+        s
+    }) {
+        total += x
+        if x == 1 {
+            break
+        }
+    }
+    println("total", total)
+    let tx = Tx{id: 2}
+    for t in one(tx) {
+        println("got", t)
+    }
+    for x in safe(41) {
+        println(x + 1)
+    }
+    let b = Bag{xs: [1, 2, 3]}
+    for x in b.doubled() {
+        println(x)
+    }
+    println(b.first())
+    for x in items([4, 5]) {
+        println(x)
+    }
+    at([7, 8], 1)
+}

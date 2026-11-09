@@ -1,0 +1,12 @@
+fn main() {
+    var m: Map[String, str] = [:]
+    {
+        let s = "hello world".toString()
+        with e = m.entry("k".toString()) {
+            e = s.asStr()
+        }
+    }
+    let junk = "XXXXXXXXXXXXXXXXXXXXXXX".toString()
+    println(m, junk)
+}
+// error: `s` does not live long enough: `m` would still view it after it is dropped

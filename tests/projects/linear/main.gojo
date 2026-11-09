@@ -1,0 +1,12 @@
+use ./db
+
+fn take(s: sink String) {
+    println(s)
+}
+
+fn main() {
+    let t = db.begin(1)
+    take(t.log)
+    let u = db.begin(2)
+    u.commit()
+}

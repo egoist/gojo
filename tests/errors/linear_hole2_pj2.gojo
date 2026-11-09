@@ -1,0 +1,32 @@
+struct S {
+    n: int
+    fn proj(self) yield &int {
+        println("before")
+        yield self.n
+        println("after")
+    }
+}
+fn main() {
+    let s = S{n: 7}
+    with x = s.proj() {
+        println("x", x)
+    }
+}
+
+linear struct Tx {
+    id: int
+    name: String
+
+    fn commit(sink self) {
+        println("commit", self.id)
+    }
+
+    fn rollback(sink self) {
+        println("rollback", self.id)
+    }
+}
+
+fn begin(id: int) -> Tx {
+    return Tx{id: id, name: "tx" + "{id}"}
+}
+// error: `yield` lends a reference into `self`, a parameter passed by value (its type is copy), which is this function's own copy

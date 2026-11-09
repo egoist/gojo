@@ -1,0 +1,215 @@
+// Linear types (spec 5.7): values that must be consumed.
+
+linear struct Tx {
+    id: int
+
+    fn commit(sink self) {
+        println("commit", self.id)
+    }
+
+    fn rollback(sink self) {
+        println("rollback", self.id)
+    }
+}
+
+fn begin(id: int) -> Tx {
+    return Tx{id}
+}
+
+fn guarded(c: bool) {
+    let tx = begin(6)
+    defer tx.rollback()
+    if c {
+        tx.commit()
+    }
+}
+
+fn mainA() {
+    guarded(true)
+    guarded(false)
+}
+
+linear struct Pool {
+    a: Tx
+    b: Tx
+    name: String
+
+    fn close(sink self) {
+        self.a.commit()
+        self.b.rollback()
+    }
+}
+
+linear enum Step {
+    Pending(Tx)
+    Done
+
+    fn finish(sink self) {
+        match self {
+            Pending(t) => t.commit()
+            Done => {}
+        }
+    }
+}
+
+fn each(xs: []int, f: fn(int)) {
+    for x in xs {
+        f(x)
+    }
+}
+
+fn borrowing() {
+    let tx = begin(7)
+    each([1, 2], x => println(x + tx.id))
+    tx.commit()
+}
+
+fn commitIt(t: sink Tx) {
+    t.commit()
+}
+
+// moved into a task, which consumes it (one at a time, so the output's
+// order is fixed)
+fn tasks() {
+    scope {
+        for i in 0..2 {
+            let tx = begin(8 + i * 100)
+            let t = go commitIt(tx)
+            t.join()
+        }
+    }
+}
+
+fn give() -> Tx {
+    let t = begin(9)
+    return t
+}
+
+fn opt(c: bool) -> ?Tx {
+    if c {
+        return some(begin(10))
+    }
+    return none
+}
+
+fn partial() {
+    let p = Pool{a: begin(11), b: begin(12), name: "p"}
+    p.close()
+    let s = Step.Pending(begin(13))
+    s.finish()
+    let d = Step.Done
+    d.finish()
+}
+
+fn mainB() {
+    borrowing()
+    tasks()
+    give().commit()
+    let o = opt(true)
+    match o {
+        some(t) => t.commit()
+        none => println("none")
+    }
+    let o2 = opt(false)
+    if let t = o2 {
+        t.commit()
+    } else {
+        println("empty")
+    }
+    partial()
+    let (x, y) = (begin(14), begin(15))
+    x.commit()
+    y.commit()
+}
+
+struct Stack[T: any] {
+    items: Vec[T]
+
+    fn push(inout self, x: sink T) {
+        self.items.push(x)
+    }
+
+    fn pop(inout self) -> ?T {
+        return self.items.pop()
+    }
+
+    fn finish(sink self) {
+        self.items.finish()
+    }
+}
+
+fn id[T: any](x: sink T) -> T {
+    return x
+}
+
+fn mk(ok: bool) -> Tx ! String {
+    if ok {
+        return begin(30)
+    }
+    return err("no")
+}
+
+fn tryit(ok: bool) -> int ! String {
+    let t = try mk(ok)
+    let n = t.id
+    t.commit()
+    return n
+}
+
+fn guardedErr(ok: bool) -> int ! String {
+    let t = begin(40)
+    errdefer t.rollback()
+    let n = try tryit(ok)
+    t.commit()
+    return n
+}
+
+fn mainG() {
+    var s = Stack[Tx]{items: []}
+    s.push(begin(20))
+    s.push(id(begin(21)))
+    loop {
+        let t = s.pop() else { break }
+        t.commit()
+    }
+    s.finish()
+    println(tryit(true) catch _e { 0 })
+    println(tryit(false) catch _e { -1 })
+    let c = mk(false) catch _e { begin(31) }
+    c.rollback()
+    println(guardedErr(true) catch _e { 0 })
+    println(guardedErr(false) catch _e { -1 })
+    var a = begin(50)
+    var b = begin(51)
+    swap(&a, &b)
+    a.commit()
+    let old = replace(&b, begin(52))
+    old.rollback()
+    b.commit()
+    let p = (begin(53), "x")
+    p.0.commit()
+    println(p.1)
+    let x = if p.1 == "x" { begin(54) } else { begin(55) }
+    x.commit()
+    var o: ?Tx = none
+    o = some(begin(56))
+    if let t = o {
+        t.commit()
+    }
+    outer: for i in 0..3 {
+        for j in 0..3 {
+            let t = begin(60 + i * 10 + j)
+            if j == 1 {
+                t.rollback()
+                continue outer
+            }
+            t.commit()
+        }
+    }
+}
+
+fn main() {
+    mainA()
+    mainB()
+    mainG()
+}

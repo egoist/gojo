@@ -868,6 +868,9 @@ Tests run on a simulated scheduler: one thread, a virtual clock, and an
 interleaving chosen by a seed, so a test does the same thing every time.
 `gojo test --explore 1000` tries a thousand interleavings and, if one
 fails, prints the seed that replays it: `gojo test --seed 966961`.
+The network is simulated as well (in memory, with delays and short reads
+from the seed), and `gojo test --faults` adds resets, refused connections
+and disk errors, so code that retries can be tested.
 
 ## Packages and the standard library
 
@@ -987,6 +990,13 @@ fn main() {
 package. A dependency that has any builds only once your `gojo.toml` allows it
 (`[unsafe] allow = ["name"]`), and `forbid = true` there keeps your own package
 free of it.
+
+`[authority]` limits what dependencies may do with files, environment
+variables, other programs and the network: `leftpad = []` keeps `leftpad` (and
+whatever it depends on) to pure code, `s3 = ["net"]` lets `s3` use the network
+and nothing else. A package may still write to a file its caller hands it.
+`gojo authority` shows what each dependency uses and the table that allows
+exactly that.
 
 ## Where next
 

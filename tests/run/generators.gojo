@@ -1,0 +1,79 @@
+// Generators (spec 7.3): `gen fn` yields values to a `for` loop.
+
+gen fn lines(src: str) -> str {
+    var start = 0
+    let b = src.bytes()
+    for i in 0..b.len() {
+        if b[i] == 10 {
+            yield src[start..i]
+            start = i + 1
+        }
+    }
+    if start < src.len() {
+        yield src[start..]
+    }
+}
+
+gen fn countdown(n: int) -> int {
+    var i = n
+    while i > 0 {
+        yield i
+        i -= 1
+    }
+}
+
+struct Node {
+    v: int
+    kids: Vec[Node]
+
+    gen fn walk(self) -> int {
+        yield self.v
+        for k in self.kids {
+            for x in k.walk() {
+                yield x
+            }
+        }
+    }
+}
+
+gen fn evens(limit: int) -> String {
+    for x in countdown(limit) {
+        if x % 2 == 0 {
+            yield "even ${x}"
+        }
+    }
+}
+
+fn firstLong(text: str) -> ?int {
+    var n = 0
+    for l in lines(text) {
+        n += 1
+        if l.len() > 3 {
+            return some(n)
+        }
+    }
+    return none
+}
+
+fn main() {
+    let text = "ab\ncdef\ng".toString()
+    for l in lines(text) {
+        println("line:", l)
+    }
+    for x in countdown(5) {
+        if x == 2 {
+            break
+        }
+        println(x)
+    }
+    let tree = Node{v: 1, kids: [Node{v: 2, kids: []}, Node{v: 3, kids: [Node{v: 4, kids: []}]}]}
+    var sum = 0
+    for x in tree.walk() {
+        sum += x
+    }
+    println("sum", sum)
+    for s in evens(6) {
+        println(s)
+    }
+    println(firstLong(text))
+}

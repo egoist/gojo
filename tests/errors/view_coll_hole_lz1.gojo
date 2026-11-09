@@ -1,0 +1,8 @@
+fn main() {
+    var s = "hello".toString()
+    var ws: Vec[str] = []
+    let n = [1, 2].iter().map(x => { ws.push(s.asStr()); x }).sum()
+    s.push("defghijklmnopqrstuvwxyz0123456789")
+    println(ws, n)
+}
+// error: `s` is used by two arguments of the same call, and one of them may modify it

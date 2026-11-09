@@ -10,7 +10,7 @@ Functions without a body are implemented by the compiler or runtime.
 
 **Functions:** [`panic`](#panic), [`assert`](#assert), [`assertEq`](#asserteq), [`unreachable`](#unreachable), [`drop`](#drop), [`swap`](#swap), [`replace`](#replace), [`take`](#take), [`min`](#min), [`max`](#max), [`setOf`](#setof)
 
-**Methods on other types:** [`extend ?T`](#extend-t), [`extend T ! E`](#extend-t--e), [`extend T: Integer`](#extend-t-integer), [`extend T: Float`](#extend-t-float), [`extend f64`](#extend-f64), [`extend f32`](#extend-f32), [`extend rune`](#extend-rune), [`extend str`](#extend-str), [`extend String`](#extend-string), [`extend []T`](#extend-t-1), [`extend []Vec[T]`](#extend-vect), [`extend []String`](#extend-string-1), [`extend Vec[T]`](#extend-vect-1), [`extend Map[K, V]`](#extend-mapk-v), [`extend Rc[T]`](#extend-rct), [`extend Weak[T]`](#extend-weakt), [`extend Arc[T]`](#extend-arct), [`extend Cell[T]`](#extend-cellt), [`extend Mutex[T]`](#extend-mutext), [`extend Sender[T]`](#extend-sendert), [`extend Receiver[T]`](#extend-receivert), [`extend Task[T]`](#extend-taskt), [`extend Iso[T]`](#extend-isot), [`extend Scope`](#extend-scope), [`extend MutexRef[T]`](#extend-mutexreft)
+**Methods on other types:** [`extend ?T`](#extend-t), [`extend T ! E`](#extend-t--e), [`extend T: Integer`](#extend-t-integer), [`extend T: Float`](#extend-t-float), [`extend f64`](#extend-f64), [`extend f32`](#extend-f32), [`extend rune`](#extend-rune), [`extend str`](#extend-str), [`extend String`](#extend-string), [`extend []T`](#extend-t-1), [`extend []Vec[T]`](#extend-vect), [`extend []String`](#extend-string-1), [`extend []str`](#extend-str-1), [`extend Vec[T]`](#extend-vect-1), [`extend Map[K, V]`](#extend-mapk-v), [`extend Rc[T]`](#extend-rct), [`extend Weak[T]`](#extend-weakt), [`extend Arc[T]`](#extend-arct), [`extend Cell[T]`](#extend-cellt), [`extend Mutex[T]`](#extend-mutext), [`extend Sender[T]`](#extend-sendert), [`extend Receiver[T]`](#extend-receivert), [`extend Task[T]`](#extend-taskt), [`extend Iso[T]`](#extend-isot), [`extend Scope`](#extend-scope), [`extend MutexRef[T]`](#extend-mutexreft)
 
 ## Types
 
@@ -253,6 +253,8 @@ Mixes in the hash of any hashable value.
 
 ```gojo
 pub copy struct Id[T] {
+    // The slot it names (reused after `remove`, with a new generation).
+    pub index: int
     // and private fields
 }
 ```
@@ -611,7 +613,7 @@ Explicitly end the lifetime of a value.
 ### swap
 
 ```gojo
-pub fn swap[T](a: inout T, b: inout T)
+pub fn swap[T: any](a: inout T, b: inout T)
 ```
 
 Exchanges two places.
@@ -619,7 +621,7 @@ Exchanges two places.
 ### replace
 
 ```gojo
-pub fn replace[T](dst: inout T, value: sink T) -> T
+pub fn replace[T: any](dst: inout T, value: sink T) -> T
 ```
 
 Puts `value` into `dst` and returns what was there.
@@ -627,7 +629,7 @@ Puts `value` into `dst` and returns what was there.
 ### take
 
 ```gojo
-pub fn take[T: default](dst: inout T) -> T
+pub fn take[T: default + any](dst: inout T) -> T
 ```
 
 Takes the value out of `dst`, leaving the type's default (`""`, `0`, `none`,
@@ -664,7 +666,7 @@ A set of the values in `xs` (duplicates once, in the order first seen).
 #### ?T.isSome
 
 ```gojo
-pub fn isSome(self) -> bool
+pub fn isSome(self) -> bool where T: any
 ```
 
 Whether there is a value.
@@ -672,7 +674,7 @@ Whether there is a value.
 #### ?T.isNone
 
 ```gojo
-pub fn isNone(self) -> bool
+pub fn isNone(self) -> bool where T: any
 ```
 
 Whether there is no value.
@@ -680,7 +682,7 @@ Whether there is no value.
 #### ?T.unwrap
 
 ```gojo
-pub fn unwrap(sink self) -> T
+pub fn unwrap(sink self) -> T where T: any
 ```
 
 The value; panics on none. Prefer `??`, `if let` or `try` where none can
@@ -689,7 +691,7 @@ happen.
 #### ?T.expect
 
 ```gojo
-pub fn expect(sink self, msg: str) -> T
+pub fn expect(sink self, msg: str) -> T where T: any
 ```
 
 The value; panics with `msg` on none.
@@ -770,7 +772,7 @@ let port = try env.get("PORT").okOr(ConfigError.Missing("PORT"))
 #### T ! E.isOk
 
 ```gojo
-pub fn isOk(self) -> bool
+pub fn isOk(self) -> bool where T: any, E: any
 ```
 
 Whether this is a value rather than an error.
@@ -778,7 +780,7 @@ Whether this is a value rather than an error.
 #### T ! E.isErr
 
 ```gojo
-pub fn isErr(self) -> bool
+pub fn isErr(self) -> bool where T: any, E: any
 ```
 
 Whether this is an error.
@@ -786,7 +788,7 @@ Whether this is an error.
 #### T ! E.unwrap
 
 ```gojo
-pub fn unwrap(sink self) -> T
+pub fn unwrap(sink self) -> T where T: any
 ```
 
 The value; panics with the error. Prefer `try` or `catch`.
@@ -794,7 +796,7 @@ The value; panics with the error. Prefer `try` or `catch`.
 #### T ! E.expect
 
 ```gojo
-pub fn expect(sink self, msg: str) -> T
+pub fn expect(sink self, msg: str) -> T where T: any
 ```
 
 The value; panics with `msg` and the error.
@@ -1541,6 +1543,32 @@ pub fn fields(self) -> Vec[String]
 The words between runs of ASCII whitespace: `"  a b\tc ".fields()` is
 `["a", "b", "c"]`.
 
+#### str.splitViews
+
+```gojo
+pub fn splitViews(self, sep: str) -> Vec[str]
+```
+
+Like `split`, without copies: the pieces are views of this string, in a
+vector that lives in a variable (spec 5.4) and keeps the string
+borrowed while it is in use.
+
+#### str.lineViews
+
+```gojo
+pub fn lineViews(self) -> Vec[str]
+```
+
+Like `lines`, without copies: the lines as views of this string.
+
+#### str.fieldViews
+
+```gojo
+pub fn fieldViews(self) -> Vec[str]
+```
+
+Like `fields`, without copies: the words as views of this string.
+
 #### str.toUpper
 
 ```gojo
@@ -1830,7 +1858,7 @@ The number of bytes there is room for.
 #### []T.len
 
 ```gojo
-pub fn len(self) -> int
+pub fn len(self) -> int where T: any
 ```
 
 The number of elements.
@@ -1838,7 +1866,7 @@ The number of elements.
 #### []T.reverse
 
 ```gojo
-pub fn reverse(inout self)
+pub fn reverse(inout self) where T: any
 ```
 
 Reverses the order in place. Only an `inout []T` (or a range of a
@@ -1847,7 +1875,7 @@ Reverses the order in place. Only an `inout []T` (or a range of a
 #### []T.swap
 
 ```gojo
-pub fn swap(inout self, i: int, j: int)
+pub fn swap(inout self, i: int, j: int) where T: any
 ```
 
 Exchanges elements `i` and `j`; panics when either is out of range.
@@ -1863,7 +1891,7 @@ Sorts in ascending order. Stable; O(n log n).
 #### []T.sortBy
 
 ```gojo
-pub fn sortBy(inout self, less: fn(T, T) -> bool)
+pub fn sortBy(inout self, less: fn(T, T) -> bool) where T: any
 ```
 
 Sorts by `less(a, b)`: true when `a` goes before `b`. Stable.
@@ -1871,7 +1899,7 @@ Sorts by `less(a, b)`: true when `a` goes before `b`. Stable.
 #### []T.ptr
 
 ```gojo
-pub fn ptr(self) -> *T
+pub fn ptr(self) -> *T where T: any
 ```
 
 raw pointer to the first element, for FFI
@@ -1879,7 +1907,7 @@ raw pointer to the first element, for FFI
 #### []T.isEmpty
 
 ```gojo
-pub fn isEmpty(self) -> bool
+pub fn isEmpty(self) -> bool where T: any
 ```
 
 Whether there are no elements.
@@ -1887,7 +1915,7 @@ Whether there are no elements.
 #### []T.get
 
 ```gojo
-pub fn get(self, i: int) yield ?&T
+pub fn get(self, i: int) yield ?&T where T: any
 ```
 
 Element `i`, or none when `i` is out of range (indexing with `xs[i]`
@@ -1896,7 +1924,7 @@ panics instead).
 #### []T.first
 
 ```gojo
-pub fn first(self) yield ?&T
+pub fn first(self) yield ?&T where T: any
 ```
 
 The first element, if any.
@@ -1904,7 +1932,7 @@ The first element, if any.
 #### []T.last
 
 ```gojo
-pub fn last(self) yield ?&T
+pub fn last(self) yield ?&T where T: any
 ```
 
 The last element, if any.
@@ -1928,7 +1956,7 @@ The index of the first element equal to `x`.
 #### []T.map
 
 ```gojo
-pub fn map[U](self, f: fn(T) -> U) -> Vec[U]
+pub fn map[U](self, f: fn(T) -> U) -> Vec[U] where T: any
 ```
 
 `f` applied to each element, in order.
@@ -1944,7 +1972,7 @@ Copies of the elements for which `keep` is true.
 #### []T.each
 
 ```gojo
-pub fn each(self, f: fn(T))
+pub fn each(self, f: fn(T)) where T: any
 ```
 
 Calls `f` on each element, in order.
@@ -1952,7 +1980,7 @@ Calls `f` on each element, in order.
 #### []T.any
 
 ```gojo
-pub fn any(self, f: fn(T) -> bool) -> bool
+pub fn any(self, f: fn(T) -> bool) -> bool where T: any
 ```
 
 Whether `f` is true for some element (stops at the first).
@@ -1960,7 +1988,7 @@ Whether `f` is true for some element (stops at the first).
 #### []T.all
 
 ```gojo
-pub fn all(self, f: fn(T) -> bool) -> bool
+pub fn all(self, f: fn(T) -> bool) -> bool where T: any
 ```
 
 Whether `f` is true for every element (stops at the first false).
@@ -1968,7 +1996,7 @@ Whether `f` is true for every element (stops at the first false).
 #### []T.count
 
 ```gojo
-pub fn count(self, f: fn(T) -> bool) -> int
+pub fn count(self, f: fn(T) -> bool) -> int where T: any
 ```
 
 How many elements `f` is true for.
@@ -2016,7 +2044,7 @@ An owned copy.
 #### []T.find
 
 ```gojo
-pub fn find(self, pred: fn(T) -> bool) yield ?&T
+pub fn find(self, pred: fn(T) -> bool) yield ?&T where T: any
 ```
 
 The first element `pred` is true for.
@@ -2024,7 +2052,7 @@ The first element `pred` is true for.
 #### []T.findIndex
 
 ```gojo
-pub fn findIndex(self, pred: fn(T) -> bool) -> ?int
+pub fn findIndex(self, pred: fn(T) -> bool) -> ?int where T: any
 ```
 
 The index of the first element `pred` is true for.
@@ -2049,7 +2077,7 @@ O(log n), or none. (With duplicates, any of them.)
 #### []T.partitionPoint
 
 ```gojo
-pub fn partitionPoint(self, pred: fn(T) -> bool) -> int
+pub fn partitionPoint(self, pred: fn(T) -> bool) -> int where T: any
 ```
 
 The index of the first element `pred` is false for, in a slice where
@@ -2067,7 +2095,7 @@ Whether the elements are in ascending order.
 #### []T.sortByKey
 
 ```gojo
-pub fn sortByKey[K: ordered](inout self, key: fn(T) -> K)
+pub fn sortByKey[K: ordered](inout self, key: fn(T) -> K) where T: any
 ```
 
 Sorts by the key `key` gives for each element, ascending. Stable.
@@ -2075,7 +2103,7 @@ Sorts by the key `key` gives for each element, ascending. Stable.
 #### []T.minBy
 
 ```gojo
-pub fn minBy[K: ordered](self, key: fn(T) -> K) yield ?&T
+pub fn minBy[K: ordered](self, key: fn(T) -> K) yield ?&T where T: any
 ```
 
 The element with the smallest key (the first of equal ones), or none
@@ -2084,7 +2112,7 @@ for no elements.
 #### []T.maxBy
 
 ```gojo
-pub fn maxBy[K: ordered](self, key: fn(T) -> K) yield ?&T
+pub fn maxBy[K: ordered](self, key: fn(T) -> K) yield ?&T where T: any
 ```
 
 The element with the largest key (the first of equal ones), or none
@@ -2117,7 +2145,7 @@ Sets every element to a copy of `x`.
 #### []T.rotateLeft
 
 ```gojo
-pub fn rotateLeft(inout self, n: int)
+pub fn rotateLeft(inout self, n: int) where T: any
 ```
 
 Moves every element `n` places towards the front, the first `n` going
@@ -2127,7 +2155,7 @@ works (negative rotates the other way).
 #### []T.rotateRight
 
 ```gojo
-pub fn rotateRight(inout self, n: int)
+pub fn rotateRight(inout self, n: int) where T: any
 ```
 
 Moves every element `n` places towards the end, the last `n` going to
@@ -2222,12 +2250,22 @@ pub fn join(self, sep: str) -> String
 
 The strings with `sep` between them: `["a", "b"].join(", ")` is `"a, b"`.
 
+### extend []str
+
+#### []str.join
+
+```gojo
+pub fn join(self, sep: str) -> String
+```
+
+The strings with `sep` between them: `["a", "b"].join(", ")` is `"a, b"`.
+
 ### extend Vec[T]
 
 #### Vec[T].push
 
 ```gojo
-pub fn push(inout self, x: sink T)
+pub fn push(inout self, x: sink T) where T: any
 ```
 
 Appends `x`.
@@ -2235,7 +2273,7 @@ Appends `x`.
 #### Vec[T].pop
 
 ```gojo
-pub fn pop(inout self) -> ?T
+pub fn pop(inout self) -> ?T where T: any
 ```
 
 Removes and returns the last element, or none when empty.
@@ -2243,7 +2281,7 @@ Removes and returns the last element, or none when empty.
 #### Vec[T].insert
 
 ```gojo
-pub fn insert(inout self, i: int, x: sink T)
+pub fn insert(inout self, i: int, x: sink T) where T: any
 ```
 
 Inserts `x` at index `i` (0 <= `i` <= `len()`), moving the later elements
@@ -2252,7 +2290,7 @@ up; panics otherwise.
 #### Vec[T].remove
 
 ```gojo
-pub fn remove(inout self, i: int) -> T
+pub fn remove(inout self, i: int) -> T where T: any
 ```
 
 Removes and returns element `i`, moving the later elements down; panics when
@@ -2261,11 +2299,21 @@ Removes and returns element `i`, moving the later elements down; panics when
 #### Vec[T].swapRemove
 
 ```gojo
-pub fn swapRemove(inout self, i: int) -> T
+pub fn swapRemove(inout self, i: int) -> T where T: any
 ```
 
 Removes and returns element `i`, putting the last element in its place:
 O(1), but changes the order. Panics when `i` is out of range.
+
+#### Vec[T].finish
+
+```gojo
+pub fn finish(sink self) where T: any
+```
+
+Ends an empty vector of linear values (spec 5.7): a vector that holds
+them must be consumed like they are, so pop each one and consume it,
+then call `finish`. Panics when the vector still holds values.
 
 #### Vec[T].clear
 
@@ -2287,7 +2335,7 @@ Keeps the first `n` elements and drops the rest; nothing happens when `n`
 #### Vec[T].extend
 
 ```gojo
-pub fn extend(inout self, other: sink Vec[T])
+pub fn extend(inout self, other: sink Vec[T]) where T: any
 ```
 
 Moves the elements of `other` to the end.
@@ -2295,7 +2343,7 @@ Moves the elements of `other` to the end.
 #### Vec[T].reverse
 
 ```gojo
-pub fn reverse(inout self)
+pub fn reverse(inout self) where T: any
 ```
 
 Reverses the order in place.
@@ -2303,7 +2351,7 @@ Reverses the order in place.
 #### Vec[T].swap
 
 ```gojo
-pub fn swap(inout self, i: int, j: int)
+pub fn swap(inout self, i: int, j: int) where T: any
 ```
 
 Exchanges elements `i` and `j`; panics when either is out of range.
@@ -2320,7 +2368,7 @@ order) and takes O(n log n) time.
 #### Vec[T].sortBy
 
 ```gojo
-pub fn sortBy(inout self, less: fn(T, T) -> bool)
+pub fn sortBy(inout self, less: fn(T, T) -> bool) where T: any
 ```
 
 Sorts by `less(a, b)`: true when `a` goes before `b`. Stable.
@@ -2328,7 +2376,7 @@ Sorts by `less(a, b)`: true when `a` goes before `b`. Stable.
 #### Vec[T].reserve
 
 ```gojo
-pub fn reserve(inout self, n: int)
+pub fn reserve(inout self, n: int) where T: any
 ```
 
 Makes room for `n` more elements without reallocating; panics ("capacity
@@ -2337,7 +2385,7 @@ overflow") for an impossible size.
 #### Vec[T].cap
 
 ```gojo
-pub fn cap(self) -> int
+pub fn cap(self) -> int where T: any
 ```
 
 The number of elements there is room for.
@@ -2364,7 +2412,7 @@ duplicate).
 #### Vec[T].drain
 
 ```gojo
-pub fn drain(inout self, lo: int, hi: int) -> Vec[T]
+pub fn drain(inout self, lo: int, hi: int) -> Vec[T] where T: any
 ```
 
 Removes the elements from index `lo` up to (not including) `hi` and
@@ -2373,7 +2421,7 @@ returns them, in order; panics unless 0 <= `lo` <= `hi` <= `len()`.
 #### Vec[T].splitOff
 
 ```gojo
-pub fn splitOff(inout self, at: int) -> Vec[T]
+pub fn splitOff(inout self, at: int) -> Vec[T] where T: any
 ```
 
 Splits in two at index `at`: keeps the elements before it and returns

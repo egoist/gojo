@@ -175,7 +175,7 @@ fn layout(src: &str) -> Result<String, String> {
             for _ in 0..n {
                 out.push('\n');
             }
-            line_continues = (prev_binary && !prev_comment) || matches!(&e.item, Item::Tok(k) if dot_continues(&toks, *k));
+            line_continues = (prev_binary && !prev_comment) || matches!(&e.item, Item::Tok(k) if dot_continues(&toks, *k) || (matches!(&toks[*k].tok, Tok::Ident(w) if w == "requires") && *k > 0 && toks[*k - 1].tok == Tok::Newline));
             at_line_start = true;
             // a new statement, unless inside parentheses or continuing
             if !line_continues && matches!(stack.last().map(|o| o.kind), None | Some("{")) {

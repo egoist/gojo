@@ -1,0 +1,9 @@
+fn run(f: fn()) { f() }
+fn main() {
+    var ws: Vec[str] = []
+    var src = "hello world".toString()
+    run(() => { ws.push(src.asStr()) })
+    src.push("defghijklmnopqrstuvwxyz0123456789")
+    println(ws)
+}
+// error: `src` does not live long enough: `ws` would still view it after it is dropped

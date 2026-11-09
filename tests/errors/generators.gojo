@@ -1,0 +1,29 @@
+gen fn nums(n: int) -> int {
+    for i in 0..n {
+        yield i
+    }
+}
+
+gen fn bad1(xs: []int) -> int {
+    xs.each(x => {
+        yield x
+    })
+    return 5
+}
+
+gen fn bad2() -> String {
+    yield 3
+}
+
+fn main() {
+    let g = nums(3)
+    for i, x in nums(2) {
+        println(i, x)
+    }
+    println(g)
+}
+// error: a `yield` in a closure inside a `gen fn` would yield from the closure
+// error: a `gen fn` gives its values with `yield`; `return` ends it, without a value
+// error: mismatched types: expected `String`, found `int`
+// error: `nums` is a generator: iterate over what it yields with `for x in nums(...)`
+// error: a generator gives one value per iteration: `for x in g(...)`

@@ -1,0 +1,77 @@
+// Run with `gojo test --faults`: connections reset, dials are refused,
+// datagrams are lost and file writes fail now and then, as the seed decides.
+use std/{fmt, io, net, os, path}
+
+fn pingOnce(addr: str) -> String ! io.Error {
+    let c = try net.dial(addr)
+    try c.writeText("ping")
+    c.closeWrite()
+    return String(try c.readAll())
+}
+
+fn serve(ln: net.Listener) {
+    scope {
+        loop {
+            let c = ln.accept() catch _e { return }
+            go () => {
+                let req = c.readAll() catch _e { return }
+                if String(req) == "ping" {
+                    c.writeText("pong") catch _e { return }
+                }
+            }
+        }
+    }
+}
+
+// Retries until an answer comes back whole.
+test "retries survive faults" {
+    let ln = net.listen(":0") catch e { panic(e.message()) }
+    let addr = fmt.format("127.0.0.1:{}", ln.port())
+    scope srv {
+        go serve(ln)
+        for _ in 0..20 {
+            var answered = false
+            for _try in 0..50 {
+                if let ok(r) = pingOnce(addr) {
+                    if r == "pong" {
+                        answered = true
+                        break
+                    }
+                }
+            }
+            assert(answered)
+        }
+        srv.cancel()
+    }
+}
+
+// Assumes the network never fails: some seed shows that it does.
+test "naive client" {
+    let ln = net.listen(":0") catch e { panic(e.message()) }
+    let addr = fmt.format("127.0.0.1:{}", ln.port())
+    scope srv {
+        go serve(ln)
+        for _ in 0..20 {
+            let r = pingOnce(addr) catch e { panic(e.message()) }
+            assert(r == "pong")
+        }
+        srv.cancel()
+    }
+}
+
+// Writes a file until it reads back whole.
+test "disk retries" {
+    let p = path.join(os.tempDir(), "gojo-faults-${os.pid()}.txt")
+    var ok = false
+    for _ in 0..50 {
+        os.writeText(p, "saved") catch _e { continue }
+        if let ok(t) = os.readText(p) {
+            if t == "saved" {
+                ok = true
+                break
+            }
+        }
+    }
+    _ = os.remove(p)
+    assert(ok)
+}

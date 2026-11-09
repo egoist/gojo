@@ -1,0 +1,5 @@
+[package]
+name = "s3"
+
+[dependencies]
+util = { path = "../util" }

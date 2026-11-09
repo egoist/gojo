@@ -1,0 +1,10 @@
+fn mk(s: str) -> ?Vec[str] { return [s] }
+fn mkr(s: str) -> Vec[str] ! String { return [s] }
+fn main() {
+    var d: Vec[str] = []
+    var s = "hello".toString()
+    match mkr(s.asStr()) { ok(x) => d = x, err(e) => println(e) }
+    s.push("defghijklmnopqrstuvwxyz0123456789")
+    println(d)
+}
+// error: `s` does not live long enough: `d` would still view it after it is dropped

@@ -145,6 +145,46 @@ fn compile_warnings() {
     }
 }
 
+/// `gojo check --json` prints each diagnostic as a line of JSON, with the
+/// edits that fix it where there is one obvious fix.
+#[test]
+fn check_json() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    for f in files("tests/json") {
+        let rel = f.strip_prefix(root).unwrap();
+        let want = std::fs::read_to_string(f.with_extension("jsonl")).unwrap();
+        let out = Command::new(gojo()).arg("check").arg("--json").arg(rel).current_dir(root).output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout), want, "{}", f.display());
+        assert!(out.stderr.is_empty(), "{}: {}", f.display(), String::from_utf8_lossy(&out.stderr));
+    }
+}
+
+/// An error that leaves `main` in a debug build prints where it was made and
+/// each `try` that passed it up (spec 8); release builds print only the error.
+#[test]
+fn error_return_traces() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut failures = vec![];
+    for f in files("tests/traces") {
+        let rel = f.strip_prefix(root).unwrap();
+        let src = std::fs::read_to_string(&f).unwrap();
+        let want: Vec<&str> = src.lines().filter_map(|l| l.strip_prefix("// stderr: ")).collect();
+        let out = Command::new(gojo()).arg("run").arg(rel).current_dir(root).output().unwrap();
+        let got = String::from_utf8_lossy(&out.stderr);
+        if out.status.code() != Some(1) || got.lines().collect::<Vec<_>>() != want {
+            failures.push(format!("{}: exit {:?}\n--- expected\n{}\n--- got\n{}", f.display(), out.status.code(), want.join("\n"), got));
+        }
+        let rel_out = Command::new(gojo()).arg("run").arg("--release").arg(rel).current_dir(root).output().unwrap();
+        let got = String::from_utf8_lossy(&rel_out.stderr);
+        if got.lines().collect::<Vec<_>>() != want[..1] {
+            failures.push(format!("{} --release: expected only `{}`, got\n{}", f.display(), want[0], got));
+        }
+    }
+    if !failures.is_empty() {
+        panic!("{} trace test(s) failed:\n{}", failures.len(), failures.join("\n"));
+    }
+}
+
 /// Every program in tests/panic panics as its `// panic:` lines say, as built
 /// and with `--verify-bce` (see `run_programs`).
 #[test]
@@ -476,6 +516,94 @@ fn simulated_scheduler() {
     let ok = Command::new(gojo()).arg("test").arg("--seed").arg("3").arg(&f).output().unwrap();
     assert!(String::from_utf8_lossy(&ok.stderr).contains("ok   virtual time"));
     assert!(t0.elapsed() < std::time::Duration::from_secs(30));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `gojo test` simulates the network: in memory, delays and short reads from
+/// the seed; `--faults` adds resets, refused dials, lost datagrams and disk
+/// errors, and a failing seed replays.
+#[test]
+fn simulated_network() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/simnet");
+    let net = Command::new(gojo()).arg("test").arg("--explore").arg("100").arg(dir.join("net.gojo")).output().unwrap();
+    let e = String::from_utf8_lossy(&net.stderr);
+    assert!(net.status.success() && e.contains("7 passed, 0 failed") && e.contains("ok   http (100 schedules"), "{}", e);
+    let faults = Command::new(gojo()).arg("test").arg("--faults").arg("--explore").arg("200").arg(dir.join("faults.gojo")).output().unwrap();
+    let e = String::from_utf8_lossy(&faults.stderr);
+    assert!(e.contains("ok   retries survive faults (200 schedules") && e.contains("ok   disk retries (200 schedules") && e.contains("2 passed, 1 failed"), "{}", e);
+    let seed = e.split("FAIL naive client (seed ").nth(1).and_then(|r| r.split(';').next()).unwrap_or_else(|| panic!("no seed printed:\n{}", e)).to_string();
+    assert!(e.contains(&format!("rerun it with `gojo test --seed {} --faults`", seed)), "{}", e);
+    let again = Command::new(gojo()).arg("test").arg("--faults").arg("--seed").arg(&seed).arg(dir.join("faults.gojo")).output().unwrap();
+    assert!(String::from_utf8_lossy(&again.stderr).contains(&format!("FAIL naive client (seed {};", seed)), "{}", String::from_utf8_lossy(&again.stderr));
+    // without faults, the same seed passes
+    let calm = Command::new(gojo()).arg("test").arg("--seed").arg(&seed).arg(dir.join("faults.gojo")).output().unwrap();
+    assert!(calm.status.success(), "{}", String::from_utf8_lossy(&calm.stderr));
+    // two tasks reading from each other: a deadlock, reported
+    let tmp = std::env::temp_dir().join(format!("gojo_simnet_{}", std::process::id()));
+    std::fs::create_dir_all(&tmp).unwrap();
+    let f = tmp.join("deadlock.gojo");
+    std::fs::write(&f, "use std/{fmt, net}\n\ntest \"both read\" {\n    let ln = net.listen(\":0\") catch e { panic(e.message()) }\n    let c = net.dial(fmt.format(\":{}\", ln.port())) catch e { panic(e.message()) }\n    let s = ln.accept() catch e { panic(e.message()) }\n    scope {\n        go () => {\n            var b = Vec[byte]{}\n            _ = s.read(&b, 1)\n        }\n        var b = Vec[byte]{}\n        _ = c.read(&b, 1)\n    }\n}\n").unwrap();
+    let dl = Command::new(gojo()).arg("test").arg(&f).output().unwrap();
+    let e = String::from_utf8_lossy(&dl.stderr);
+    assert!(!dl.status.success() && e.contains("deadlock") && e.matches("waiting for the simulated network").count() == 2, "{}", e);
+    let run = Command::new(gojo()).arg("run").arg("--faults").arg(&f).output().unwrap();
+    assert_eq!(run.status.code(), Some(2));
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// `gojo claims`: what the compiler proved, for every function of a program,
+/// a library or a file of tests; a `checkfree` claim that fails is listed
+/// and then reported (as JSON lines by `check --json`).
+#[test]
+fn claims() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let out = Command::new(gojo()).arg("claims").arg("--json").arg(root.join("tests/run/contracts.gojo")).output().unwrap();
+    let j = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success() && j.contains("{\"function\": \"dot\"") && j.contains("\"checkfree\": true") && j.contains("\"kept\": []"), "{}{}", j, String::from_utf8_lossy(&out.stderr));
+    let dir = std::env::temp_dir().join(format!("gojo_claims_{}", std::process::id()));
+    let lib = dir.join("lib");
+    std::fs::create_dir_all(&lib).unwrap();
+    // a library: no `main`, and a function nothing calls
+    std::fs::write(lib.join("lib.gojo"), "pub checkfree fn sum(v: []int) -> int {\n    var s = 0\n    for i in 0..v.len() {\n        s += v[i]\n    }\n    return s\n}\n\npub checkfree fn none() -> int {\n    return 1\n}\n").unwrap();
+    let out = Command::new(gojo()).arg("claims").arg(&lib).output().unwrap();
+    let o = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success() && o.contains("sum (checkfree)") && o.contains("1 bounds check removed, 0 kept") && o.contains("none (checkfree)"), "{}{}", o, String::from_utf8_lossy(&out.stderr));
+    // tests only, with a claim that fails: the list, then the error
+    let t = dir.join("t.gojo");
+    std::fs::write(&t, "checkfree fn at(v: []int, i: int) -> int {\n    return v[i]\n}\n\ntest \"at\" {\n    assert(at([1], 0) == 1)\n}\n").unwrap();
+    let out = Command::new(gojo()).arg("claims").arg(&t).output().unwrap();
+    let (o, e) = (String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert!(out.status.code() == Some(1) && o.contains("at (checkfree)") && o.contains("0 bounds checks removed, 1 kept") && e.contains("`at` is `checkfree`, but this bounds check remains"), "{}{}", o, e);
+    let out = Command::new(gojo()).arg("check").arg("--json").arg(&t).output().unwrap();
+    let e = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.code() == Some(1) && e.lines().any(|l| l.starts_with("{\"severity\": \"error\", \"message\": \"`at` is `checkfree`") && l.contains("\"line\": 2")), "{}", e);
+    // `gojo check` covers a library's functions too
+    let out = Command::new(gojo()).arg("check").arg(&t).output().unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A box moved out of and a box of the same type made after it in the same
+/// block share one allocation; anything that may leave the block between
+/// them keeps them apart.
+#[test]
+fn box_reuse() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let c = Command::new(gojo()).arg("emit-c").arg(root.join("tests/run/box_reuse.gojo")).output().unwrap();
+    let c = String::from_utf8_lossy(&c.stdout);
+    assert_eq!(c.matches("/* reused below */").count(), 4, "{}", c);
+    assert_eq!(c.matches("GOJO_BOX_FREE_R(").count(), 2, "{}", c);
+    let dir = std::env::temp_dir().join(format!("gojo_reuse_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let f = dir.join("apart.gojo");
+    // a return and a loop exit between the free and the new box
+    std::fs::write(&f, "fn id(s: sink String) -> String {\n    return s\n}\n\nfn a(b: sink Box[String], stop: bool) -> Box[String] {\n    let v = id(*b)\n    if stop {\n        return Box(\"stop\")\n    }\n    return Box(v + \"!\")\n}\n\nfn c(b: sink Box[String], xs: []String) -> ?Box[String] {\n    let v = id(*b)\n    for x in xs {\n        if x == v {\n            break\n        }\n    }\n    return Box(v)\n}\n\nfn d(b: sink Box[String]) -> Box[String] {\n    let v = id(*b)\n    return Box(v + \"?\")\n}\n\nfn main() {\n    println(*a(Box(\"a\"), false), *a(Box(\"b\"), true))\n    println(c(Box(\"x\"), [\"w\", \"x\"]) != none, *d(Box(\"d\")))\n}\n").unwrap();
+    let out = Command::new(gojo()).arg("emit-c").arg(&f).output().unwrap();
+    let c = String::from_utf8_lossy(&out.stdout);
+    // (only `d` has nothing between them)
+    assert!(out.status.success() && c.matches("reused below").count() == 1 && c.matches("GOJO_BOX_FREE_R(").count() == 2, "{}{}", c, String::from_utf8_lossy(&out.stderr));
+    let run = Command::new(gojo()).arg("run").arg(&f).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&run.stdout), "a! stop\ntrue d?\n");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -821,7 +949,7 @@ fn formatted() {
     }
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut paths = vec![];
-    for d in ["std", "examples", "bench/gojo", "tests/run", "tests/errors", "tests/panic", "tests/projects", "tests/packages", "tests/testblocks", "tests/unsafe", "tests/stdin", "tests/signals", "tests/ffi_pin", "tests/warnings"] {
+    for d in ["std", "examples", "bench/gojo", "tests/run", "tests/errors", "tests/panic", "tests/projects", "tests/packages", "tests/testblocks", "tests/unsafe", "tests/stdin", "tests/signals", "tests/ffi_pin", "tests/warnings", "tests/traces", "tests/json", "tests/simnet"] {
         walk(&root.join(d), &mut paths);
     }
     let mut bad = vec![];
@@ -868,8 +996,29 @@ fn std_docs_current() {
 /// prints the ```text block after it, and is formatted.
 #[test]
 fn tour_examples() {
+    doc_programs("docs/tour.md", 15);
+}
+
+/// The one-page summary (`gojo spec`): its programs run like the tour's, its
+/// other Gojo blocks type check, and it stays short enough to hand to a
+/// coding agent whole.
+#[test]
+fn brief_examples() {
+    doc_programs("docs/brief.md", 3);
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let tour = std::fs::read_to_string(root.join("docs/tour.md")).unwrap();
+    let brief = std::fs::read_to_string(root.join("docs/brief.md")).unwrap();
+    let words = brief.split_whitespace().count();
+    assert!(words <= 2600, "docs/brief.md has {} words; keep it under 2600 (about 4k tokens)", words);
+    let out = Command::new(gojo()).arg("spec").output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout), brief);
+}
+
+/// Every ```gojo block of a document with `fn main` runs and prints the
+/// ```text block after it, and is formatted; the other ```gojo blocks type
+/// check (with an empty `main` added).
+fn doc_programs(doc: &str, min: usize) {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let tour = std::fs::read_to_string(root.join(doc)).unwrap();
     // (language, body) of each fenced block
     let mut blocks: Vec<(String, String)> = vec![];
     let mut lines = tour.lines();
@@ -886,16 +1035,27 @@ fn tour_examples() {
             blocks.push((lang.to_string(), body));
         }
     }
-    let dir = std::env::temp_dir().join(format!("gojo_tour_{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("gojo_doc_{}_{}", doc.replace('/', "_"), std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let mut failures = vec![];
     let mut programs = 0;
     for (i, (lang, body)) in blocks.iter().enumerate() {
-        if lang != "gojo" || !body.contains("fn main") {
+        if lang != "gojo" {
+            continue;
+        }
+        let first = body.lines().next().unwrap_or("");
+        if !body.contains("fn main") {
+            if doc.ends_with("brief.md") {
+                let f = dir.join(format!("s{}.gojo", i));
+                std::fs::write(&f, format!("{}\nfn main() {{\n}}\n", body)).unwrap();
+                let out = Command::new(gojo()).arg("check").arg(&f).output().unwrap();
+                if !out.status.success() {
+                    failures.push(format!("block starting `{}` doesn't check:\n{}", first, String::from_utf8_lossy(&out.stderr)));
+                }
+            }
             continue;
         }
         programs += 1;
-        let first = body.lines().next().unwrap_or("");
         if gojo::formatter::format(body).as_deref() != Ok(body.as_str()) {
             failures.push(format!("program starting `{}` is not formatted", first));
         }
@@ -915,8 +1075,8 @@ fn tour_examples() {
         }
     }
     let _ = std::fs::remove_dir_all(&dir);
-    assert!(programs >= 15, "only {} programs", programs);
-    assert!(failures.is_empty(), "{} tour program(s) failed:\n{}", failures.len(), failures.join("\n"));
+    assert!(programs >= min, "{}: only {} programs", doc, programs);
+    assert!(failures.is_empty(), "{}: {} program(s) failed:\n{}", doc, failures.len(), failures.join("\n"));
 }
 
 /// Debug builds carry Gojo source lines: a debugger (when there is one)
@@ -1011,6 +1171,22 @@ fn packages() {
     }
     if !allowed.status.success() || !aout.contains("\"name\": \"@c/fastabs\", \"version\": \"1.2.0\", \"path\": \"unsafe_allowed/fastabs\", \"root\": false, \"status\": \"allowed\", \"lines\": 4") || !aout.ends_with("\"ok\": true}\n") {
         failures.push(format!("gojo unsafe --json (allowed): {:?}\n{}{}", allowed.status, aout, String::from_utf8_lossy(&allowed.stderr)));
+    }
+    // `gojo authority` reports what each dependency does, and fails when
+    // [authority] doesn't allow it
+    let adenied = Command::new(gojo()).arg("authority").arg("authority_denied/app").current_dir(&base).output().unwrap();
+    let aallowed = Command::new(gojo()).arg("authority").arg("--json").arg("authority_allowed/app").current_dir(&base).output().unwrap();
+    let (dout, aout) = (String::from_utf8_lossy(&adenied.stdout), String::from_utf8_lossy(&aallowed.stdout));
+    if adenied.status.code() != Some(1)
+        || !dout.contains("leftpad 0.1.0 (authority_denied/leftpad): fs, env (NOT ALLOWED by [authority])")
+        || !dout.contains("authority_denied/leftpad/leftpad.gojo:4  env      os.getenv")
+        || !dout.contains("s3 0.1.0 (authority_denied/s3): fs (NOT ALLOWED by [authority])\n    fs through its dependencies")
+        || !dout.contains("[authority]\nleftpad = [\"fs\", \"env\"]\nutil = [\"fs\"]\ns3 = [\"fs\"]")
+    {
+        failures.push(format!("gojo authority (denied): {:?}\n{}{}", adenied.status, dout, String::from_utf8_lossy(&adenied.stderr)));
+    }
+    if !aallowed.status.success() || !aout.contains("{\"name\": \"util\", \"version\": \"0.1.0\", \"path\": \"authority_allowed/util\", \"needs\": [\"fs\"], \"status\": \"allowed\", \"uses\": [{\"kind\": \"fs\", \"what\": \"os.readText\", \"file\": \"authority_allowed/util/util.gojo\", \"line\": 4}]}") || !aout.ends_with("\"ok\": true}\n") {
+        failures.push(format!("gojo authority --json (allowed): {:?}\n{}{}", aallowed.status, aout, String::from_utf8_lossy(&aallowed.stderr)));
     }
     // ...and in a workspace, member by member
     let wsu = Command::new(gojo()).arg("unsafe").arg("workspace").current_dir(&base).output().unwrap();

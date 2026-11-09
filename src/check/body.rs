@@ -1,11 +1,11 @@
 // Type checking of function bodies into the typed IR.
 
 use super::{bind_params, builtin_type, is_generic_builtin, Checker, TyEnv};
-use crate::ast::{self, Expr, ExprKind, Mode, Stmt, StmtKind, YieldKind};
+use crate::ast::{TypeExpr, TypeExprKind, self, Expr, ExprKind, Mode, Stmt, StmtKind, YieldKind};
 use crate::diag::{Diag, Span};
 use crate::tir::*;
 use crate::types::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 pub struct Frame {
@@ -14,6 +14,9 @@ pub struct Frame {
     saved_ret: Ty,
     saved_loops: Vec<(Option<String>, u32)>,
     saved_yields: Option<(YieldKind, bool)>,
+    saved_gen: Option<Ty>,
+    /// The body of a `for` loop over a generator or a type's `each`.
+    loop_body: bool,
 }
 
 pub struct FnCx {
@@ -48,6 +51,12 @@ pub struct FnCx {
     pub call_owner: Option<Ty>,
     /// The next closure checked is the body of a push-style `for` loop.
     pub loop_body_next: Option<(u32, Option<String>)>,
+    /// The body (by address) of the closure that is that loop body: other
+    /// closures checked meanwhile (a generator's closure arguments) are not.
+    pub loop_body_of: usize,
+    /// The elements of loops over generators and `each` (their bodies'
+    /// parameters), for messages.
+    pub loop_elems: HashSet<LocalId>,
     /// Inside `defer` / `errdefer`: the deferred code can't leave the function.
     /// An ordinary closure starts over at 0; a loop body doesn't.
     pub defer_depth: u32,
@@ -56,6 +65,16 @@ pub struct FnCx {
     pub shadow_ok: Option<String>,
     /// The value expected from the `with` body being checked (`let n = with ...`).
     pub with_value: Option<Expect>,
+    /// The fields named by enclosing `static for`s and `static T { f => }`:
+    /// (name, the field's type parameter, the type whose field it is).
+    pub static_fields: Vec<(String, TParamId, Ty)>,
+    /// In a `static if T is P` arm: `T` is `P` there (spec 9.1).
+    pub type_eqs: Vec<(TParamId, Ty)>,
+    /// In a `gen fn` (and the bodies of its `for` loops): what it yields,
+    /// and its hidden loop-body parameter.
+    pub gen_elem: Option<(Ty, LocalId)>,
+    /// The next call is a `for` loop's call of a generator.
+    pub gen_call_ok: bool,
     /// Lazy chains with `flatMap` being checked (lazy.rs): the labels of
     /// their innermost and outermost loops, and the user's label. A `break`
     /// in the body leaves the outermost; `continue label`, the innermost.
@@ -143,10 +162,16 @@ impl FnCx {
             locked: vec![],
             call_owner: None,
             loop_body_next: None,
+            loop_body_of: 0,
+            loop_elems: HashSet::new(),
             lazy_loops: vec![],
             defer_depth: 0,
             shadow_ok: None,
             with_value: None,
+            static_fields: vec![],
+            type_eqs: vec![],
+            gen_elem: None,
+            gen_call_ok: false,
         }
     }
     pub fn depth(&self) -> u32 {
@@ -200,12 +225,13 @@ impl Checker {
         for ci in 0..self.prog.consts.len() {
             self.ensure_const(ci, None);
         }
+        // package-level values (their types may be inferred), checked when
+        // first used, here or by the field defaults
+        self.global_state = vec![0; self.prog.globals.len()];
         // struct field defaults
         for d in 0..self.prog.types.len() {
             self.check_defaults(d as DefId);
         }
-        // package-level values (their types may be inferred)
-        self.global_state = vec![0; self.prog.globals.len()];
         for gi in 0..self.prog.globals.len() {
             self.ensure_global(gi, None);
         }
@@ -329,7 +355,9 @@ impl Checker {
         self.prog.globals[gi].ty = t.clone();
         self.prog.funcs[g.init as usize].ret = t;
         let body = TBlock { stmts: vec![], value: Some(Box::new(e)), span: value.span };
-        self.tfuncs.push(TFunc { func: g.init, locals: cx.locals, params: vec![], recv: None, body, n_arms: cx.n_arms });
+        let tf = TFunc { func: g.init, locals: cx.locals, params: vec![], recv: None, body, n_arms: cx.n_arms };
+        self.check_isolation(&tf);
+        self.tfuncs.push(tf);
     }
 
     /// Checks constant `ci` unless it already is. `use_sp`: where another
@@ -427,6 +455,15 @@ impl Checker {
                 let e = self.expr(&mut cx, dexpr, Some(&ty));
                 let e = self.coerce(&mut cx, e, &ty, Use::Value);
                 let e = self.zonk_expr(&mut cx, e);
+                // it is computed inside whatever function builds the value,
+                // which has variables of its own
+                if !cx.locals.is_empty() {
+                    self.diags.push(Diag::new(dexpr.span, format!("the default of `{}` declares variables of its own (a `let`, a closure, a pattern or a task)", f.name)).note(None, "a default is a plain expression: put the code in a function and call it here"));
+                    if let TypeDefKind::Struct { fields } = &mut self.prog.types[d as usize].kind {
+                        fields[i].default = Some(TExpr::error(dexpr.span));
+                    }
+                    continue;
+                }
                 if let TypeDefKind::Struct { fields } = &mut self.prog.types[d as usize].kind {
                     fields[i].default = Some(e);
                 }
@@ -448,6 +485,7 @@ impl Checker {
             cx.yields = Some((y, fd.yield_opt));
             cx.ret = Ty::Unit;
         }
+        let gen_of = fd.gen_of.clone();
         let mut recv = None;
         if let Some(r) = &fd.recv {
             let id = self.declare(&mut cx, &r.name, r.ty.clone(), LocalKind::Param(r.mode), r.span, true);
@@ -458,7 +496,33 @@ impl Checker {
             let id = self.declare(&mut cx, &p.name, p.ty.clone(), LocalKind::Param(p.mode), p.span, true);
             params.push(id);
         }
-        let _ = decl;
+        if let (Some(g), Some(&b)) = (gen_of, params.last()) {
+            cx.used[b as usize] = true;
+            cx.gen_elem = Some((g, b));
+        }
+        // `requires cond`: checked first thing, so the body (and the
+        // bounds-check pass) may rely on it
+        let req_block;
+        let body = match decl.and_then(|d| d.requires.as_ref()) {
+            Some(r) => {
+                // a condition that only reads: no `try`, `return`, `yield`,
+                // blocks, `&` borrows or tasks
+                if let Some(bad) = requires_bad(r) {
+                    self.diags.push(Diag::new(bad.span, "`requires` takes a condition that only reads: no `try`, `catch`, blocks, `if` or `match`, `&` borrows, closures or tasks").note(None, "it runs before the body, which may rely on it: write it with `&&`, `||`, `!`, comparisons and calls"));
+                }
+                let sp = r.span;
+                let not = Expr { kind: ExprKind::Unary("!", Box::new(r.clone())), span: sp };
+                let msg = Expr { kind: ExprKind::Str(format!("precondition of `{}` failed", fd.name)), span: sp };
+                let call = Expr { kind: ExprKind::Call(Box::new(Expr { kind: ExprKind::Ident("panic".into()), span: sp }), vec![msg]), span: sp };
+                let fail = Stmt { kind: StmtKind::Expr(call), span: sp };
+                let guard = Expr { kind: ExprKind::If { cond: Box::new(not), then: ast::Block { stmts: vec![fail], span: sp }, else_: None }, span: sp };
+                let mut b = body.clone();
+                b.stmts.insert(0, Stmt { kind: StmtKind::Expr(guard), span: sp });
+                req_block = b;
+                &req_block
+            }
+            None => body,
+        };
         let unit_result = matches!(&fd.ret, Ty::Result(t, _) if **t == Ty::Unit);
         let expect = if fd.yields.is_some() || fd.ret == Ty::Unit || fd.ret == Ty::Never || unit_result { Expect::NoValue } else { Expect::Ty(fd.ret.clone()) };
         // `main` and test bodies are scopes: `go` works there directly
@@ -479,7 +543,11 @@ impl Checker {
             self.report_uninferred(&cx, &tb);
         }
         let tb = self.zonk_block(&mut cx, tb);
-        TFunc { func: fid, locals: cx.locals, params, recv, body: tb, n_arms: cx.n_arms }
+        let tf = TFunc { func: fid, locals: cx.locals, params, recv, body: tb, n_arms: cx.n_arms };
+        if self.diags.len() == diags_before {
+            self.check_isolation(&tf);
+        }
+        tf
     }
 
     /// Implicit `ok(())` for `! E` functions, missing-return errors.
@@ -518,7 +586,7 @@ impl Checker {
             for (name, id) in sc {
                 if !cx.used[id as usize] && !name.starts_with('_') && !matches!(cx.locals[id as usize].kind, LocalKind::Param(_)) {
                     let sp = cx.locals[id as usize].span;
-                    self.diags.push(Diag::new(sp, format!("variable `{}` is declared but never used", name)).note(None, "prefix it with `_` if this is intentional"));
+                    self.diags.push(Diag::new(sp, format!("variable `{}` is declared but never used", name)).note(None, "prefix it with `_` if this is intentional").fix(Span { file: sp.file, lo: sp.lo, hi: sp.lo }, "_"));
                 }
             }
         }
@@ -606,7 +674,7 @@ impl Checker {
     }
 
     pub fn resolve(&self, cx: &FnCx, t: &Ty) -> Ty {
-        if !t.has_vars() {
+        if !t.has_vars() && cx.type_eqs.is_empty() {
             return t.clone();
         }
         t.map(&mut |x| match x {
@@ -614,16 +682,24 @@ impl Checker {
                 Some(b) => self.resolve(cx, b),
                 None => x.clone(),
             }),
+            Ty::Param(p) => cx.type_eqs.iter().rev().find(|(q, _)| q == p).map(|(_, e)| self.resolve(cx, e)),
             _ => None,
         })
     }
 
     fn shallow(&self, cx: &FnCx, t: &Ty) -> Ty {
         let mut t = t.clone();
-        while let Ty::Var(v) = t {
-            match &cx.vars[v as usize] {
-                Some(b) => t = b.clone(),
-                None => break,
+        for _ in 0..64 {
+            match t {
+                Ty::Var(v) => match &cx.vars[v as usize] {
+                    Some(b) => t = b.clone(),
+                    None => break,
+                },
+                Ty::Param(p) => match cx.type_eqs.iter().rev().find(|(q, _)| *q == p) {
+                    Some((_, e)) => t = e.clone(),
+                    None => break,
+                },
+                _ => break,
             }
         }
         t
@@ -784,6 +860,7 @@ impl Checker {
                 let (owned, mutable, what) = match l.kind {
                     LocalKind::Let => (true, false, "variable"),
                     LocalKind::Var => (true, true, "variable"),
+                    LocalKind::Param(Mode::Borrow) if cx.loop_elems.contains(id) => (false, false, "the loop element"),
                     LocalKind::Param(Mode::Borrow) => (false, false, "borrowed parameter"),
                     LocalKind::Param(Mode::Inout) => (false, true, "inout parameter"),
                     LocalKind::Param(Mode::Sink) => (true, true, "parameter"),
@@ -791,11 +868,17 @@ impl Checker {
                 };
                 Some(PInfo { root: Some(*id), owned, mutable, desc: format!("{} `{}`", what, l.name) })
             }
+            TK::StaticField { base, .. } => {
+                let b = self.place_info(cx, base)?;
+                Some(PInfo { root: b.root, owned: false, mutable: b.mutable, desc: format!("a `static for` field of {}", b.desc) })
+            }
             TK::Field { base, index } => {
                 let b = self.place_info(cx, base)?;
                 let bty = &base.ty;
                 let (fname, has_drop) = match bty {
-                    Ty::Adt(d, _) => (self.prog.def(*d).fields().get(*index).map(|f| f.name.clone()).unwrap_or_default(), self.prog.def(*d).has_drop),
+                    // a linear value's fields move out only in its own package
+                    // (where its `sink self` methods take it apart)
+                    Ty::Adt(d, _) => (self.prog.def(*d).fields().get(*index).map(|f| f.name.clone()).unwrap_or_default(), self.prog.def(*d).has_drop || (self.prog.def(*d).linear && self.prog.def(*d).pkg != cx.env.pkg)),
                     _ => (String::new(), false),
                 };
                 Some(PInfo { root: b.root, owned: b.owned && !has_drop, mutable: b.mutable, desc: format!("field `{}` of {}", fname, b.desc) })
@@ -921,9 +1004,16 @@ impl Checker {
             }
         }
         let s = self.prog.show(&ty);
-        self.diags.push(
-            Diag::new(e.span, format!("cannot move out of {} (type `{}`)", info.desc, s)).note(None, if self.is_clone(&ty) { "use `.clone()` to make an explicit copy" } else { "the value is only borrowed here" }),
-        );
+        let mut d = Diag::new(e.span, format!("cannot move out of {} (type `{}`)", info.desc, s)).note(None, if self.is_clone(&ty) { "use `.clone()` to make an explicit copy" } else { "the value is only borrowed here" });
+        if let TK::Field { base, .. } = &e.kind {
+            if let Ty::Adt(dd, _) = &base.ty {
+                let def = self.prog.def(*dd);
+                if def.linear && def.pkg != cx.env.pkg {
+                    d = d.note(None, format!("`{}` is linear: only its own package takes it apart; consume it with one of its `sink self` methods", def.name));
+                }
+            }
+        }
+        self.diags.push(d);
         TExpr::error(e.span)
     }
 
@@ -1354,6 +1444,10 @@ impl Checker {
                 TStmt::Expr(te)
             }
             StmtKind::Assign { place, op, value } => return self.assign(cx, place, op, value, sp),
+            StmtKind::Return(Some(_)) if cx.gen_elem.is_some() => {
+                self.err(sp, "a `gen fn` gives its values with `yield`; `return` ends it, without a value");
+                return None;
+            }
             StmtKind::Return(v) => {
                 if cx.defer_depth > 0 {
                     self.err(sp, "cannot `return` from a defer");
@@ -1395,6 +1489,29 @@ impl Checker {
                         }
                     }
                 }
+            }
+            StmtKind::Yield(v) if cx.gen_elem.is_some() || self.in_gen_closure(cx) => {
+                // in a generator: hand the value to the `for` loop's body, and
+                // stop when it breaks out (spec 7.3)
+                if cx.defer_depth > 0 {
+                    self.err(sp, "cannot `yield` from a defer");
+                    return None;
+                }
+                let Some((_, body)) = cx.gen_elem.clone() else {
+                    self.err(sp, "a `yield` in a closure inside a `gen fn` would yield from the closure: yield in the generator's own body (or the body of a `for` loop in it)");
+                    return None;
+                };
+                let Some(v) = v else {
+                    self.err(sp, "`yield` in a `gen fn` needs a value: `yield x`");
+                    return None;
+                };
+                let _ = body;
+                let call = Expr { kind: ExprKind::Call(Box::new(Expr { kind: ExprKind::Ident(super::GEN_BODY.into()), span: sp }), vec![v.clone()]), span: sp };
+                let brk = Expr { kind: ExprKind::Field(Box::new(Expr { kind: ExprKind::Ident("Flow".into()), span: sp }), "Break".into(), sp), span: sp };
+                let cond = Expr { kind: ExprKind::Binary("==", Box::new(call), Box::new(brk)), span: sp };
+                let ret = Stmt { kind: StmtKind::Return(None), span: sp };
+                let e = Expr { kind: ExprKind::If { cond: Box::new(cond), then: ast::Block { stmts: vec![ret], span: sp }, else_: None }, span: sp };
+                return self.stmt(cx, &Stmt { kind: StmtKind::Expr(e), span: sp });
             }
             StmtKind::Yield(v) => {
                 if cx.defer_depth > 0 {
@@ -1513,6 +1630,11 @@ impl Checker {
                 cx.loops = saved;
                 self.pop_scope(cx);
                 TStmt::Defer(TBlock { stmts: t.into_iter().collect(), value: None, span: inner.span })
+            }
+            StmtKind::StaticFor { name, name_span, ty, body } => return self.static_for(cx, name, *name_span, ty, body, sp),
+            StmtKind::StaticIf { arms, else_ } => {
+                let e = self.static_if(cx, arms, else_.as_ref(), sp);
+                TStmt::Expr(e)
             }
             StmtKind::For(f, label) => {
                 if let Some((l, lsp)) = label {
@@ -1752,6 +1874,9 @@ impl Checker {
             cx.loops.pop();
             return Some(TStmt::For { id, kind: IterKind::Range { inclusive: *inclusive }, iter: l, hi: Some(h), elem, index: None, mutable: false, body: b, span: sp });
         }
+        if let Some(r) = self.for_gen(cx, first, second, iter, by_ref, body, sp) {
+            return r;
+        }
         let it = self.expr(cx, iter, None);
         let ity = self.resolve(cx, &it.ty);
         let iter_root = self.place_root(cx, &it).map(|r| cx.locals[r as usize].ref_root.unwrap_or(r));
@@ -1884,9 +2009,14 @@ impl Checker {
                 params.push(ast::ClosureParam { name: s2.0.clone(), mode: Mode::Borrow, ty: None, span: s2.1 });
             }
             let closure = Expr { kind: ExprKind::Closure { params, ret: None, body: Box::new(Expr { kind: ExprKind::Block(body.clone()), span: body.span }) }, span: body.span };
+            // (a loop inside the call's other arguments has its own)
+            let saved = (cx.loop_body_next.take(), cx.loop_body_of);
             cx.loop_body_next = Some((id, label));
-            let call = self.method_call_on(cx, it, each, iter.span, None, &[closure], sp, None);
+            let closure = [closure];
+            cx.loop_body_of = closure_body_addr(&closure[0]);
+            let call = self.method_call_on(cx, it, each, iter.span, None, &closure, sp, None);
             let took = cx.loop_body_next.take().is_none();
+            (cx.loop_body_next, cx.loop_body_of) = saved;
             if let TK::Call { args, .. } = &call.kind {
                 let ok = took && matches!(args.last(), Some(TArg { e: TExpr { kind: TK::Closure(c), .. }, mode: ArgMode::Borrow }) if c.loop_body == Some(id));
                 if !ok {
@@ -1917,6 +2047,87 @@ impl Checker {
                 .note(None, format!("make it iterable with `fn cursor(self) -> C` and `fn {}({}self, c: inout C) yield ?&T`, or with `fn {}({}self, body: fn(T) -> Flow)`", next, if by_ref { "inout " } else { "" }, each, if by_ref { "inout " } else { "" })),
         );
         None
+    }
+
+    /// `for x in g(args)` with `g` a `gen fn` (or `v.g(args)` a generator
+    /// method of a variable): the loop body becomes the closure `g` calls for
+    /// each value it yields, as for a type with `each` (spec 7.3).
+    #[allow(clippy::too_many_arguments)]
+    fn for_gen(&mut self, cx: &mut FnCx, first: &(String, Span), second: Option<&(String, Span)>, iter: &Expr, by_ref: bool, body: &ast::Block, sp: Span) -> Option<Option<TStmt>> {
+        let ExprKind::Call(callee, args) = &iter.kind else { return None };
+        enum G {
+            Func(FuncId, Option<Vec<Ty>>),
+            Method(Expr, String),
+        }
+        let g = match &callee.kind {
+            ExprKind::Field(base, name, _) if matches!(&base.kind, ExprKind::Ident(n) if self.lookup_local_quiet(cx, n).is_some()) => {
+                let ExprKind::Ident(n) = &base.kind else { unreachable!() };
+                let l = self.lookup_local_quiet(cx, n)?;
+                let lt = self.resolve(cx, &cx.locals[l as usize].ty.clone());
+                let k = TyKey::of(&lt)?;
+                let fs = self.prog.methods.get(&(k, name.clone()))?;
+                if !fs.iter().any(|&f| self.prog.func(f).gen_of.is_some()) {
+                    return None;
+                }
+                G::Method((**base).clone(), name.clone())
+            }
+            ExprKind::Ident(_) | ExprKind::Field(..) | ExprKind::Index(..) => match self.peek_path_func(cx, callee) {
+                Some((f, targs)) if self.prog.func(f).gen_of.is_some() => G::Func(f, targs),
+                _ => return None,
+            },
+            _ => return None,
+        };
+        if by_ref || second.is_some() {
+            self.err(iter.span, "a generator gives one value per iteration: `for x in g(...)`");
+            return Some(None);
+        }
+        let label = cx.pending_label.take();
+        let id = cx.next_loop;
+        cx.next_loop += 1;
+        let params = vec![ast::ClosureParam { name: first.0.clone(), mode: Mode::Borrow, ty: None, span: first.1 }];
+        let closure = Expr { kind: ExprKind::Closure { params, ret: None, body: Box::new(Expr { kind: ExprKind::Block(body.clone()), span: body.span }) }, span: body.span };
+        let mut all = args.clone();
+        all.push(closure);
+        let saved = (cx.loop_body_next.take(), cx.loop_body_of);
+        cx.loop_body_next = Some((id, label));
+        cx.loop_body_of = all.last().map(closure_body_addr).unwrap_or(0);
+        cx.gen_call_ok = true;
+        let call = match g {
+            G::Func(f, targs) => self.call_fn(cx, f, targs, None, &all, sp, None),
+            G::Method(base, name) => {
+                let b = self.expr(cx, &base, None);
+                self.method_call_on(cx, b, &name, iter.span, None, &all, sp, None)
+            }
+        };
+        cx.gen_call_ok = false;
+        (cx.loop_body_next, cx.loop_body_of) = saved;
+        if !matches!(call.kind, TK::Call { .. }) {
+            return Some(None);
+        }
+        Some(Some(TStmt::ForEach { id, call }))
+    }
+
+    /// The function a callee path names, without reporting anything.
+    fn peek_path_func(&mut self, cx: &mut FnCx, e: &Expr) -> Option<(FuncId, Option<Vec<Ty>>)> {
+        let fi = cx.env.file;
+        match &e.kind {
+            ExprKind::Ident(n) if !cx.scopes.iter().any(|s| s.iter().any(|(m, _)| m == n)) => match self.lookup_unqualified(fi, cx.env.pkg, n) {
+                Some(Sym::Func(f)) => Some((f, None)),
+                _ => None,
+            },
+            ExprKind::Field(base, name, _) => {
+                let ExprKind::Ident(pn) = &base.kind else { return None };
+                if cx.scopes.iter().any(|s| s.iter().any(|(m, _)| m == pn)) {
+                    return None;
+                }
+                let (p, _) = self.file_cx[fi].imports.get(pn).cloned()?;
+                match self.prog.packages[p as usize].items.get(name) {
+                    Some(Sym::Func(f)) => Some((*f, None)),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
     }
 
     /// `par for x in &v { }`: the body becomes a `send fn` called for each
@@ -2084,6 +2295,25 @@ impl Checker {
         let sp = e.span;
         let expect = ex.ty().cloned();
         match &e.kind {
+            ExprKind::StaticField(base, name, nsp) => {
+                let Some((fp, owner)) = cx.static_fields.iter().rev().find(|f| f.0 == *name).map(|f| (f.1, f.2.clone())) else {
+                    self.err(*nsp, format!("`{}` doesn't name a field here: `x.[f]` reads the field `f` of a `static for f in fields(T)`", name));
+                    return TExpr::error(sp);
+                };
+                let b = self.expr(cx, base, None);
+                if !b.is_place() && !b.ty.is_error() {
+                    self.err(base.span, format!("`.[{}]` reads a field of a variable (or of a field): bind the value first (`let v = ...`)", name));
+                    return TExpr::error(sp);
+                }
+                let bt = self.resolve(cx, &b.ty);
+                if !self.unify(cx, &bt, &owner) {
+                    let (x, y) = (self.prog.show(&bt), self.prog.show(&owner));
+                    self.err(sp, format!("`{}` names a field of `{}`, not of `{}`", name, y, x));
+                    return TExpr::error(sp);
+                }
+                return TExpr::new(TK::StaticField { base: Box::new(b), fparam: fp }, Ty::Param(fp), sp);
+            }
+            ExprKind::StaticBuild { ty, name, name_span, value } => return self.static_build(cx, ty, name, *name_span, value, sp),
             ExprKind::Int(n) => match self.literal_value(*n, false, sp) {
                 Some(v) => self.int_lit(cx, v, expect.as_ref(), sp),
                 None => TExpr::error(sp),
@@ -2541,6 +2771,12 @@ impl Checker {
                 }
                 if let Some(h) = super::renamed(name) {
                     d = d.note(None, h);
+                    if matches!(&name[..], "rc" | "arc" | "weak") {
+                        d = d.fix(Span { file: sp.file, lo: sp.lo, hi: sp.lo + name.len() as u32 }, format!("{}{}", name[..1].to_uppercase(), &name[1..]));
+                    }
+                }
+                if name == "nil" {
+                    d = d.fix(sp, "none");
                 }
                 self.diags.push(d);
                 TExpr::error(sp)
@@ -2576,6 +2812,10 @@ impl Checker {
         };
         if targs.len() != fd.tparams.len() {
             self.err(sp, format!("`{}` expects {} type argument(s)", fd.name, fd.tparams.len()));
+            return TExpr::error(sp);
+        }
+        if fd.gen_of.is_some() {
+            self.err(sp, format!("`{}` is a generator, which isn't a value: iterate over what it yields with `for x in {}(...)`", fd.name, fd.name));
             return TExpr::error(sp);
         }
         let s: HashMap<TParamId, Ty> = fd.tparams.iter().copied().zip(targs.iter().cloned()).collect();
@@ -2774,6 +3014,18 @@ impl Checker {
 
     fn field(&mut self, cx: &mut FnCx, whole: &Expr, base: &Expr, name: &str, nsp: Span, expect: Option<&Ty>) -> TExpr {
         let sp = whole.span;
+        // `f.name` of a `static for` field
+        if let ExprKind::Ident(n) = &base.kind {
+            if let Some(&(_, fp, _)) = cx.static_fields.iter().rev().find(|f| f.0 == *n) {
+                if !cx.scopes.iter().any(|sc| sc.iter().any(|(m, _)| m == n)) {
+                    if name == "name" {
+                        return TExpr::new(TK::StaticFieldName(fp), Ty::Str, sp);
+                    }
+                    self.err(nsp, format!("a `static for` field has a `name` (`{}.name`); its value is `x.[{}]`", n, n));
+                    return TExpr::error(sp);
+                }
+            }
+        }
         // paths: package members, enum variants, constants
         if !matches!(self.resolve_path(cx, base), Some(PathRes::Value) | Some(PathRes::Global(_)) | None) {
             match self.resolve_path(cx, whole) {
@@ -2812,7 +3064,7 @@ impl Checker {
                     let fields = self.prog.field_tys(d, args);
                     if let Some(i) = fields.iter().position(|f| f.0 == name) {
                         let def = self.prog.def(d);
-                        if !def.fields()[i].is_pub && def.pkg != cx.env.pkg {
+                        if !self.field_visible(cx, d, i) {
                             self.err(nsp, format!("field `{}` of `{}` is private", name, def.name));
                         }
                         let ft = fields[i].1.clone();
@@ -3323,7 +3575,9 @@ impl Checker {
             Ty::Adt(d, args) if self.prog.def(*d).is_struct() => {
                 let (d, args) = (*d, args.clone());
                 let def = self.prog.def(d).clone();
-                if def.pkg != cx.env.pkg && def.fields().iter().any(|f| !f.is_pub) {
+                // private fields can be left to their defaults, not set
+                let named = |n: &str| !positional.is_empty() || fields.iter().any(|f| f.0 == n);
+                if (0..def.fields().len()).any(|i| !self.field_visible(cx, d, i) && (named(&def.fields()[i].name) || def.fields()[i].default.is_none())) {
                     self.err(sp, format!("cannot build `{}` with a literal outside its package: it has private fields", def.name));
                 }
                 // `Point{x, y}` is `Point{x: x, y: y}`
@@ -3463,7 +3717,7 @@ impl Checker {
             self.err(sp, "cannot infer the element type of this list; give it a type: `let xs: Vec[T] = [...]`");
             return TExpr::error(sp);
         }
-        if self.prog.contains_view(&elem) {
+        if self.prog.contains_view(&elem) && !self.prog.is_view(&Ty::vec(elem.clone())) {
             let s = self.prog.show(&elem);
             self.err(sp, format!("a list cannot hold borrowed views (`{}`); use owned values such as String", s));
             return TExpr::error(sp);
@@ -3505,7 +3759,7 @@ impl Checker {
             out.push(self.coerce(cx, e, &r, Use::Value));
         }
         let elem = self.resolve(cx, &elem);
-        if self.prog.contains_view(&elem) && !is_array {
+        if self.prog.contains_view(&elem) && !is_array && !self.prog.is_view(&Ty::vec(elem.clone())) {
             let s = self.prog.show(&elem);
             self.err(sp, format!("a list cannot hold borrowed views (`{}`); use owned values such as String", s));
             return TExpr::error(sp);
@@ -3608,7 +3862,8 @@ impl Checker {
                 return TExpr::error(sp);
             }
         }
-        let loop_body = cx.loop_body_next.take();
+        // (only the loop body itself, not a closure checked while its call is)
+        let loop_body = if cx.loop_body_of == body as *const Expr as usize { cx.loop_body_next.take() } else { None };
         let saved_defer = cx.defer_depth;
         if loop_body.is_none() {
             cx.defer_depth = 0;
@@ -3626,10 +3881,12 @@ impl Checker {
         if let Some((lid, label)) = &loop_body {
             // a loop body: outer loops stay reachable and `return` / `try`
             // keep referring to the enclosing function
-            cx.frames.push(Frame { depth, captures: vec![], saved_ret, saved_loops: cx.loops.clone(), saved_yields: cx.yields });
+            cx.frames.push(Frame { depth, captures: vec![], saved_ret, saved_loops: cx.loops.clone(), saved_yields: cx.yields, saved_gen: None, loop_body: true });
             cx.loops.push((label.clone(), *lid));
         } else {
-            cx.frames.push(Frame { depth, captures: vec![], saved_ret, saved_loops: std::mem::take(&mut cx.loops), saved_yields: cx.yields });
+            // (a `yield` in an ordinary closure would yield from the closure)
+            let g = cx.gen_elem.take().map(|g| g.0);
+            cx.frames.push(Frame { depth, captures: vec![], saved_ret, saved_loops: std::mem::take(&mut cx.loops), saved_yields: cx.yields, saved_gen: g, loop_body: false });
             cx.ret = ret_ty.clone();
         }
         cx.yields = None;
@@ -3664,6 +3921,9 @@ impl Checker {
             };
             let mode = if let Some(f) = &ef { f.params[i].0 } else { mode };
             let id = self.declare(cx, &p.name, t.clone(), LocalKind::Param(mode), p.span, true);
+            if loop_body.is_some() {
+                cx.loop_elems.insert(id);
+            }
             ps.push(id);
             pty.push((mode, t));
         }
@@ -3724,6 +3984,12 @@ impl Checker {
         cx.ret = fr.saved_ret;
         cx.loops = fr.saved_loops;
         cx.yields = fr.saved_yields;
+        if let Some(g) = fr.saved_gen {
+            let body = cx.scopes.iter().flatten().find(|(n, _)| n == super::GEN_BODY).map(|(_, id)| *id);
+            if let Some(b) = body {
+                cx.gen_elem = Some((g, b));
+            }
+        }
         let ret_final = self.resolve(cx, &ret_ty);
         let id = cx.closure_ids;
         cx.closure_ids += 1;
@@ -3760,7 +4026,7 @@ impl Checker {
             let e = e.clone();
             self.unify(cx, &e, &fty);
         }
-        let c = TClosure { id, params: ps, ret: ret_final, body: tb, captures: fr.captures, owned: false, scoped: false, by_value: vec![], loop_body: loop_body.map(|l| l.0), span: sp };
+        let c = TClosure { id, params: ps, ret: ret_final, body: tb, captures: fr.captures, owned: false, scoped: false, by_value: vec![], sending: vec![], loop_body: loop_body.map(|l| l.0), span: sp };
         TExpr::new(TK::Closure(Box::new(c)), fty, sp)
     }
 
@@ -4239,7 +4505,7 @@ impl Checker {
                 };
                 return TExpr::new(TK::MakeChan(Box::new(n)), t.clone(), sp);
             }
-            Ty::Int(_) | Ty::F32 | Ty::F64 => {
+            Ty::Int(_) | Ty::F32 | Ty::F64 | Ty::Param(_) if t.is_numeric() || self.param_numeric(&t) => {
                 if args.len() != 1 {
                     self.err(sp, "conversion takes one value");
                     return TExpr::error(sp);
@@ -4316,7 +4582,7 @@ impl Checker {
                 let inner = match &a.kind {
                     ExprKind::Ref(inner) => inner,
                     _ => {
-                        self.diags.push(Diag::new(a.span, format!("parameter `{}` is inout: pass a mutable reference with `&`", p.name)).note(None, "write `&x` so that modifications are visible at the call site"));
+                        self.diags.push(Diag::new(a.span, format!("parameter `{}` is inout: pass a mutable reference with `&`", p.name)).note(None, "write `&x` so that modifications are visible at the call site").fix(Span { file: a.span.file, lo: a.span.lo, hi: a.span.lo }, "&"));
                         let e = self.expr(cx, a, Some(&pty));
                         return TArg { mode: ArgMode::Inout, e };
                     }
@@ -4365,16 +4631,20 @@ impl Checker {
             }
             Mode::Borrow => {
                 if let ExprKind::Ref(_) = &a.kind {
-                    self.err(a.span, format!("parameter `{}` is borrowed read-only; `&` is only for inout parameters", p.name));
+                    self.diags.push(Diag::new(a.span, format!("parameter `{}` is borrowed read-only; `&` is only for inout parameters", p.name)).fix(Span { file: a.span.file, lo: a.span.lo, hi: a.span.lo + 1 }, ""));
                 }
+                let wrapped = self.ok_wrap_fn_item(cx, a, &pty);
+                let a = wrapped.as_ref().unwrap_or(a);
                 let e = self.expr(cx, a, Some(&pty));
                 let e = self.coerce(cx, e, &pty, Use::Borrow);
                 TArg { mode: ArgMode::Borrow, e }
             }
             Mode::Sink => {
                 if let ExprKind::Ref(_) = &a.kind {
-                    self.err(a.span, format!("parameter `{}` takes ownership (sink); pass the value without `&`", p.name));
+                    self.diags.push(Diag::new(a.span, format!("parameter `{}` takes ownership (sink); pass the value without `&`", p.name)).fix(Span { file: a.span.file, lo: a.span.lo, hi: a.span.lo + 1 }, ""));
                 }
+                let wrapped = self.ok_wrap_fn_item(cx, a, &pty);
+                let a = wrapped.as_ref().unwrap_or(a);
                 let e = self.expr(cx, a, Some(&pty));
                 let e = self.coerce(cx, e, &pty, Use::Value);
                 TArg { mode: ArgMode::Value, e }
@@ -4382,8 +4652,354 @@ impl Checker {
         }
     }
 
+    /// `static for f in fields(T) { body }` (spec 9.1): an ordinary `for` in
+    /// the IR, so every check treats the body as running any number of
+    /// times; codegen unrolls it, once per field of the instance's `T`.
+    fn static_for(&mut self, cx: &mut FnCx, name: &str, name_span: Span, ty: &TypeExpr, body: &ast::Block, sp: Span) -> Option<TStmt> {
+        let env = cx.env.clone();
+        let t = self.resolve_type(ty, &env);
+        if !self.static_struct_ok(&t, ty.span, "static for") {
+            return None;
+        }
+        let fp = self.new_tparam(&format!("{}'s type", name), false);
+        // not a loop for `break` / `continue`, which leave enclosing loops
+        let id = cx.next_loop;
+        cx.next_loop += 1;
+        let elem = self.declare(cx, &format!("__sf{}", id), Ty::Unit, LocalKind::Let, name_span, false);
+        cx.used[elem as usize] = true;
+        cx.static_fields.push((name.to_string(), fp, t.clone()));
+        let b = self.block(cx, body, Expect::NoValue);
+        cx.static_fields.pop();
+        Some(TStmt::For { id, kind: IterKind::StaticFields, iter: TExpr::new(TK::Unit, t, sp), hi: Some(TExpr::new(TK::ConstParam(fp), Ty::Param(fp), sp)), elem, index: None, mutable: false, body: b, span: sp })
+    }
+
+    /// A type whose fields `static for` / `static T { }` can go over: a
+    /// struct, or a type parameter (checked per instance).
+    fn static_struct_ok(&mut self, t: &Ty, sp: Span, what: &str) -> bool {
+        match t {
+            Ty::Param(_) => true,
+            Ty::Adt(d, _) if self.prog.def(*d).is_struct() => true,
+            Ty::Error => false,
+            _ => {
+                let s = self.prog.show(t);
+                self.err(sp, format!("`{}` goes over the fields of a struct (or a type parameter that is one), not `{}`", what, s));
+                false
+            }
+        }
+    }
+
+    /// `static if T: bound { } else static if let v: P = x { } else { }`:
+    /// an `if` whose condition codegen decides per instance (spec 9.1). Each
+    /// arm is checked as if its condition held: with the bound on `T`, or with
+    /// `v` of the pattern's type; only the arm that holds is generated.
+    fn static_if(&mut self, cx: &mut FnCx, arms: &[(ast::StaticCond, ast::Block)], else_: Option<&ast::Block>, sp: Span) -> TExpr {
+        let Some(((cond, body), rest)) = arms.split_first() else {
+            return match else_ {
+                Some(b) => {
+                    let tb = self.block(cx, b, Expect::NoValue);
+                    let t = if always_leaves(&tb) { Ty::Never } else { Ty::Unit };
+                    TExpr::new(TK::Block(tb), t, sp)
+                }
+                None => TExpr::unit(sp),
+            };
+        };
+        let env = cx.env.clone();
+        let (cond_e, then) = match cond {
+            ast::StaticCond::Bound(te, be) => {
+                let t = self.resolve_type(te, &env);
+                let kind = match &be.kind {
+                    TypeExprKind::Named { path, args } if path.len() == 1 && args.is_empty() && (path[0] == "struct" || path[0] == "enum") => Some(path[0].clone()),
+                    _ => None,
+                };
+                let (name, targs, pushed) = match kind {
+                    Some(k) => (format!("static_if:kind:{}", k), vec![t.clone()], None),
+                    None => match self.resolve_bound(be, &env) {
+                        Some(Bound::Iface(d, args)) if matches!(&self.prog.def(d).kind, TypeDefKind::Iface { type_set: Some(_), methods, .. } if methods.is_empty()) => {
+                            let mut ta = vec![t.clone()];
+                            ta.extend(args.iter().cloned());
+                            // checked with the bound, where `T` is a parameter
+                            let pushed = if let Ty::Param(p) = &t {
+                                self.prog.tparams[*p as usize].bounds.push(Bound::Iface(d, args.clone()));
+                                Some(*p)
+                            } else {
+                                None
+                            };
+                            (format!("static_if:iface:{}", d), ta, pushed)
+                        }
+                        Some(_) => {
+                            self.err(be.span, "`static if T: ...` takes `struct`, `enum`, or an interface with a type set and no methods (`Integer`, `Float`, `Number`); for other types, match their shape: `static if let v: Vec[_] = x`");
+                            (String::new(), vec![], None)
+                        }
+                        None => (String::new(), vec![], None),
+                    },
+                };
+                let tb = self.block(cx, body, Expect::NoValue);
+                if let Some(p) = pushed {
+                    self.prog.tparams[p as usize].bounds.pop();
+                }
+                if name.is_empty() {
+                    return TExpr::error(sp);
+                }
+                (TExpr::new(TK::Intrinsic { name, targs, args: vec![] }, Ty::Bool, sp), tb)
+            }
+            ast::StaticCond::Is(te, pat) => {
+                let t = self.resolve_type(te, &env);
+                let Ty::Param(p) = t else {
+                    let s = self.prog.show(&t);
+                    self.err(te.span, format!("`static if ... is` asks about a type parameter, not `{}`", s));
+                    return TExpr::error(sp);
+                };
+                let (pt, binders) = self.static_pattern_binders(pat, &env);
+                // a view would let generic code make a view (of its own local,
+                // as a `T`) that the borrow checker can't follow
+                if self.prog.contains_view(&pt) {
+                    let s = self.prog.show(&pt);
+                    self.err(pat.span, format!("`static if T is {}`: the pattern can't be a view; in that arm a `T` could then be a view the borrow checker doesn't see. Match a value instead: `static if let v: {} = x`", s, s));
+                    return TExpr::error(sp);
+                }
+                // in the arm, `T` is the pattern's type, and its names are types
+                cx.type_eqs.push((p, pt.clone()));
+                let saved = cx.env.tparams.clone();
+                for (n, b) in binders {
+                    cx.env.tparams.insert(n, b);
+                }
+                let tb = self.block(cx, body, Expect::NoValue);
+                cx.env.tparams = saved;
+                cx.type_eqs.pop();
+                (TExpr::new(TK::Intrinsic { name: "static_if_let".into(), targs: vec![Ty::Param(p), pt], args: vec![] }, Ty::Bool, sp), tb)
+            }
+            ast::StaticCond::Let(vname, vsp, pat, x) => {
+                let pt = self.static_pattern_type(pat, &env);
+                let xe = self.expr(cx, x, None);
+                if !xe.is_place() {
+                    self.err(x.span, "`static if let` looks at a variable or a field: bind the value first (`let v = ...`)");
+                    return TExpr::error(sp);
+                }
+                let xt = self.resolve(cx, &xe.ty);
+                let cond_e = TExpr::new(TK::Intrinsic { name: "static_if_let".into(), targs: vec![xt.clone(), pt.clone()], args: vec![] }, Ty::Bool, sp);
+                // `v` is `x` seen as the pattern's type
+                self.push_scope(cx);
+                let v = self.declare(cx, vname, pt.clone(), LocalKind::Ref { mutable: false }, *vsp, false);
+                let place = TExpr { kind: xe.kind.clone(), ty: pt, span: xe.span };
+                let mut tb = self.block(cx, body, Expect::NoValue);
+                self.pop_scope(cx);
+                tb.stmts.insert(0, TStmt::LetRef { local: v, place });
+                (cond_e, tb)
+            }
+        };
+        let else_b = if rest.is_empty() && else_.is_none() {
+            None
+        } else {
+            let e = self.static_if(cx, rest, else_, sp);
+            Some(TBlock { stmts: vec![TStmt::Expr(e)], value: None, span: sp })
+        };
+        // (every arm leaving makes the whole leave, as for `if`)
+        let diverges = else_b.as_ref().is_some_and(|e| always_leaves(e)) && always_leaves(&then);
+        TExpr::new(TK::If { cond: Box::new(cond_e), then, else_: else_b }, if diverges { Ty::Never } else { Ty::Unit }, sp)
+    }
+
+    /// The type of a `static if let` pattern: `_` stands for any type (a type
+    /// parameter of its own, bound per instance).
+    /// A `static if T is P` pattern: like `static_pattern_type`, where a name
+    /// that isn't a type (`Vec[E]`) also stands for any type, and names it in
+    /// the arm.
+    fn static_pattern_binders(&mut self, te: &TypeExpr, env: &TyEnv) -> (Ty, Vec<(String, Ty)>) {
+        fn collect(c: &mut Checker, te: &TypeExpr, env: &TyEnv, out: &mut Vec<(String, Ty)>) {
+            if let TypeExprKind::Named { path, args } = &te.kind {
+                if path.len() == 1 && args.is_empty() && path[0] != "_" && !env.tparams.contains_key(&path[0]) && builtin_type(&path[0]).is_none() && path[0].chars().next().is_some_and(|ch| ch.is_uppercase()) && c.lookup_unqualified(env.file, env.pkg, &path[0]).is_none() && !out.iter().any(|(n, _)| *n == path[0]) {
+                    let id = c.new_tparam(&path[0], false);
+                    out.push((path[0].clone(), Ty::Param(id)));
+                }
+                for a in args {
+                    collect(c, a, env, out);
+                }
+            }
+            match &te.kind {
+                TypeExprKind::Option(a) | TypeExprKind::Slice(a) | TypeExprKind::Ptr(a) | TypeExprKind::Array(_, a) => collect(c, a, env, out),
+                TypeExprKind::Func { params, ret, .. } => {
+                    for (_, p) in params {
+                        collect(c, p, env, out);
+                    }
+                    if let Some(r) = ret {
+                        collect(c, r, env, out);
+                    }
+                }
+                TypeExprKind::Result(a, b) => {
+                    collect(c, a, env, out);
+                    collect(c, b, env, out);
+                }
+                TypeExprKind::Tuple(ts) => {
+                    for t in ts {
+                        collect(c, t, env, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut binders = vec![];
+        collect(self, te, env, &mut binders);
+        let mut env2 = env.clone();
+        for (n, t) in &binders {
+            env2.tparams.insert(n.clone(), t.clone());
+        }
+        let pt = self.static_pattern_type(te, &env2);
+        // a map's keys are hashable, wherever they are bound
+        let keys: Vec<TParamId> = {
+            let mut v = vec![];
+            pt.walk(&mut |x| {
+                if let Ty::Map(k, _) = x {
+                    if let Ty::Param(p) = &**k {
+                        v.push(*p);
+                    }
+                }
+            });
+            v
+        };
+        for p in keys {
+            if binders.iter().any(|(_, b)| *b == Ty::Param(p)) && !self.prog.tparams[p as usize].bounds.iter().any(|b| matches!(b, Bound::Cap(Cap::Hash))) {
+                self.prog.tparams[p as usize].bounds.push(Bound::Cap(Cap::Hash));
+            }
+        }
+        (pt, binders)
+    }
+
+    fn static_pattern_type(&mut self, te: &TypeExpr, env: &TyEnv) -> Ty {
+        fn rewrite(c: &mut Checker, te: &TypeExpr, env: &mut TyEnv) -> TypeExpr {
+            let mut te = te.clone();
+            if let TypeExprKind::Named { path, args } = &mut te.kind {
+                if path.len() == 1 && path[0] == "_" && args.is_empty() {
+                    let n = format!("__any{}", c.prog.tparams.len());
+                    let id = c.new_tparam("_", false);
+                    env.tparams.insert(n.clone(), Ty::Param(id));
+                    path[0] = n;
+                    return te;
+                }
+                for a in args.iter_mut() {
+                    *a = rewrite(c, a, env);
+                }
+            }
+            match &mut te.kind {
+                TypeExprKind::Option(a) | TypeExprKind::Slice(a) | TypeExprKind::Ptr(a) => **a = rewrite(c, a, env),
+                TypeExprKind::Result(a, b) => {
+                    **a = rewrite(c, a, env);
+                    **b = rewrite(c, b, env);
+                }
+                TypeExprKind::Tuple(ts) => {
+                    for t in ts.iter_mut() {
+                        *t = rewrite(c, t, env);
+                    }
+                }
+                TypeExprKind::Array(_, a) => **a = rewrite(c, a, env),
+                _ => {}
+            }
+            te
+        }
+        let mut env2 = env.clone();
+        let te2 = rewrite(self, te, &mut env2);
+        self.resolve_type(&te2, &env2)
+    }
+
+    /// `static T { f => value }`: a `T` with each field's value computed by
+    /// `value`, once per field (codegen unrolls it). `value` can't move what
+    /// is declared outside it: it runs once for each field.
+    fn static_build(&mut self, cx: &mut FnCx, ty: &TypeExpr, name: &str, name_span: Span, value: &Expr, sp: Span) -> TExpr {
+        let env = cx.env.clone();
+        let t = self.resolve_type(ty, &env);
+        if !self.static_struct_ok(&t, ty.span, "static T { }") {
+            return TExpr::error(sp);
+        }
+        let _ = name_span;
+        let fp = self.new_tparam(&format!("{}'s type", name), false);
+        cx.static_fields.push((name.to_string(), fp, t.clone()));
+        let first_local = cx.locals.len() as LocalId;
+        let v = self.expr(cx, value, Some(&Ty::Param(fp)));
+        let v = self.coerce(cx, v, &Ty::Param(fp), Use::Value);
+        cx.static_fields.pop();
+        let mut moved = None;
+        visit_expr(&v, &mut |x| match &x.kind {
+            TK::Move(p) => {
+                if let Some(l) = crate::tir::root_local(p) {
+                    if l < first_local {
+                        moved.get_or_insert(x.span);
+                    }
+                }
+            }
+            // an arm that moves out of an outer value (`match s { v => v }`)
+            TK::Match { scrut, owned: true, arms } if arms.iter().any(|a| a.consuming) => {
+                if crate::tir::root_local(scrut).is_some_and(|l| l < first_local) {
+                    moved.get_or_insert(x.span);
+                }
+            }
+            TK::Closure(c) if c.owned || c.captures.iter().any(|(_, u)| *u == CapUse::Move) => {
+                if c.captures.iter().any(|(l, _)| *l < first_local) {
+                    moved.get_or_insert(x.span);
+                }
+            }
+            _ => {}
+        });
+        if let Some(msp) = moved {
+            self.err(msp, "a `static T { }` value runs once for each field, so it can't move a value declared outside it");
+        }
+        TExpr::new(TK::Intrinsic { name: "static_build".into(), targs: vec![t.clone(), Ty::Param(fp)], args: vec![TArg { mode: ArgMode::Value, e: v }] }, t, sp)
+    }
+
+    /// Inside an ordinary closure in a `gen fn` (where `yield` can't go).
+    fn in_gen_closure(&self, cx: &FnCx) -> bool {
+        cx.frames.iter().any(|f| f.saved_gen.is_some())
+    }
+
+    /// A function that can't fail, passed where one returning `R ! E` is
+    /// expected (`task.map(xs, 8, square)`), becomes the closure
+    /// `(a) => square(a)`, whose result is an `R ! E` that is always ok.
+    fn ok_wrap_fn_item(&mut self, cx: &mut FnCx, a: &Expr, pty: &Ty) -> Option<Expr> {
+        let Ty::Func(ft) = pty else { return None };
+        if !matches!(&ft.ret, Ty::Result(..)) {
+            return None;
+        }
+        let fi = cx.env.file;
+        let f = match &a.kind {
+            ExprKind::Ident(n) if !cx.scopes.iter().any(|s| s.iter().any(|(m, _)| m == n)) => match self.lookup_unqualified(fi, cx.env.pkg, n) {
+                Some(Sym::Func(f)) => f,
+                _ => return None,
+            },
+            ExprKind::Field(base, name, _) => {
+                let ExprKind::Ident(pn) = &base.kind else { return None };
+                if cx.scopes.iter().any(|s| s.iter().any(|(m, _)| m == pn)) {
+                    return None;
+                }
+                let (p, _) = self.file_cx[fi].imports.get(pn).cloned()?;
+                match self.prog.packages[p as usize].items.get(name) {
+                    Some(Sym::Func(f)) => *f,
+                    _ => return None,
+                }
+            }
+            _ => return None,
+        };
+        let fd = self.prog.func(f);
+        if matches!(fd.ret, Ty::Result(..)) || fd.recv.is_some() || fd.params.len() != ft.params.len() || fd.yields.is_some() {
+            return None;
+        }
+        let sp = a.span;
+        let params: Vec<crate::ast::ClosureParam> = ft.params.iter().enumerate().map(|(i, (m, _))| crate::ast::ClosureParam { name: format!("__w{}", i), mode: *m, ty: None, span: sp }).collect();
+        let args: Vec<Expr> = ft.params.iter().enumerate().map(|(i, (m, _))| {
+            let id = Expr { kind: ExprKind::Ident(format!("__w{}", i)), span: sp };
+            if *m == Mode::Inout { Expr { kind: ExprKind::Ref(Box::new(id)), span: sp } } else { id }
+        }).collect();
+        let body = Expr { kind: ExprKind::Call(Box::new(a.clone()), args), span: sp };
+        Some(Expr { kind: ExprKind::Closure { params, ret: None, body: Box::new(body) }, span: sp })
+    }
+
     pub fn call_fn(&mut self, cx: &mut FnCx, fid: FuncId, explicit: Option<Vec<Ty>>, recv: Option<TExpr>, args: &[Expr], sp: Span, expect: Option<&Ty>) -> TExpr {
         let fd = self.prog.func(fid).clone();
+        if fd.gen_of.is_some() && !std::mem::take(&mut cx.gen_call_ok) {
+            let d = if fd.recv.is_some() {
+                Diag::new(sp, format!("`{}` is a generator method: iterate over what it yields with `for x in v.{}(...)`, called on a variable", fd.name, fd.name)).note(None, "a `for` loop over a generator takes a call of a function or of a variable's method, without type arguments: bind the receiver to a variable first")
+            } else {
+                Diag::new(sp, format!("`{}` is a generator: iterate over what it yields with `for x in {}(...)`", fd.name, fd.name)).note(None, "a `for` loop over a generator takes the call itself, without type arguments (they are inferred)")
+            };
+            self.diags.push(d);
+            return TExpr::error(sp);
+        }
         if fd.kind == FuncKind::Test {
             self.err(sp, "tests cannot be called");
             return TExpr::error(sp);
@@ -4482,6 +5098,17 @@ impl Checker {
             }
         }
         out_args.extend(checked.into_iter().map(|a| a.unwrap()));
+        // An error type parameter that nothing pinned down (`apply(x, f)`
+        // with an `f` that can't fail) is `never`: the call can't fail, and
+        // its `T ! never` result is just a `T` (below).
+        for &tp in &fd.tparams {
+            if self.resolve(cx, &s[&tp]).has_vars() && error_only(&fd, tp) {
+                let v = s[&tp].clone();
+                if let Ty::Var(_) = self.resolve(cx, &v) {
+                    self.unify(cx, &v, &Ty::Never);
+                }
+            }
+        }
         let mut targs = vec![];
         for &tp in &fd.tparams {
             let t = self.resolve(cx, &s[&tp]);
@@ -4524,6 +5151,13 @@ impl Checker {
         if let Some(y) = fd.yields {
             let ty = if fd.yield_opt { Ty::opt(ret) } else { ret };
             return TExpr::new(TK::Proj { call: Box::new(call), mutable: y == YieldKind::Mut, opt: fd.yield_opt }, ty, sp);
+        }
+        // a result that can't be an error is its value
+        if let Ty::Result(ok, e) = &ret {
+            if **e == Ty::Never {
+                let ok = (**ok).clone();
+                return TExpr::new(TK::Intrinsic { name: "never_ok".into(), targs: vec![], args: vec![TArg { mode: ArgMode::Value, e: call }] }, ok, sp);
+            }
         }
         call
     }
@@ -4601,7 +5235,13 @@ impl Checker {
                         self.require_mut(cx, &b, &format!("call `{}` (it modifies its receiver) on", name));
                         TArg { mode: ArgMode::Inout, e: b }
                     }
-                    _ => {
+                    // the method takes the value out of the interface value,
+                    // which must be owned here
+                    Mode::Sink => {
+                        let b = self.value(cx, b);
+                        TArg { mode: ArgMode::Value, e: b }
+                    }
+                    Mode::Borrow => {
                         let b = self.borrow(cx, b);
                         TArg { mode: ArgMode::Borrow, e: b }
                     }
@@ -4940,6 +5580,25 @@ impl Checker {
         }
     }
 
+    /// Whether code in this function's package may name field `i` of `d`:
+    /// its own package's, public ones, and the standard library's private
+    /// ones from inside the standard library (whose modules share them), but
+    /// not from outside it: `os.Command{prog: ...}` or `os.File{fd: 3}` would
+    /// make what only `os` functions may make.
+    fn field_visible(&self, cx: &FnCx, d: DefId, i: usize) -> bool {
+        let def = self.prog.def(d);
+        let f = &def.fields()[i];
+        if def.pkg == cx.env.pkg {
+            return true;
+        }
+        let std = |p: PkgId| self.prog.packages[p as usize].is_std;
+        if std(def.pkg) {
+            f.declared_pub || std(cx.env.pkg)
+        } else {
+            f.is_pub
+        }
+    }
+
     /// `go call` / `go () => { ... }` in the innermost `scope` of this function.
     pub fn go_expr(&mut self, cx: &mut FnCx, inner: &Expr, handle: bool, sp: Span) -> TExpr {
         let Some(ts) = cx.task_scopes.last().cloned() else {
@@ -4948,7 +5607,12 @@ impl Checker {
             return TExpr::error(sp);
         };
         if ts.depth != cx.depth() {
-            self.diags.push(Diag::new(sp, "this `go` is inside a closure, but its `scope` is outside it").note(None, "start a `scope { }` inside the closure, or pass the scope in and call `s.go(() => ...)`"));
+            let d = if cx.frames.last().is_some_and(|f| f.loop_body) {
+                Diag::new(sp, "this `go` is in the body of a loop over a generator (or a type's `each`), which runs once per value as a function of its own, but its `scope` is outside the loop").note(None, "start a `scope { }` inside the loop body, or collect the values first and start the tasks in a plain `for`")
+            } else {
+                Diag::new(sp, "this `go` is inside a closure, but its `scope` is outside it").note(None, "start a `scope { }` inside the closure, or pass the scope in and call `s.go(() => ...)`")
+            };
+            self.diags.push(d);
             return TExpr::error(sp);
         }
         let Some((pre, closure)) = self.task_closure_ast(cx, inner) else {
@@ -5091,10 +5755,11 @@ impl Checker {
         for (l, u) in c.captures.clone() {
             let local = cx.locals[l as usize].clone();
             let t = self.resolve(cx, &local.ty);
-            if !self.is_send(&t) {
-                let s = self.prog.show(&t);
-                self.diags.push(Diag::new(c.span, format!("a task captures `{}` of type `{}`, which is not safe to share between threads", local.name, s)).note(Some(local.span), "declared here").note(None, "`Rc`, `Cell`, `Weak`, raw pointers and function values can't cross tasks; use `Arc`, `Mutex` or `send fn`"));
-            }
+            let send = self.is_send(&t);
+            let not_send = |this: &mut Self| {
+                let s = this.prog.show(&t);
+                this.diags.push(Diag::new(c.span, format!("a task captures `{}` of type `{}`, which is not safe to share between threads", local.name, s)).note(Some(local.span), "declared here").note(None, "`Rc`, `Cell`, `Weak`, raw pointers and function values can't cross tasks; use `Arc`, `Mutex` or `send fn`"));
+            };
             let is_ref = matches!(local.kind, LocalKind::Ref { .. });
             let borrowed = if owned {
                 false
@@ -5106,18 +5771,28 @@ impl Checker {
                 lives(cx, l)
             };
             if borrowed {
+                if !send {
+                    not_send(self);
+                }
                 if u == CapUse::Move {
                     self.diags.push(Diag::new(c.span, format!("a task cannot move `{}`: it borrows it from outside", local.name)).note(Some(local.span), "declared here").note(None, "move it into the task by passing it to a `sink` parameter: `go f(x)`, or declare it inside the scope's inner blocks"));
                 }
                 continue;
             }
             if is_ref || matches!(local.kind, LocalKind::Param(Mode::Borrow | Mode::Inout)) || self.prog.is_view(&t) {
+                if !send {
+                    not_send(self);
+                }
                 if owned {
                     self.diags.push(Diag::new(c.span, format!("a task started through a `Scope` value borrows `{}`", local.name)).note(Some(local.span), "declared here").note(None, "it may outlive this function: give it owned values (`.clone()` them first)"));
                 } else {
                     self.diags.push(Diag::new(c.span, format!("a task borrows `{}`, which does not live until the scope ends", local.name)).note(Some(local.span), "declared here").note(None, "declare it directly in the scope's body or outside the scope, or `.clone()` it into a local so the task can take it"));
                 }
                 continue;
+            }
+            // moved into the task: fine if nothing else can reach it
+            if !send {
+                c.sending.push(l);
             }
             if u == CapUse::Mutate {
                 self.diags.push(Diag::new(c.span, format!("a task cannot modify `{}`: it gets its own copy", local.name)).note(Some(local.span), "declared in a block inside the scope, so it is moved (or copied) into the task").note(None, "to share the result, declare it directly in the scope's body or outside the scope, so the task borrows it"));
@@ -5232,6 +5907,27 @@ pub fn lock_kind(prog: &Program, e: &TExpr) -> Option<bool> {
         }
     }
     None
+}
+
+/// Whether every path through the block leaves it (`return`, `break`...),
+/// looking into `if`, `match` and blocks whose every branch does.
+pub fn always_leaves(b: &TBlock) -> bool {
+    fn expr(e: &TExpr) -> bool {
+        e.ty == Ty::Never
+            || match &e.kind {
+                TK::Block(b) | TK::Unsafe(b) => always_leaves(b),
+                TK::If { then, else_: Some(el), .. } => always_leaves(then) && always_leaves(el),
+                TK::Match { arms, .. } => !arms.is_empty() && arms.iter().all(|a| expr(&a.body)),
+                _ => false,
+            }
+    }
+    if block_diverges(b) {
+        return true;
+    }
+    if let Some(v) = &b.value {
+        return expr(v);
+    }
+    matches!(b.stmts.last(), Some(TStmt::Expr(e)) if expr(e))
 }
 
 pub fn block_diverges(b: &TBlock) -> bool {
@@ -5580,4 +6276,64 @@ fn comp_block(list: &str, b: &ast::Block, missing: &mut Vec<Span>) -> ast::Block
         None => missing.push(b.span),
     }
     ast::Block { stmts, span: b.span }
+}
+
+/// Whether type parameter `p` of `fd` appears in its signature only as the
+/// error type of results (`fn(T) -> R ! E`, `-> Vec[R] ! E`): then a call
+/// that doesn't pin it down can't fail, and `E` is `never`.
+fn error_only(fd: &FuncDef, p: TParamId) -> bool {
+    fn walk(t: &Ty, p: TParamId, seen: &mut bool) -> bool {
+        match t {
+            Ty::Param(q) => *q != p,
+            Ty::Result(a, b) => {
+                if **b == Ty::Param(p) {
+                    *seen = true;
+                    walk(a, p, seen)
+                } else {
+                    walk(a, p, seen) && walk(b, p, seen)
+                }
+            }
+            Ty::Vec(a) | Ty::Slice(a) | Ty::Array(a, _) | Ty::Option(a) | Ty::Box(a) | Ty::Rc(a) | Ty::Arc(a) | Ty::Weak(a) | Ty::Cell(a) | Ty::Mutex(a) | Ty::MutexRef(a) | Ty::Sender(a) | Ty::Receiver(a) | Ty::Task(a) | Ty::Iso(a) | Ty::Ptr(a) => walk(a, p, seen),
+            Ty::ArrayT(a, b) | Ty::Map(a, b) => walk(a, p, seen) && walk(b, p, seen),
+            Ty::Adt(_, args) | Ty::Iface(_, args) => args.iter().all(|a| walk(a, p, seen)),
+            Ty::Func(f) => f.params.iter().all(|(_, t)| walk(t, p, seen)) && walk(&f.ret, p, seen),
+            _ => true,
+        }
+    }
+    let mut seen = false;
+    let mut ok = fd.params.iter().all(|x| walk(&x.ty, p, &mut seen)) && walk(&fd.ret, p, &mut seen);
+    if let Some(r) = &fd.recv {
+        ok = ok && walk(&r.ty, p, &mut seen);
+    }
+    ok && seen && !fd.ret_of.is_some()
+}
+
+/// The address of a closure expression's body, which identifies it while
+/// its AST is being checked.
+fn closure_body_addr(e: &Expr) -> usize {
+    match &e.kind {
+        ExprKind::Closure { body, .. } => &**body as *const Expr as usize,
+        _ => 0,
+    }
+}
+
+/// The first part of a `requires` clause that does more than read.
+fn requires_bad<'a>(e: &'a Expr) -> Option<&'a Expr> {
+    let ok = |x: &'a Expr| requires_bad(x);
+    match &e.kind {
+        ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Str(_) | ExprKind::Char(_) | ExprKind::Bool(_) | ExprKind::None | ExprKind::Ident(_) | ExprKind::DotVariant(_) | ExprKind::TypeExpr(_) => None,
+        ExprKind::Field(b, ..) | ExprKind::OptField(b, _) | ExprKind::TypeArgs(b, _) | ExprKind::Unary(_, b) => ok(b),
+        ExprKind::Index(b, xs) | ExprKind::Call(b, xs) => ok(b).or_else(|| xs.iter().find_map(ok)),
+        ExprKind::Slice(b, lo, hi) => ok(b).or_else(|| lo.as_deref().and_then(ok)).or_else(|| hi.as_deref().and_then(ok)),
+        ExprKind::Binary(_, l, r) | ExprKind::Coalesce(l, r) => ok(l).or_else(|| ok(r)),
+        ExprKind::Range { lo, hi, .. } => ok(lo).or_else(|| ok(hi)),
+        ExprKind::Interp(parts) => parts.iter().find_map(|p| match p {
+            ast::InterpPart::Expr(x, ..) => ok(x),
+            ast::InterpPart::Lit(_) => None,
+        }),
+        ExprKind::Tuple(xs) | ExprKind::VecLit(xs) => xs.iter().find_map(ok),
+        ExprKind::MapLit(kv) => kv.iter().find_map(|(k, v)| ok(k).or_else(|| ok(v))),
+        ExprKind::StructLit { ty, fields, positional, kv } => ok(ty).or_else(|| fields.iter().find_map(|f| ok(&f.2))).or_else(|| positional.iter().find_map(ok)).or_else(|| kv.iter().find_map(|(k, v)| ok(k).or_else(|| ok(v)))),
+        _ => Some(e),
+    }
 }

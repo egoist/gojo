@@ -1,0 +1,57 @@
+// View collections can't outlive what they view, and nothing may change
+// that data (or their own buffer, while a view into it is in use).
+
+fn returnsLocal() -> Vec[str] {
+    let s = "a b".toString()
+    return s.splitViews(" ")
+}
+
+fn modifyWhileViewed() {
+    var s = "a b".toString()
+    let ws = s.splitViews(" ")
+    s.push(" c")
+    println(ws)
+}
+
+fn intoInout(src: str, out: inout Vec[str]) {
+    out.push(src)
+}
+
+fn outlives() {
+    var keep: Vec[str] = []
+    {
+        let s = "a b".toString()
+        let ws = s.splitViews(" ")
+        keep = ws
+    }
+    println(keep)
+}
+
+fn pushWhileIter() {
+    let s = "a b".toString()
+    var ws = s.splitViews(" ")
+    for w in ws {
+        ws.push(w)
+    }
+}
+
+fn boxIt() {
+    let s = "a b".toString()
+    let b = Box(s.splitViews(" "))
+    println(b.len())
+}
+
+fn main() {
+    println(returnsLocal())
+    modifyWhileViewed()
+    var o: Vec[str] = []
+    intoInout("x", &o)
+    outlives()
+    pushWhileIter()
+    boxIt()
+}
+// error: returns a view of `s`, which is dropped when the function returns
+// error: cannot modify `s` while it is borrowed by `ws`
+// error: `s` does not live long enough: `keep` would still view it after it is dropped
+// error: cannot modify `ws` while it is borrowed by `w`
+// error: `b` has type `Box[Vec[str]]`, which would store a borrowed view

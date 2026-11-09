@@ -1,0 +1,9 @@
+`os.getenv` uses environment variables (`env`), which dependency `leftpad` may not: [authority] in
+leftpad.gojo:4:24
+leftpad = ["env"]
+`os.readText` uses the file system (`fs`), which dependency `leftpad` may not
+leftpad.gojo:9:16
+`os.readText` uses the file system (`fs`), and `util` may not: `s3` depends on it, and [authority] in
+gives `s3` ["net"]
+util.gojo:4:12
+allow `fs` for `s3` too

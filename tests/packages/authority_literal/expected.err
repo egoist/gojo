@@ -1,0 +1,2 @@
+cannot build `Command` with a literal outside its package: it has private fields
+cannot build `File` with a literal outside its package: it has private fields

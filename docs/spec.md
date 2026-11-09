@@ -20,7 +20,7 @@ The fuzzing tool is `gojo-fuzz` (section 15).
 - Source files are UTF-8. Comments are `// line comments` and `/* block comments */`; block comments can span lines.
 - **Automatic semicolons**: a statement terminator is inserted when the last token on a line is an identifier, a literal, `true`, `false`, `none`, `)`, `]`, `}`, `return`, `break` or `continue`. So a line that ends with an operator continues on the next line. Newlines inside parentheses and brackets do not end a statement. `;` puts several statements on one line.
 - **Leading-dot lines**: a line that starts with `.name` continues the expression on the line before (a method chain written one step per line), unless it is a `match` arm, that is, it has a `=>` outside brackets (`.Circle(r) => ...`). Comments and blank lines may sit between the steps. A block whose last line is a bare `.Variant` after another expression statement therefore needs the variant's type: `Color.Red`.
-- Keywords: `use extend pub fn struct enum interface type copy let var if else for in match return break continue defer errdefer go try catch with yield unsafe extern none true false inout sink where test const select scope isolate`. `self`, `as` and `lib` are contextual keywords, and so are `view` before `struct` or `enum` and `of` after a function's result type.
+- Keywords: `use extend pub fn struct enum interface type copy let var if else for in match return break continue defer errdefer go try catch with yield unsafe extern none true false inout sink where test const select scope isolate`. `self`, `as` and `lib` are contextual keywords, and so are `view` and `linear` before `struct` or `enum`, `of` after a function's result type, `static` before `for`, `if` or a type, `is` in `static if T is P`, `gen` and `checkfree` before `fn`, and `requires` after a function's signature.
 - Integer literals: decimal, `0x`, `0b`, `0o`, optionally separated with `_`. Floats: `1.5`, `2.5e3`, `1e-3`.
 - Strings `"..."` support `\n \t \\ \" \$ \xNN \u{...}`. Backquoted strings are raw and process no escapes (and no interpolation).
 - **Interpolation**: `"x = ${expr}"` embeds the value of `expr`, shown as `print` shows it; `${expr:spec}` formats it with a `fmt.format` spec (`${n:>8}`, `${f:.2}`, `${b:08b}`), checked at compile time. A string with an interpolation is a new `String`; one without stays a literal. The expression stays on the string's line, and `\${` is a literal `${`. A character literal `'é'` is a `rune` (an `i32` code point); when the expected type is `u8` it is converted to a byte.
@@ -36,7 +36,7 @@ Tests: `run/lexical`, `run/patterns`, `run/modern`, `errors/int_mismatch`, `erro
 - The default bound name is the last segment of the path; `use ./util/text as t` picks another name.
 - `use ./geom.{Vec2, Shape}` brings the names directly into scope and does not bind `geom`. The imported names must exist and must be `pub`.
 - An unused import (including an unused name inside `.{...}`) is a compile error. Imports between packages cannot form a cycle.
-- Only `pub` declarations can be used by other packages. Functions, types, methods, associated functions and struct fields are all invisible outside the package by default.
+- Only `pub` declarations can be used by other packages. Functions, types, methods, associated functions and struct fields are all invisible outside the package by default. Outside its package, a struct literal can't name a private field, and can be written only when every private field has a default (`strings.Builder{}`); the standard library's modules share their private fields with each other, not with other packages (`os.File{fd: 3}` or `os.Command{prog: ...}` is an error).
 - `print`, `println`, `eprint`, `eprintln`, `assert`, `assertEq`, `drop`, `ok`, `err`, `some` and `none` are in the prelude and need no import.
 
 ### 2.1 Package manifest `gojo.toml`
@@ -58,6 +58,10 @@ uuid = { path = "../uuid", package = "@carol/uuid" }
 allow = ["@c/zlib"]                             # dependencies that may have unsafe code
 forbid = true                                   # this package may not
 
+[authority]                                     # optional: see below
+leftpad = []                                    # may not use files, environment, programs or network
+"@aws/s3" = ["net"]
+
 [workspace]                                     # optional: members checked and tested together
 members = ["app", "libs/*"]
 ```
@@ -68,9 +72,10 @@ members = ["app", "libs/*"]
 - A directory that several packages depend on is compiled once (diamond dependencies).
 - `gojo.toml` is a strict subset of TOML (tables, strings, integers, booleans, arrays, inline tables). Unknown keys, misspelled names and paths that don't exist are errors with a location; they are never ignored.
 - **`[unsafe]`.** A dependency, direct or not, that has `unsafe` blocks, `unsafe fn`s, `unsafe send` types or `extern` blocks only builds when the manifest of the package being built lists it in `allow`, by the name in its own `gojo.toml`; the error says where its unsafe code is, and `gojo unsafe` lists all of it. Only the manifest being built decides, so a program sees and approves every package in its tree that has unsafe code (the dependencies' own `allow` lists don't count). A name in `allow` that isn't in the dependency tree is an error. `forbid = true` makes any unsafe code in the package's own files an error, which keeps a coding agent from reaching for `unsafe`. The standard library is not subject to it. A workspace's members each have their own `[unsafe]`.
+- **`[authority]`.** Limits what dependencies may do through the standard library. Each key is a dependency anywhere in the tree, by the name in its own `gojo.toml`, or `"*"` for every dependency not listed; each value lists the kinds it may use: `fs` (files and directories, the working directory: `os.open`, `os.readText`, `os.remove`, `os.walk`, `path.abs`, ...), `env` (`os.getenv`, `os.setenv`, `os.unsetenv`, `os.environ`), `process` (`os.run`, `os.command`, `os.notify`, ...) and `net` (`net.dial`, `net.listen`, `net.lookup`, `tls.dial`, `http.get`, `http.request`, ...; `tls.listen` needs `fs` too, for its key files, and `tls.dialWith` and `tls.client` need `fs` for a configuration's `caFile`). A call to one of these functions, or a use of it as a value, in the code of a listed package (field defaults and package-level values included) is an error unless its entry grants the kind, and so is one in a package it depends on, directly or not: the entries of every listed package above a package in the tree apply to it as well. The other functions of the standard library are free, among them the standard streams, `os.args` and `os.exit`; so are methods, which need a value (an `os.File`, a `net.Conn`) the package was handed or made with a granted function. Unlisted dependencies, when there is no `"*"`, and the package being built are not limited. A name that isn't in the dependency tree, or is the package being built, is an error; so is an unknown kind. `unsafe` code is not checked against it (see `[unsafe]`). `gojo authority [--json]` lists what each dependency uses, with its call sites, and the table that grants exactly that; it fails when the table doesn't hold.
 - `gojo init [name]` writes a `gojo.toml` in the current directory. In a workspace root without `[package]`, `gojo check` and `gojo test` process each member in turn, and `gojo run`/`build` require a member to be named. `gojo doc yaml/schema` shows the API of a dependency.
 
-Tests: `projects/app`, `projects/cycle`, `projects/private`, `projects/groups`, `packages/*` (`packages/unsafe_*` for `[unsafe]`), `errors/bad_use`, `errors/bad_use_names`, `errors/unused`, `errors/use_groups`.
+Tests: `projects/app`, `projects/cycle`, `projects/private`, `projects/groups`, `packages/*` (`packages/unsafe_*` for `[unsafe]`, `packages/authority_*` for `[authority]`), `errors/bad_use`, `errors/bad_use_names`, `errors/unused`, `errors/use_groups`.
 
 ## 3. Declarations
 
@@ -141,7 +146,7 @@ Tests: `run/basics`, `run/niche`, `run/spans`, `errors/no_nil`, `errors/int_mism
 
 ### 4.2 Structs
 
-- Fields can have default values: `port int = 8080`. A `?T` field defaults to `none`. Leaving out a field without a default in a literal is a compile error.
+- Fields can have default values: `port int = 8080`. A `?T` field defaults to `none`. Leaving out a field without a default in a literal is a compile error. A default is an expression computed where the value is built; it may use package-level values and call functions, but not declare variables of its own (a `let`, a closure, a pattern, a task): put such code in a function.
 - `Point{x, y}` sets each field from the variable of the same name (`Point{x: x, y: y}`); it can be mixed with `name: value`.
 - `.{x: 1, y: 2}` is a literal of the struct the context expects (a parameter, a field, a `return`, a typed `let`, an element pushed into a `Vec[T]`, `?T` of a struct), as `.Variant` is for enums: `serve(ln, h, .{deadline: 5 * time.second})`. Without an expected struct type it is an error.
 - `copy struct` declares a bitwise-copied type. All its fields must be copy, and the type cannot have a `drop` method.
@@ -172,6 +177,7 @@ Tests: `run/basics`, `run/generics`, `run/edge`, `run/patterns`.
 - A borrowed interface parameter (`r Reader`, `r: inout Reader`) is a data pointer plus a method table and allocates no memory.
 - An interface value (a variable, field or collection element) is an exclusive box on the heap plus a method table; dropping it drops the value inside. An interface value is never empty; write `?Reader` for an optional one.
 - `match r { f File => ..., _ => ... }` branches on the concrete type.
+- A method with a `sink self` receiver takes the value out of an interface value, which must be owned where it is called (not a borrowed interface parameter); the interface value is consumed.
 - Interfaces can embed other interfaces. Methods with type parameters and conditional methods do not count toward the method set.
 - **Type sets**: `interface Num { ~int | ~f64 }`. `~T` also accepts newtypes whose underlying type is `T`. An interface with a type set can only be used as a constraint, not as the type of a value.
 - `error` is a built-in interface with the single method `fn message(self) -> String`.
@@ -184,6 +190,7 @@ Capabilities are built-in constraints that the compiler decides:
 
 | Capability | Types that satisfy it |
 | --- | --- |
+| `any` | every type, linear ones included (5.7); a type parameter without it takes only types that can be dropped |
 | `copy` | scalars, `Span`, copy structs and enums, fixed-length arrays of copy elements |
 | `clone` | copy types; `String`, `Rc`, `Arc`, `Chan`; containers whose elements can be cloned; types with a `clone` method or whose fields can all be cloned |
 | `default` | scalars, `String`, `Vec`, `Map`, `?T`; fixed-length arrays whose elements have a default; structs whose fields all have defaults; newtypes whose underlying type has a default |
@@ -250,13 +257,16 @@ Tests: `run/ownership`, `run/errdefer`, `run/labels`, `run/push_flow`, `run/temp
 ### 5.4 Views and projections
 
 - The view types `str`, `[]T` and `MutexRef[T]`, and references lent by projections, **cannot be stored**: they cannot be struct fields, collection elements or captures of escaping closures, and cannot be returned from functions (except through the `yield` of a projection).
-- A projection function lends a reference with `yield`: `yield &T`, `yield inout T`, `yield ?&T`. `v[i]`, `m.get(k)`, `m.entry(k)` and `mu.lock()` are all projections.
+- A projection function lends a reference with `yield`: `yield &T`, `yield inout T`, `yield ?&T`. It can't yield a reference into its own locals, or into a parameter it gets by value (a `sink` one, or a read-only one of a copy type, such as `self` of a copy struct): the caller would keep a reference into a copy that is gone. `v[i]`, `m.get(k)`, `m.entry(k)` and `mu.lock()` are all projections.
 - `let x = v[i]`: when the element is copy it is copied out; otherwise `x` is a reference. To own the value, write `.clone()`.
 - `if let u = m.get(k) { }` and `with e = m.entry(k) { }` bind the reference to the block; the reference cannot be taken out of the block. The block cannot modify the borrowed container. A `with` body runs exactly once, so a function can end with a `with` whose body returns. A `with` is an expression with its body's value (`let n = with v = m.lock() { v.len() }`, or the last expression of a function); that value can't be a view (what the block borrows, such as locked data, is reachable only inside it), and moving out of the borrowed value is an error as anywhere else.
 - **Last use**: a view or reference bound with `let` stops holding the borrowed value after its last use in the block; after that the original value can be modified.
 - A view cannot outlive the value it borrows. You cannot take a view of a temporary and keep it (`let s: str = make()`).
 - While a view exists, the borrowed `Vec`/`String` cannot be modified, so `push` never leaves a view dangling.
-- **Views live only in variables** (possibly inside a variable's `?T` / `T ! E`). No value can exist that puts a view into any other storage, whether its type is written or inferred: `[s]`, `Rc(s)`, `Box(s)`, `[2]str`, `Map[int, str]`, `Vec[MutexRef[T]]`, and putting a view into an interface value (`xs.push(s)` where `xs` is a `Vec[Len]`).
+- **Views live only in variables** (possibly inside a variable's `?T` / `T ! E`). No value can exist that puts a view into any other storage, whether its type is written or inferred: `Rc(s)`, `Box(s)`, `[2]str`, `Vec[MutexRef[T]]`, a struct field (other than a view struct's), and putting a view into an interface value (`xs.push(s)` where `xs` is a `Vec[Len]`).
+- **View collections.** A `Vec` or `Map` whose elements (keys or values) are views (`str`, `[]T`, a view struct, or a view collection in turn) is a view itself: `Vec[str]`, `Map[str, int]`, `Vec[Token]`. It lives only in variables under every rule here, owns its buffer (it is moved, not copied, and its memory is freed after its last use), and borrows what its elements view: `[s]`, `ws.push(w)`, `m[w] = 1` and `m.entry(w)` add what `w` views to what the collection borrows, which can't change or go away while the collection is in use. A view read out of it (`ws[i]`, `for w in ws`, `ws.first() ?? ""`) views the same data, and so may outlive the collection; a reference into it (`ws.get(i)`, a slice `ws[1..]`) also borrows the collection itself, which can't change or move meanwhile. Views stored any other way are tracked too: assigning an element (`ws[0] = s`, `ts[i].text = s`), through a reference into it (`for x in &ws { x = s }`, `with e = m.entry(k)`, a `match` binding, a lock of `Mutex(&ws)`), or from inside a closure or task that changes it. A function returning one says what it views like any returned view (`-> Vec[str] of text`, or inferred). `s.splitViews(sep)`, `s.lineViews()` and `s.fieldViews()` are the copy-free versions of `split`, `lines` and `fields`.
+- **Views left in `inout` parameters.** A function may store views of its other parameters in an `inout` parameter that can hold views (`fn tokenize(src: str, out: inout Vec[Token])`); the compiler works out which parameters those are, as for a returned view, and the caller's variable then borrows those arguments. Storing a view of anything of the function's own there is an error.
+- **Loops over a temporary.** The elements of `for x in f()`, when `f()` is a temporary that owns them (`text.split(" ")` gives a `Vec[String]`), are gone when the loop ends: a view of one can't be kept past the loop (`best = w`). Bind the temporary to a variable first. When the temporary is a view collection, the views read from it view what it does.
 - **View types.** `view struct Token { kind: Kind, text: str }` (or `view enum`) may hold views, and is a view itself: it lives only in variables, like `str`, under every rule above. It borrows what its views point into: `Token{text: src[0..3], kind: k}` borrows `src`, a field read from it (`t.text`) borrows the same, and assigning a view to a field (`t.text = s`) adds to what the variable borrows. Its other fields must be copy, so it is copied like `str` and never dropped; owned data lives beside it. It can't have a `drop` method or hold task handles, scopes or lock guards, and isn't `send`. A method with `inout self` can only store subviews of `self` in it (`self.rest = self.rest[1..]`), as for an `inout` slice. A view returned by its methods borrows what the struct does, not the variable holding it: a lexer's tokens point into the input, so the lexer can move on while earlier tokens are in use.
 - **Bindings into a view variable.** A `match` (or `if let`) binding on a variable that holds a view points into that variable, so the variable can't be given another value, directly, through `inout` or in a closure, while the binding is in use. Assigning to such a binding assigns the variable: the variable then views what was assigned too, under the rules for assigning to it. A binding of data the variable holds inline (an array payload) borrows the variable itself, as does a view of an inline field (`v.arr[0..2]`); a task that reads a view variable in place keeps it from being given another value until the task's scope ends.
 - **Copies are passed by value.** A parameter of a copy type (a `copy struct`, an array, a view struct) is the function's own copy, so a view into data it holds inline (`self.arr[0..2]`) can't be returned; a view it holds (`self.text`) can, since it points into the caller's data.
@@ -271,7 +281,7 @@ Tests: `run/ownership`, `run/errdefer`, `run/labels`, `run/push_flow`, `run/temp
 - **Data inside a lock**: a view obtained inside `with s = mu.lock() { }` (including locks from `Mutex(&x)`) cannot leave the block, cannot be assigned to a variable outside the block, and cannot be returned: the lock is released when the block ends, and other tasks may then modify the data.
 - **Generics and views**: if a generic function keeps a value of its type parameter `T` after the call ends (captured by an escaping closure or by a task started through a `Scope` value, or passed to another generic function that keeps it), then `T` cannot be a view type at the call.
 
-Tests: `run/lastuse`, `run/generics`, `run/spans`, `run/mutexref`, `errors/view_field`, `errors/view_return`, `errors/view_temporary`, `errors/view_outlives_owner`, `errors/views_in_containers`, `errors/escaping_view`, `errors/projection_borrow`, `errors/mutable_ref_conflict`, `errors/iterator_invalidation`, `errors/move_while_borrowed`, `errors/view_assign_scope`, `errors/view_lock_escape`, `errors/stored_views`, `errors/generic_keeps_view`, `errors/closure_view`, `errors/defer_returned_view`, `errors/temp_and_iface_views`, `run/view_structs`, `run/view_sources`, `errors/view_types`, `errors/view_types_syntax`, `errors/view_types_borrow`, `errors/view_types_capture`, `errors/match_view_storage`, `errors/view_sources`, `errors/ret_of`, `errors/view_holes`, `errors/task_error_view`.
+Tests: `run/lastuse`, `run/generics`, `run/spans`, `run/mutexref`, `errors/view_field`, `errors/view_return`, `errors/view_temporary`, `errors/view_outlives_owner`, `errors/views_in_containers`, `errors/escaping_view`, `errors/projection_borrow`, `errors/mutable_ref_conflict`, `errors/iterator_invalidation`, `errors/move_while_borrowed`, `errors/view_assign_scope`, `errors/view_lock_escape`, `errors/stored_views`, `errors/generic_keeps_view`, `errors/closure_view`, `errors/defer_returned_view`, `errors/temp_and_iface_views`, `run/view_structs`, `run/view_sources`, `errors/view_types`, `errors/view_types_syntax`, `errors/view_types_borrow`, `errors/view_types_capture`, `errors/match_view_storage`, `errors/view_sources`, `errors/ret_of`, `errors/view_holes`, `errors/task_error_view`, `run/view_collections`, `run/vec_literal_view`, `errors/view_collections`, `errors/view_collections_borrow`, `errors/view_collections_inout`, `errors/view_coll_hole_*`, `run/view_collections_review`, `errors/loop_temp_view`.
 
 ### 5.5 Shared ownership
 
@@ -288,6 +298,33 @@ Tests: `run/misc`, `run/interfaces`, `run/niche`, `run/arena`.
 - A closure given to `go` cannot modify outer variables.
 
 Tests: `run/basics`, `run/concurrency`, `errors/escaping_view`, `errors/go_closure_mutation`.
+
+### 5.7 Linear types
+
+A value of a **linear** type is never dropped implicitly: every value must be consumed. `linear struct` and `linear enum` declare one:
+
+```gojo
+linear struct Tx {
+    id: int
+
+    fn commit(sink self) ! DbError { ... }
+    fn rollback(sink self) { ... }
+}
+```
+
+- **Consuming** a value means moving it: into a `sink` parameter (its own `sink self` methods above all), out of the function with `return`, or into something that is consumed in turn (a field of a linear struct, a `Vec`, a `?T`, a result or a tuple). Panics abort, so no value is ever dropped on the way out of a panic.
+- **What is rejected**: a variable or `sink` parameter (of a function or a closure) that still holds the value where its block ends, at a `return`, `break` or `continue` that leaves it, or where a `try` returns an error; a temporary nobody takes (`begin()` as a statement, `_ = begin()`, `begin().id`, the result of a plain `go`); assigning over a variable that holds one, and assigning to any place the function doesn't own (an `inout` parameter or `self`, an element, a reference, a variable a closure captures), since what was there would be dropped: `let old = replace(&x, new)` gives it back instead; moving it into a closure other than the body of a `go` (a closure could be dropped, or called twice); and a `match` arm that moves out of the value but drops a linear part with `_`.
+- **Projections and scopes**: a projection's body ends at its `yield` (its defers run there), so a linear value it still holds is dropped there: an error. A `scope` whose tasks can fail can't have a linear value: when one fails, the value is dropped.
+- **Linear errors**: an error type can be linear, and is then consumed like any other value. A `catch` must bind it, `try` can't turn it into an `error` interface value, a `try ... else wrap` hands it to `wrap` (which must consume it), and the tasks of a `scope` can't fail with one (when several fail, only the first error is kept). Errors name the path (`pool.tx`), say whether it is unconsumed on every path or only some, and list the type's `sink self` methods.
+- **Variables that may be empty**: `none`, `[]` and variants without linear payload hold nothing to consume, so `var o: ?Tx = none` needs nothing until a value is put in. A `match` (or `if let`) arm that can only see such variants consumes the value too: after `if let t = o { t.commit() }` there is nothing left. A vector of linear values is consumed by popping each one and ending the empty vector with `v.finish()`, which panics if it still holds values.
+- **Taking it apart**: only the type's own package can move fields out of a linear value (elsewhere, `cannot move out of field`), or move a payload out of a variant of a linear enum. In its own methods with a `sink self` receiver, `self` is being ended: when the method returns, its fields are dropped as usual, except its linear fields, which must be consumed. In a linear enum's own `sink self` method, a `match` on `self` ends it in arms whose variant has no linear payload.
+- **Guarded defers**: a `defer` or `errdefer` whose body consumes a linear place declared outside it (`tx`, `pool.conn`, or a value it matches with `if let`) runs only while all of that place is still there: neither it, nor part of it, nor what it is part of has been moved. `defer tx.rollback()` rolls back on every way out before `tx.commit()`, and does nothing after it; `errdefer tx.rollback()` does the same on error exits only. A defer may consume at most one linear place.
+- **Types that hold linear values**: a struct or enum with a linear field or payload must be declared `linear` itself. Linear values can be held by linear structs and enums, `Vec`, `?T`, results and tuples, which are consumed in turn. `Rc`, `Arc`, `Weak`, `Cell`, `Mutex`, channels, tasks, `Iso`, `Box`, `Map`, arrays and interface values (a borrowed interface parameter is fine) would drop them, so `Rc[Tx]` and `let r: Reader = tx` are errors.
+- **Generics**: a type parameter takes linear types only if declared `any` (`[T: any]`, or `where T: any` on a method): a generic body may drop a `T` otherwise. In a body where `T` is `any`, values of type `T` are linear, and checked as such. `Stack[T: any]` holding a `Vec[T]` is linear exactly when its argument is. In the standard library, `swap`, `replace`, `take`, the `Vec` methods that move elements (`push`, `pop`, `insert`, `remove`, `swapRemove`, `extend`, `reverse`, `swap`, `drain`, `splitOff`, `reserve`, `cap`, `finish`), the read-only slice methods (`len`, `get`, `first`, `last`, `find`, `each`, `map`, `sortBy`...), `?T`'s `isSome`, `isNone`, `unwrap` and `expect`, results' `isOk` and `isErr`, and `json.encode` are `any`; `drop`, `clear` and `truncate` are not.
+- A linear type is not `copy`, has no derived `clone` (a `clone` method of its own still works), and can't have a `drop` method. A package-level value can't be linear: nothing could consume it.
+- The check is per function: a forward analysis over the paths that hold a value still to be consumed, like the borrow checker's. It needs nothing from other functions' bodies.
+
+Tests: `run/linear`, `run/linear_review`, `errors/linear_leaks`, `errors/linear_generic`, `errors/linear_decl`, `errors/linear_copy`, `errors/linear_paths`, `errors/linear_hole_*`, `errors/linear_hole2_*`, `run/linear_review2`, `projects/linear`, `projects/linear_enum`.
 
 ## 6. Expressions
 
@@ -314,6 +351,7 @@ Tests: `run/basics`, `run/edge`, `run/misc`, `run/constraints`, `run/patterns`, 
 - `match` is exhaustive. Patterns: literals (including negative ones), ranges `1..=9`, alternatives with `|`, `_`, bindings, enum variants (can nest; every field must be written), `ok(x)`/`err(e)`, `some(x)`/`none`, tuples `(a, b)`, and the concrete type of an interface value, `f: File`. An arm can have a guard `if cond`; guarded arms do not count toward the exhaustiveness check.
 - **`let ... else`**: `let pattern = e else { ... }` matches `e` against a pattern that may fail (`let .Circle(r) = s else { return 0 }`, `let ok(v) = r else { ... }`, `let (k, 0) = pair else { ... }`); `let x = opt else { ... }` unwraps an optional. The `else` block must leave (`return`, `break`, `continue`, a panic); the names it binds are in scope for the rest of the block. It is the same as `match e { pattern => { rest of the block }, _ => { else } }`, with the same binding rules.
 - When the matched value is a place, bindings are references by default. When an arm moves a binding away, that arm consumes the matched value.
+- A guard can't move a value (a binding or anything else): it runs before its arm is chosen, and when it is false another arm may still use the value. The same holds for the guards of a `select`, which all run before an arm is picked.
 - There is no `switch`.
 
 Tests: `run/basics`, `run/labels`, `run/edge`, `run/misc`, `run/patterns`, `run/loop_views`, `errors/labels`, `errors/non_exhaustive`, `errors/iterator_invalidation`, `errors/iter_mutation`, `errors/iter_let`, `errors/rules`, `errors/loop_exits`, `errors/loop_carried_view`.
@@ -330,6 +368,37 @@ When a type provides both protocols, the cursor is used. A type that satisfies n
 Whether a view of an element can outlive the current iteration: with the cursor protocol, it can when `next` lends a part of `self` (as when iterating a `Vec`; the iterated value then cannot be modified); it cannot when `next` lends data in the cursor, because the next step changes the cursor. With the push protocol it cannot, because `each` may pass the body a value that is valid only for one call.
 
 Tests: `run/iterators`, `run/iterator_views`, `run/constraints`, `run/push_flow`, `errors/iter_misuse`, `errors/iter_mutation`, `errors/iterator_views`.
+
+### 7.3 Generators
+
+A `gen fn` produces values one at a time with `yield`, for a `for` loop to consume:
+
+```gojo
+gen fn lines(src: str) -> str {
+    var start = 0
+    for i, b in src.bytes() {
+        if b == 10 {
+            yield src[start..i]
+            start = i + 1
+        }
+    }
+    if start < src.len() {
+        yield src[start..]
+    }
+}
+
+for l in lines(text) { println(l) }
+```
+
+- The result type is what it yields. A method can be one (`gen fn walk(self) -> int`), and generators can call generators and themselves (`for x in k.walk() { yield x }`, a tree walk).
+- A generator is consumed by `for x in g(args)` (or `for x in v.g(args)` for a method of a variable); calling it anywhere else is an error. The loop body runs for each value; `break`, `continue`, `return`, `try` and labeled jumps in it work as in any loop, and `break` (or leaving the loop any way) stops the generator: its `yield` returns into it no more, and its defers and drops run.
+- It is the push protocol of 7.1 written as a function: the loop body is a closure the generator calls at each `yield`, so it costs a call per value and nothing else (no coroutine, no allocation). Each value is lent to the body for one iteration, like `each`'s: a view yielded can be used in the iteration, not kept after it (copy it out to keep it).
+- `yield` takes a value. It can be in the generator's body, or in the body of a `for` loop in it, but not in another closure (it would yield from that closure). `return` ends a generator; it takes no value. `for i, x in g()` and `for x in &g()` aren't allowed.
+- The result type names what it yields (`gen fn g(n: int) -> int`; a generator without one is an error); `-> T ! never` yields plain `T`. `gen` and `checkfree` go in either order before `fn`, also in `extend` blocks. A generator isn't a value: `keep(g)` or `[g]` is an error. Its arguments may be closures, which are ordinary closures: a `return` in one returns from that closure, not from the function with the loop, and loops inside them are their own.
+- Each value lives for one call of the loop body, so a view of it can't leave the function (`return l` in the body is an error), as it can't be kept in an outer variable; the same holds for loops over a type's `each`.
+- What generators don't do: give values on demand to code other than a `for` (`next()`), or zip two of them. Those need the cursor protocol of 7.1 (a struct with `cursor` and `next`).
+
+Tests: `run/generators`, `run/generators_more`, `errors/generators`, `errors/generators_more`, `errors/gen_view_return`, `errors/gen_no_type`.
 
 ### 7.2 Lazy chains
 
@@ -357,12 +426,15 @@ Tests: `run/lazy`, `errors/lazy`, `errors/iter_mutation`.
 - `e catch err { block }`: handles the error in place; the block's value is the value of the whole expression.
 - `match r { ok(v) => ..., err(.Kind(x)) => ... }`.
 - `x.unwrap()` panics on error.
+- **Functions that can't fail**: `T ! never` is a result that is never an error, and a call returning one gives its `T` directly (no `try`, nothing to handle). A generic function whose error type parameter appears only as the error type of results (`fn map[T, R, E](xs: []T, f: fn(T) -> R ! E) -> Vec[R] ! E`) takes it as `never` when nothing at the call decides it: given `x => x * 2`, `map` gives a `Vec[int]`; given a function that returns `int ! ParseError`, a `Vec[int] ! ParseError`; an expected type (`let r: Vec[int] ! MyError = map(...)`) decides it too. A named function that returns a plain value is accepted where one returning `R ! E` is expected (it is called through a closure that wraps its result). So one function serves both: `task.map` and `task.each` take a function that can fail or one that can't.
 - In a function that returns `?T ! E`, `return none` is a successful `none` (wrapped as ok). When the expected type of a `.Variant` shorthand is `E ! Err` or `?E`, it resolves against `E`.
 - **Error types**: each module uses its own concrete error type, and they all satisfy the built-in interface `error` (`fn message(self) -> String`), so a function written with `! error` can `try` errors from any module. Errors from the operating system, files, processes and the network are all `io.Error`: `kind` (an `io.ErrorKind`: `NotFound`, `PermissionDenied`, `AlreadyExists`, `Cancelled`, etc., independent of the platform), `message()`, `code` (the system error number). `os.Error` and `net.Error` are aliases of it. Errors of other modules carry their own information, such as the line and column of `json.Error`, or `time.ParseError`.
 
+**Error return traces**: in a debug build, an error that leaves `main` prints, after the error itself, where it was made (the `err(...)`) and each `try` that passed it up, in order. The trace belongs to the task that made the error; making a new error starts a new trace. Release builds don't keep it.
+
 A **panic** signals a bug in the program. A panic prints a message and a source location (pointing into user code, not the standard library) and terminates the whole process with exit code 2. It does not unwind the stack and does not run defers. There is no `recover`.
 
-Tests: `run/errors`, `run/errdefer`, `run/patterns`, `errors/try_error_mismatch`, `errors/try_outside_result`, `errors/unhandled_result`, `panic/unwrap_err`, `panic/unwrap_none`, `panic/no_defer`, `testblocks/blocks`.
+Tests: `run/errors`, `run/errdefer`, `run/patterns`, `run/never_errors`, `errors/try_error_mismatch`, `errors/try_outside_result`, `errors/unhandled_result`, `panic/unwrap_err`, `panic/unwrap_none`, `panic/no_defer`, `testblocks/blocks`, `traces/basic`.
 
 ## 9. Generics
 
@@ -374,6 +446,57 @@ Tests: `run/errors`, `run/errdefer`, `run/patterns`, `errors/try_error_mismatch`
 - Implementations are monomorphized per type argument.
 
 Tests: `run/generics`, `run/constgen`, `run/constraints`, `errors/constgen`, `errors/constraints`, `errors/unordered_sort`.
+
+### 9.1 Static reflection
+
+Generic code can go over a type's fields and branch on a type's shape. It is checked once, like any generic code, and each instance keeps only what applies to its types: there is no compile-time evaluation and no code is written as text.
+
+```gojo
+fn put[T](x: T, out: inout String) {
+    static if T: Integer {
+        out.push("${x}")
+    } else static if let s: String = x {
+        out.push("\"${s}\"")
+    } else static if let xs: Vec[_] = x {
+        for e in xs {
+            put(e, &out)
+        }
+    } else static if T: struct {
+        static for f in fields(T) {
+            out.push(f.name)
+            put(x.[f], &out)
+        }
+    }
+}
+
+fn read[T](m: Map[str, str]) -> T ! String {
+    return static T{f => try parse(m.get(f.name), f.name)}
+}
+
+fn parse[F](text: ?str, name: str) -> F ! String {
+    let s = text else { return err("missing ${name}") }
+    static if F is String {
+        return s.toString()
+    } else static if F: Integer {
+        return F(s.parseInt() ?? 0)
+    } else {
+        return err("${name}: unsupported")
+    }
+}
+```
+
+- **`static for f in fields(T) { }`** runs its body once for each field of `T` (a struct, or a type parameter that each instance makes a struct), in order. `f.name` is the field's name (a `str`), and `x.[f]` is that field of `x` (a place: borrow it, read it, pass it on; it can't be moved out). In the body the field's type is a type parameter of its own, so the body is checked once for every field; generic functions called with `x.[f]` are instantiated per field. `break` and `continue` in it belong to the loops around it.
+- **`static T{f => value}`** builds a `T` field by field: `value` is computed once per field, with `f` naming it, and must have that field's type (usually through a generic call: `try parse(m.get(f.name), f.name)`). It can't move anything declared outside it, since it runs once per field. When a field's `try` fails, the fields already built are dropped.
+- **`static if`** chooses between arms by type; each instance keeps only the first arm whose condition holds, and checks every arm as if its condition held:
+  - `T: struct`, `T: enum`; `T: I` for an interface with a type set and no methods (`Integer`, `Float`, `Number`): in that arm `T` has the bound, so `x + 1` and `F(n)` (a conversion) work.
+  - `static if let v: P = x`: `x` (a variable or a field) has the shape of the type pattern `P`, where `_` matches any type (`Vec[_]`, `?_`, `Map[_, _]`, `String`, `bool`); `v` is `x` seen as that type.
+  - `static if T is P`: the type parameter `T` has the shape `P`, and in the arm `T` *is* `P`: a `String` can be returned as a `T`. A name in `P` that isn't a type (`Vec[E]`, `?E`) stands for any type and names it in the arm.
+  - `else static if ...` chains, and a final `else`. A chain where every arm leaves (returns) leaves.
+- A `static for` or `static T{}` whose type isn't a struct in some instance is an error where that instance is built; guard such code with `static if T: struct`. A newtype is not a struct.
+- **Privacy**: outside the package that declares a type, `static for` goes over its public fields only, and `static T{}` can't build a type with private fields (or a view struct, whose views would come from nowhere the borrow checker sees).
+- **What can't happen through it**: a `static if T is P` pattern can't be a view (in that arm generic code could make a view as a `T` the borrow checker doesn't see; match a value with `static if let` instead); `x.[f]` needs a variable or a field (`mk().[f]` is an error); a `static T{}` value can't move anything declared outside it, also through a `match` or a closure; and a linear value made earlier in the same expression as a `try` that may fail is an error (it would be dropped).
+
+Tests: `run/static_reflection`, `run/static_shapes`, `errors/static_reflection`, `errors/static_hole_*`.
 
 ## 10. Concurrency
 
@@ -393,7 +516,7 @@ Tests: `run/scopes`, `run/task_move`, `run/concurrency`, `run/mutexref`, `run/ca
 
 - `par for x in &v { }` (a `var` `Vec` or array, an `inout` slice, or a range of one), `par for x in v` (also any slice), `par for i, x in &v` and `par for i in a..b` run the iterations on up to `maxProcs` tasks, in chunks handed out as tasks finish them. With `&v` the body may modify its element. It may only read what it captures, which must be `send`. `continue` ends an iteration; `break`, `return` and `try` are errors. The statement ends when every iteration has.
 - `send: fn(A) -> R` is the type of a function that any number of tasks may call at once. A closure is a `send fn` when everything it captures is `send` and it only reads it; functions declared with `fn` are `send fn`. A `send fn` can be used where a `fn` is expected, not the other way round. A `send fn` is `send`.
-- `task.map(xs, limit, f)` calls `f` on each element in up to `limit` tasks at once (0: no limit) and gives the results in order; `task.tryMap` does the same for `f` returning `R ! E`, and stops at the first error; `task.each` gives no results; `task.race(fs)` runs the functions at once, gives the first success and cancels the rest (all fail: the last error).
+- `task.map(xs, limit, f)` calls `f` on each element in up to `limit` tasks at once (0: no limit) and gives the results in order; when `f` can fail (`R ! E`), the first error cancels the calls still running and is the result (section 8: for an `f` that can't fail, the result is just the vector); `task.each` gives no results, and fails the same way; `task.race(fs)` runs the functions at once, gives the first success and cancels the rest (all fail: the last error).
 
 Tests: `run/parallel`, `errors/par_for`, `errors/send_fn`.
 
@@ -421,11 +544,12 @@ Tests: `run/select`, `run/concurrency`, `run/sched`, `errors/select_arms`, `erro
 - `Atomic[T]`, for integer types: `Atomic(x)`, `load`, `store`, `add` and `sub` (wrapping; they give the new value), `swap` (gives the old one), `compareSwap(old, new)` and `clone`. Every operation is atomic and sequentially consistent; tasks share an `Atomic` by borrowing it.
 - `send interface Name { }` is an interface that only `send` types implement, so its values are `send`; a type parameter bounded by it is `send`.
 - `isolate { body }` has type `Iso[T]` (`T` is the type of `body`, not a view). The body may use variables from outside only if their types are `send`, so nothing outside points into what it builds. `Iso[T]` is `send` whatever `T` is (it may hold `Rc` and `Cell`), can't be cloned, and `iso.take()` gives back the `T`.
+- **Inferred isolation.** A task may also take a value that isn't `send` without `isolate`, when the compiler can see that nothing else reaches it: it is moved into the task (`go f(x)` with a `sink` parameter, or a capture by value), from a `let` or `var` of the function (not a parameter, a reference or a pattern binding), and in that function (1) everything stored in it is built from `send` values, from reads that give `send` values, and from locals moved in whole that follow these same rules, and (2) every other use of it is a read that gives a `send` value (`x.value`, `x.items.len()`) or a borrow by a call whose other arguments follow (1) and whose result is `send` (`count(x)`), outside any other closure. Package-level values are `send`, so such a call can connect the value only to itself and to what it makes. Otherwise the capture is an error, with a note on the use that stops it (`let keep = n.clone()`: "`n` is used here, which may leave another reference to what it holds"). A task never borrows a value that isn't `send` from outside: the parent could use it meanwhile.
 - `task.yieldNow()` lets other tasks run.
 
 - **Task-local values**: `let key = task.local[T]()` (at package level) makes a key; `task.with(key, value, () => body)` binds it while `body` runs, and `key.get()` gives a copy (`?T`; `T` must be `send` and cloneable) in that code and in every task started inside it, through any number of scopes and shields. An inner `task.with` of the same key hides the outer one until it ends. Nothing else can change a binding, so tasks never race on one.
 
-Tests: `run/sharing`, `run/isolate`, `run/mutexref`, `run/rwlock`, `run/task_locals`, `errors/rwlock`, `errors/wait_under_lock`, `errors/send_interface`, `errors/isolate`, `errors/isolate_clone`, `errors/mutexref`, `errors/mutexref_borrow`, `errors/mutexref_immutable`, `panic/deadlock_locks`.
+Tests: `run/sharing`, `run/isolate`, `run/isolation_inferred`, `errors/isolation_inferred`, `run/mutexref`, `run/rwlock`, `run/task_locals`, `errors/rwlock`, `errors/wait_under_lock`, `errors/send_interface`, `errors/isolate`, `errors/isolate_clone`, `errors/mutexref`, `errors/mutexref_borrow`, `errors/mutexref_immutable`, `panic/deadlock_locks`.
 
 ### 10.6 Cancellation
 
@@ -453,10 +577,12 @@ Tests: `run/sched`, `run/preempt`, `run/long_loops`, `run/ffi_block`, `run/file_
 
 ### 10.8 Simulation
 
-- `gojo test` runs each test on a **simulated scheduler**: one thread; which runnable task goes next, and whether a task gives way at a channel operation, lock, spawn, join or atomic operation (and, now and then, at a preemption checkpoint), comes from a seed. Tasks affect each other only through these operations (there are no data races), so the seed decides the interleaving. The clock is virtual: monotonic time starts at 0 and wall-clock time at 2000-01-01 UTC; it advances 1 µs per scheduling step, and when every task waits it jumps to the next timer. While a task waits for the network the clock follows real time, and network events arrive when they do, so programs that use the network aren't fully repeatable.
-- The seed of a test comes from its name, so a test does the same thing every run. `--seed n` uses seed `n`; `--explore n` runs each test under `n` seeds, stops at the first failure and prints its seed (`FAIL name (seed 966961; rerun it with gojo test --seed 966961)`); `--real` uses the real scheduler. `gojo run --seed n` (or `GOJO_SEED=n`) runs a program the same way.
+- `gojo test` runs each test on a **simulated scheduler**: one thread; which runnable task goes next, and whether a task gives way at a channel operation, lock, spawn, join or atomic operation (and, now and then, at a preemption checkpoint), comes from a seed. Tasks affect each other only through these operations (there are no data races), so the seed decides the interleaving. The clock is virtual: monotonic time starts at 0 and wall-clock time at 2000-01-01 UTC; it advances 1 µs per scheduling step, and when every task waits it jumps to the next timer.
+- **The network is simulated too.** TCP and UDP sockets live in memory and every address is this machine (an empty host, `localhost`, `127.x.x.x`, `::1`, `0.0.0.0`): dialing or sending to another host fails as unreachable, `net.lookup` knows only `localhost` and literal addresses, `:0` picks ports from 40000 up, and `rawFd` returns a number no system call knows. The seed decides the rest: each write arrives after a delay of up to 200 µs of virtual time, in order on its connection; a read returns a random part of what has arrived and a write may take only part of its data, as TCP may (`Conn.write` loops, so only code calling `read` once per message notices); datagrams may arrive out of order. A task waiting on a socket nobody will write to is part of a deadlock, reported like any other (`waiting for the simulated network`). TLS doesn't run over it: `tls.client` and `tls.Listener` fail with an error saying so. So a test that uses the network is as repeatable as one that doesn't.
+- **`--faults`** also injects failures, as the seed decides: a read or write on a connection resets it now and then (`ConnectionReset` on both ends), a dial is refused (`ConnectionRefused`) about one time in 16, a datagram is lost about one time in 16, and file I/O (not the standard streams) fails: about one write in 32 with `EIO` or `ENOSPC` (`os.writeFile` may then leave part of the file), one read in 64 with `EIO`, and one read in 8 returns fewer bytes than it could. The failure message of a test run with it names the flag (`rerun it with gojo test --seed n --faults`). Writes that were never flushed to the disk are not lost: Gojo has no `fsync` yet.
+- The seed of a test comes from its name, so a test does the same thing every run. `--seed n` uses seed `n`; `--explore n` runs each test under `n` seeds, stops at the first failure and prints its seed (`FAIL name (seed 966961; rerun it with gojo test --seed 966961)`); `--real` uses the real scheduler and the real network. `gojo run --seed n` (or `GOJO_SEED=n`) runs a program on the simulated scheduler, but with the real network, so a server stays reachable.
 
-Tests: the `simulated_scheduler` test (`tests/testblocks/sched.gojo`).
+Tests: the `simulated_scheduler` test (`tests/testblocks/sched.gojo`), the `simulated_network` test (`tests/simnet`).
 
 ### 10.9 Networking
 
@@ -528,6 +654,7 @@ Except for the prelude, every module needs a `use`. Standard library modules can
 | `collections` | `Deque`, `Heap`, `SortedMap`, `SortedSet`, `BitSet` |
 | `crypto`, `crc32`, `tls` | SHA-2, SHA-1, MD5 (`hash`, streaming `Digest`), `hmac`, `pbkdf2`, constant-time `equal`; CRC-32; TLS clients and servers (`dial`, `dialWith`, `listen`) through the system's OpenSSL, loaded on first use |
 | `regex`, `flag`, `log` | RE2-syntax regular expressions, matched in linear time; command-line parsing with help, subcommands and suggestions; leveled logging as text or JSON, with fields |
+| simd | `Simd[T, N]`: `N` lanes of a number type, with lane-wise `add`/`sub`/`mul`/`div`/`min`/`max`/`mulAdd`, `splat`, `load`/`store` on slices, `sum`/`hmin`/`hmax`/`dot`, comparisons giving a `Mask[N]` (`any`, `all`, `count`, `bits`) and `select`. Fixed-size loops the C compiler vectorizes; no operators (`+` stays for numbers) |
 
 The full API of each module is in [`docs/std`](std/README.md) (generated by `gojo doc`, section 17).
 
@@ -545,10 +672,15 @@ Tests: `testblocks/blocks`.
 ## 14. Execution model
 
 - The compiler generates C and compiles it with `cc` or `zig cc`. Debug and release (`-O2`) differ in optimization level and debug info: overflow checks and index checks stay in both.
-- An index or slice the compiler proves in range has no check, in both builds (`src/codegen/bce.rs`). The proofs use loop counters (`for i in 0..v.len`, `for i, _ in v`), immutable locals (`let n = v.len`), `var` integers that only grow from a non-negative start (`var i = 0` with `i += 1`), conditions where they hold (`if i < v.len { v[i] }`, the rest of a block after `if i >= v.len { return }`, the body of `while i < v.len`, the right side of `i < v.len && v[i] != 0`, after `assert(i < v.len)`; `if parts.len() >= 7 { parts[5] }`, `if !xs.isEmpty() { xs[0] }`), constants, integer types and `&`/`%` masks. A bound relative to `v.len` counts only where nothing can change `v`'s length, and what a condition says about a place ends at the first statement that may change it. `gojo build --verify-bce` keeps the removed checks and reports a failed one as a compiler bug; the tests (`run_programs`, `runtime_panics`) and `gojo-fuzz` build that way, and `bounds_check_elimination` checks which indexes of `run/bce` are proven.
+- An index or slice the compiler proves in range has no check, in both builds (`src/codegen/bce.rs`). The proofs use loop counters (`for i in 0..v.len`, `for i, _ in v`), immutable locals (`let n = v.len`), `var` integers that only grow from a non-negative start (`var i = 0` with `i += 1`), conditions where they hold (`if i < v.len { v[i] }`, the rest of a block after `if i >= v.len { return }`, the body of `while i < v.len`, the right side of `i < v.len && v[i] != 0`, after `assert(i < v.len)`; `if parts.len() >= 7 { parts[5] }`, `if !xs.isEmpty() { xs[0] }`, `if xs.len() != 0 { xs[0] }`, the rest of a block after `if xs.len() == 0 { return }`), constants, integer types and `&`/`%` masks. A bound relative to `v.len` counts only where nothing can change `v`'s length, and what a condition says about a place ends at the first statement that may change it. `gojo build --verify-bce` keeps the removed checks and reports a failed one as a compiler bug; the tests (`run_programs`, `runtime_panics`) and `gojo-fuzz` build that way, and `bounds_check_elimination` checks which indexes of `run/bce` are proven. A fact relating two lengths (`a.len() == b.len()`) lets a bound by one length prove an index into the other.
+- **`requires`**: `fn dot(a: []f64, b: []f64) -> f64 requires a.len() == b.len() { ... }` (the clause may go on the line after the signature, with the body's `{` on the line after it). The condition is checked when the function is called, before its body runs; a call that breaks it panics with `precondition of `dot` failed`, at the clause. In the body it is a fact like an `assert`, so `for i in 0..a.len() { a[i] * b[i] }` needs no checks. `gojo doc` shows it in the signature.
+- **`checkfree fn`**: a function in which no bounds check may remain. One the compiler can't prove is an error where the program's code is generated (`gojo build`, `run`, `test`, and `check`, which generates every function of the program, library or test file, used or not), naming the index.
+- **`gojo claims [file|dir] [--json]`** lists, function by function, the bounds checks the compiler removed and the ones that stay, and which functions are `checkfree`: what a reviewer (or a coding agent) can rely on without reading the loops. It covers every function that isn't generic, used or not (and the instances of generic ones that are), in a program, a library or a file of tests; a check removed in one copy of some code and kept in another (a `defer` at each exit) counts as kept. A `checkfree` claim that fails is listed, then reported as an error.
+- The `requires` clause is a condition that only reads: comparisons, `&&`, `||`, `!`, field reads, indexes and calls. `try`, `catch`, blocks, `if`, `match`, `&` borrows, closures and tasks are errors there.
 - Debug builds have debug info (`-g`), and the generated C uses `#line` to point at lines of the Gojo source, so lldb/gdb can set breakpoints like `main.gojo:12`, and stack traces and sanitizer reports show Gojo lines. On macOS the debug info is in a `.dSYM` next to the binary; `gojo build -o prog` also writes `prog.dSYM`. `gojo emit-c` and `--keep-c` output C without `#line`, which makes it easier to debug the compiler itself.
 - Generics are monomorphized. Functions with at most 60 IR nodes get an `inline` hint.
 - `Box`, `Rc`/`Arc` and interface boxes are allocated from thread-local free lists in size classes; `Vec`/`String` buffers use `malloc`.
+- **Box reuse.** A box emptied by moving its value out (`f(*b)` into a `sink` parameter, a `match` arm on a `sink` value) and a box of the same type made later in the same block share one allocation, when nothing between them can leave the block (`return`, `break`, `continue`, `try`, the end of a branch): the new value is written into the old block. A rewrite that rebuilds nodes, `Add(l, r) => .Add(Box(f(*l)), Box(f(*r)))`, allocates nothing (Perceus's reuse, with no run-time uniqueness check: ownership already proves it). Test: `run/box_reuse` and the `box_reuse` test.
 - Tasks are stackful coroutines with M:N scheduling; see 10.7.
 - `Map` keeps insertion order. Floats print in the shortest round-trip representation, without scientific notation when the exponent is in [-4, 21).
 - If a function that returns a value runs off its end (type checking proves this cannot happen), the program panics with an internal error instead of returning an undefined value.

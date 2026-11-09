@@ -253,7 +253,7 @@ Quotes a string as JSON.
 ### encode
 
 ```gojo
-pub fn encode[T](v: T) -> String
+pub fn encode[T: any](v: T) -> String
 ```
 
 The JSON text of any value, compact.
@@ -261,7 +261,7 @@ The JSON text of any value, compact.
 ### encodePretty
 
 ```gojo
-pub fn encodePretty[T](v: T) -> String
+pub fn encodePretty[T: any](v: T) -> String
 ```
 
 The JSON text of any value, indented by two spaces.
@@ -277,7 +277,7 @@ The value of type `T` that the JSON `text` describes: `json.decode[Config](text)
 ### toValue
 
 ```gojo
-pub fn toValue[T](v: T) -> Value
+pub fn toValue[T: any](v: T) -> Value
 ```
 
 Any value as a `Value` tree, to inspect or change before encoding.

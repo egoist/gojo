@@ -1,0 +1,11 @@
+use std/{os, path}
+
+// Writes `s` padded on the left to `n` characters, and a newline, to `f`.
+pub fn write(f: os.File, s: str, n: int) ! os.Error {
+    var out: String = ""
+    for _ in s.len()..n {
+        out += " "
+    }
+    try f.writeText(out + s + "\n")
+    try f.writeText(path.join("a", "b") + "\n")
+}

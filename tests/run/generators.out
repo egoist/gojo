@@ -1,0 +1,11 @@
+line: ab
+line: cdef
+line: g
+5
+4
+3
+sum 10
+even 6
+even 4
+even 2
+some(2)

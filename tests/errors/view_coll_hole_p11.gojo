@@ -1,0 +1,11 @@
+fn f(out: inout Vec[str]) {
+    let s = "hello world".toString()
+    out[0] = s.asStr()
+}
+fn main() {
+    var ws: Vec[str] = ["a"]
+    f(&ws)
+    let junk = "XXXXXXXXXXXXXXXXXXXXXXX".toString()
+    println(ws, junk)
+}
+// error: cannot store a view of `s` in the `inout` parameter `out`

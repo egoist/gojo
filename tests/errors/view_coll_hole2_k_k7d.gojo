@@ -1,0 +1,9 @@
+fn main() {
+    var ws: Vec[str] = []
+    let v: Vec[String] = ["hello world".toString()]
+    v.each(x => { ws.push(x.asStr()) })
+    drop(v)
+    let junk = "XXXXXXXXXXXXXXXXXXXXXXX".toString()
+    println(ws, junk)
+}
+// error: this closure stores a view of its own `x` in `ws`, which it captures: the view could outlive what it points into

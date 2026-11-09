@@ -1,0 +1,37 @@
+pub linear struct Tx {
+    pub id: int
+    pub log: String
+
+    pub fn commit(sink self) {
+        println("commit", self.id, self.log)
+    }
+}
+
+pub fn begin(id: int) -> Tx {
+    return Tx{id, log: "tx"}
+}
+
+pub struct Handle {
+    pub n: int
+}
+
+pub linear enum Conn {
+    Open(Handle)
+    Busy(Tx)
+
+    pub fn close(sink self) {
+        println("closing properly")
+        match self {
+            Open(_) => {}
+            Busy(t) => t.commit()
+        }
+    }
+}
+
+pub fn open() -> Conn {
+    return Conn.Open(Handle{n: 1})
+}
+
+pub fn busy() -> Conn {
+    return Conn.Busy(begin(5))
+}

@@ -307,6 +307,9 @@ impl<'a> An<'a> {
         // what defers mention, what closures capture, what unsafe code
         // touches; and which locals may borrow which
         let mut edges: Vec<(HashSet<LocalId>, Vec<LocalId>)> = vec![];
+        let mut stores: Vec<(HashSet<LocalId>, LocalId)> = vec![];
+        // a reference local -> the variable it points into
+        let mut owner: HashMap<LocalId, LocalId> = HashMap::new();
         let facts = self.facts;
         let borrows = |l: LocalId| facts.get(l as usize).is_none_or(|f| f.borrows);
         let mut untracked = HashSet::new();
@@ -328,15 +331,25 @@ impl<'a> An<'a> {
                     let mut m = HashSet::new();
                     mentions_expr(place, &mut m);
                     edges.push((m, vec![*local]));
+                    if let Some(r) = root_of(place) {
+                        owner.insert(*local, r);
+                    }
                 }
                 TStmt::Assign { place, value, .. } => {
-                    if let Some((d, _)) = local_path(place).filter(|p| borrows(p.0)) {
+                    // (`ws[0] = s`, `ts[i].text = s`, `x = s` through a reference)
+                    if let Some(d) = root_of(place).filter(|d| borrows(*d)) {
                         let mut m = HashSet::new();
                         mentions_expr(value, &mut m);
-                        edges.push((m, vec![d]));
+                        stores.push((m, d));
                     }
                 }
                 TStmt::For { iter, hi, elem, index, .. } => {
+                    if let Some(r) = root_of(iter) {
+                        owner.insert(*elem, r);
+                        if let Some(i) = index {
+                            owner.insert(*i, r);
+                        }
+                    }
                     let mut m = HashSet::new();
                     mentions_expr(iter, &mut m);
                     if let Some(h) = hi {
@@ -346,7 +359,25 @@ impl<'a> An<'a> {
                     d.extend(index.iter().copied());
                     edges.push((m, d));
                 }
+                // `m[k] = v` on a map of views
+                TStmt::MapInsert { map, key, value } => {
+                    if let Some(d) = root_of(map).filter(|d| borrows(*d)) {
+                        let mut m = HashSet::new();
+                        mentions_expr(key, &mut m);
+                        mentions_expr(value, &mut m);
+                        stores.push((m, d));
+                    }
+                }
+                // `let mu = Mutex(&ws)`: what is stored through its lock is in `ws`
+                TStmt::Let { local, init: TExpr { kind: TK::MutexRef(p), .. } } => {
+                    if let Some(r) = root_of(p) {
+                        owner.insert(*local, r);
+                    }
+                }
                 TStmt::With { local, place, .. } => {
+                    if let Some(r) = root_of(place) {
+                        owner.insert(*local, r);
+                    }
                     let mut m = HashSet::new();
                     mentions_expr(place, &mut m);
                     edges.push((m, vec![*local]));
@@ -381,6 +412,13 @@ impl<'a> An<'a> {
                 TK::Closure(c) => pinned.extend(c.captures.iter().map(|c| c.0)),
                 TK::Unsafe(b) => mentions_block(b, &mut pinned),
                 TK::Match { scrut, arms, .. } => {
+                    if let Some(r) = root_of(scrut) {
+                        for a in arms {
+                            for &b in &a.binds {
+                                owner.insert(b, r);
+                            }
+                        }
+                    }
                     let mut m = HashSet::new();
                     mentions_expr(scrut, &mut m);
                     edges.push((m, arms.iter().flat_map(|a| a.binds.iter().copied()).collect()));
@@ -390,6 +428,24 @@ impl<'a> An<'a> {
                     mentions_expr(x, &mut m);
                     edges.push((m, vec![*b]));
                 }
+                // a variable passed `inout` may be left viewing the other
+                // arguments (`ws.push(s)`, `tokenize(src, &toks)`)
+                TK::Call { args, .. } | TK::Intrinsic { args, .. } if args.iter().any(|a| a.mode == ArgMode::Inout) => {
+                    for (i, a) in args.iter().enumerate() {
+                        if a.mode != ArgMode::Inout {
+                            continue;
+                        }
+                        if let Some(d) = root_of(&a.e).filter(|d| borrows(*d)) {
+                            let mut m = HashSet::new();
+                            for (j, b) in args.iter().enumerate() {
+                                if j != i {
+                                    mentions_expr(&b.e, &mut m);
+                                }
+                            }
+                            stores.push((m, d));
+                        }
+                    }
+                }
                 TK::Try { e: x, wrap: Some(TryWrap::Call(h, _)) } => {
                     let mut m = HashSet::new();
                     mentions_expr(x, &mut m);
@@ -398,6 +454,22 @@ impl<'a> An<'a> {
                 _ => {}
             },
         });
+        // a view stored in a place inside a variable, or through a reference
+        // into one, is in that variable (and those the reference points into)
+        for (m, d) in stores {
+            let mut ds = vec![d];
+            let mut cur = d;
+            for _ in 0..32 {
+                match owner.get(&cur) {
+                    Some(&o) if !ds.contains(&o) => {
+                        ds.push(o);
+                        cur = o;
+                    }
+                    _ => break,
+                }
+            }
+            edges.push((m, ds));
+        }
         // local -> locals bound from expressions that mention it
         let mut direct: HashMap<LocalId, HashSet<LocalId>> = HashMap::new();
         for (srcs, dsts) in &edges {
@@ -748,8 +820,8 @@ impl<'a> An<'a> {
 
     fn expr(&mut self, st: &mut St, e: &'a TExpr, top: bool) {
         match &e.kind {
-            TK::Unit | TK::Int(_) | TK::Float(_) | TK::Bool(_) | TK::Str(_) | TK::NoneLit | TK::Local(_) | TK::Const(_) | TK::Global(_) | TK::ConstParam(_) | TK::FuncRef(..) | TK::DefaultOf | TK::Error => {}
-            TK::Field { base: x, .. } | TK::Deref(x) | TK::Copy(x) | TK::OptField { base: x, .. } | TK::Unary { e: x, .. } | TK::Cast(x) | TK::SomeLit(x) | TK::OkLit(x) | TK::ErrLit(x) | TK::Coerce(_, x) | TK::Recv(x) | TK::Wrap(x) | TK::MakeChan(x) | TK::Unbox(x) | TK::MutexRef(x) | TK::Proj { call: x, .. } => self.expr(st, x, false),
+            TK::Unit | TK::Int(_) | TK::Float(_) | TK::Bool(_) | TK::Str(_) | TK::NoneLit | TK::Local(_) | TK::Const(_) | TK::Global(_) | TK::ConstParam(_) | TK::FuncRef(..) | TK::DefaultOf | TK::Error | TK::StaticFieldName(_) => {}
+            TK::StaticField { base: x, .. } | TK::Field { base: x, .. } | TK::Deref(x) | TK::Copy(x) | TK::OptField { base: x, .. } | TK::Unary { e: x, .. } | TK::Cast(x) | TK::SomeLit(x) | TK::OkLit(x) | TK::ErrLit(x) | TK::Coerce(_, x) | TK::Recv(x) | TK::Wrap(x) | TK::MakeChan(x) | TK::Unbox(x) | TK::MutexRef(x) | TK::Proj { call: x, .. } => self.expr(st, x, false),
             TK::Move(x) => {
                 if let Some(p) = local_path(x) {
                     self.mv(st, &p);
@@ -986,5 +1058,20 @@ impl<'a> An<'a> {
             }
         }
         true
+    }
+}
+
+/// The variable a place (or a reference into it, a projection, a slice of
+/// it) is in.
+fn root_of(e: &TExpr) -> Option<LocalId> {
+    match &e.kind {
+        TK::Local(l) => Some(*l),
+        TK::Field { base, .. } | TK::StaticField { base, .. } | TK::Index { base, .. } | TK::MapIndex { base, .. } | TK::Deref(base) | TK::SliceOf { base, .. } => root_of(base),
+        TK::Coerce(Coercion::VecToSlice | Coercion::ArrayToSlice | Coercion::StringToStr, x) | TK::ProjUnwrap { proj: x, .. } | TK::MutexRef(x) => root_of(x),
+        TK::Proj { call, .. } => match &call.kind {
+            TK::Call { args, .. } => args.first().and_then(|a| root_of(&a.e)),
+            _ => None,
+        },
+        _ => None,
     }
 }

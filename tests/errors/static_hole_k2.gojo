@@ -1,0 +1,25 @@
+fn dup[F](x: F) -> F {
+    static if F is * u8 {
+        return x
+    } else static if F is int {
+        return x
+    } else {
+        panic("no")
+    }
+}
+
+fn forge[T](src: T) -> T {
+    return static T{f => dup(src.[f])}
+}
+
+fn main() {
+    let l = RwLock(42)
+    let l2 = forge(l)
+    with v = l2.write() {
+        v = 1
+    }
+    with v = l.read() {
+        println(v)
+    }
+}
+// error: `static RwLock[int] { }` (in `forge`) can't build it: `RwLock[int]` has fields private to its package

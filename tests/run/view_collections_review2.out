@@ -1,0 +1,20 @@
+["hello world"] XXXXXXXXXXXXXXXXXXXXXXX
+[["hello world"]] XXXXXXXXXXXXXXXXXXXXXXX
+{1: ["hello world"]} XXXXXXXXXXXXXXXXXXXXXXX
+hello world XXXXXXXXXXXXXXXXXXXXXXX
+["hello world"] XXXXXXXXXXXXXXXXXXXXXXX
+[["hello world"]] XXXXXXXXXXXXXXXXXXXXXXX
+{"k": ["hello world"]} XXXXXXXXXXXXXXXXXXXXXXX
+{"k": "hello world"} XXXXXXXXXXXXXXXXXXXXXXX
+[["hello world"]] XXXXXXXXXXXXXXXXXXXXXXX
+some(["hello world"]) XXXXXXXXXXXXXXXXXXXXXXX
+{"k": ["hello world"]} XXXXXXXXXXXXXXXXXXXXXXX
+["hello world"] XXXXXXXXXXXXXXXXXXXXXXX
+a
+["a"]
+c
+["b", "a", "c"] []
+{"apple avocado": ["apple avocado"]}
+{"a": ["apple", "avocado"], "b": ["banana", "blueberry"], "c": ["cherry"]}
+["c"]
+["a", "b", "c"]

@@ -1,0 +1,19 @@
+fn keepLocal(out: inout Vec[str]) {
+    let s = "x".toString()
+    out.push(s)
+}
+
+fn main() {
+    var ws: Vec[str] = []
+    keepLocal(&ws)
+    var src = "abc".toString()
+    fillFrom(src, &ws)
+    src.push("d")
+    println(ws)
+}
+
+fn fillFrom(s: str, out: inout Vec[str]) {
+    out.push(s[0..1])
+}
+// error: cannot store a view of `s` in the `inout` parameter `out`
+// error: `src` does not live long enough: `ws` would still view it after it is dropped

@@ -1,0 +1,9 @@
+use std/os
+
+// a value only `os` functions may make
+pub fn go1() {
+    let c = os.Command{prog: "/bin/echo", args: ["pwned"]}
+    _ = c.run()
+    let f = os.File{fd: 1}
+    _ = f.writeText("x")
+}

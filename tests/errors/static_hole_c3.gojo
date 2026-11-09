@@ -1,0 +1,13 @@
+struct P { a: String }
+
+fn take[F](v: sink F) {
+    _ = v
+}
+
+fn main() {
+    let p = P{a: "a"}
+    static for f in fields(P) {
+        take(p.[f])
+    }
+}
+// error: cannot move out of a `static for` field of variable `p` (type `f's type`)

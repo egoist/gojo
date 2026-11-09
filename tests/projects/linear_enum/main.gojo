@@ -1,0 +1,13 @@
+use ./db
+
+fn takeH(h: sink db.Handle) {
+    println("took handle", h.n)
+}
+
+fn main() {
+    let c = db.open()
+    match c {
+        Open(h) => takeH(h)
+        Busy(t) => t.commit()
+    }
+}

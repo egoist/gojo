@@ -1,0 +1,81 @@
+// View collections (spec 5.4): a `Vec` or `Map` of views lives in a
+// variable, owns its buffer, and borrows what its elements view.
+
+view struct Token {
+    kind: int
+    text: str
+}
+
+fn tokenize(src: str) -> Vec[Token] {
+    var out: Vec[Token] = []
+    for w in src.fieldViews() {
+        let kind = if w.parseInt() != none { 1 } else { 2 }
+        out.push(Token{kind, text: w})
+    }
+    return out
+}
+
+fn count(text: str) -> Map[String, int] {
+    var seen: Map[str, int] = [:]
+    for w in text.fieldViews() {
+        with c = seen.entry(w) {
+            c += 1
+        }
+    }
+    var out: Map[String, int] = [:]
+    for k, v in seen {
+        out[k.toString()] = v
+    }
+    return out
+}
+
+fn longest(ws: Vec[str]) -> str {
+    var best = ""
+    for w in ws {
+        if w.len() > best.len() {
+            best = w
+        }
+    }
+    return best
+}
+
+fn mainA() {
+    let src = "let x = 42 + y1 + 42".toString()
+    let toks = tokenize(src)
+    for t in toks {
+        println(t.kind, t.text)
+    }
+    println(count(src))
+    let ws = src.splitViews(" ")
+    println(longest(ws), ws.len())
+    println("a\r\nb\n\nc".lineViews(), "a,,b".splitViews(","), "héllo".splitViews(""))
+}
+
+fn tokenizeInto(src: str, out: inout Vec[Token]) {
+    for w in src.fieldViews() {
+        out.push(Token{kind: w.len(), text: w})
+    }
+}
+
+fn helper(a: str, b: str, out: inout Vec[str]) {
+    out.push(b)
+    _ = a
+}
+
+fn mainB() {
+    let src = "x = 42".toString()
+    var toks: Vec[Token] = []
+    tokenizeInto(src, &toks)
+    println(toks.len(), toks[2].text)
+    var a = "aa".toString()
+    let b = "bb".toString()
+    var ws: Vec[str] = []
+    helper(a, b, &ws)
+    a.push("x")
+    println(ws)
+}
+
+fn main() {
+    mainA()
+    mainB()
+}

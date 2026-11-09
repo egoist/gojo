@@ -103,6 +103,13 @@ pub struct FuncDecl {
     /// `extend T: Integer { ... }`: the block's type parameter. The
     /// methods are added to every built-in type in the bound's type set.
     pub ext_tparams: Vec<TParam>,
+    /// `gen fn`: a generator; its result type is what it yields (spec 7.3).
+    pub is_gen: bool,
+    /// `requires cond`: checked when the function is called; a fact for
+    /// bounds-check elimination in the body (spec 14).
+    pub requires: Option<Expr>,
+    /// `checkfree fn`: no bounds check may remain in the body (spec 14).
+    pub checkfree: bool,
     pub span: Span,
 }
 
@@ -125,6 +132,8 @@ pub struct StructDecl {
     pub unsafe_send: bool,
     /// `view struct`: may hold views, and is one (spec 5.4).
     pub is_view: bool,
+    /// `linear struct`: never dropped implicitly; must be consumed (spec 5.7).
+    pub is_linear: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -143,6 +152,8 @@ pub struct EnumDecl {
     pub is_copy: bool,
     /// `view enum`: may hold views, and is one.
     pub is_view: bool,
+    /// `linear enum`: must be consumed.
+    pub is_linear: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -222,6 +233,25 @@ pub enum StmtKind {
     Discard(Expr),
     Yield(Option<Expr>),
     Select(Vec<SelectArm>),
+    /// `static for f in fields(T) { }`: the body once per field of `T`,
+    /// `f` naming the field (spec 9.1).
+    StaticFor { name: String, name_span: Span, ty: TypeExpr, body: Block },
+    /// `static if T: bound { } else static if let v: Vec[_] = x { } else { }`:
+    /// the first arm whose condition the type satisfies, chosen per instance.
+    StaticIf { arms: Vec<(StaticCond, Block)>, else_: Option<Block> },
+}
+
+/// A condition of `static if`.
+#[derive(Clone, Debug)]
+pub enum StaticCond {
+    /// `T: bound`: a capability, an interface, `struct` or `enum`.
+    Bound(TypeExpr, TypeExpr),
+    /// `let v: Pattern = x`: `x`'s type has the pattern's shape (`_` matches
+    /// any type); `v` is `x` seen as that type.
+    Let(String, Span, TypeExpr, Expr),
+    /// `T is P`: the type parameter `T` has the pattern's shape; in the arm
+    /// it is that type (`_` and names that aren't types match any type).
+    Is(TypeExpr, TypeExpr),
 }
 
 #[derive(Clone, Debug)]
@@ -313,6 +343,10 @@ pub struct ClosureParam {
 
 #[derive(Clone, Debug)]
 pub enum ExprKind {
+    /// `x.[f]`: the field `f` of a `static for` (spec 9.1).
+    StaticField(Box<Expr>, String, Span),
+    /// `static T { f => value }`: a `T` built field by field.
+    StaticBuild { ty: TypeExpr, name: String, name_span: Span, value: Box<Expr> },
     Int(u128),
     Float(f64),
     Str(String),

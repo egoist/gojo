@@ -1,0 +1,75 @@
+// What a generator's loop body may not do, and what a generator is not.
+gen fn nums(n: int) -> int {
+    for i in 0..n {
+        yield i
+    }
+}
+
+fn keep(_f: fn(int, fn(int) -> Flow)) {
+}
+
+// a user's `__body` is just a variable, and the hidden one can't be named
+gen fn g(n: int) -> int {
+    if n > 0 {
+        __body(n)
+    }
+    yield n
+}
+
+fn check(i: int) ! String {
+    if i < 0 {
+        return err("negative")
+    }
+}
+
+fn pre(v: []int, i: int) -> int requires try check(i) {
+    return v[i]
+}
+
+fn clear(v: inout Vec[int]) -> bool {
+    v.clear()
+    return true
+}
+
+fn pre2(v: inout Vec[int], i: int) -> int requires i < v.len() && clear(&v) {
+    return v[i]
+}
+
+fn tasks() {
+    scope {
+        for x in nums(3) {
+            go println(x)
+        }
+    }
+}
+
+gen fn words(s: str) -> String {
+    yield s.toString()
+}
+
+fn own(w: sink String) {
+    println(w)
+}
+
+fn moved() {
+    for w in words("a") {
+        own(w)
+    }
+}
+
+fn main() {
+    keep(nums)
+    for x in g(1) {
+        println(x)
+    }
+    _ = pre([1], 0)
+    var v = [1]
+    _ = pre2(&v, 0)
+    tasks()
+    moved()
+}
+// error: `nums` is a generator, which isn't a value
+// error: undefined: `__body`
+// error: `requires` takes a condition that only reads
+// error: this `go` is in the body of a loop over a generator
+// error: the loop element `w`

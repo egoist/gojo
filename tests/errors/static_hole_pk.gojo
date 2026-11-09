@@ -1,0 +1,15 @@
+struct P { a: String, b: String }
+
+fn conv[F](x: sink String) -> F {
+    static if F is String {
+        return x
+    }
+    panic("no")
+}
+
+fn main() {
+    let s: String = "a long heap string xxxxxxxxxxxxxxxxxxxxxxxxxxx ${1}"
+    let p = static P{f => conv(match s { v => v })}
+    println(p.a, p.b)
+}
+// error: a `static T { }` value runs once for each field, so it can't move a value declared outside it

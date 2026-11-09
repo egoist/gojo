@@ -201,6 +201,11 @@ static inline void gojo_box_free(void *p, size_t n) {
     lists[cls] = (gojo_box_node *)p;
 }
 
+// A box emptied by a move out of it, and a new box: the compiler pairs them
+// up where one can take the other's block (codegen.rs `reuse_boxes`).
+#define GOJO_BOX_FREE_R(p, T) gojo_box_free((p), sizeof(T))
+#define GOJO_BOX_NEW_R(T) gojo_box_alloc(sizeof(T))
+
 // ---- strings
 static inline gojo_str gojo_str_lit(const char *s, int64_t n) { gojo_str r = { (const uint8_t *)s, n }; return r; }
 static inline gojo_str gojo_string_view(const gojo_string *s) { gojo_str r = { s->ptr, s->len }; return r; }
@@ -517,6 +522,12 @@ bool gojo_os___getenv(gojo_str name, gojo_string *out);
 int64_t gojo_time_now(void);
 extern int gojo_sim_on;
 extern int64_t gojo_sim_clock;
+// `gojo test`: the simulated network, and faults (GOJO_FAULTS).
+extern int gojo_simnet_on;
+extern int gojo_sim_faults;
+bool gojo_simnet_fd(int64_t fd);
+int gojo_sim_disk_fault(int64_t fd, bool write);
+int64_t gojo_sim_short_read(int64_t n);
 extern int gojo_debug_checks;
 // A package-level `let`: computed once, by the first task to use it.
 typedef struct { int state; void *owner; } gojo_once;
@@ -527,6 +538,9 @@ void gojo_sim_point(void);
 void gojo_task_dump(void);
 void *gojo_dlsym(const char *lib, const char *name);
 int gojo_run_test(void (*fn)(void), const char *name);
+void gojo_etrace_origin(const char *at);
+void gojo_etrace_push(const char *at);
+void gojo_etrace_print(void);
 
 // ---- json (runtime/gojo_lib.c)
 typedef struct {

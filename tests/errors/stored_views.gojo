@@ -20,8 +20,13 @@ fn boxes() {
 }
 
 fn maps() {
+    // a view map lives in a variable, and can't outlive what it views
     var m = Map[int, str]{}
-    // error: `m` has type `Map[int, str]`, which would store a borrowed view
+    {
+        let s = "abc".toString()
+        m[1] = s.asStr()
+        // error: `s` does not live long enough: `m` would still view it after it is dropped
+    }
     println(m.len())
 }
 

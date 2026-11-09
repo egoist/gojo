@@ -1,0 +1,42 @@
+linear struct Tx {
+    id: int
+    name: String
+
+    fn commit(sink self) {
+        println("commit", self.id)
+    }
+
+    fn rollback(sink self) {
+        println("rollback", self.id)
+    }
+}
+
+fn begin(id: int) -> Tx {
+    return Tx{id: id, name: "tx" + "{id}"}
+}
+linear struct E {
+    code: int
+
+    fn message(self) -> String {
+        return "E"
+    }
+
+    fn end(sink self) {
+        println("end E")
+    }
+}
+fn f() -> int ! E {
+    return err(E{code: 1})
+}
+fn main() {
+    let r = scope {
+        go f()
+        go f()
+        1
+    }
+    match r {
+        ok(x) => println(x)
+        err(e) => e.end()
+    }
+}
+// error: the tasks of this scope fail with the linear `E`: when several fail, only the first error is kept and the others would be dropped

@@ -17,6 +17,7 @@ struct Options {
     seed: Option<String>,
     explore: Option<String>,
     real: bool,
+    faults: bool,
     /// Keep the bounds checks the compiler proved unnecessary, and report one
     /// that fails as a compiler bug.
     verify_bce: bool,
@@ -27,7 +28,9 @@ const USAGE: &str = "Gojo — a systems language with Go's simplicity, no GC and
 usage:
   gojo run   <file.gojo|dir> [args...]   compile and run
   gojo build <file.gojo|dir> [-o out]     compile to a native binary
-  gojo check <file.gojo|dir>              type and borrow check only
+  gojo check <file.gojo|dir> [--json]     type and borrow check only; --json prints each
+                                          diagnostic as a line of JSON, with the edits
+                                          that fix it where there is one obvious fix
   gojo test  <file.gojo|dir>              run `test \"...\" {}` blocks
   gojo emit-c <file.gojo|dir>             print the generated C
   gojo fmt [--check] [file.gojo|dir...]  format in place (default: .); --check lists
@@ -41,6 +44,14 @@ usage:
                                           blocks, `unsafe fn`, `unsafe send`, `extern`),
                                           package by package, and whether gojo.toml's
                                           [unsafe] table allows it; fails when it doesn't
+  gojo authority [file.gojo|dir] [--json] what each dependency does with the file system,
+                                          environment, other programs and the network,
+                                          whether gojo.toml's [authority] table allows it,
+                                          and the table that grants exactly that
+  gojo claims [file.gojo|dir] [--json]    what the compiler proved about each function:
+                                          the bounds checks it removed, and where they stay
+  gojo spec                               the whole language on one page, for coding
+                                          agents (docs/brief.md)
   gojo version                            print the version
 
 options:
@@ -55,7 +66,11 @@ options:
                    `test`; tests use a seed from their name by default)
   --explore <n>    `test`: run each test under n seeds, stop at the first
                    failure and print its seed
-  --real           `test`: use the real scheduler (threads, real time)
+  --real           `test`: use the real scheduler (threads, real time) and the
+                   real network
+  --faults         `test`: also inject faults the seed decides: connections
+                   reset, dials refused, datagrams lost, file reads and
+                   writes failing (EIO, ENOSPC) or reading short
   --verify-bce     keep the bounds checks the compiler removed because it proved
                    them unnecessary; one that fails is a compiler bug
 
@@ -93,7 +108,20 @@ fn main() -> ExitCode {
         Some("init") => return init_command(&args[2..]),
         Some("unsafe") => {
             let rest = args[2..].to_vec();
-            return gojo::with_compiler_stack(move || unsafe_command(&rest));
+            return gojo::with_compiler_stack(move || report_command("unsafe", &rest, unsafe_report));
+        }
+        Some("authority") => {
+            let rest = args[2..].to_vec();
+            return gojo::with_compiler_stack(move || report_command("authority", &rest, authority_report));
+        }
+        Some("claims") => {
+            let rest = args[2..].to_vec();
+            return gojo::with_compiler_stack(move || claims_command(&rest));
+        }
+        Some("spec") => {
+            // the one-page summary of the language (docs/brief.md)
+            print!("{}", include_str!("../docs/brief.md"));
+            return ExitCode::SUCCESS;
         }
         Some("version" | "--version" | "-V") => {
             println!("{}", version());
@@ -109,7 +137,7 @@ fn main() -> ExitCode {
         return usage();
     }
     let cmd = args[1].as_str();
-    let mut opts = Options { release: false, output: None, verbose: false, cc: std::env::var("GOJO_CC").ok(), target: None, keep_c: false, seed: None, explore: None, real: false, verify_bce: false };
+    let mut opts = Options { release: false, output: None, verbose: false, cc: std::env::var("GOJO_CC").ok(), target: None, keep_c: false, seed: None, explore: None, real: false, faults: false, verify_bce: false };
     let mut input = None;
     let mut prog_args = vec![];
     let mut i = 2;
@@ -150,7 +178,9 @@ fn main() -> ExitCode {
                 }
             }
             "--real" => opts.real = true,
+            "--faults" => opts.faults = true,
             "--verify-bce" => opts.verify_bce = true,
+            "--json" if cmd == "check" => gojo::JSON_DIAGS.store(true, std::sync::atomic::Ordering::Relaxed),
             _ if a.starts_with('-') && a.len() > 1 => {
                 eprintln!("error: unknown option `{}` (see `gojo help`)", a);
                 return ExitCode::from(2);
@@ -162,6 +192,10 @@ fn main() -> ExitCode {
             _ => input = Some(a.clone()),
         }
         i += 1;
+    }
+    if opts.faults && (cmd != "test" || opts.real) {
+        eprintln!("error: `--faults` is for `gojo test` on the simulated scheduler (not with `--real`)");
+        return ExitCode::from(2);
     }
     let input = match input {
         Some(i) => i,
@@ -359,19 +393,20 @@ The prelude is available everywhere; other modules are imported with `use std/na
     }
 }
 
-/// `gojo unsafe`: every site of unsafe code in the program, by package.
-fn unsafe_command(args: &[String]) -> ExitCode {
+/// `gojo unsafe` and `gojo authority`: a report on the program (each member
+/// of a workspace in turn), printed or as JSON; fails when the policy does.
+fn report_command(cmd: &str, args: &[String], one: fn(&str, bool) -> (bool, Option<String>)) -> ExitCode {
     let mut json = false;
     let mut input = None;
     for a in args {
         match a.as_str() {
             "--json" => json = true,
             _ if a.starts_with('-') => {
-                eprintln!("error: unknown option `{}` (`gojo unsafe [file.gojo|dir] [--json]`)", a);
+                eprintln!("error: unknown option `{}` (`gojo {} [file.gojo|dir] [--json]`)", a, cmd);
                 return ExitCode::from(2);
             }
             _ if input.is_some() => {
-                eprintln!("error: `gojo unsafe` takes one file or directory");
+                eprintln!("error: `gojo {}` takes one file or directory", cmd);
                 return ExitCode::from(2);
             }
             _ => input = Some(a.clone()),
@@ -388,7 +423,7 @@ fn unsafe_command(args: &[String]) -> ExitCode {
                 if !json {
                     println!("== {}", shown_path(&m));
                 }
-                let (good, j) = unsafe_report(&m, json);
+                let (good, j) = one(&m, json);
                 ok &= good;
                 if let Some(j) = j {
                     parts.push(format!("{{\"member\": {}, \"report\": {}}}", json_str(&shown_path(&m)), j));
@@ -396,12 +431,124 @@ fn unsafe_command(args: &[String]) -> ExitCode {
             }
             (ok, json.then(|| format!("{{\"members\": [{}], \"ok\": {}}}", parts.join(", "), ok)))
         }
-        None => unsafe_report(&input, json),
+        None => one(&input, json),
     };
     if let Some(j) = out {
         println!("{}", j);
     }
     if ok { ExitCode::SUCCESS } else { ExitCode::from(1) }
+}
+
+/// The report for `gojo authority`: what each dependency does (directly and
+/// through its own dependencies), whether `[authority]` allows it, and the
+/// table that would grant exactly that.
+fn authority_report(input: &str, json: bool) -> (bool, Option<String>) {
+    use gojo::authority;
+    let loaded = match gojo::load(input, None) {
+        Ok(l) => l,
+        Err((sm, diags)) => {
+            report(&sm, &diags);
+            return (false, None);
+        }
+    };
+    let table = authority::check_table(&loaded.unsafe_info);
+    if !table.is_empty() {
+        report(&loaded.sm, &table);
+        return (false, None);
+    }
+    let (sm, info) = (loaded.sm, loaded.unsafe_info);
+    let (prog, tfuncs, _) = match gojo::check::check_program(loaded.units) {
+        Ok(r) => r,
+        Err(diags) => {
+            report(&sm, &diags);
+            return (false, None);
+        }
+    };
+    let uses = authority::uses(&prog, &tfuncs, &info);
+    let needed = authority::needed(&info, &uses);
+    let violations = authority::check(&prog, &tfuncs, &info);
+    let list = |ks: &[&str]| format!("[{}]", ks.iter().map(|k| format!("\"{}\"", k)).collect::<Vec<_>>().join(", "));
+    let mut suggested = String::from("[authority]\n");
+    for (name, ks) in &needed {
+        suggested.push_str(&format!("{} = {}\n", authority::quoted(name), list(ks)));
+    }
+    // each package's own uses, one per function and line
+    let own = |i: usize| -> Vec<&authority::Use> {
+        let mut v: Vec<&authority::Use> = vec![];
+        for u in uses.iter().filter(|u| u.pkg == i) {
+            if !v.iter().any(|w| w.what == u.what && w.kind == u.kind && sm.file(w.span.file).line_col(w.span.lo).0 == sm.file(u.span.file).line_col(u.span.lo).0 && w.span.file == u.span.file) {
+                v.push(u);
+            }
+        }
+        v
+    };
+    let q = json_str;
+    let status = |name: &str, ks: &[&str]| -> &'static str {
+        let lim = authority::limits(&info, name);
+        if lim.is_empty() {
+            "not limited"
+        } else if lim.iter().all(|(_, _, g)| ks.iter().all(|k| g.iter().any(|x| x == k))) {
+            "allowed"
+        } else {
+            "not allowed"
+        }
+    };
+    let mut out = None;
+    if json {
+        let pkgs: Vec<String> = needed
+            .iter()
+            .map(|(name, ks)| {
+                let i = info.packages.iter().position(|p| p.name == *name).unwrap_or(0);
+                let p = &info.packages[i];
+                let us: Vec<String> = own(i).iter().map(|u| format!("{{\"kind\": {}, \"what\": {}, \"file\": {}, \"line\": {}}}", q(u.kind), q(&u.what), q(&shown_path(&sm.file(u.span.file).path)), sm.file(u.span.file).line_col(u.span.lo).0)).collect();
+                format!(
+                    "{{\"name\": {}, \"version\": {}, \"path\": {}, \"needs\": {}, \"status\": {}, \"uses\": [{}]}}",
+                    q(name),
+                    p.version.as_ref().map(|v| q(v)).unwrap_or_else(|| "null".into()),
+                    p.root.as_ref().map(|r| q(&shown_path(&r.display().to_string()))).unwrap_or_else(|| "null".into()),
+                    list(ks),
+                    q(status(name, ks)),
+                    us.join(", ")
+                )
+            })
+            .collect();
+        out = Some(format!("{{\"packages\": [{}], \"suggested\": {}, \"ok\": {}}}", pkgs.join(", "), q(&suggested), violations.is_empty()));
+    } else {
+        for (name, ks) in &needed {
+            let i = info.packages.iter().position(|p| p.name == *name).unwrap_or(0);
+            let p = &info.packages[i];
+            let at = match (&p.version, &p.root) {
+                (Some(v), Some(r)) => format!(" {} ({})", v, shown_path(&r.display().to_string())),
+                _ => String::new(),
+            };
+            let what = if ks.is_empty() { "nothing".to_string() } else { ks.join(", ") };
+            let note = match status(name, ks) {
+                "not limited" => "not limited by [authority]",
+                "allowed" => "allowed by [authority]",
+                _ => "NOT ALLOWED by [authority]",
+            };
+            println!("{}{}: {} ({})", name, at, what, note);
+            let mine = own(i);
+            let locs: Vec<String> = mine.iter().map(|u| format!("{}:{}", shown_path(&sm.file(u.span.file).path), sm.file(u.span.file).line_col(u.span.lo).0)).collect();
+            let width = locs.iter().map(|l| l.chars().count()).max().unwrap_or(0);
+            for (u, loc) in mine.iter().zip(&locs) {
+                println!("    {:<width$}  {:<7}  {}", loc, u.kind, u.what, width = width);
+            }
+            let through: Vec<&str> = ks.iter().copied().filter(|k| !mine.iter().any(|u| u.kind == *k)).collect();
+            if !through.is_empty() {
+                println!("    {} through its dependencies", through.join(", "));
+            }
+        }
+        if needed.is_empty() {
+            println!("no dependencies");
+        } else {
+            println!("\nA table granting exactly this (gojo.toml):\n{}", suggested.trim_end());
+        }
+    }
+    if !violations.is_empty() && !json {
+        report(&sm, &violations);
+    }
+    (violations.is_empty(), out)
 }
 
 /// A path relative to here (`../zlib/lib.gojo`), unless that takes a long way round.
@@ -414,6 +561,82 @@ fn shown_path(p: &str) -> String {
         Some(r) if r.split('/').filter(|c| *c == "..").count() <= 3 => r,
         _ => abs.display().to_string(),
     }
+}
+
+/// `gojo claims [file|dir] [--json]`: what the compiler proved about each
+/// function: the bounds checks it removed and the ones that stay, and
+/// whether the function is `checkfree` or has a `requires`.
+fn claims_command(args: &[String]) -> ExitCode {
+    let mut json = false;
+    let mut input: Option<String> = None;
+    for a in args {
+        match a.as_str() {
+            "--json" => json = true,
+            _ if a.starts_with('-') => {
+                eprintln!("error: unknown option `{}` (`gojo claims [file.gojo|dir] [--json]`)", a);
+                return ExitCode::from(2);
+            }
+            _ => input = Some(a.clone()),
+        }
+    }
+    let input = input.unwrap_or_else(|| ".".into());
+    let c = match gojo::frontend(&input, None) {
+        Ok(c) => c,
+        Err((sm, diags)) => {
+            report(&sm, &diags);
+            return ExitCode::from(1);
+        }
+    };
+    let (mut claims, errs) = match codegen::claims(&c.prog, &c.tfuncs, &c.sm) {
+        Ok(cl) => cl,
+        Err(e) => {
+            eprintln!("error: {}", e);
+            return ExitCode::from(1);
+        }
+    };
+    // a `checkfree` function with nothing to check says so too
+    for (i, fd) in c.prog.funcs.iter().enumerate() {
+        if fd.checkfree && !c.prog.packages[fd.pkg as usize].is_std {
+            claims.entry(i as gojo::types::FuncId).or_default();
+        }
+    }
+    let mut fids: Vec<&gojo::types::FuncId> = claims.keys().filter(|f| !c.prog.packages[c.prog.func(**f).pkg as usize].is_std).collect();
+    fids.sort_by_key(|f| (c.prog.func(**f).span.file, c.prog.func(**f).span.lo));
+    let at = |sp: gojo::diag::Span| {
+        let f = c.sm.file(sp.file);
+        let (l, col) = f.line_col(sp.lo);
+        (f.path.clone(), l, col)
+    };
+    let mut items = vec![];
+    for f in fids {
+        let fd = c.prog.func(*f);
+        let cl = &claims[f];
+        let (path, line, _) = at(fd.span);
+        let name = match fd.recv_key {
+            Some(_) => format!("{}.{}", fd.recv.as_ref().map(|r| c.prog.show(&r.ty)).unwrap_or_default(), fd.name),
+            None => fd.name.clone(),
+        };
+        if json {
+            let spans = |v: &Vec<gojo::diag::Span>| v.iter().map(|s| { let (p, l, col) = at(*s); format!("{{\"file\": {}, \"line\": {}, \"column\": {}}}", json_str(&p), l, col) }).collect::<Vec<_>>().join(", ");
+            items.push(format!("{{\"function\": {}, \"file\": {}, \"line\": {}, \"checkfree\": {}, \"removed\": [{}], \"kept\": [{}]}}", json_str(&name), json_str(&path), line, fd.checkfree, spans(&cl.removed), spans(&cl.kept)));
+        } else {
+            let tag = if fd.checkfree { " (checkfree)" } else { "" };
+            println!("{}{} at {}:{}: {} bounds check{} removed, {} kept", name, tag, path, line, cl.removed.len(), if cl.removed.len() == 1 { "" } else { "s" }, cl.kept.len());
+            for s in &cl.kept {
+                let (p, l, col) = at(*s);
+                println!("  kept    {}:{}:{}", p, l, col);
+            }
+        }
+    }
+    if json {
+        println!("{{\"functions\": [{}]}}", items.join(", "));
+    }
+    // the list first, then what breaks a `checkfree` claim
+    if !errs.is_empty() {
+        report(&c.sm, &errs);
+        return ExitCode::from(1);
+    }
+    ExitCode::SUCCESS
 }
 
 fn json_str(s: &str) -> String {
@@ -757,7 +980,7 @@ fn drive(cmd: &str, input: &str, opts: &Options, prog_args: &[String]) -> Result
         report(&loaded.sm, &policy);
         return Err(());
     }
-    let sm = loaded.sm;
+    let (sm, unsafe_info) = (loaded.sm, loaded.unsafe_info);
     let t_parse = t0.elapsed();
     let (prog, tfuncs, tests) = match gojo::check::check_program(loaded.units) {
         Ok(r) => r,
@@ -767,7 +990,12 @@ fn drive(cmd: &str, input: &str, opts: &Options, prog_args: &[String]) -> Result
         }
     };
     let t_check = t0.elapsed();
-    let (errors, warnings) = gojo::split_warnings(gojo::borrowck::check(&prog, &tfuncs));
+    let authority = gojo::authority::check(&prog, &tfuncs, &unsafe_info);
+    if !authority.is_empty() {
+        report(&sm, &authority);
+        return Err(());
+    }
+    let (errors, warnings) = gojo::split_warnings(gojo::ownership_checks(&prog, &tfuncs));
     if !errors.is_empty() {
         report(&sm, &errors);
         return Err(());
@@ -780,9 +1008,16 @@ fn drive(cmd: &str, input: &str, opts: &Options, prog_args: &[String]) -> Result
         // some errors only show when generic code is instantiated (a type
         // `json.encode` can't handle, a generic type that grows without
         // end): generate the C of a program too, and throw it away
-        if prog.packages[prog.main_pkg as usize].items.contains_key("main") {
-            if let Err(e) = codegen::generate(&prog, &tfuncs, &sm, None, opts.release) {
+        // (every function of the program, so a library's are checked too)
+        let roots = codegen::all_roots(&prog);
+        match codegen::generate_diags(&prog, &tfuncs, &sm, Some(&roots), opts.release) {
+            Ok(_) => {}
+            Err(codegen::GenError::Msg(e)) => {
                 eprintln!("error: {}", e);
+                return Err(());
+            }
+            Err(codegen::GenError::Diags(ds)) => {
+                report(&sm, &ds);
                 return Err(());
             }
         }
@@ -801,10 +1036,14 @@ fn drive(cmd: &str, input: &str, opts: &Options, prog_args: &[String]) -> Result
         eprintln!("no tests found");
         return Ok(ExitCode::SUCCESS);
     }
-    let c_src = match codegen::generate(&prog, &tfuncs, &sm, if is_test { Some(&tests) } else { None }, opts.release) {
+    let c_src = match codegen::generate_diags(&prog, &tfuncs, &sm, if is_test { Some(&tests) } else { None }, opts.release) {
         Ok(c) => c,
-        Err(e) => {
+        Err(codegen::GenError::Msg(e)) => {
             eprintln!("error: {}", e);
+            return Err(());
+        }
+        Err(codegen::GenError::Diags(ds)) => {
+            report(&sm, &ds);
             return Err(());
         }
     };
@@ -1025,6 +1264,9 @@ fn finish(cmd: &str, bin: &Path, opts: &Options, prog_args: &[String], stem: &st
     }
     if opts.real {
         c.env("GOJO_SCHED", "real");
+    }
+    if opts.faults {
+        c.env("GOJO_FAULTS", "1");
     }
     let status = c.status();
     match status {

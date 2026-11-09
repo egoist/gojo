@@ -30,4 +30,5 @@ The prelude is available everywhere; other modules are imported with `use std/na
 | [`regex`](regex.md) | Regular expressions with the syntax of RE2 (as in Go and Rust). |
 | [`flag`](flag.md) | Command-line parsing: declare the options and arguments, then read them back by name, typed. |
 | [`log`](log.md) | Leveled, structured logging: one line per event, with key=value fields, to standard error. |
+| [`simd`](simd.md) | Fixed-width vectors of numbers, for code that works on several values at once: `Simd[f32, 8]` holds 8 lanes. |
 

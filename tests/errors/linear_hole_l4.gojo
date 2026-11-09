@@ -1,0 +1,21 @@
+linear struct Tx {
+    id: int
+    name: String
+
+    fn commit(sink self) {
+        println("commit", self.id)
+    }
+
+    fn rollback(sink self) {
+        println("rollback", self.id)
+    }
+}
+
+fn begin(id: int) -> Tx {
+    return Tx{id: id, name: "tx" + "{id}"}
+}
+fn main() {
+    let f = (t: sink Tx) => println(t.id)
+    f(begin(1))
+}
+// error: `t` is not consumed: the linear `Tx` would be dropped where the closure ends

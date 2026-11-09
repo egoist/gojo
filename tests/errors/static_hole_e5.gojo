@@ -1,0 +1,36 @@
+linear struct Tx {
+    id: int
+
+    fn commit(sink self) {
+        println("commit", self.id)
+    }
+}
+
+linear struct Pair {
+    t: Tx
+    n: int
+}
+
+fn num(fail: bool) -> int ! String {
+    if fail {
+        return err("fail")
+    }
+    return 5
+}
+
+fn take(t: sink Tx, n: int) -> Pair {
+    return Pair{t: t, n: n}
+}
+
+fn mk(fail: bool) -> Pair ! String {
+    return take(Tx{id: 1}, try num(fail))
+}
+
+fn main() {
+    let p = mk(true) catch e {
+        println(e)
+        return
+    }
+    p.t.commit()
+}
+// error: if this may leave early (a `try` failing), the linear `Tx` made before it in the same expression is dropped

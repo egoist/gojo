@@ -313,6 +313,9 @@ pub struct FieldInfo {
     pub ty: Ty,
     pub default: Option<TExpr>,
     pub is_pub: bool,
+    /// Declared `pub` (`is_pub` also holds for every field of a standard
+    /// library type, which the standard library's modules share).
+    pub declared_pub: bool,
     pub embedded: bool,
     pub span: Span,
 }
@@ -358,6 +361,10 @@ pub struct TypeDef {
     /// `view struct` / `view enum`: may hold views and is one itself, so it
     /// lives only in variables, like `str` (spec 5.4). Always copy.
     pub view: bool,
+    /// `linear struct` / `linear enum`: never dropped implicitly. Every value
+    /// must be consumed: moved into a `sink` parameter (its own `sink self`
+    /// methods above all), returned, or stored in something that is (spec 5.7).
+    pub linear: bool,
 }
 
 impl TypeDef {
@@ -430,6 +437,11 @@ pub struct FuncDef {
     pub is_unsafe: bool,
     /// Associated functions: the owning type (with this function's type params).
     pub owner_ty: Option<Ty>,
+    /// `gen fn`: what it yields. Its last parameter is then the hidden loop
+    /// body (`fn(T) -> Flow`) a `for` passes it, and it returns nothing.
+    pub gen_of: Option<Ty>,
+    /// `checkfree fn`: codegen reports any bounds check left in it.
+    pub checkfree: bool,
 }
 
 impl FuncDef {
@@ -570,6 +582,34 @@ impl Program {
             Ty::Adt(d, _) => self.def(*d).view,
             Ty::Option(t) | Ty::Array(t, _) | Ty::ArrayT(t, _) => self.is_view(t),
             Ty::Result(a, b) => self.is_view(a) || self.is_view(b),
+            // a view collection: owns its buffer, borrows what its elements
+            // view, and lives only in variables like any view (spec 5.4)
+            Ty::Vec(a) => self.is_coll_elem_view(a),
+            Ty::Map(k, v) => (self.is_coll_elem_view(k) || self.is_coll_elem_view(v)) && !(self.contains_view(k) && !self.is_coll_elem_view(k)) && !(self.contains_view(v) && !self.is_coll_elem_view(v)),
+            _ => false,
+        }
+    }
+
+    /// A view that a `Vec` or `Map` may hold: a plain view (`str`, `[]T`, a
+    /// view struct), or a view collection in turn. Not task handles, scopes
+    /// or lock guards, which their blocks track.
+    fn is_coll_elem_view(&self, t: &Ty) -> bool {
+        match t {
+            Ty::Str | Ty::Slice(_) => true,
+            Ty::Adt(d, _) => self.def(*d).view,
+            Ty::Option(a) => self.is_coll_elem_view(a),
+            Ty::Vec(_) | Ty::Map(..) => self.is_view(t),
+            _ => false,
+        }
+    }
+
+    /// A view that owns memory: a view collection (`Vec[str]`). References
+    /// into it point into its buffer, as well as into what it views.
+    pub fn owning_view(&self, t: &Ty) -> bool {
+        match t {
+            Ty::Vec(_) | Ty::Map(..) => self.is_view(t),
+            Ty::Option(a) => self.owning_view(a),
+            Ty::Result(a, b) => self.owning_view(a) || self.owning_view(b),
             _ => false,
         }
     }
@@ -592,6 +632,7 @@ impl Program {
     pub fn has_nested_view(&self, t: &Ty) -> bool {
         match t {
             Ty::Str | Ty::Slice(_) | Ty::Scope => false,
+            Ty::Vec(_) | Ty::Map(..) if self.is_view(t) => false,
             Ty::Adt(d, args) if self.def(*d).view => args.iter().any(|a| self.contains_view(a)),
             Ty::Task(a) => self.contains_view(a),
             Ty::Option(a) => self.has_nested_view(a),
@@ -636,6 +677,56 @@ impl Program {
             }
         }
         false
+    }
+
+    /// Whether a value of this type must be consumed instead of dropped
+    /// (spec 5.7): a `linear` type, a type parameter declared `any` (it may
+    /// stand for one), or anything that owns one. References and views
+    /// (`[]T`, raw pointers, `Weak`) don't own what they point to.
+    pub fn is_linear(&self, t: &Ty) -> bool {
+        const LIMIT: usize = 512;
+        let mut seen: HashSet<Ty> = HashSet::new();
+        let mut todo = vec![t.clone()];
+        while let Some(t) = todo.pop() {
+            if !seen.insert(t.clone()) || seen.len() > LIMIT {
+                continue;
+            }
+            match &t {
+                Ty::Param(p) => {
+                    if self.tparam(*p).bounds.iter().any(|b| matches!(b, Bound::Cap(Cap::Any))) {
+                        return true;
+                    }
+                }
+                Ty::Vec(a) | Ty::Array(a, _) | Ty::ArrayT(a, _) | Ty::Option(a) | Ty::Box(a) | Ty::Rc(a) | Ty::Arc(a) | Ty::Cell(a) | Ty::Mutex(a) | Ty::Sender(a) | Ty::Receiver(a) | Ty::Task(a) | Ty::Iso(a) => todo.push((**a).clone()),
+                Ty::Map(a, b) | Ty::Result(a, b) => {
+                    todo.push((**a).clone());
+                    todo.push((**b).clone());
+                }
+                Ty::Adt(d, args) => {
+                    let def = self.def(*d);
+                    if def.linear {
+                        return true;
+                    }
+                    match &def.kind {
+                        TypeDefKind::Struct { .. } => todo.extend(self.field_tys(*d, args).into_iter().map(|f| f.1)),
+                        TypeDefKind::Enum { variants } => {
+                            for v in 0..variants.len() {
+                                todo.extend(self.variant_tys(*d, args, v).into_iter().map(|f| f.1));
+                            }
+                        }
+                        TypeDefKind::Iface { .. } => {}
+                    }
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+
+    /// Whether type parameter `p` may stand for a linear type: declared
+    /// `[T: any]` (or `where T: any`).
+    pub fn tparam_any(&self, p: TParamId) -> bool {
+        self.tparam(p).bounds.iter().any(|b| matches!(b, Bound::Cap(Cap::Any)))
     }
 
     /// Dropping a value of this type only frees memory, which no program can

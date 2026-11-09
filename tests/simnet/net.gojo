@@ -1,0 +1,136 @@
+// The simulated network of `gojo test`: sockets in memory, delays and short
+// reads from the seed. These hold under every seed.
+use std/{fmt, http, io, net, task, time}
+
+fn echo(ln: net.Listener) ! io.Error {
+    let c = try ln.accept()
+    let data = try c.readAll()
+    try c.write(data)
+}
+
+test "tcp echo" {
+    let ln = net.listen("127.0.0.1:0") catch e { panic(e.message()) }
+    let port = ln.port()
+    assert(port >= 40000)
+    var msg = Vec[byte]{}
+    for i in 0..10000 {
+        msg.push(byte(i % 251))
+    }
+    scope {
+        go () => {
+            echo(ln) catch e { panic(e.message()) }
+        }
+        let c = net.dial(fmt.format("localhost:{}", port)) catch e { panic(e.message()) }
+        c.write(msg) catch e { panic(e.message()) }
+        c.closeWrite()
+        let back = c.readAll() catch e { panic(e.message()) }
+        assert(back == msg)
+    }
+}
+
+test "many clients" {
+    let ln = net.listen(":0") catch e { panic(e.message()) }
+    let addr = fmt.format("127.0.0.1:{}", ln.port())
+    let total = Atomic(0)
+    scope srv {
+        go () => {
+            scope {
+                loop {
+                    let c = ln.accept() catch _e { return }
+                    go () => {
+                        let b = c.readAll() catch _e { return }
+                        total.add(b.len())
+                    }
+                }
+            }
+        }
+        scope {
+            for i in 0..20 {
+                go () => {
+                    let c = net.dial(addr) catch e { panic(e.message()) }
+                    c.writeText("x".repeat(i + 1)) catch e { panic(e.message()) }
+                }
+            }
+        }
+        // the clients are gone; wait for the server to count their bytes
+        while total.load() < 210 {
+            time.sleep(time.millisecond)
+        }
+        srv.cancel()
+    }
+    assert(total.load() == 210)
+}
+
+test "refused and unreachable" {
+    let refused = match net.dial("127.0.0.1:1") {
+        ok(_c) => false
+        err(e) => e.kind == .ConnectionRefused
+    }
+    assert(refused)
+    // there is no other host
+    let far = match net.dial("example.com:80") {
+        ok(_c) => false
+        err(e) => e.kind != .ConnectionRefused
+    }
+    assert(far)
+    let names = net.lookup("localhost") catch e { panic(e.message()) }
+    assert(names == ["127.0.0.1", "::1"])
+    let unknown = net.lookup("example.com") catch e { Vec[String]{e.message()} }
+    assert(unknown == ["lookup example.com: no such host"])
+}
+
+test "address in use" {
+    let a = net.listen("127.0.0.1:0") catch e { panic(e.message()) }
+    let inUse = match net.listen(fmt.format(":{}", a.port())) {
+        ok(_l) => false
+        err(e) => e.message().contains("in use")
+    }
+    assert(inUse)
+}
+
+test "udp" {
+    let srv = net.listenUdp(":0") catch e { panic(e.message()) }
+    let c = net.dialUdp(fmt.format("127.0.0.1:{}", srv.port())) catch e { panic(e.message()) }
+    c.send("ping".bytes()) catch e { panic(e.message()) }
+    var buf = Vec[byte]{}
+    let (n, from) = srv.recvFrom(&buf, 1500) catch e { panic(e.message()) }
+    assert(n == 4 && String(buf) == "ping")
+    srv.sendTo("pong".bytes(), from) catch e { panic(e.message()) }
+    var got = Vec[byte]{}
+    let m = c.recv(&got, 2) catch e { panic(e.message()) }
+    // the rest of a longer datagram is dropped
+    assert(m == 2 && String(got) == "po")
+}
+
+test "read timeout" {
+    let ln = net.listen(":0") catch e { panic(e.message()) }
+    let c = net.dial(fmt.format(":{}", ln.port())) catch e { panic(e.message()) }
+    let start = time.now()
+    // nobody writes: the read is cancelled after a virtual second
+    let r = task.timeout(time.second, () => {
+        var buf = Vec[byte]{}
+        return c.read(&buf, 10) catch _e { -1 }
+    })
+    assert(r == none)
+    assert(time.since(start) >= time.second)
+    _ = ln
+}
+
+struct Hello {
+    fn serve(self, req: http.Request) -> http.Response {
+        return http.text(200, "hello " + req.path + " " + "y".repeat(5000))
+    }
+}
+
+test "http" {
+    let ln = net.listen("127.0.0.1:0") catch e { panic(e.message()) }
+    let base = fmt.format("http://127.0.0.1:{}", ln.port())
+    scope server {
+        go http.serve(ln, Hello{}, http.Options{})
+        for p in ["/a", "/b", "/c"] {
+            let r = http.get(base + p) catch e { panic(e.message()) }
+            assert(r.status == 200 && r.text().startsWith("hello " + p + " yyy") && r.text().len() == 7 + p.len() + 5000)
+        }
+        server.cancel()
+    }
+}

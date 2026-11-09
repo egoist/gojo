@@ -1,0 +1,31 @@
+interface Ender {
+    fn end(sink self)
+}
+struct S {
+    name: String
+    fn end(sink self) { println("end", self.name) }
+}
+fn f(x: Ender) { x.end() }
+fn main() {
+    let s = S{name: "a" + "b"}
+    f(s)
+    println("after f", s.name)
+}
+
+linear struct Tx {
+    id: int
+    name: String
+
+    fn commit(sink self) {
+        println("commit", self.id)
+    }
+
+    fn rollback(sink self) {
+        println("rollback", self.id)
+    }
+}
+
+fn begin(id: int) -> Tx {
+    return Tx{id: id, name: "tx" + "{id}"}
+}
+// error: cannot move out of borrowed parameter `x` (type `Ender`)

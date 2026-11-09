@@ -1,0 +1,44 @@
+fn fail() -> int ! String {
+    return err("boom")
+}
+fn run() -> int ! String {
+    let r = scope {
+        go fail()
+        let t = begin(1)
+        println("body made", t.id)
+        t
+    }
+    match r {
+        ok(t) => t.commit()
+        err(e) => println("scope failed:", e)
+    }
+    let t2 = try scope {
+        go fail()
+        let u = begin(2)
+        println("body made", u.id)
+        u
+    }
+    t2.commit()
+    return 0
+}
+fn main() {
+    println(run() catch e { println(e); -1 })
+}
+
+linear struct Tx {
+    id: int
+    name: String
+
+    fn commit(sink self) {
+        println("commit", self.id)
+    }
+
+    fn rollback(sink self) {
+        println("rollback", self.id)
+    }
+}
+
+fn begin(id: int) -> Tx {
+    return Tx{id: id, name: "tx" + "{id}"}
+}
+// error: this scope's tasks can fail, and then its value, the linear `Tx`, would be dropped

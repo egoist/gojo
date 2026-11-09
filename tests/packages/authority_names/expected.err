@@ -1,0 +1,4 @@
+`app` is the package being built, which [authority] doesn't limit
+`pad` is what a dependency is imported as; [authority] lists packages by the name in their own gojo.toml: `s3`
+`nope` is not a dependency of this package, directly or through others
+the dependencies are `s3`

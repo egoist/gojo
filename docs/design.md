@@ -18,7 +18,7 @@ Gojo (a code name; it may change) is a small, fast-compiling systems language wi
 
 - Gojo does not aim for all of Rust's expressive power. Code that stores references in structs (zero-copy parsers and the like) is left to `unsafe` or to dedicated view types.
 - Gojo is not compatible with Go source and cannot call Go code directly: Go's GC heap and Gojo's ownership model cannot be mixed safely.
-- No macros, compile-time evaluation, higher-kinded types or specialization.
+- No macros, compile-time evaluation, higher-kinded types or specialization. (Static reflection over a type's fields, checked once, covers what derive macros are mostly used for: spec 9.1.)
 
 **Kept because they work**: the package (a directory) as the unit of code, acyclic imports, structural implicit interfaces (no orphan rules, separate compilation stays possible), `go`, channels and `select` (inside structured scopes), composition instead of inheritance, struct embedding, one built-in format, a single static binary, built-in testing and toolchain. Several of these came from Go; none is kept *because* Go has it.
 
@@ -190,7 +190,7 @@ with e = counts.entry(word) {   // with binds a projection to a block
 }
 ```
 
-**Views live only in variables.** Without lifetime annotations, the borrow checker can track only views held in local variables. So no value that would store a view elsewhere may exist: collections, `Box`, `Rc`, interface values, generic types, whether the type is written out or inferred (`[s]`, `Rc(s)`). When a view is assigned to an outer variable, the borrowed value must live at least as long. A view of data inside a lock cannot leave the `with` block, because the lock is released when the block ends. If a generic function keeps a value of `T` after the call returns (an escaping closure, a task started through a `Scope` value), `T` cannot be a view at the call. These rules were added during M2 while systematically constructing bypass cases; see `tests/errors/view_*`, `stored_views`, `generic_keeps_view`.
+**Views live only in variables.** Without lifetime annotations, the borrow checker can track only views held in local variables. So no value that would store a view elsewhere may exist: `Box`, `Rc`, interface values, struct fields, generic types, whether the type is written out or inferred (`Rc(s)`). A `Vec` or `Map` of views is a view itself (a *view collection*, after Goose's root sets and Mojo's `List[StringSpan[origin]]`): it lives in a variable, owns its buffer, and borrows the union of what its elements view, which grows as views are pushed in. A function that pushes views of one parameter into an `inout` one has that worked out like a returned view's sources, so `tokenize(src, &toks)` leaves `toks` borrowing `src`. When a view is assigned to an outer variable, the borrowed value must live at least as long. A view of data inside a lock cannot leave the `with` block, because the lock is released when the block ends. If a generic function keeps a value of `T` after the call returns (an escaping closure, a task started through a `Scope` value), `T` cannot be a view at the call. These rules were added during M2 while systematically constructing bypass cases; see `tests/errors/view_*`, `stored_views`, `generic_keeps_view`.
 
 ### 4.4 Release and defer
 
@@ -199,10 +199,11 @@ with e = counts.entry(word) {   // with binds a projection to a block
 - A value whose release only frees memory (`String`, `Vec[int]`, structs of those: no `drop` method, nothing shared) is freed right after its last use, and, when some branches moved it, at the end of the others. No program can tell the difference, and memory doesn't sit unused until a scope ends. This is Mojo's "as soon as possible" destruction taken only as far as it stays invisible: values whose drop does something (closing a file or a channel, cancelling a task) keep scope-end drops. See [drops.md](drops.md).
 - `defer` runs at the end of the current block. Since resources are released automatically, code like `defer f.Close()` is mostly unnecessary; defer is mainly for restoring state and logging. Deferred code cannot change where the function goes: it cannot contain `return` or `try`, and it cannot jump out of an enclosing loop.
 - To release early, call `drop(x)`, which is just an ordinary function that takes a `sink` parameter.
+- A **linear** type (`linear struct Tx`) is never dropped implicitly: each value must be consumed, by a `sink` parameter (its own `sink self` methods: `commit`, `rollback`), a `return`, or something that is consumed in turn. Leaving one in a variable where its block ends, at a `return`, `break` or `try` that leaves it, or as a temporary nobody takes, is a compile error that names the methods to call. A `defer` that consumes a linear variable runs only while it still holds its value, so `defer tx.rollback()` covers every early exit and does nothing after `tx.commit()`. Panics abort, so no path is unwound, and the check is per function over the drop states the compiler already tracks. Containers that would drop such values (`Rc`, `Map`, `Box`, interface values) can't hold them, and a type parameter takes them only when declared `any`. This answers what scope-end drops can't: a cleanup that can fail (`try f.close()`), or a protocol step that must not be skipped. See spec 5.7.
 
 ### 4.5 Shared ownership and cyclic structures
 
-- `Rc[T]` uses a non-atomic count and cannot cross tasks (except inside an `isolate`d value); `Arc[T]` uses an atomic count. Both are read-only inside; to modify, wrap the value in `Cell[T]` (single-threaded) or `Mutex[T]`.
+- `Rc[T]` uses a non-atomic count and cannot cross tasks (except inside an `isolate`d value, or moved into a task when nothing else reaches it); `Arc[T]` uses an atomic count. Both are read-only inside; to modify, wrap the value in `Cell[T]` (single-threaded) or `Mutex[T]`.
 - The programmer breaks cycles with `Weak[T]`. The language does no cycle detection.
 - For structures like graphs, ASTs and DOMs, the recommended approach is `arena[T]` plus indices: nodes refer to each other with `Id[T]`, and the whole arena is released at once. An `Id` carries a generation, so accessing through a deleted Id gives none instead of a dangling pointer.
 
@@ -210,7 +211,7 @@ with e = counts.entry(word) {   // with binds a projection to a block
 
 `Vec[T]` owns its data; `[]T` is only a borrowed view. `v.push(x)` requires an `inout` borrow, so the Vec cannot grow while any view exists. The Go problem of "two slices unexpectedly sharing a backing array after append" therefore cannot happen. `String` and `str` relate the same way.
 
-A list of string literals, `["a", "b"]`, is a `Vec[String]`, not a `Vec[str]`: views never end up inside collections.
+A list of string literals, `["a", "b"]`, is a `Vec[String]`, not a `Vec[str]`. A `Vec[str]` is a view collection: it lives in a variable and keeps what its elements view borrowed.
 
 ### 4.7 Closure capture
 
@@ -363,7 +364,7 @@ let names = users
 
 | Constraint | Meaning | How it is satisfied |
 | --- | --- | --- |
-| `any` | Any type; can only be moved and borrowed | All types |
+| `any` | Any type, linear ones included; can only be moved and borrowed | All types; a type parameter without it takes only types that can be dropped |
 | `copy` | Copied bitwise; assignment does not move | Scalars; types declared as `copy struct` |
 | `clone` | Can be explicitly `.clone()`d | A `clone()` method, or all fields clonable (derived); `copy` types satisfy it automatically |
 | `default` | Has a default value; `var x: T` is allowed | All fields have default values |
@@ -438,12 +439,12 @@ for j in jobs.rx { run(j) }             // ends once `produce` returns
 ```
 
 - **Scopes.** `go` starts a task in the innermost `scope` (the bodies of `main` and tests are scopes). A task may borrow anything that lives until the scope ends, and one task may even modify a variable nothing else touches; values declared in blocks inside the scope move into the task. Leaving a scope early cancels its tasks; a failing task cancels its siblings. A function that starts long-lived tasks takes a `Scope` parameter, so where they live is visible in its signature.
-- **Values crossing tasks satisfy `send`**: the compiler derives it from the type's structure; users don't write it. `send fn` is a function type safe to call from several tasks at once, `send interface` an interface whose values may cross tasks, and `isolate { }` builds a value (even a graph of `Rc`) that may cross as a whole because nothing outside points into it.
+- **Values crossing tasks satisfy `send`**: the compiler derives it from the type's structure; users don't write it. `send fn` is a function type safe to call from several tasks at once, `send interface` an interface whose values may cross tasks, and `isolate { }` builds a value (even a graph of `Rc`) that may cross as a whole because nothing outside points into it. The compiler also infers that for a value moved into a task when it is built from `send` values and nothing else in the function takes a reference to it (Swift's region-based isolation, within one function).
 - **Shared mutable state** goes through `Mutex[T]` (locking is a projection, so a reference can't leave the critical section), `with a, b = lock(m1, m2)` for several locks in one global order, and `Atomic[T]`. Waiting (on a channel, a task, a timer) directly inside a lock block is an error.
 - **Channels** have two ends, `Sender[T]` and `Receiver[T]`. Ownership knows when the last sender is gone, so that closes the channel: there is no `close`, and no channel operation panics. `select` waits on channels, task handles, timers (`time.after(d)`) and cancellation, with `if` guards on arms (Gojo has no nil channels to disable an arm with).
 - **Cancellation propagates along the task tree**, without a `ctx` in every signature. In a cancelled task, blocking operations return immediately in the "no result" form they already have: a receive gets `none`, a send doesn't happen, `time.sleep` wakes early, network calls fail with an error for which `isCancelled()` holds. `task.reason()` says why, `task.deadline()` gives the deadline to pass on, `task.shield` protects cleanup, and `drop` methods run shielded for a moment so that cleanup which blocks still happens. Ctrl-C cancels `main`'s scope: programs shut down cleanly by default.
 - **Data parallelism**: `par for x in &v { }` runs iterations on every CPU, each owning its element; `task.map`, `task.each` and `task.race` cover the rest.
-- **Testing**: `gojo test` runs on a simulated scheduler with a seed and a virtual clock. Since there are no data races, tasks affect each other only at runtime operations, which the scheduler controls, so a seed reproduces an interleaving exactly; `--explore n` tries n of them and prints the seed of a failure.
+- **Testing**: `gojo test` runs on a simulated scheduler with a seed and a virtual clock. Since there are no data races, tasks affect each other only at runtime operations, which the scheduler controls, so a seed reproduces an interleaving exactly; `--explore n` tries n of them and prints the seed of a failure. The network is simulated in memory under the same seed (delays, short reads, reordered datagrams), and `--faults` injects resets, refused dials, lost datagrams and disk errors, as TigerBeetle's VOPR and turmoil do for their own code.
 
 Stacks differ from Go: tasks borrow data on other tasks' stacks, so stacks **cannot move**, and therefore cannot start at 2 KB and be copied wholesale when full, as Go does. Each task reserves a fixed range of virtual addresses (2 MB by default, with a guard page), and only pages actually used take memory: a suspended task takes one page (4 KB on Linux, 16 KB on Apple Silicon) while it runs, and, once it has been parked for a while, only the bytes it really uses: its stack is **hibernated**, copied out and brought back at the same address (100,000 idle tasks: 1.7 GB → 0.2 GB on macOS). Blocking C calls need no special annotation: during an `extern` call, the thread gives its CPU slot to another thread. Long computations that don't block are preempted: generated code checks a global flag in loops and at the entry of recursive functions (one load, one branch), and when tasks are waiting, a task that has run for more than 10 ms yields the CPU. Across the 8 benchmarks, the geometric mean of cycle counts did not change, and no single benchmark got more than 5% slower (`bench/README.md`).
 
@@ -480,6 +481,7 @@ unsafe fn nextOf(p: *Node) -> *Node {
 
 - An `unsafe` block that needs nothing is an error, and `unsafe fn`s and `extern` functions can't become function values, satisfy interfaces, or be called implicitly (`==`, `print`, `for`, drops): every unchecked call is under an `unsafe` the reader can find. The reference lists what unsafe code must never do (spec 11.1), as Rust's reference does, so "correct unsafe code" has a definition.
 - Keep `unsafe` blocks as small as possible. `gojo unsafe` lists the unsafe code of every package of a program, with locations and line counts. A dependency with unsafe code builds only when the manifest being built allows it by name (`[unsafe] allow`), so adding a package that calls C takes a decision, the way pnpm makes install scripts opt-in. `forbid = true` keeps a package's own code safe (Rust's `forbid(unsafe_code)`), which also keeps coding agents from reaching for `unsafe` to get past the borrow checker. The registry will show the count on package pages.
+- `[authority]` does the same for I/O: `leftpad = []` keeps a dependency (and its own dependencies) away from files, environment variables, other programs and the network, checked against its calls into the standard library. It is opt-in and needs no capability parameters: values handed in are the object-capability way to delegate.
 - Libraries in `extern "C" lib "z"` are loaded at run time, like approaches that avoid cgo, so cross-compiling needs no C toolchain for the target platform. libc functions (no library given) and `extern "C" static "z"` are ordinary link-time calls.
 - C may keep a pointer into a task's stack after the call returns; `.ptr()` pins that task, so its stack is never put away while it waits (section 8).
 - External callbacks will be Gojo functions declared with `extern "C" fn`. They cannot capture variables; context is passed through a `*void` parameter. (Exporting works today; passing them to C as values doesn't yet.)
@@ -566,7 +568,7 @@ Gojo is not a dialect of Go, but many readers know Go, so this table maps the fa
 | Classes and inheritance | Composition and structural interfaces are enough |
 | Trait-style explicit implementations | They bring orphan rules and overlap problems and break separate compilation |
 | Higher-kinded types, specialization, variadic generics | Type checking would turn into a solving problem |
-| Macros and compile-time evaluation | Slower compilation, and tools struggle to understand the code; code generation is left to external tools |
+| Macros and compile-time evaluation | Slower compilation, and tools struggle to understand the code. What derive macros are mostly for (serializers, printers, decoders) is covered by static reflection instead: `static for f in fields(T)`, `static if T is P`, `static T{f => ...}`, checked once like other generic code and unrolled per instance, with no evaluator (spec 9.1) |
 | General operator overloading | Only `==`, comparison and hashing are open |
 | Exceptions and `recover` | Errors go through `T ! E`; panic signals only bugs |
 | async / await | Goroutines have no "function coloring" problem |

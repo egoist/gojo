@@ -1,0 +1,84 @@
+// A task can take a value that isn't `send` (here a tree of `Rc` nodes) when
+// nothing else can still reach it: no `isolate { }` needed.
+struct Node {
+    value: int
+    children: Vec[Rc[Node]]
+    parent: ?Weak[Node]
+}
+
+fn build(depth: int, v: int) -> Rc[Node] {
+    var kids = Vec[Rc[Node]]{}
+    if depth > 0 {
+        kids.push(build(depth - 1, v * 2))
+        kids.push(build(depth - 1, v * 2 + 1))
+    }
+    return Rc(Node{value: v, children: kids, parent: none})
+}
+
+fn sum(n: Rc[Node]) -> int {
+    var t = n.value
+    for c in n.children {
+        t += sum(c.clone())
+    }
+    return t
+}
+
+fn total(t: sink Rc[Node]) -> int {
+    return sum(t)
+}
+
+fn show(n: sink Rc[Node], c: sink Rc[Cell[int]]) {
+    c.set(c.get() + 1)
+    println("task sees", sum(n), c.get())
+}
+
+fn count(n: Rc[Node]) -> int {
+    var c = 1
+    for k in n.children {
+        c += count(k.clone())
+    }
+    return c
+}
+
+fn main() {
+    // built from `send` values, then moved into the task
+    let tree = build(4, 1)
+    // reading what is `send` in it, or lending it to a call that gives back
+    // something `send`, leaves no other reference
+    println("root", tree.value, "kids", tree.children.len(), "nodes", count(tree))
+    let r = scope {
+        let t = go total(tree)
+        t.join()
+    }
+    println("sum", r)
+
+    // put together from parts that are moved in whole
+    var kids = Vec[Rc[Node]]{}
+    for i in 0..3 {
+        kids.push(build(1, i))
+    }
+    let root = Rc(Node{value: 100, children: kids, parent: none})
+    let cell = Rc(Cell(5))
+    scope {
+        go show(root, cell)
+    }
+
+    // a value made by the call `go` starts
+    for i in 0..2 {
+        let n = scope {
+            let t = go total(build(2, i))
+            t.join()
+        }
+        println("task", i, n)
+    }
+
+    // a value made in a block inside the scope, captured by the task
+    scope {
+        if r > 0 {
+            let own = build(2, 5)
+            go () => {
+                println("task sees", count(own), "nodes")
+            }
+        }
+    }
+}

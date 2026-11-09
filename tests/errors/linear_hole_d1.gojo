@@ -1,0 +1,25 @@
+linear struct Tx {
+    id: int
+    name: String
+
+    fn commit(sink self) {
+        println("commit", self.id)
+    }
+
+    fn rollback(sink self) {
+        println("rollback", self.id)
+    }
+}
+
+fn begin(id: int) -> Tx {
+    return Tx{id: id, name: "tx" + "{id}"}
+}
+fn over(v: inout Tx) {
+    v = begin(2)
+}
+fn main() {
+    var t = begin(1)
+    over(&t)
+    t.commit()
+}
+// error: assigning here drops the linear `Tx` that was there

@@ -49,7 +49,7 @@ pub fn check(prog: &Program, tfuncs: &[TFunc]) -> Vec<Diag> {
 /// Whether nothing uses `x` afterwards is the borrow checker's own answer:
 /// the function is checked again with that clone as a move of `x`, and a
 /// warning given only if that is accepted.
-fn needless_clones(prog: &Program, tf: &TFunc, proj: &HashMap<FuncId, Vec<usize>>, rsrc: &HashMap<FuncId, Vec<usize>>, view_ret: bool, out: &mut Vec<Diag>) {
+fn needless_clones(prog: &Program, tf: &TFunc, proj: &HashMap<FuncId, Vec<usize>>, rsrc: &Summ, view_ret: bool, out: &mut Vec<Diag>) {
     let mut cands: Vec<(usize, LocalId, Span)> = vec![];
     visit_block(&tf.body, &mut |e| match &e.kind {
         TK::Intrinsic { name, args, .. } if name == "clone" && args.len() == 1 => {
@@ -93,7 +93,7 @@ fn needless_clones(prog: &Program, tf: &TFunc, proj: &HashMap<FuncId, Vec<usize>
         b.block(&mut st, &tf.body);
         b.end_scope_defers(&mut st);
         if b.as_move_seen && b.diags.is_empty() {
-            out.push(Diag::warning(sp, format!("`{0}.clone()` copies `{0}`, which isn't used after this", loc.name)).note(None, format!("write `{}` to move it instead of copying it", loc.name)));
+            out.push(Diag::warning(sp, format!("`{0}.clone()` copies `{0}`, which isn't used after this", loc.name)).note(None, format!("write `{}` to move it instead of copying it", loc.name)).fix(sp, loc.name.clone()));
         }
     }
 }
@@ -105,51 +105,90 @@ fn needless_clones(prog: &Program, tf: &TFunc, proj: &HashMap<FuncId, Vec<usize>
 /// to what its returns point into, given the others, until nothing changes.
 /// That least fixpoint is exactly what the bodies can return. Functions with
 /// a single argument are left out: they borrow it either way.
-fn return_sources(prog: &Program, tfuncs: &[TFunc], proj: &HashMap<FuncId, Vec<usize>>) -> HashMap<FuncId, Vec<usize>> {
-    let mut out: HashMap<FuncId, Vec<usize>> = HashMap::new();
+/// What a function's views point into, as far as its callers are concerned
+/// (parameters as indices, receiver first): what a returned view may point
+/// into, and what each `inout` parameter may be left viewing (a view
+/// collection the function pushes views of another parameter into).
+#[derive(Default)]
+pub struct Summ {
+    pub ret: HashMap<FuncId, Vec<usize>>,
+    pub inout: HashMap<FuncId, Vec<(usize, Vec<usize>)>>,
+}
+
+/// Both summaries, worked out together: each may depend on the other through
+/// calls. The least fixpoint over the functions that return a view or take an
+/// `inout` parameter that can hold views.
+fn return_sources(prog: &Program, tfuncs: &[TFunc], proj: &HashMap<FuncId, Vec<usize>>) -> Summ {
+    let mut out = Summ::default();
     for (i, fd) in prog.funcs.iter().enumerate() {
         if let Some(d) = &fd.ret_of {
-            out.insert(i as FuncId, d.clone());
+            out.ret.insert(i as FuncId, d.clone());
         }
     }
-    let cands: Vec<&TFunc> = tfuncs
-        .iter()
-        .filter(|tf| {
-            let fd = prog.func(tf.func);
-            prog.is_view(&fd.ret) && fd.yields.is_none() && fd.ret_of.is_none() && fd.recv.iter().count() + fd.params.len() > 1
-        })
-        .collect();
+    let ret_cand = |tf: &TFunc| {
+        let fd = prog.func(tf.func);
+        prog.is_view(&fd.ret) && fd.yields.is_none() && fd.ret_of.is_none() && fd.recv.iter().count() + fd.params.len() > 1
+    };
+    let inout_cand = |tf: &TFunc| {
+        let fd = prog.func(tf.func);
+        fd.recv.iter().chain(fd.params.iter()).any(|p| p.mode == Mode::Inout && prog.is_view(&p.ty)) && fd.recv.iter().count() + fd.params.len() > 1
+    };
+    let cands: Vec<&TFunc> = tfuncs.iter().filter(|tf| ret_cand(tf) || inout_cand(tf)).collect();
     for tf in &cands {
-        out.insert(tf.func, vec![]);
+        if ret_cand(tf) {
+            out.ret.insert(tf.func, vec![]);
+        }
     }
     for _ in 0..16 {
         let mut changed = false;
         for tf in &cands {
-            let got = {
-                let mut b = Bc::new(prog, tf, proj, &out, true);
+            let (got, igot) = {
+                let mut b = Bc::new(prog, tf, proj, &out, ret_cand(tf));
                 let mut st = St::new();
                 b.block(&mut st, &tf.body);
                 b.end_scope_defers(&mut st);
-                b.ret_params
+                (b.ret_params, b.inout_got)
             };
-            let cur = out.get_mut(&tf.func).unwrap();
-            for i in got {
-                if !cur.contains(&i) {
-                    cur.push(i);
-                    changed = true;
+            if let Some(cur) = out.ret.get_mut(&tf.func) {
+                for i in got {
+                    if !cur.contains(&i) {
+                        cur.push(i);
+                        changed = true;
+                    }
+                }
+            }
+            if !igot.is_empty() {
+                let cur = out.inout.entry(tf.func).or_default();
+                for (k, srcs) in igot {
+                    let at = match cur.iter().position(|(j, _)| *j == k) {
+                        Some(i) => i,
+                        None => {
+                            cur.push((k, vec![]));
+                            changed = true;
+                            cur.len() - 1
+                        }
+                    };
+                    for s in srcs {
+                        if !cur[at].1.contains(&s) {
+                            cur[at].1.push(s);
+                            changed = true;
+                        }
+                    }
                 }
             }
         }
         if !changed {
-            for v in out.values_mut() {
+            for v in out.ret.values_mut() {
                 v.sort_unstable();
             }
             return out;
         }
     }
-    // (it didn't settle: every argument, as for any other call)
+    // (it didn't settle: every argument, as for any other call; and no
+    // function may leave views in an `inout` parameter)
     for tf in &cands {
-        out.remove(&tf.func);
+        out.ret.remove(&tf.func);
+        out.inout.remove(&tf.func);
     }
     out
 }
@@ -194,6 +233,9 @@ fn yield_sources(prog: &Program, tfuncs: &[TFunc], diags: &mut Vec<Diag>) -> Has
                 };
                 let r = root(p.0);
                 match params.iter().position(|q| *q == r) {
+                    // a parameter passed by value is this function's own
+                    // copy: gone once it returns
+                    Some(_) if by_value(prog, &tf.locals[r as usize]) => bad.push((*sp, tf.locals[r as usize].name.clone())),
                     Some(i) => idx.push(i),
                     None if matches!(tf.locals[r as usize].kind, LocalKind::Let | LocalKind::Var) => bad.push((*sp, tf.locals[r as usize].name.clone())),
                     None => idx.extend(0..params.len()),
@@ -202,7 +244,8 @@ fn yield_sources(prog: &Program, tfuncs: &[TFunc], diags: &mut Vec<Diag>) -> Has
         });
         if !prog.packages[prog.func(tf.func).pkg as usize].is_std {
             for (sp, name) in bad {
-                diags.push(Diag::new(sp, format!("`yield` lends a reference into `{}`, a local of this function", name)).note(None, "the caller may keep views of what it gets, after this function has ended; yield a part of `self` or of a parameter, or return an owned value instead"));
+                let what = if params.iter().any(|&q| tf.locals[q as usize].name == name) { "a parameter passed by value (its type is copy), which is this function's own copy" } else { "a local of this function" };
+                diags.push(Diag::new(sp, format!("`yield` lends a reference into `{}`, {}", name, what)).note(None, "the caller may keep views of what it gets, after this function has ended; yield a part of a parameter passed by reference, or return the value instead"));
             }
         }
         idx.sort_unstable();
@@ -210,6 +253,37 @@ fn yield_sources(prog: &Program, tfuncs: &[TFunc], diags: &mut Vec<Diag>) -> Has
         out.insert(tf.func, idx);
     }
     out
+}
+
+/// Whether a value of this type can point into a view collection's buffer:
+/// a slice of views (`[]str`), or something holding one. A `str` or a view
+/// struct of `str`s points into what the elements view, not the buffer.
+fn points_into_buffer(prog: &Program, t: &Ty) -> bool {
+    prog.reaches(t, &|x| match x {
+        Ty::Slice(a) => prog.contains_view(a),
+        Ty::MutexRef(_) | Ty::Param(_) | Ty::Var(_) => true,
+        _ => false,
+    })
+}
+
+/// A parameter the function gets its own copy of: `sink`, or a read-only
+/// one of a copy type (numbers, copy structs, arrays, tuples of them, view
+/// structs), which is passed by value.
+fn by_value(prog: &Program, l: &crate::tir::Local) -> bool {
+    fn copy(prog: &Program, t: &Ty) -> bool {
+        match t {
+            Ty::Unit | Ty::Bool | Ty::Int(_) | Ty::F32 | Ty::F64 | Ty::Ptr(_) => true,
+            Ty::Option(a) | Ty::Array(a, _) => copy(prog, a),
+            Ty::Result(a, b) => copy(prog, a) && copy(prog, b),
+            Ty::Adt(d, args) => prog.def(*d).is_copy || (prog.def(*d).tuple && args.iter().all(|a| copy(prog, a))),
+            _ => false,
+        }
+    }
+    match l.kind {
+        LocalKind::Param(Mode::Sink) => true,
+        LocalKind::Param(Mode::Borrow) => copy(prog, &l.ty),
+        _ => false,
+    }
 }
 
 /// Whether a value of this type keeps a view inside storage of its own: a
@@ -225,6 +299,8 @@ fn stores_view(prog: &Program, t: &Ty) -> bool {
         Ty::Task(a) => prog.contains_view(a),
         Ty::Option(a) => stores_view(prog, a),
         Ty::Result(a, b) => stores_view(prog, a) || stores_view(prog, b),
+        // a view collection sits in a variable too
+        Ty::Vec(_) | Ty::Map(..) if prog.is_view(t) => false,
         _ => prog.contains_view(t),
     }
 }
@@ -491,7 +567,7 @@ struct Bc<'a> {
     /// For functions returning a view: the arguments (receiver first) the
     /// view may point into (`return_sources`). Calls of other functions
     /// borrow all their arguments.
-    rsrc: &'a HashMap<FuncId, Vec<usize>>,
+    rsrc: &'a Summ,
     /// The parameters (receiver first, as indices) the views this function
     /// returns point into, so far.
     ret_params: Vec<usize>,
@@ -509,6 +585,12 @@ struct Bc<'a> {
     /// Borrows (by where they start) that come from a call whose result
     /// views only some of its arguments: why, for the error that names them.
     why_borrow: HashMap<Span, String>,
+    /// Elements of loops over a temporary that can't outlive the loop:
+    /// where the temporary is.
+    temp_iters: HashMap<LocalId, Span>,
+    /// The views this function stores in its `inout` parameters, so far:
+    /// (the parameter, the parameters the views point into), receiver first.
+    inout_got: Vec<(usize, Vec<usize>)>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -539,13 +621,15 @@ fn place_path(e: &TExpr) -> Option<Path> {
             _ => None,
         },
         TK::ProjUnwrap { proj, .. } => place_path(proj),
+        // which field depends on the instance: the whole value
+        TK::StaticField { base, .. } => place_path(base),
         _ => None,
     }
 }
 
 impl<'a> Bc<'a> {
-    fn new(prog: &'a Program, tf: &'a TFunc, proj: &'a HashMap<FuncId, Vec<usize>>, rsrc: &'a HashMap<FuncId, Vec<usize>>, view_ret: bool) -> Bc<'a> {
-        Bc { prog, tf, proj, diags: vec![], loans: vec![], holders: HashMap::new(), depth: 0, suppress: 0, loops: vec![], view_ret, defers: vec![vec![]], decl_depth: HashMap::new(), escaped: vec![], locked: vec![], in_closure: false, in_each_body: false, via_parents: HashMap::new(), tscopes: vec![], spawn_depth: None, as_move: None, as_move_seen: false, rsrc, ret_params: vec![], src_unknown: Cell::new(false), storage: vec![], bind_into: HashMap::new(), why_borrow: HashMap::new() }
+    fn new(prog: &'a Program, tf: &'a TFunc, proj: &'a HashMap<FuncId, Vec<usize>>, rsrc: &'a Summ, view_ret: bool) -> Bc<'a> {
+        Bc { prog, tf, proj, diags: vec![], loans: vec![], holders: HashMap::new(), depth: 0, suppress: 0, loops: vec![], view_ret, defers: vec![vec![]], decl_depth: HashMap::new(), escaped: vec![], locked: vec![], in_closure: false, in_each_body: false, via_parents: HashMap::new(), tscopes: vec![], spawn_depth: None, as_move: None, as_move_seen: false, rsrc, ret_params: vec![], src_unknown: Cell::new(false), storage: vec![], bind_into: HashMap::new(), why_borrow: HashMap::new(), temp_iters: HashMap::new(), inout_got: vec![] }
     }
 
     fn err(&mut self, d: Diag) {
@@ -557,6 +641,10 @@ impl<'a> Bc<'a> {
     fn name(&self, p: &Path) -> String {
         let l = &self.tf.locals[p.0 as usize];
         let mut s = l.name.clone();
+        // (a lazy chain's own variables: check/lazy.rs)
+        if s.starts_with("__lz") {
+            s = "the chain's value".into();
+        }
         let mut t = l.ty.clone();
         for &i in &p.1 {
             if let Ty::Adt(d, args) = &t {
@@ -569,6 +657,31 @@ impl<'a> Bc<'a> {
             }
         }
         s
+    }
+
+    /// A variable holding a view collection (`Vec[str]`): it owns a buffer
+    /// that references into it point into, besides viewing other data.
+    fn owning_holder(&self, l: LocalId) -> bool {
+        let loc = &self.tf.locals[l as usize];
+        matches!(loc.kind, LocalKind::Let | LocalKind::Var | LocalKind::Param(_)) && self.prog.owning_view(&loc.ty)
+    }
+
+    /// What changing the place `e` changes: for a view collection, its own
+    /// buffer (not what its elements view).
+    fn mut_targets(&self, e: &TExpr) -> Vec<(Path, bool)> {
+        if let Some(p) = place_path(e) {
+            if self.owning_holder(p.0) {
+                return vec![(p, true)];
+            }
+            // a reference into one (`with e = m.entry(k)`, `for x in &vv`)
+            if matches!(self.tf.locals[p.0 as usize].kind, LocalKind::Ref { .. }) && self.prog.owning_view(&e.ty) {
+                let o = self.owner_of(p.0);
+                if o != p.0 && self.owning_holder(o) {
+                    return vec![((o, vec![]), true)];
+                }
+            }
+        }
+        self.arg_targets(e)
     }
 
     fn is_holder(&self, l: LocalId) -> bool {
@@ -587,7 +700,12 @@ impl<'a> Bc<'a> {
                 if self.is_holder(p.0) && !p.1.is_empty() && !matches!(self.tf.locals[p.0 as usize].kind, LocalKind::Ref { .. }) && !self.prog.contains_view(&e.ty) {
                     return vec![(p, false)];
                 }
-                if self.is_holder(p.0) {
+                if self.owning_holder(p.0) {
+                    // a view collection: its own buffer, and what it views
+                    let mut v = vec![(p.clone(), false)];
+                    v.extend(self.holders.get(&p.0).cloned().unwrap_or_default());
+                    v
+                } else if self.is_holder(p.0) {
                     self.holders.get(&p.0).cloned().unwrap_or_else(|| {
                         // a reference whose sources weren't recorded
                         self.src_unknown.set(true);
@@ -802,7 +920,7 @@ impl<'a> Bc<'a> {
         if let Some(p) = place_path(e) {
             self.check_storage(&p, e.span);
             self.check_own_loans(&p, e.span);
-            if self.is_holder(p.0) {
+            if self.is_holder(p.0) && !self.owning_holder(p.0) {
                 return;
             }
             self.check_moved(st, &p, e.span, "modification of");
@@ -814,7 +932,7 @@ impl<'a> Bc<'a> {
         self.subexprs_of_place(st, e);
         if let Some(p) = place_path(e) {
             // (views are copied, but a task handle is a view that is used up)
-            if self.is_holder(p.0) && !matches!(self.tf.locals[p.0 as usize].ty, Ty::Task(_)) {
+            if self.is_holder(p.0) && !matches!(self.tf.locals[p.0 as usize].ty, Ty::Task(_)) && !self.owning_holder(p.0) {
                 return;
             }
             self.check_moved(st, &p, e.span, "use of");
@@ -927,9 +1045,13 @@ impl<'a> Bc<'a> {
                     vec![]
                 }
             }),
+            TK::Copy(x) if self.copied_elem_sources(x).is_some() => self.copied_elem_sources(x).unwrap(),
             TK::Copy(x) | TK::Move(x) | TK::SomeLit(x) | TK::OkLit(x) | TK::ErrLit(x) | TK::Wrap(x) | TK::Try { e: x, .. } => self.view_sources(x),
             TK::Coalesce { l, r } => {
-                let mut out = self.view_sources(l)?;
+                let mut out = match self.copied_elem_sources(l) {
+                    Some(x) => x?,
+                    None => self.view_sources(l)?,
+                };
                 out.extend(self.view_sources(r)?);
                 Ok(out)
             }
@@ -948,7 +1070,10 @@ impl<'a> Bc<'a> {
                 }
             }
             TK::SliceOf { base, .. } => {
-                if self.prog.is_view(&base.ty) {
+                if self.prog.owning_view(&base.ty) && base.is_place() {
+                    // its buffer, and what it views
+                    Ok(self.targets(base))
+                } else if self.prog.is_view(&base.ty) {
                     self.view_sources(base)
                 } else if base.is_place() {
                     Ok(self.targets(base))
@@ -956,11 +1081,48 @@ impl<'a> Bc<'a> {
                     Err(base.span)
                 }
             }
-            TK::Call { args, callee } => self.call_view_sources(callee, args),
-            TK::Intrinsic { args, .. } => self.call_view_sources(&Callee::Value, args),
+            TK::Call { args, callee } => self.call_view_sources(callee, args, &e.ty),
+            // a copy of a view collection views what it does
+            TK::Intrinsic { name, args, .. } if name == "clone" && args.len() == 1 && self.prog.owning_view(&args[0].e.ty) => self.view_sources(&args[0].e),
+            TK::Intrinsic { args, .. } => self.call_view_sources(&Callee::Value, args, &e.ty),
+            // an element: of a place, of a view (what it views), or of a
+            // temporary, which is gone after the statement
+            TK::Index { base, .. } if self.prog.is_view(&e.ty) => {
+                if base.is_place() && self.prog.owning_view(&base.ty) && self.is_copy(&e.ty) {
+                    // an element copied out views what the collection views
+                    self.view_sources(base)
+                } else if base.is_place() {
+                    Ok(self.targets(base))
+                } else if self.prog.is_view(&base.ty) {
+                    self.view_sources(base)
+                } else {
+                    Err(base.span)
+                }
+            }
             TK::Proj { call, .. } => self.view_sources(call),
             TK::ProjUnwrap { proj, .. } => self.view_sources(proj),
             TK::MutexRef(p) => Ok(self.targets(p).into_iter().map(|(t, _)| (t, true)).collect()),
+            // a view collection views what its elements do
+            TK::VecLit(xs) | TK::ArrayLit(xs) if self.prog.is_view(&e.ty) => {
+                let mut out = vec![];
+                for x in xs {
+                    if self.prog.contains_view(&x.ty) {
+                        out.extend(self.view_sources(x)?);
+                    }
+                }
+                Ok(out)
+            }
+            TK::MapLit(ps) if self.prog.is_view(&e.ty) => {
+                let mut out = vec![];
+                for (k, v) in ps {
+                    for x in [k, v] {
+                        if self.prog.contains_view(&x.ty) {
+                            out.extend(self.view_sources(x)?);
+                        }
+                    }
+                }
+                Ok(out)
+            }
             // a view struct or enum views what its view fields do
             TK::StructLit { fields: xs, .. } | TK::EnumLit { args: xs, .. } if self.prog.is_view(&e.ty) => {
                 let mut out = vec![];
@@ -1038,12 +1200,42 @@ impl<'a> Bc<'a> {
         }
     }
 
+    /// A view element copied out of a view collection's projection
+    /// (`ws.first() ?? ""`, `ws[0]` read as a value): what the collection
+    /// views, not its buffer.
+    fn copied_elem_sources(&self, x: &TExpr) -> Option<Result<Vec<(Path, bool)>, Span>> {
+        let call = match &x.kind {
+            TK::Proj { call, .. } => call,
+            TK::ProjUnwrap { proj, .. } => match &proj.kind {
+                TK::Proj { call, .. } => call,
+                _ => return None,
+            },
+            _ => return None,
+        };
+        let TK::Call { args, .. } = &call.kind else { return None };
+        let a = args.first()?;
+        // (a slice method's receiver: the vector seen as a slice)
+        let base = match &a.e.kind {
+            TK::Coerce(Coercion::VecToSlice, v) => &**v,
+            _ => &a.e,
+        };
+        let elem = match &x.ty {
+            Ty::Option(t) => (**t).clone(),
+            t => t.clone(),
+        };
+        if base.is_place() && self.prog.owning_view(&base.ty) && self.is_copy(&elem) && self.prog.is_view(&elem) {
+            Some(self.view_sources(base))
+        } else {
+            None
+        }
+    }
+
     /// What the view a call returns points into: the arguments the callee's
     /// view may point into (all of them when that isn't known), or, for a
     /// function value, what it captured.
-    fn call_view_sources(&self, callee: &Callee, args: &[TArg]) -> Result<Vec<(Path, bool)>, Span> {
+    fn call_view_sources(&self, callee: &Callee, args: &[TArg], ret: &Ty) -> Result<Vec<(Path, bool)>, Span> {
         let only: Option<&Vec<usize>> = match callee {
-            Callee::Func(f, _) => self.rsrc.get(f).filter(|_| {
+            Callee::Func(f, _) => self.rsrc.ret.get(f).filter(|_| {
                 let fd = self.prog.func(*f);
                 fd.recv.iter().count() + fd.params.len() == args.len()
             }),
@@ -1079,7 +1271,15 @@ impl<'a> Bc<'a> {
             if a.mode == ArgMode::Value && !self.prog.is_view(&a.e.ty) {
                 continue;
             }
-            if self.prog.is_view(&a.e.ty) {
+            // a view collection: what is returned may point into its buffer
+            // (a slice of it), or only view what it views (an element: `str`)
+            if self.prog.owning_view(&a.e.ty) && a.e.is_place() {
+                if points_into_buffer(self.prog, ret) {
+                    out.extend(self.targets(&a.e));
+                } else {
+                    out.extend(self.view_sources(&a.e)?);
+                }
+            } else if self.prog.is_view(&a.e.ty) {
                 out.extend(self.view_sources(&a.e)?);
             } else if a.e.is_place() {
                 out.extend(self.targets(&a.e));
@@ -1146,6 +1346,9 @@ impl<'a> Bc<'a> {
                 if hsp != osp && !same_block {
                     d = d.note(Some(hsp), format!("`{}` is declared here, outside that block", h));
                 }
+                if let Some(isp) = self.temp_iters.get(&p.0) {
+                    d = d.note(Some(*isp), format!("`{}` points into this temporary, which is dropped when the loop ends; bind it to a variable before the loop (`let parts = ...`) to keep views of it", o));
+                }
                 self.err(d.note(None, "store an owned copy instead (`.toString()` / `.toVec()`)"));
                 return;
             }
@@ -1173,7 +1376,7 @@ impl<'a> Bc<'a> {
             e = x;
         }
         let TK::Call { callee: Callee::Func(f, _), args } = &e.kind else { return None };
-        let only = self.rsrc.get(f)?;
+        let only = self.rsrc.ret.get(f)?;
         let fd = self.prog.func(*f);
         let params: Vec<&str> = fd.recv.iter().chain(fd.params.iter()).map(|p| p.name.as_str()).collect();
         if params.len() != args.len() || only.len() >= params.len() {
@@ -1214,7 +1417,7 @@ impl<'a> Bc<'a> {
         let name = l.name.clone();
         if self.in_closure && !self.decl_depth.contains_key(&v) {
             if !srcs.is_empty() && self.in_each_body {
-                self.err(Diag::new(sp, format!("`{}` can't keep a view of a loop element past the iteration", name)).note(None, "this loop runs through the type's `each` method, which may pass the body something that only lives for one call; store an owned copy (`.toString()` / `.clone()`), or iterate with `cursor` / `next`"));
+                self.err(Diag::new(sp, format!("`{}` can't keep a view of a loop element past the iteration", name)).note(None, "this loop runs through a generator or the type's `each` method, which may pass the body something that only lives for one call; store an owned copy (`.toString()` / `.clone()`)"));
             } else if !srcs.is_empty() {
                 self.err(Diag::new(sp, format!("a closure cannot store a borrowed view in the captured variable `{}`", name)).note(None, "the function that owns the variable couldn't see what it borrows; return the view instead, or store an owned copy"));
             }
@@ -1370,7 +1573,19 @@ impl<'a> Bc<'a> {
         for level in levels.iter().rev() {
             for (b, err_only) in level.iter().rev() {
                 if !*err_only || with_err {
-                    self.block(st, b);
+                    // a defer that consumes a linear variable runs only while
+                    // the variable still holds its value (spec 5.7): check it
+                    // as if it did, on the paths where it runs
+                    let guards = crate::linear::defer_guards(self.prog, self.tf, b);
+                    if guards.len() == 1 {
+                        let g = &guards[0];
+                        let mut ran = st.clone();
+                        ran.moved.retain(|m| !overlap(&m.0, g));
+                        self.block(&mut ran, b);
+                        st.join(&ran);
+                    } else {
+                        self.block(st, b);
+                    }
                 }
             }
         }
@@ -1419,6 +1634,13 @@ impl<'a> Bc<'a> {
                         if let Some(p) = self.bind_into.get(v).cloned() {
                             self.assign_view_to(st, p.0, place.span, value, false);
                         }
+                        // a reference into a view collection (`for x in &ws`):
+                        // the collection now views the value too
+                        let owner = self.owner_of(*v);
+                        if owner != *v && self.prog.owning_view(&self.tf.locals[owner as usize].ty) && !self.bind_into.contains_key(v) {
+                            let le = TExpr::new(TK::Local(owner), self.tf.locals[owner as usize].ty.clone(), place.span);
+                            self.store_views_into(st, &le, &[value]);
+                        }
                         self.assign_view(st, *v, place.span, value);
                         return;
                     }
@@ -1450,19 +1672,46 @@ impl<'a> Bc<'a> {
                         }
                         self.reinit(st, &p);
                     }
-                    _ => self.write(st, place),
+                    _ => {
+                        self.write(st, place);
+                        // `ws[0] = s`, `ts[i].text = s`, `x = s` for `x` a
+                        // reference into a view collection: it now views `s`
+                        if op.is_none() && self.prog.contains_view(&value.ty) {
+                            if let Some(p) = place_path(place) {
+                                let le = TExpr::new(TK::Local(p.0), self.tf.locals[p.0 as usize].ty.clone(), place.span);
+                                if self.prog.contains_view(&self.tf.locals[self.owner_of(p.0) as usize].ty) {
+                                    self.store_views_into(st, &le, &[value]);
+                                }
+                            }
+                        }
+                    }
                 }
             }
             TStmt::MapInsert { map, key, value } => {
                 self.expr(st, key);
                 self.expr(st, value);
                 self.write(st, map);
+                // a view map now views what its new key and value do
+                if self.prog.is_view(&map.ty) {
+                    self.store_views_into(st, map, &[key, value]);
+                }
             }
             TStmt::Return(e, sp) => {
                 let mut kept = 0;
                 if let Some(e) = e {
                     self.expr(st, e);
                     if self.view_ret {
+                        // from the body of a loop run by `each` or a
+                        // generator: the element lives for one call of the
+                        // body, so a view of it can't leave the function
+                        if self.in_each_body {
+                            if let Ok(srcs) = self.view_sources(e) {
+                                if let Some((p, _)) = srcs.iter().find(|(p, _)| matches!(self.tf.locals[p.0 as usize].kind, LocalKind::Param(_)) && self.decl_depth.contains_key(&p.0)) {
+                                    let n = self.tf.locals[p.0 as usize].name.clone();
+                                    self.err(Diag::new(e.span, format!("can't return a view of the loop element `{}`", n)).note(None, "this loop runs through a generator or the type's `each` method, which may pass the body something that only lives for one call; return an owned copy (`.toString()` / `.clone()`)"));
+                                }
+                            }
+                        }
                         self.check_view_return(e, *sp);
                         self.note_returned(e);
                         // the returned view still points into its sources
@@ -1535,14 +1784,48 @@ impl<'a> Bc<'a> {
                 if let Some(i) = index {
                     self.decl_depth.insert(*i, self.depth);
                 }
+                // a loop over a temporary: what its elements view (a view
+                // collection's sources), or, for references into the
+                // temporary itself, the element alone, which then can't leave
+                // the loop body (the temporary is gone after the loop)
+                if holds && !iter.is_place() && self.iter_targets(iter).is_none() {
+                    for x in std::iter::once(*elem).chain(index.iter().copied()) {
+                        let el_ty = &self.tf.locals[x as usize].ty;
+                        let by_ref = matches!(self.tf.locals[x as usize].kind, LocalKind::Ref { .. });
+                        if !(by_ref || self.prog.contains_view(el_ty)) {
+                            continue;
+                        }
+                        let mut srcs: Vec<(Path, bool)> = vec![];
+                        // the temporary is itself a view of something
+                        // else that lives: what the elements view
+                        let viewed = if self.prog.is_view(&iter.ty) { self.view_sources(iter).ok() } else { None };
+                        if let Some(s) = &viewed {
+                            srcs = s.iter().map(|(p, _)| (p.clone(), *mutable)).collect();
+                        }
+                        // (a view element is copied out of the temporary when
+                        // used: what it views is what counts)
+                        let copied = self.is_copy(el_ty) && !*mutable;
+                        if viewed.is_none() || (by_ref && !copied) {
+                            srcs.push(((x, vec![]), *mutable));
+                            self.temp_iters.insert(x, iter.span);
+                        }
+                        self.holders.insert(x, srcs);
+                    }
+                }
                 if let Some((targets, range)) = self.iter_targets(iter).filter(|_| holds) {
+                    // over a view collection: its own buffer is what a `&`
+                    // loop changes (what it views is only read), and an
+                    // element copied out views only what the collection views
+                    let buf: Option<Path> = if iter.is_place() && self.prog.owning_view(&iter.ty) { place_path(iter) } else { None };
+                    let mut_of = |t: &Path| *mutable && (buf.is_none() || buf.as_ref() == Some(t));
                     for (t, _) in &targets {
-                        self.check_loans_r(t, range.as_ref(), if *mutable { Acc::Mut } else { Acc::Read }, iter.span, None);
+                        self.check_loans_r(t, range.as_ref(), if mut_of(t) { Acc::Mut } else { Acc::Read }, iter.span, None);
                     }
                     for (t, _) in &targets {
-                        self.loans.push(Loan { target: t.clone(), mutable: *mutable, holder: Some(*elem), span: iter.span, depth: self.depth, returned: false, carried: false, range: range.clone(), task: false });
+                        self.loans.push(Loan { target: t.clone(), mutable: mut_of(t), holder: Some(*elem), span: iter.span, depth: self.depth, returned: false, carried: false, range: range.clone(), task: false });
                     }
-                    self.holders.insert(*elem, targets.iter().map(|(p, _)| (p.clone(), *mutable)).collect());
+                    let copied = !*mutable && self.is_copy(&self.tf.locals[*elem as usize].ty);
+                    self.holders.insert(*elem, targets.iter().filter(|(p, _)| !(copied && buf.as_ref() == Some(p))).map(|(p, _)| (p.clone(), mut_of(p))).collect());
                     if let Some(i) = index {
                         if matches!(self.tf.locals[*i as usize].kind, LocalKind::Ref { .. }) {
                             self.holders.insert(*i, targets.iter().map(|(p, _)| (p.clone(), false)).collect());
@@ -1614,6 +1897,10 @@ impl<'a> Bc<'a> {
             }
             TStmt::With { local, place, lock, body } => {
                 self.read(st, place);
+                // `with e = m.entry(k)`: the map now views what `k` does
+                if let TK::Proj { call, .. } = &place.kind {
+                    self.widen_inout_views(st, call);
+                }
                 self.depth += 1;
                 self.decl_depth.insert(*local, self.depth);
                 let mutable = !*lock && matches!(self.tf.locals[*local as usize].kind, LocalKind::Ref { mutable: true });
@@ -1643,6 +1930,7 @@ impl<'a> Bc<'a> {
                         _ => {}
                     }
                     if let Some(g) = &a.guard {
+                        self.guard_moves(g, "select");
                         self.expr(st, g);
                     }
                 }
@@ -1881,7 +2169,11 @@ impl<'a> Bc<'a> {
                     self.expr(st, base)
                 }
             }
-            TK::Proj { call, .. } => self.call_args(st, call),
+            TK::Proj { call, .. } => {
+                self.call_args(st, call);
+                // `m.entry(k)`: the map now views what `k` does
+                self.widen_inout_views(st, call);
+            }
             TK::Call { .. } | TK::Intrinsic { .. } => {
                 self.call_args(st, e);
                 self.widen_inout_views(st, e);
@@ -1990,10 +2282,15 @@ impl<'a> Bc<'a> {
                             // variable holding a view (`err(a)` of `str ! [4]int`)
                             // points into that variable, not into what it views
                             let own = if self.prog.is_view(&scrut.ty) { place_path(scrut) } else { None };
+                            // (a view copied out of a temporary that is a view
+                            // itself, `if let x = ws.pop()`, views what it does)
+                            let temp_srcs = if temp && self.prog.is_view(&scrut.ty) { self.view_sources(scrut).ok() } else { None };
                             for r in refs {
                                 self.decl_depth.insert(r, self.depth);
+                                let rt = self.tf.locals[r as usize].ty.clone();
                                 let ts: Vec<(Path, bool)> = match &own {
-                                    Some(p) if !self.prog.contains_view(&self.tf.locals[r as usize].ty) => vec![(p.clone(), mutable)],
+                                    Some(p) if !self.prog.contains_view(&rt) => vec![(p.clone(), mutable)],
+                                    _ if temp && !mutable && self.is_copy(&rt) && self.prog.is_view(&rt) && temp_srcs.is_some() => temp_srcs.clone().unwrap_or_default().into_iter().map(|(p, _)| (p, false)).collect(),
                                     _ if temp => vec![((r, vec![]), mutable)],
                                     _ => targets.iter().map(|(p, _)| (p.clone(), mutable)).collect(),
                                 };
@@ -2001,7 +2298,31 @@ impl<'a> Bc<'a> {
                             }
                         }
                     }
+                    // a binding that takes part of the matched value (`if let
+                    // x = o`, `some(x) => ...` on a `?Vec[str]`) views what
+                    // the value did; one of a temporary that owned its data
+                    // views itself, so it can't leave the arm
+                    let taken: Vec<LocalId> = a.binds.iter().copied().filter(|b| matches!(self.tf.locals[*b as usize].kind, LocalKind::Let | LocalKind::Var) && self.prog.contains_view(&self.tf.locals[*b as usize].ty)).collect();
+                    if !taken.is_empty() {
+                        let srcs = self.view_sources(scrut).ok();
+                        for b in taken {
+                            self.decl_depth.insert(b, self.depth);
+                            match &srcs {
+                                Some(v) if !v.is_empty() => {
+                                    let snap = s2.clone();
+                                    self.bind_view(b, self.depth, v.clone(), false, scrut.span, &snap, scrut);
+                                }
+                                Some(_) => {}
+                                None => {
+                                    self.holders.insert(b, vec![((b, vec![]), false)]);
+                                }
+                            }
+                        }
+                    }
                     if let Some(g) = &a.guard {
+                        // a guard runs before its arm is chosen: when it is
+                        // false, a later arm still sees the value
+                        self.guard_moves(g, "match");
                         self.expr(&mut s2, g);
                     }
                     self.expr(&mut s2, &a.body);
@@ -2095,6 +2416,20 @@ impl<'a> Bc<'a> {
                 let mut s2 = st.clone();
                 if let Some(b) = bind {
                     self.reinit(&mut s2, &(*b, vec![]));
+                    // the error views what the failed expression did
+                    if self.prog.contains_view(&self.tf.locals[*b as usize].ty) {
+                        self.decl_depth.insert(*b, self.depth + 1);
+                        match self.view_sources(x) {
+                            Ok(v) if !v.is_empty() => {
+                                let snap = s2.clone();
+                                self.bind_view(*b, self.depth + 1, v, false, x.span, &snap, x);
+                            }
+                            Ok(_) => {}
+                            Err(_) => {
+                                self.holders.insert(*b, vec![((*b, vec![]), false)]);
+                            }
+                        }
+                    }
                 }
                 self.block(&mut s2, handler);
                 st.join(&s2);
@@ -2156,7 +2491,7 @@ impl<'a> Bc<'a> {
         }
         // the body is checked on its own
         // (`return` in a loop body run through `each` returns from this function)
-        let mut inner = Bc { prog: self.prog, tf: self.tf, proj: self.proj, diags: vec![], loans: vec![], holders: self.holders.clone(), depth: 0, suppress: self.suppress, loops: vec![], view_ret: self.view_ret && c.loop_body.is_some(), defers: vec![vec![]], decl_depth: c.params.iter().map(|p| (*p, 0)).collect(), escaped: vec![], locked: self.locked.iter().map(|(_, ps, sp, n)| (0, ps.clone(), *sp, n.clone())).collect(), in_closure: true, in_each_body: c.loop_body.is_some(), via_parents: self.via_parents.clone(), tscopes: vec![], spawn_depth: None, as_move: None, as_move_seen: false, rsrc: self.rsrc, ret_params: vec![], src_unknown: Cell::new(false), storage: self.storage.iter().map(|(p, sp, _, w)| (p.clone(), *sp, 0, *w)).collect(), bind_into: self.bind_into.clone(), why_borrow: HashMap::new() };
+        let mut inner = Bc { prog: self.prog, tf: self.tf, proj: self.proj, diags: vec![], loans: vec![], holders: self.holders.clone(), depth: 0, suppress: self.suppress, loops: vec![], view_ret: self.view_ret && c.loop_body.is_some(), defers: vec![vec![]], decl_depth: c.params.iter().map(|p| (*p, 0)).collect(), escaped: vec![], locked: self.locked.iter().map(|(_, ps, sp, n)| (0, ps.clone(), *sp, n.clone())).collect(), in_closure: true, in_each_body: c.loop_body.is_some(), via_parents: self.via_parents.clone(), tscopes: vec![], spawn_depth: None, as_move: None, as_move_seen: false, rsrc: self.rsrc, ret_params: vec![], src_unknown: Cell::new(false), storage: self.storage.iter().map(|(p, sp, _, w)| (p.clone(), *sp, 0, *w)).collect(), bind_into: self.bind_into.clone(), why_borrow: HashMap::new(), temp_iters: self.temp_iters.clone(), inout_got: vec![] };
         let mut s = St::new();
         inner.block(&mut s, &c.body);
         inner.end_scope_defers(&mut s);
@@ -2165,9 +2500,76 @@ impl<'a> Bc<'a> {
                 self.ret_params.push(i);
             }
         }
+        for (k, got) in inner.inout_got {
+            match self.inout_got.iter_mut().find(|(j, _)| *j == k) {
+                Some((_, cur)) => cur.extend(got.into_iter().filter(|i| !cur.contains(i)).collect::<Vec<_>>()),
+                None => self.inout_got.push((k, got)),
+            }
+        }
+        // what the body stored in a captured view collection (`ws.push(s)`
+        // in a closure passed down, or a task) is stored in it here too
+        let grown: Vec<(LocalId, Vec<(Path, bool)>)> = c
+            .captures
+            .iter()
+            .filter(|(_, u)| *u == CapUse::Mutate)
+            .filter_map(|(l, _)| {
+                let after = inner.holders.get(l)?;
+                let before = self.holders.get(l).cloned().unwrap_or_default();
+                let new: Vec<(Path, bool)> = after.iter().filter(|x| !before.contains(x)).cloned().collect();
+                if new.is_empty() {
+                    None
+                } else {
+                    Some((*l, new))
+                }
+            })
+            .collect();
         for d in inner.diags {
             self.err(d);
         }
+        for (l, srcs) in grown {
+            // a view of the closure's own parameter or variable would outlive
+            // the call that gave it
+            let own = |x: &Path| !(self.decl_depth.contains_key(&x.0) || c.captures.iter().any(|(y, _)| *y == x.0));
+            if let Some((p, _)) = srcs.iter().find(|(p, _)| own(p)) {
+                let (o, n) = (self.tf.locals[p.0 as usize].name.clone(), self.tf.locals[l as usize].name.clone());
+                self.err(Diag::new(c.span, format!("this closure stores a view of its own `{}` in `{}`, which it captures: the view could outlive what it points into", o, n)).note(None, "store an owned copy (`.toString()`), or collect the views where the data lives"));
+                continue;
+            }
+            let le = TExpr::new(TK::Local(l), self.tf.locals[l as usize].ty.clone(), c.span);
+            let froms: Vec<TExpr> = vec![];
+            let _ = froms;
+            let owner = self.owner_of(l);
+            if matches!(self.tf.locals[owner as usize].kind, LocalKind::Param(Mode::Inout)) {
+                continue;
+            }
+            let depth = self.decl_depth.get(&owner).copied().unwrap_or(0);
+            self.bind_view(owner, depth, srcs, false, c.span, st, &le);
+        }
+    }
+
+    /// The variable a reference finally points into (`for x in &ws`, a
+    /// `match` binding, `with e = m.entry(k)`, a lock of `Mutex(&ws)`): views
+    /// stored through the reference are stored in it.
+    fn owner_of(&self, mut l: LocalId) -> LocalId {
+        for _ in 0..32 {
+            let loc = &self.tf.locals[l as usize];
+            if let Some(p) = self.bind_into.get(&l) {
+                l = p.0;
+                continue;
+            }
+            match loc.kind {
+                LocalKind::Ref { .. } => match self.holders.get(&l).and_then(|h| h.iter().find(|(p, _)| p.0 != l).map(|(p, _)| p.0)).or(loc.ref_root.filter(|r| *r != l)) {
+                    Some(r) => l = r,
+                    None => break,
+                },
+                _ if matches!(loc.ty, Ty::MutexRef(_)) => match self.holders.get(&l).and_then(|h| h.first().map(|(p, _)| p.0)) {
+                    Some(r) if r != l => l = r,
+                    _ => break,
+                },
+                _ => break,
+            }
+        }
+        l
     }
 
     /// A call that can't be seen into (a generic `inout T`, like `swap` and
@@ -2187,35 +2589,124 @@ impl<'a> Bc<'a> {
             if a.mode != ArgMode::Inout || !generic.get(i).copied().unwrap_or(true) || !self.prog.contains_view(&a.e.ty) {
                 continue;
             }
-            let Some(root) = place_path(&a.e) else { continue };
-            let mut srcs: Vec<(Path, bool)> = vec![];
-            for (j, b) in args.iter().enumerate() {
-                if j == i || !self.prog.contains_view(&b.e.ty) {
-                    continue;
-                }
-                match self.view_sources(&b.e) {
-                    Ok(s) => srcs.extend(s),
-                    Err(tsp) => {
-                        self.err(Diag::new(tsp, "this temporary value is dropped at the end of the statement, but a view of it may be kept").note(None, "bind the value to a variable first: `let s = ...` and borrow from that"));
+            let others: Vec<&TExpr> = args.iter().enumerate().filter(|(j, _)| *j != i).map(|(_, b)| &b.e).collect();
+            if !self.store_views_into(st, &a.e, &others) {
+                return;
+            }
+        }
+        // a function written in Gojo that leaves views of some arguments in an
+        // `inout` one
+        if let Callee::Func(f, _) = callee {
+            if let Some(sum) = self.rsrc.inout.get(f).cloned() {
+                for (k, from) in sum {
+                    let Some(t) = args.get(k).filter(|a| a.mode == ArgMode::Inout) else { continue };
+                    let others: Vec<&TExpr> = from.iter().filter_map(|&j| args.get(j)).map(|a| &a.e).collect();
+                    if !self.store_views_into_k(st, &t.e, &others, true) {
                         return;
                     }
                 }
             }
-            if srcs.is_empty() {
-                continue;
-            }
-            self.check_storage(&root, a.e.span);
-            let v = root.0;
-            let l = &self.tf.locals[v as usize];
-            if matches!(l.kind, LocalKind::Param(Mode::Inout)) {
-                if let Some((p, _)) = srcs.iter().find(|(p, _)| p.0 != v) {
-                    let (o, name) = (self.name(p), l.name.clone());
-                    self.err(Diag::new(a.e.span, format!("cannot store a view of `{}` in the `inout` parameter `{}`", o, name)).note(None, "the caller couldn't see that its variable now borrows this; return the view instead, or use an owned type"));
+        }
+    }
+
+    /// The place `target` (a view variable, a view collection) may now hold
+    /// what the views among `from` point into. False when a temporary would
+    /// be kept (reported).
+    fn store_views_into(&mut self, st: &mut St, target: &TExpr, from: &[&TExpr]) -> bool {
+        self.store_views_into_k(st, target, from, false)
+    }
+
+    /// `whole`: the views stored may point into the arguments themselves
+    /// (a call whose summary says it stores views of a parameter that holds
+    /// none: `out.push(p.asStr())` for `p: String`).
+    fn store_views_into_k(&mut self, st: &mut St, target: &TExpr, from: &[&TExpr], whole: bool) -> bool {
+        let Some(root) = place_path(target) else { return true };
+        let mut srcs: Vec<(Path, bool)> = vec![];
+        for b in from {
+            if !self.prog.contains_view(&b.ty) || (whole && b.is_place() && self.prog.owning_view(&b.ty)) {
+                // (a view collection the callee may store views into the
+                // buffer of: the buffer, and what it views)
+                if whole && b.is_place() {
+                    srcs.extend(self.targets(b).into_iter().map(|(p, _)| (p, false)));
                 }
                 continue;
             }
-            let depth = self.decl_depth.get(&v).copied().unwrap_or(0);
-            self.bind_view(v, depth, srcs, false, a.e.span, st, &a.e);
+            match self.view_sources(b) {
+                Ok(s) => srcs.extend(s),
+                Err(tsp) => {
+                    self.err(Diag::new(tsp, "this temporary value is dropped at the end of the statement, but a view of it may be kept").note(None, "bind the value to a variable first: `let s = ...` and borrow from that"));
+                    return false;
+                }
+            }
+        }
+        if srcs.is_empty() {
+            return true;
+        }
+        self.check_storage(&root, target.span);
+        // stored through a reference: in what it points into (not into
+        // itself: `w = w[1..]` in `for w in &ws`)
+        let v = self.owner_of(root.0);
+        srcs.retain(|(p, _)| p.0 != v);
+        if srcs.is_empty() {
+            return true;
+        }
+        let l = &self.tf.locals[v as usize];
+        if matches!(l.kind, LocalKind::Param(Mode::Inout)) {
+            // Views of other parameters are fine: the caller learns that its
+            // variable now views those arguments (`Summ::inout`). A view of
+            // anything of this function's own would dangle.
+            let params: Vec<LocalId> = self.tf.recv.iter().copied().chain(self.tf.params.iter().copied()).collect();
+            let k = params.iter().position(|q| *q == v).unwrap_or(0);
+            let mut got = vec![];
+            for (p, _) in &srcs {
+                if p.0 == v {
+                    continue;
+                }
+                match params.iter().position(|q| *q == p.0) {
+                    Some(i) => got.push(i),
+                    None => {
+                        let (o, name) = (self.name(p), l.name.clone());
+                        self.err(Diag::new(target.span, format!("cannot store a view of `{}` in the `inout` parameter `{}`", o, name)).note(None, format!("`{}` belongs to this function and is gone when it returns, while the caller's variable would still view it; store a view of a parameter, or an owned value", o)));
+                        return true;
+                    }
+                }
+            }
+            match self.inout_got.iter_mut().find(|(j, _)| *j == k) {
+                Some((_, cur)) => {
+                    for i in got {
+                        if !cur.contains(&i) {
+                            cur.push(i);
+                        }
+                    }
+                }
+                None => self.inout_got.push((k, got)),
+            }
+            // and here, what it now views stays borrowed while it is in use
+            // (it is in use until the function returns)
+            let srcs: Vec<(Path, bool)> = srcs.into_iter().filter(|(p, _)| p.0 != v).collect();
+            for (p, _) in &srcs {
+                self.loans.push(Loan { target: p.clone(), mutable: false, holder: Some(v), span: target.span, depth: 0, returned: false, carried: false, range: None, task: false });
+            }
+            return true;
+        }
+        let depth = self.decl_depth.get(&v).copied().unwrap_or(0);
+        self.bind_view(v, depth, srcs, false, target.span, st, target);
+        true
+    }
+
+    /// A guard runs before its arm is chosen (a `select` runs them all): a
+    /// value it moved would be gone for the arm that runs instead.
+    fn guard_moves(&mut self, g: &TExpr, what: &str) {
+        let mut moved: Vec<Span> = vec![];
+        visit_expr(g, &mut |x| {
+            if let TK::Move(p) = &x.kind {
+                if p.is_place() {
+                    moved.push(x.span);
+                }
+            }
+        });
+        for sp in moved {
+            self.err(Diag::new(sp, format!("a `{}` guard can't move a value: it runs before its arm is chosen, and when it is false another arm may still use the value", what)).note(None, "borrow it in the guard, and move it in the arm's body"));
         }
     }
 
@@ -2239,18 +2730,18 @@ impl<'a> Bc<'a> {
                         self.expr(st, x);
                     }
                     if let Some(p) = place_path(base) {
-                        if !self.is_holder(p.0) {
+                        if !self.is_holder(p.0) || self.owning_holder(p.0) {
                             self.check_moved(st, &p, base.span, "modification of");
                             self.check_loans_r(&p, range.as_ref(), Acc::Mut, base.span, None);
                         }
                     }
-                    for (p, _) in self.arg_targets(base) {
+                    for (p, _) in self.mut_targets(base) {
                         accesses.push((p, Acc::Mut, a.e.span, false, range.clone()));
                     }
                 }
                 ArgMode::Inout => {
                     self.write(st, &a.e);
-                    for (p, _) in self.arg_targets(&a.e) {
+                    for (p, _) in self.mut_targets(&a.e) {
                         accesses.push((p, Acc::Mut, a.e.span, false, None));
                     }
                 }

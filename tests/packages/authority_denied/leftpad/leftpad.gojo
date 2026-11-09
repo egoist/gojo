@@ -1,0 +1,16 @@
+use std/os
+
+pub struct Opts {
+    pub fill: String = os.getenv("PAD_FILL") ?? " "
+}
+
+// Pads `s` on the left to `n` characters.
+pub fn pad(s: str, n: int) -> String {
+    let read = os.readText
+    _ = read
+    var out: String = ""
+    for _ in s.len()..n {
+        out += " "
+    }
+    return out + s
+}

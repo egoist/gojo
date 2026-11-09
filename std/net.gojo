@@ -8,6 +8,10 @@
 //           go serve(c)
 //       }
 //   }
+//
+// Under `gojo test` the network is simulated: sockets in memory, every
+// address this machine, delays and short reads decided by the test's seed,
+// and with `--faults` resets and refused dials too.
 use std/io
 
 // Errors here are io.Error; `isCancelled()` tells a cancelled call apart.

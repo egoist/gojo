@@ -1,0 +1,11 @@
+view struct Tok { text: str }
+fn main() {
+    var ts: Vec[Tok] = [Tok{text: "a"}]
+    {
+        let s = "hello world".toString()
+        ts[0].text = s.asStr()
+    }
+    let junk = "XXXXXXXXXXXXXXXXXXXXXXX".toString()
+    println(ts[0].text, junk)
+}
+// error: `s` does not live long enough: `ts` would still view it after it is dropped

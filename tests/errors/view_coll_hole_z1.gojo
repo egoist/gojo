@@ -1,0 +1,11 @@
+fn f(s: inout String, out: inout Vec[str]) {
+    out.push(s.asStr())
+    s.push("defghijklmnopqrstuvwxyz0123456789")
+}
+fn main() {
+    var s = "hello".toString()
+    var out: Vec[str] = []
+    f(&s, &out)
+    println(out)
+}
+// error: cannot modify `s` while it is borrowed by `out`

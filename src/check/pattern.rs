@@ -51,7 +51,7 @@ impl Checker {
                 TK::Field { base, .. } => {
                     let (o, m) = walk(c, cx, base)?;
                     let has_drop = match &base.ty {
-                        Ty::Adt(d, _) => c.prog.def(*d).has_drop,
+                        Ty::Adt(d, _) => c.prog.def(*d).has_drop || (c.prog.def(*d).linear && c.prog.def(*d).pkg != cx.env.pkg),
                         _ => false,
                     };
                     Some((o && !has_drop, m))

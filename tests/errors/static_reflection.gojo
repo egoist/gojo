@@ -1,0 +1,67 @@
+struct P {
+    x: int
+    name: String
+}
+
+fn bad1[T](x: T) {
+    static for f in fields(T) {
+        println(x.[g])
+        println(f.size)
+    }
+}
+
+fn bad2(n: int) {
+    static for f in fields(int) {
+        println(f.name)
+    }
+    _ = n
+}
+
+fn bad3[T](x: T) {
+    static if T: copy {
+        println(x)
+    }
+}
+
+fn bad4[T](x: T) {
+    static if let v: Vec[_] = make[T]() {
+        println(v)
+    }
+    _ = x
+}
+
+fn make[T]() -> T ! String {
+    return err("no")
+}
+
+fn parse[F](name: str, s: sink String) -> F ! String {
+    _ = name
+    _ = s
+    return err("no")
+}
+
+fn bad5(s: sink String) -> P ! String {
+    return static P{f => try parse(f.name, s)}
+}
+
+fn bad6(n: int) {
+    static if int is String {
+        println(n)
+    }
+}
+
+fn main() {
+    bad1(P{x: 1, name: "a"})
+    bad2(1)
+    bad3(1)
+    bad4(1)
+    _ = bad5("a")
+    bad6(1)
+}
+// error: `g` doesn't name a field here
+// error: a `static for` field has a `name`
+// error: `static for` goes over the fields of a struct (or a type parameter that is one), not `int`
+// error: `static if T: ...` takes `struct`, `enum`, or an interface with a type set and no methods
+// error: `static if let` looks at a variable or a field
+// error: a `static T { }` value runs once for each field, so it can't move a value declared outside it
+// error: `static if ... is` asks about a type parameter, not `int`

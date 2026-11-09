@@ -1,0 +1,31 @@
+view struct Tok {
+    a: str
+    b: str
+}
+
+fn pick[F](s: String) -> F {
+    static if F is str {
+        return s
+    } else {
+        panic("no")
+    }
+}
+
+fn build[T]() -> T {
+    let s: String = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa${1}"
+    return static T{f => pick(s)}
+}
+
+fn build2[T]() -> T {
+    let s: String = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa${1}"
+    let t: T = pick(s)
+    return t
+}
+
+fn main() {
+    let t: Tok = build()
+    println(t.a, t.b)
+    let u: str = build2()
+    println(u)
+}
+// error: `static if T is str`: the pattern can't be a view; in that arm a `T` could then be a view the borrow checker doesn't see. Match a value instead: `static if let v: str = x`

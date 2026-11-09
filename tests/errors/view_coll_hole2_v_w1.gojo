@@ -1,0 +1,9 @@
+fn main() {
+    var d: Vec[str] = []
+    var s = "hello".toString()
+    let o: ?Vec[str] = [s.asStr()]
+    if let x = o { d = x }
+    s.push("defghijklmnopqrstuvwxyz0123456789")
+    println(d)
+}
+// error: `s` does not live long enough: `d` would still view it after it is dropped

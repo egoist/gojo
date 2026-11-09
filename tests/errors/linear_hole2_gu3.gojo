@@ -1,0 +1,30 @@
+fn eat(s: sink String) -> bool {
+    println("ate", s)
+    return false
+}
+fn main() {
+    let o: ?String = some("abc" + "def")
+    match o {
+        some(s) if eat(s) => println("guard")
+        some(s) => println("second", s)
+        none => {}
+    }
+}
+
+linear struct Tx {
+    id: int
+    name: String
+
+    fn commit(sink self) {
+        println("commit", self.id)
+    }
+
+    fn rollback(sink self) {
+        println("rollback", self.id)
+    }
+}
+
+fn begin(id: int) -> Tx {
+    return Tx{id: id, name: "tx" + "{id}"}
+}
+// error: a `match` guard can't move a value: it runs before its arm is chosen, and when it is false another arm may still use the value
