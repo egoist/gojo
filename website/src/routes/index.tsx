@@ -79,6 +79,9 @@ function Home() {
             <Link to="/docs/$" params={{ _splat: "tour" }} class={`${button.primary} h-11 px-5`}>
               Take the tour <ArrowRightIcon />
             </Link>
+            <Link to="/docs/$" params={{ _splat: "why-gojo" }} class={`${button.outline} h-11 px-5`}>
+              Why Gojo?
+            </Link>
           </div>
         </div>
       </section>

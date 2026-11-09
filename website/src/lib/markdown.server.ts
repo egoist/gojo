@@ -41,7 +41,7 @@ let highlighter: Promise<Highlighter> | undefined
 function getHighlighter() {
   highlighter ??= createHighlighter({
     themes: Object.values(themes),
-    langs: [gojoGrammar, "sh", "toml", "c", "json"],
+    langs: [gojoGrammar, "sh", "toml", "c", "json", "rust", "go"],
   })
   return highlighter
 }

@@ -1,6 +1,6 @@
 # Gojo
 
-**Documentation:** [A tour of Gojo](docs/tour.md) · [Standard library reference](docs/std/README.md) · [Language reference](docs/spec.md) · [Design notes](docs/design.md) · [Packages](docs/packages.md)
+**Documentation:** [Why Gojo](docs/why-gojo.md) · [A tour of Gojo](docs/tour.md) · [Standard library reference](docs/std/README.md) · [Language reference](docs/spec.md) · [Design notes](docs/design.md) · [Packages](docs/packages.md)
 
 Gojo is a small, fast-compiling systems programming language with no garbage collector and no nil. Ownership (without lifetime annotations) frees memory and rules out data races; errors are values (`T ! E`, `try`, `errdefer`); concurrency is structured (`scope`, `go`, channels, cancellation). It takes ideas from Rust, Zig, Swift, Kotlin and Go without following any of them.
 
