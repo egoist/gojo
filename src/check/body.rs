@@ -836,6 +836,10 @@ impl Checker {
                 };
                 Some(PInfo { root: Some(*id), owned, mutable, desc: format!("{} `{}`", what, l.name) })
             }
+            TK::StaticField { base, .. } => {
+                let b = self.place_info(cx, base)?;
+                Some(PInfo { root: b.root, owned: false, mutable: b.mutable, desc: format!("a `static for` field of {}", b.desc) })
+            }
             TK::Field { base, index } => {
                 let b = self.place_info(cx, base)?;
                 let bty = &base.ty;
@@ -2258,6 +2262,10 @@ impl Checker {
                     return TExpr::error(sp);
                 };
                 let b = self.expr(cx, base, None);
+                if !b.is_place() && !b.ty.is_error() {
+                    self.err(base.span, format!("`.[{}]` reads a field of a variable (or of a field): bind the value first (`let v = ...`)", name));
+                    return TExpr::error(sp);
+                }
                 let bt = self.resolve(cx, &b.ty);
                 if !self.unify(cx, &bt, &owner) {
                     let (x, y) = (self.prog.show(&bt), self.prog.show(&owner));
@@ -4693,6 +4701,13 @@ impl Checker {
                     return TExpr::error(sp);
                 };
                 let (pt, binders) = self.static_pattern_binders(pat, &env);
+                // a view would let generic code make a view (of its own local,
+                // as a `T`) that the borrow checker can't follow
+                if self.prog.contains_view(&pt) {
+                    let s = self.prog.show(&pt);
+                    self.err(pat.span, format!("`static if T is {}`: the pattern can't be a view; in that arm a `T` could then be a view the borrow checker doesn't see. Match a value instead: `static if let v: {} = x`", s, s));
+                    return TExpr::error(sp);
+                }
                 // in the arm, `T` is the pattern's type, and its names are types
                 cx.type_eqs.push((p, pt.clone()));
                 let saved = cx.env.tparams.clone();
@@ -4752,6 +4767,14 @@ impl Checker {
             }
             match &te.kind {
                 TypeExprKind::Option(a) | TypeExprKind::Slice(a) | TypeExprKind::Ptr(a) | TypeExprKind::Array(_, a) => collect(c, a, env, out),
+                TypeExprKind::Func { params, ret, .. } => {
+                    for (_, p) in params {
+                        collect(c, p, env, out);
+                    }
+                    if let Some(r) = ret {
+                        collect(c, r, env, out);
+                    }
+                }
                 TypeExprKind::Result(a, b) => {
                     collect(c, a, env, out);
                     collect(c, b, env, out);
@@ -4770,7 +4793,25 @@ impl Checker {
         for (n, t) in &binders {
             env2.tparams.insert(n.clone(), t.clone());
         }
-        (self.static_pattern_type(te, &env2), binders)
+        let pt = self.static_pattern_type(te, &env2);
+        // a map's keys are hashable, wherever they are bound
+        let keys: Vec<TParamId> = {
+            let mut v = vec![];
+            pt.walk(&mut |x| {
+                if let Ty::Map(k, _) = x {
+                    if let Ty::Param(p) = &**k {
+                        v.push(*p);
+                    }
+                }
+            });
+            v
+        };
+        for p in keys {
+            if binders.iter().any(|(_, b)| *b == Ty::Param(p)) && !self.prog.tparams[p as usize].bounds.iter().any(|b| matches!(b, Bound::Cap(Cap::Hash))) {
+                self.prog.tparams[p as usize].bounds.push(Bound::Cap(Cap::Hash));
+            }
+        }
+        (pt, binders)
     }
 
     fn static_pattern_type(&mut self, te: &TypeExpr, env: &TyEnv) -> Ty {
@@ -4826,14 +4867,26 @@ impl Checker {
         let v = self.coerce(cx, v, &Ty::Param(fp), Use::Value);
         cx.static_fields.pop();
         let mut moved = None;
-        visit_expr(&v, &mut |x| {
-            if let TK::Move(p) = &x.kind {
+        visit_expr(&v, &mut |x| match &x.kind {
+            TK::Move(p) => {
                 if let Some(l) = crate::tir::root_local(p) {
                     if l < first_local {
                         moved.get_or_insert(x.span);
                     }
                 }
             }
+            // an arm that moves out of an outer value (`match s { v => v }`)
+            TK::Match { scrut, owned: true, arms } if arms.iter().any(|a| a.consuming) => {
+                if crate::tir::root_local(scrut).is_some_and(|l| l < first_local) {
+                    moved.get_or_insert(x.span);
+                }
+            }
+            TK::Closure(c) if c.owned || c.captures.iter().any(|(_, u)| *u == CapUse::Move) => {
+                if c.captures.iter().any(|(l, _)| *l < first_local) {
+                    moved.get_or_insert(x.span);
+                }
+            }
+            _ => {}
         });
         if let Some(msp) = moved {
             self.err(msp, "a `static T { }` value runs once for each field, so it can't move a value declared outside it");

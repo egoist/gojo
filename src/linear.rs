@@ -179,6 +179,25 @@ fn mentioned_locals(b: &TBlock) -> HashSet<LocalId> {
     out
 }
 
+/// Whether evaluating `e` may leave the enclosing code early: a `try`, or a
+/// `return`, `break` or `continue` inside it.
+fn may_leave(e: &TExpr) -> bool {
+    let mut found = false;
+    walk_expr(e, &mut |n| match n {
+        Node::Expr(x) => {
+            if matches!(x.kind, TK::Try { .. }) {
+                found = true;
+            }
+        }
+        Node::Stmt(st) => {
+            if matches!(st, TStmt::Return(..) | TStmt::Break(..) | TStmt::Continue(..)) {
+                found = true;
+            }
+        }
+    });
+    found
+}
+
 /// A state as a key: its paths in order, with whether each is only `Maybe`
 /// (an unreachable state has none).
 fn canon(st: &St) -> Vec<(Path, bool)> {
@@ -1189,6 +1208,18 @@ impl<'a, 's> Lin<'a, 's> {
                 }
             }
             TK::Call { args, .. } | TK::Intrinsic { args, .. } => {
+                // (only what is passed by value is held by the call; any later
+                // argument may leave)
+                let parts: Vec<&TExpr> = args.iter().map(|a| &a.e).collect();
+                let held: Vec<bool> = args.iter().map(|a| a.mode == ArgMode::Value).collect();
+                self.early_exit_after_k(&parts, &held);
+                if let TK::Intrinsic { name, targs, args } = &e.kind {
+                    // `static T{f => try ...}`: a failing field drops the built ones
+                    if name == "static_build" && targs.first().is_some_and(|t| self.lin(t)) && args.first().is_some_and(|a| may_leave(&a.e)) {
+                        let d = Diag::new(e.span, format!("a field's `try` here may leave after earlier fields of the linear `{}` were built, and they would be dropped", self.show(&targs[0]))).note(None, "compute the fields that can fail first, in variables");
+                        self.err(d);
+                    }
+                }
                 for a in args {
                     let c = if a.mode == ArgMode::Value { Ctx::Consumed } else { Ctx::Borrowed };
                     self.expr(st, &a.e, c);
@@ -1274,12 +1305,16 @@ impl<'a, 's> Lin<'a, 's> {
                 self.rvalue(e, ctx);
             }
             TK::StructLit { fields: xs, .. } | TK::EnumLit { args: xs, .. } | TK::VecLit(xs) | TK::ArrayLit(xs) => {
+                let parts: Vec<&TExpr> = xs.iter().collect();
+                self.early_exit_after(&parts);
                 for x in xs {
                     self.expr(st, x, Ctx::Consumed);
                 }
                 self.rvalue(e, ctx);
             }
             TK::MapLit(ps) => {
+                let parts: Vec<&TExpr> = ps.iter().flat_map(|(k, v)| [k, v]).collect();
+                self.early_exit_after(&parts);
                 for (k, v) in ps {
                     self.expr(st, k, Ctx::Consumed);
                     self.expr(st, v, Ctx::Consumed);
@@ -1408,6 +1443,28 @@ impl<'a, 's> Lin<'a, 's> {
         }
         if e.ty == Ty::Never {
             *st = St::unreachable();
+        }
+    }
+
+    /// Parts of one expression evaluated in order (a literal's elements, a
+    /// call's arguments): a linear value made by one is held only by the
+    /// expression until it is done, so a later part that may leave early (a
+    /// `try`) would drop it.
+    fn early_exit_after(&mut self, parts: &[&TExpr]) {
+        let held = vec![true; parts.len()];
+        self.early_exit_after_k(parts, &held);
+    }
+
+    fn early_exit_after_k(&mut self, parts: &[&TExpr], held: &[bool]) {
+        for (i, x) in parts.iter().enumerate() {
+            if !held[i] || !self.lin(&x.ty) || self.linear_free(x) {
+                continue;
+            }
+            if let Some(later) = parts[i + 1..].iter().find(|y| may_leave(y)) {
+                let d = Diag::new(later.span, format!("if this may leave early (a `try` failing), the linear `{}` made before it in the same expression is dropped", self.show(&x.ty))).note(Some(x.span), "made here").note(None, "compute what can fail first: `let n = try ...`, then build the value");
+                self.err(d);
+                return;
+            }
         }
     }
 

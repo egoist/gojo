@@ -1,0 +1,12 @@
+struct P { a: String }
+
+fn mk() -> P {
+    return P{a: "a string long enough to live on the heap ${1}"}
+}
+
+fn main() {
+    static for f in fields(P) {
+        println(mk().[f])
+    }
+}
+// error: `.[f]` reads a field of a variable (or of a field): bind the value first (`let v = ...`)

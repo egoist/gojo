@@ -485,9 +485,11 @@ fn parse[F](text: ?str, name: str) -> F ! String {
   - `static if let v: P = x`: `x` (a variable or a field) has the shape of the type pattern `P`, where `_` matches any type (`Vec[_]`, `?_`, `Map[_, _]`, `String`, `bool`); `v` is `x` seen as that type.
   - `static if T is P`: the type parameter `T` has the shape `P`, and in the arm `T` *is* `P`: a `String` can be returned as a `T`. A name in `P` that isn't a type (`Vec[E]`, `?E`) stands for any type and names it in the arm.
   - `else static if ...` chains, and a final `else`. A chain where every arm leaves (returns) leaves.
-- A `static for` or `static T{}` whose type isn't a struct in some instance is an error where that instance is built; guard such code with `static if T: struct`.
+- A `static for` or `static T{}` whose type isn't a struct in some instance is an error where that instance is built; guard such code with `static if T: struct`. A newtype is not a struct.
+- **Privacy**: outside the package that declares a type, `static for` goes over its public fields only, and `static T{}` can't build a type with private fields (or a view struct, whose views would come from nowhere the borrow checker sees).
+- **What can't happen through it**: a `static if T is P` pattern can't be a view (in that arm generic code could make a view as a `T` the borrow checker doesn't see; match a value with `static if let` instead); `x.[f]` needs a variable or a field (`mk().[f]` is an error); a `static T{}` value can't move anything declared outside it, also through a `match` or a closure; and a linear value made earlier in the same expression as a `try` that may fail is an error (it would be dropped).
 
-Tests: `run/static_reflection`, `errors/static_reflection`.
+Tests: `run/static_reflection`, `run/static_shapes`, `errors/static_reflection`, `errors/static_hole_*`.
 
 ## 10. Concurrency
 

@@ -313,6 +313,9 @@ pub struct FieldInfo {
     pub ty: Ty,
     pub default: Option<TExpr>,
     pub is_pub: bool,
+    /// Declared `pub` (`is_pub` also holds for every field of a standard
+    /// library type, which the standard library's modules share).
+    pub declared_pub: bool,
     pub embedded: bool,
     pub span: Span,
 }

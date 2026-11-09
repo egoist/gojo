@@ -1,0 +1,50 @@
+fn mu[T](_x: T) -> str {
+    static if T is Mutex[E] {
+        return "mutex"
+    } else {
+        return "no"
+    }
+}
+
+fn mu2[T](x: T) -> str {
+    static if let _m: Mutex[_] = x {
+        return "mutex"
+    } else {
+        return "no"
+    }
+}
+
+fn we[T](_x: T) -> str {
+    static if T is Weak[E] {
+        return "weak"
+    } else {
+        return "no"
+    }
+}
+
+fn se[T](_x: T) -> str {
+    static if T is Sender[E] {
+        return "sender"
+    } else static if T is Receiver[E] {
+        return "receiver"
+    } else {
+        return "no"
+    }
+}
+
+fn fu[T](_x: T) -> str {
+    static if T is fn(int) -> int {
+        return "fn"
+    } else {
+        return "no"
+    }
+}
+
+fn main() {
+    println(mu(Mutex(1)), mu2(Mutex(1)))
+    let r = Rc(1)
+    println(we(r.downgrade()))
+    let ch = Chan[int](1)
+    println(se(ch.tx), se(ch.rx))
+    println(fu((x: int) => x + 1))
+}

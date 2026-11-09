@@ -248,14 +248,14 @@ impl Checker {
                         }
                         let ty = self.resolve_type(&f.ty, &env);
                         self.check_field_view(id, &ty, f.ty.span, &f.name);
-                        fields.push(FieldInfo { name: f.name.clone(), ty, default: None, is_pub: f.is_pub || self.prog.packages[self.prog.def(id).pkg as usize].is_std, embedded: f.embedded, span: f.span });
+                        fields.push(FieldInfo { name: f.name.clone(), ty, default: None, is_pub: f.is_pub || self.prog.packages[self.prog.def(id).pkg as usize].is_std, declared_pub: f.is_pub, embedded: f.embedded, span: f.span });
                     }
                     self.prog.types[id as usize].kind = TypeDefKind::Struct { fields };
                 }
                 ast::ItemKind::TypeAlias { ty, .. } => {
                     let t = self.resolve_type(ty, &env);
                     let is_copy = self.is_copy(&t);
-                    self.prog.types[id as usize].kind = TypeDefKind::Struct { fields: vec![FieldInfo { name: "value".into(), ty: t, default: None, is_pub: true, embedded: false, span: item.span }] };
+                    self.prog.types[id as usize].kind = TypeDefKind::Struct { fields: vec![FieldInfo { name: "value".into(), ty: t, default: None, is_pub: true, declared_pub: false, embedded: false, span: item.span }] };
                     self.prog.types[id as usize].is_copy = is_copy;
                 }
                 ast::ItemKind::Enum(e) => {

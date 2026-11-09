@@ -502,7 +502,8 @@ impl<'a> Gen<'a> {
             Ty::Scope => "Scope".into(),
             Ty::Ptr(a) => format!("Ptr_{}", self.mangle(a)),
             Ty::Func(f) => {
-                let mut s = "Fn".to_string();
+                // (`send fn` and `fn` are different types: their instances too)
+                let mut s = if f.send { "SFn".to_string() } else { "Fn".to_string() };
                 for (m, p) in &f.params {
                     let _ = write!(s, "_{}{}", match m {
                         Mode::Borrow => "",
@@ -2115,12 +2116,18 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
             let owner = self.sub(fs, &iter.ty);
             let Some(TExpr { kind: TK::ConstParam(fp), .. }) = hi else { unreachable!() };
             let fp = *fp;
+            let here = self.prog.func(fs.tf.func).pkg;
             let fields = match &owner {
-                Ty::Adt(d, args) if self.prog.def(*d).is_struct() => self.prog.field_tys(*d, args),
+                Ty::Adt(d, args) if self.prog.def(*d).is_struct() && !self.prog.def(*d).newtype => {
+                    // outside the type's package, only its public fields
+                    let def = self.prog.def(*d);
+                    let vis: Vec<bool> = def.fields().iter().map(|f| f.declared_pub || def.pkg == here || def.tuple).collect();
+                    self.prog.field_tys(*d, args).into_iter().zip(vis).filter(|(_, v)| *v).map(|(f, _)| f).collect()
+                }
                 _ => {
                     if self.static_err.is_none() {
                         let l = self.sm.file(span.file).line_col(span.lo);
-                        self.static_err = Some(format!("{}:{}:{}: `static for` over `{}`, which isn't a struct: guard it with `static if T: struct`", self.sm.file(span.file).path, l.0, l.1, self.prog.show(&owner)));
+                        self.static_err = Some(format!("{}:{}:{}: `static for` over `{}` (in `{}`), which isn't a struct: guard it with `static if T: struct`", self.sm.file(span.file).path, l.0, l.1, self.prog.show(&owner), self.prog.func(fs.tf.func).name));
                     }
                     vec![]
                 }
@@ -2861,9 +2868,25 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
             }
             TK::ArrayLit(xs) => {
                 let c = self.cty(&t);
+                let el = match &t {
+                    Ty::Array(e, _) => (**e).clone(),
+                    _ => Ty::Unit,
+                };
                 let mut vals = vec![];
-                for x in xs {
-                    vals.push(self.expr(fs, x));
+                let mut held = vec![];
+                for (i, x) in xs.iter().enumerate() {
+                    let v = self.expr(fs, x);
+                    let v = if xs[i + 1..].iter().any(may_leave) {
+                        let (v, flag) = self.hold(fs, &v, &el);
+                        held.extend(flag);
+                        v
+                    } else {
+                        v
+                    };
+                    vals.push(v);
+                }
+                for f in held {
+                    self.emit(fs, &format!("{} = 0;", f));
                 }
                 let n = self.tmp();
                 self.emit(fs, &format!("{} {} = {{ .a = {{ {} }} }};", c, n, vals.join(", ")));
@@ -2876,12 +2899,28 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
                 };
                 let n = self.tmp();
                 self.emit(fs, &format!("gojo_map {} = {{0}};", n));
+                let mut held_map: Option<String> = None;
+                // (dropped if a later key's or value's `try` leaves first)
+                if pairs.iter().any(|(a, b)| may_leave(a) || may_leave(b)) {
+                    let mt = Ty::Map(std::rc::Rc::new(k.clone()), std::rc::Rc::new(v.clone()));
+                    let flag = format!("{}_held", n);
+                    self.emit(fs, &format!("bool {} = 1;", flag));
+                    self.register(fs, Cl::DropFlag(n.clone(), mt, flag.clone()));
+                    held_map = Some(flag);
+                }
                 for (ke, ve) in pairs {
                     let kv = self.expr(fs, ke);
+                    let (kv, kflag) = if may_leave(ve) { self.hold(fs, &kv, &k) } else { (kv, None) };
                     let vv = self.expr(fs, ve);
+                    if let Some(f) = kflag {
+                        self.emit(fs, &format!("{} = 0;", f));
+                    }
                     let old = self.map_insert(fs, &format!("&{}", n), &k, &v, &kv, &vv);
                     let ot = Ty::opt(v.clone());
                     self.discard(fs, &old, &ot, false);
+                }
+                if let Some(f) = held_map {
+                    self.emit(fs, &format!("{} = 0;", f));
                 }
                 n
             }
@@ -4786,7 +4825,8 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
         let t = self.sub(fs, &targs[0]);
         if let Some(k) = name.strip_prefix("static_if:kind:") {
             return match &t {
-                Ty::Adt(d, _) => if k == "struct" { self.prog.def(*d).is_struct() } else { matches!(self.prog.def(*d).kind, TypeDefKind::Enum { .. }) },
+                // (a newtype is its own kind of type, not a struct)
+                Ty::Adt(d, _) => if k == "struct" { self.prog.def(*d).is_struct() && !self.prog.def(*d).newtype } else { matches!(self.prog.def(*d).kind, TypeDefKind::Enum { .. }) },
                 _ => false,
             };
         }
@@ -4808,7 +4848,9 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
                         true
                     }
                 },
-                (Ty::Vec(a), Ty::Vec(b)) | (Ty::Slice(a), Ty::Slice(b)) | (Ty::Option(a), Ty::Option(b)) | (Ty::Box(a), Ty::Box(b)) | (Ty::Rc(a), Ty::Rc(b)) | (Ty::Arc(a), Ty::Arc(b)) | (Ty::Cell(a), Ty::Cell(b)) | (Ty::Ptr(a), Ty::Ptr(b)) => bind(a, b, fs, binds),
+                (Ty::Vec(a), Ty::Vec(b)) | (Ty::Slice(a), Ty::Slice(b)) | (Ty::Option(a), Ty::Option(b)) | (Ty::Box(a), Ty::Box(b)) | (Ty::Rc(a), Ty::Rc(b)) | (Ty::Arc(a), Ty::Arc(b)) | (Ty::Cell(a), Ty::Cell(b)) | (Ty::Ptr(a), Ty::Ptr(b)) | (Ty::Weak(a), Ty::Weak(b)) | (Ty::Mutex(a), Ty::Mutex(b)) | (Ty::MutexRef(a), Ty::MutexRef(b)) | (Ty::Sender(a), Ty::Sender(b)) | (Ty::Receiver(a), Ty::Receiver(b)) | (Ty::Task(a), Ty::Task(b)) | (Ty::Iso(a), Ty::Iso(b)) => bind(a, b, fs, binds),
+                // (a function matches whether or not it is a `send fn`)
+                (Ty::Func(f), Ty::Func(g)) => f.params.len() == g.params.len() && f.params.iter().zip(g.params.iter()).all(|((m1, x), (m2, y))| m1 == m2 && bind(x, y, fs, binds)) && bind(&f.ret, &g.ret, fs, binds),
                 (Ty::Array(a, n), Ty::Array(b, m)) => n == m && bind(a, b, fs, binds),
                 (Ty::Map(a, b), Ty::Map(c, d)) | (Ty::Result(a, b), Ty::Result(c, d)) => bind(a, c, fs, binds) && bind(b, d, fs, binds),
                 (Ty::Adt(d1, a1), Ty::Adt(d2, a2)) => d1 == d2 && a1.len() == a2.len() && a1.iter().zip(a2.iter()).all(|(x, y)| bind(x, y, fs, binds)),
@@ -4825,12 +4867,18 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
                 let t = self.sub(fs, &_targs[0]);
                 let Ty::Param(fp) = &_targs[1] else { unreachable!() };
                 let fp = *fp;
+                let here = self.prog.func(fs.tf.func).pkg;
                 let fields = match &t {
-                    Ty::Adt(d, a) if self.prog.def(*d).is_struct() => self.prog.field_tys(*d, a),
+                    Ty::Adt(d, a) if self.prog.def(*d).is_struct() && !self.prog.def(*d).newtype && !self.prog.def(*d).view && (self.prog.def(*d).pkg == here || self.prog.def(*d).tuple || self.prog.def(*d).fields().iter().all(|f| f.declared_pub)) => self.prog.field_tys(*d, a),
                     _ => {
                         if self.static_err.is_none() {
                             let l = self.sm.file(_sp.file).line_col(_sp.lo);
-                            self.static_err = Some(format!("{}:{}:{}: `static {} {{ }}` builds a struct, and `{}` isn't one: guard it with `static if T: struct`", self.sm.file(_sp.file).path, l.0, l.1, self.prog.show(&t), self.prog.show(&t)));
+                            let why = match &t {
+                                Ty::Adt(d, _) if self.prog.def(*d).view => "is a view struct (its views would come from nowhere the borrow checker sees)",
+                                Ty::Adt(d, _) if self.prog.def(*d).is_struct() && !self.prog.def(*d).newtype => "has fields private to its package",
+                                _ => "isn't a struct: guard it with `static if T: struct`",
+                            };
+                            self.static_err = Some(format!("{}:{}:{}: `static {} {{ }}` (in `{}`) can't build it: `{}` {}", self.sm.file(_sp.file).path, l.0, l.1, self.prog.show(&t), self.prog.func(fs.tf.func).name, self.prog.show(&t), why));
                         }
                         return self.zero(&t);
                     }
@@ -4948,6 +4996,15 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
                 let pieces = crate::fmtspec::parse(&tmpl).unwrap_or_default();
                 let b = self.tmp();
                 self.emit(fs, &format!("gojo_string {} = {{0}};", b));
+                // (dropped if an argument's `try` leaves before it is done)
+                let held = if args[1..].iter().any(|a| may_leave(&a.e)) {
+                    let flag = format!("{}_held", b);
+                    self.emit(fs, &format!("bool {} = 1;", flag));
+                    self.register(fs, Cl::DropFlag(b.clone(), Ty::String, flag.clone()));
+                    Some(flag)
+                } else {
+                    None
+                };
                 let mut next = 1;
                 for p in pieces {
                     match p {
@@ -4984,6 +5041,9 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
                             }
                         }
                     }
+                }
+                if let Some(f) = held {
+                    self.emit(fs, &format!("{} = 0;", f));
                 }
                 if name == "fmt.printf" {
                     self.emit(fs, &format!("gojo_write(1, &{});", b));

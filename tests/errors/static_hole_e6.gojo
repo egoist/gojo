@@ -1,0 +1,39 @@
+linear struct Tx {
+    id: int
+
+    fn commit(sink self) {
+        println("commit", self.id)
+    }
+}
+
+linear struct Pair {
+    t: Tx
+    n: int
+}
+
+fn num(fail: bool) -> int ! String {
+    if fail {
+        return err("fail")
+    }
+    return 5
+}
+
+fn mk(fail: bool) -> Pair ! String {
+    let v: Vec[Tx] = [Tx{id: 1}, Tx{id: try num(fail)}]
+    var w = v
+    loop {
+        let t = w.pop() else { break }
+        t.commit()
+    }
+    w.finish()
+    return Pair{t: Tx{id: 2}, n: 0}
+}
+
+fn main() {
+    let p = mk(true) catch e {
+        println(e)
+        return
+    }
+    p.t.commit()
+}
+// error: if this may leave early (a `try` failing), the linear `Tx` made before it in the same expression is dropped
