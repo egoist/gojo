@@ -627,7 +627,7 @@ Puts `value` into `dst` and returns what was there.
 ### take
 
 ```gojo
-pub fn take[T: default](dst: inout T) -> T
+pub fn take[T: default + any](dst: inout T) -> T
 ```
 
 Takes the value out of `dst`, leaving the type's default (`""`, `0`, `none`,
@@ -770,7 +770,7 @@ let port = try env.get("PORT").okOr(ConfigError.Missing("PORT"))
 #### T ! E.isOk
 
 ```gojo
-pub fn isOk(self) -> bool
+pub fn isOk(self) -> bool where T: any, E: any
 ```
 
 Whether this is a value rather than an error.
@@ -778,7 +778,7 @@ Whether this is a value rather than an error.
 #### T ! E.isErr
 
 ```gojo
-pub fn isErr(self) -> bool
+pub fn isErr(self) -> bool where T: any, E: any
 ```
 
 Whether this is an error.
@@ -1928,7 +1928,7 @@ The index of the first element equal to `x`.
 #### []T.map
 
 ```gojo
-pub fn map[U](self, f: fn(T) -> U) -> Vec[U]
+pub fn map[U](self, f: fn(T) -> U) -> Vec[U] where T: any
 ```
 
 `f` applied to each element, in order.
@@ -2330,7 +2330,7 @@ order) and takes O(n log n) time.
 #### Vec[T].sortBy
 
 ```gojo
-pub fn sortBy(inout self, less: fn(T, T) -> bool)
+pub fn sortBy(inout self, less: fn(T, T) -> bool) where T: any
 ```
 
 Sorts by `less(a, b)`: true when `a` goes before `b`. Stable.

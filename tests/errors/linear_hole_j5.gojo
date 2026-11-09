@@ -1,0 +1,29 @@
+linear struct Tx {
+    id: int
+    name: String
+
+    fn commit(sink self) {
+        println("commit", self.id)
+    }
+
+    fn rollback(sink self) {
+        println("rollback", self.id)
+    }
+}
+
+fn begin(id: int) -> Tx {
+    return Tx{id: id, name: "tx" + "{id}"}
+}
+fn main() {
+    var o: ?Tx = some(begin(1))
+    match o {
+        some(t) => {
+            t = begin(2)
+        }
+        none => {}
+    }
+    if let t = o {
+        t.commit()
+    }
+}
+// error: assigning here drops the linear `Tx` that was there

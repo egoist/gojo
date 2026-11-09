@@ -31,7 +31,7 @@ use crate::types::*;
 use crate::ast::Mode;
 use std::collections::{HashMap, HashSet};
 
-type Path = (LocalId, Vec<usize>);
+pub type Path = (LocalId, Vec<usize>);
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum S {
@@ -105,7 +105,7 @@ pub fn check(prog: &Program, tfuncs: &[TFunc]) -> Vec<Diag> {
         }
     }
     for tf in tfuncs {
-        let mut l = Lin { prog, tf, diags: vec![], seen: &mut seen, scopes: vec![], loops: vec![], suppress: 0, exempt: None };
+        let mut l = Lin { prog, tf, diags: vec![], seen: &mut seen, scopes: vec![], loops: vec![], suppress: 0, exempt: None, cap_ref: HashSet::new(), lin_cache: HashMap::new(), memo: HashMap::new() };
         l.wf_func();
         l.func();
         diags.extend(l.diags);
@@ -113,26 +113,44 @@ pub fn check(prog: &Program, tfuncs: &[TFunc]) -> Vec<Diag> {
     diags
 }
 
-/// The linear locals a `defer` body consumes that it doesn't declare itself:
-/// the defer runs only while they hold their value (at most one is allowed).
-pub fn defer_guards(prog: &Program, tf: &TFunc, b: &TBlock) -> Vec<LocalId> {
-    let mut declared = HashSet::new();
-    walk_block(b, &mut |n| {
-        if let Node::Stmt(TStmt::Let { local, .. } | TStmt::LetRef { local, .. }) = n {
-            declared.insert(*local);
+/// The linear values (places rooted at variables declared before it) a
+/// `defer` body consumes: the defer runs only while such a place still holds
+/// all of its value (at most one is allowed). Moves count, and so does a
+/// `match` (`if let`) that moves out of the place.
+pub fn defer_guards(prog: &Program, tf: &TFunc, b: &TBlock) -> Vec<Path> {
+    let inside = |l: LocalId| {
+        let sp = tf.locals[l as usize].span;
+        sp.file == b.span.file && b.span.lo <= sp.lo && sp.hi <= b.span.hi
+    };
+    let mut out: Vec<Path> = vec![];
+    let add = |p: Path, out: &mut Vec<Path>| {
+        if !out.contains(&p) {
+            out.push(p);
         }
-    });
-    let mut out = vec![];
-    visit_block(b, &mut |e| {
-        if let TK::Move(p) = &e.kind {
-            if let Some((l, _)) = place_path(p) {
-                if !declared.contains(&l) && prog.is_linear(&tf.locals[l as usize].ty) && !out.contains(&l) {
-                    out.push(l);
+    };
+    visit_block(b, &mut |e| match &e.kind {
+        TK::Move(x) if prog.is_linear(&x.ty) => {
+            if let Some(p) = place_path(x) {
+                if !inside(p.0) {
+                    add(p, &mut out);
                 }
             }
         }
+        TK::Match { scrut, owned: true, arms } if arms.iter().any(|a| a.consuming) && prog.is_linear(&scrut.ty) => {
+            if let Some(p) = place_path(scrut) {
+                if !inside(p.0) {
+                    add(p, &mut out);
+                }
+            }
+        }
+        _ => {}
     });
     out
+}
+
+/// Whether one path is a prefix of the other (they share storage).
+pub fn paths_overlap(a: &Path, b: &Path) -> bool {
+    a.0 == b.0 && (a.1.starts_with(&b.1) || b.1.starts_with(&a.1))
 }
 
 /// A place rooted at a local, through struct fields only.
@@ -146,6 +164,17 @@ fn place_path(e: &TExpr) -> Option<Path> {
         }
         _ => None,
     }
+}
+
+/// A state as a key: its paths in order, with whether each is only `Maybe`
+/// (an unreachable state has none).
+fn canon(st: &St) -> Vec<(Path, bool)> {
+    if !st.reachable {
+        return vec![((u32::MAX, vec![]), false)];
+    }
+    let mut v: Vec<(Path, bool)> = st.m.iter().map(|(p, s)| (p.clone(), *s == S::Maybe)).collect();
+    v.sort();
+    v
 }
 
 fn is_error_value(e: &TExpr) -> bool {
@@ -168,6 +197,12 @@ struct Lin<'a, 's> {
     /// The `sink self` of a linear enum's own method: it is taken apart
     /// here, so matching it on a variant with no linear payload ends it.
     exempt: Option<LocalId>,
+    /// In a closure body: the outer variables it borrows (reads or changes
+    /// in place). Assigning one drops what it held.
+    cap_ref: HashSet<LocalId>,
+    lin_cache: HashMap<usize, bool>,
+    /// Loops already run (while nothing is reported) by entry state.
+    memo: HashMap<(u32, Vec<(Path, bool)>), (St, Vec<(usize, bool, St)>)>,
 }
 
 impl<'a, 's> Lin<'a, 's> {
@@ -220,6 +255,7 @@ impl<'a, 's> Lin<'a, 's> {
 
     fn path_name(&self, p: &Path) -> String {
         let mut s = self.tf.locals[p.0 as usize].name.clone();
+
         let mut t = self.tf.locals[p.0 as usize].ty.clone();
         for &i in &p.1 {
             if let Ty::Adt(d, args) = &t {
@@ -587,7 +623,8 @@ impl<'a, 's> Lin<'a, 's> {
             let ty = self.path_ty(&p);
             let name = self.path_name(&p);
             let state = if s == S::Maybe { "may not be consumed on every path" } else { "is not consumed" };
-            let msg = format!("`{}` {}: the linear `{}` would be dropped {}", name, state, self.show(&ty), wher);
+            let who = if l.name.starts_with("__") && p.1.is_empty() { "this value".to_string() } else { format!("`{}`", name) };
+            let msg = format!("{} {}: the linear `{}` would be dropped {}", who, state, self.show(&ty), wher);
             let d = if at_decl {
                 Diag::new(l.span, msg).note(Some(sp), wher.to_string())
             } else {
@@ -635,7 +672,7 @@ impl<'a, 's> Lin<'a, 's> {
     fn refill(&mut self, st: &mut St, p: &Path) {
         // only what this function owns: an `inout` parameter or a reference
         // is its caller's to consume
-        if !st.reachable || !matches!(self.tf.locals[p.0 as usize].kind, LocalKind::Let | LocalKind::Var | LocalKind::Param(Mode::Sink)) {
+        if !st.reachable || !matches!(self.tf.locals[p.0 as usize].kind, LocalKind::Let | LocalKind::Var | LocalKind::Param(Mode::Sink)) || self.cap_ref.contains(&p.0) {
             return;
         }
         if st.m.keys().any(|q| q.0 == p.0 && (q.1.len() <= p.1.len() && p.1[..q.1.len()] == q.1[..])) {
@@ -686,23 +723,30 @@ impl<'a, 's> Lin<'a, 's> {
     fn run_defer(&mut self, st: &mut St, b: &'a TBlock) {
         let guards = defer_guards(self.prog, self.tf, b);
         if guards.len() == 1 {
-            let g = guards[0];
-            let has: Vec<S> = st.m.iter().filter(|(p, _)| p.0 == g).map(|(_, s)| *s).collect();
-            if has.is_empty() {
+            let g = guards[0].clone();
+            let over: Vec<(Path, S)> = st.m.iter().filter(|(p, _)| paths_overlap(p, &g)).map(|(p, s)| (p.clone(), *s)).collect();
+            if over.is_empty() {
                 return; // consumed already: the defer doesn't run
             }
-            if has.len() == 1 && has[0] == S::Live && st.m.contains_key(&(g, vec![])) {
-                self.block(st, b, Ctx::Discarded);
-                return;
-            }
+            // it runs where all of `g` is there; where part of it was taken
+            // (or all of it), it doesn't
+            let whole = over.len() == 1 && over[0].1 == S::Live && g.1.starts_with(&over[0].0 .1);
             let mut run = st.clone();
-            run.m.retain(|p, _| p.0 != g);
-            run.m.insert((g, vec![]), S::Live);
+            run.m.retain(|p, _| !(paths_overlap(p, &g) && p.1.len() > g.1.len()));
+            if !run.m.keys().any(|p| p.0 == g.0 && g.1.starts_with(&p.1)) {
+                run.m.insert(g.clone(), S::Live);
+            }
             self.block(&mut run, b, Ctx::Discarded);
-            let mut skip = st.clone();
-            skip.m.retain(|p, _| p.0 != g);
-            skip.join(&run);
-            *st = skip;
+            if whole {
+                *st = run;
+            } else {
+                // where it doesn't run, part of `g` is gone: nothing that
+                // holds all of `g` can still be there
+                let mut skip = st.clone();
+                skip.m.retain(|q, _| !(q.0 == g.0 && g.1.starts_with(&q.1)));
+                skip.join(&run);
+                *st = skip;
+            }
             return;
         }
         self.block(st, b, Ctx::Discarded);
@@ -731,7 +775,8 @@ impl<'a, 's> Lin<'a, 's> {
                 if !st.reachable || !self.lin(&place.ty) {
                     return;
                 }
-                match place_path(place) {
+                let owned = |p: &Path| matches!(self.tf.locals[p.0 as usize].kind, LocalKind::Let | LocalKind::Var | LocalKind::Param(Mode::Sink)) && !self.cap_ref.contains(&p.0);
+                match place_path(place).filter(|p| owned(p)) {
                     Some(p) => {
                         let old: Vec<Path> = st.m.keys().filter(|q| q.0 == p.0 && (q.1.starts_with(&p.1) || p.1.starts_with(&q.1))).cloned().collect();
                         if !old.is_empty() {
@@ -746,7 +791,7 @@ impl<'a, 's> Lin<'a, 's> {
                         }
                     }
                     None => {
-                        let d = Diag::new(*span, format!("assigning here drops the linear `{}` that was there", self.show(&place.ty))).note(None, "take the old value out first (`replace(&v[i], x)` gives it back)");
+                        let d = Diag::new(*span, format!("assigning here drops the linear `{}` that was there", self.show(&place.ty))).note(None, "take the old value out instead: `let old = replace(&x, new)` gives it back to consume");
                         self.err(d);
                     }
                 }
@@ -785,7 +830,7 @@ impl<'a, 's> Lin<'a, 's> {
             TStmt::Defer(b) | TStmt::ErrDefer(b) => {
                 let guards = defer_guards(self.prog, self.tf, b);
                 if guards.len() > 1 {
-                    let names: Vec<String> = guards.iter().map(|&g| format!("`{}`", self.tf.locals[g as usize].name)).collect();
+                    let names: Vec<String> = guards.iter().map(|g| format!("`{}`", self.path_name(g))).collect();
                     let d = Diag::new(b.span, format!("this defer consumes several linear values ({}): it runs only while the one it consumes still holds its value, so it may consume one", names.join(", "))).note(None, "write one defer per value");
                     self.err(d);
                 }
@@ -796,7 +841,8 @@ impl<'a, 's> Lin<'a, 's> {
             TStmt::While { id, cond, body } => {
                 let body: &'a TBlock = body;
                 let cond = cond.as_ref();
-                self.run_loop(st, *id, |me, s| {
+                let lb = self.mentions_linear(body);
+                self.run_loop(st, *id, lb, |me, s| {
                     let mut exit = None;
                     if let Some(c) = cond {
                         me.expr(s, c, Ctx::Borrowed);
@@ -812,7 +858,8 @@ impl<'a, 's> Lin<'a, 's> {
                     self.expr(st, h, Ctx::Borrowed);
                 }
                 let body: &'a TBlock = body;
-                self.run_loop(st, *id, |me, s| {
+                let lb = self.mentions_linear(body);
+                self.run_loop(st, *id, lb, |me, s| {
                     let exit = s.clone();
                     me.block(s, body, Ctx::Discarded);
                     Some(exit)
@@ -829,7 +876,8 @@ impl<'a, 's> Lin<'a, 's> {
                     }
                     if let Some(TArg { e: TExpr { kind: TK::Closure(c), .. }, .. }) = args.last() {
                         let body: &'a TBlock = &c.body;
-                        self.run_loop(st, *id, |me, s| {
+                        let lb = self.mentions_linear(body);
+                        self.run_loop(st, *id, lb, |me, s| {
                             let exit = s.clone();
                             me.block(s, body, Ctx::Discarded);
                             Some(exit)
@@ -911,11 +959,32 @@ impl<'a, 's> Lin<'a, 's> {
 
     /// Runs a loop body to a fixpoint. `body` returns the state in which the
     /// loop ends by its own test (none for `loop { }`).
-    fn run_loop(&mut self, st: &mut St, id: u32, mut body: impl FnMut(&mut Self, &mut St) -> Option<St>) {
+    fn run_loop(&mut self, st: &mut St, id: u32, linear_body: bool, mut body: impl FnMut(&mut Self, &mut St) -> Option<St>) {
+        // While an outer loop is iterated to its fixpoint (nothing is
+        // reported), a loop entered in a state it was entered in before ends
+        // the same way: reuse that, or nested loops would take exponential
+        // time (each outer pass reruns every inner loop's iterations).
+        let key = if self.suppress > 0 { Some((id, canon(st))) } else { None };
+        if let Some(k) = &key {
+            if let Some((out, jumps)) = self.memo.get(k).cloned() {
+                for (li, brk, s) in jumps {
+                    if let Some(l) = self.loops.get_mut(li) {
+                        if brk { l.breaks.push(s) } else { l.conts.push(s) }
+                    }
+                }
+                *st = out;
+                return;
+            }
+        }
+        let marks: Vec<(usize, usize)> = self.loops.iter().map(|l| (l.breaks.len(), l.conts.len())).collect();
         let entry = st.clone();
         let mut head = entry.clone();
+        // A body with nothing linear in it can't change what is left to
+        // consume: one pass checks its exits. Otherwise iterate to the
+        // fixpoint.
+        let rounds = if linear_body { 8 } else { 0 };
         self.suppress += 1;
-        for _ in 0..8 {
+        for _ in 0..rounds {
             let (end, _, _) = self.loop_once(&head, id, &mut body);
             let mut next = entry.clone();
             next.join(&end);
@@ -931,6 +1000,39 @@ impl<'a, 's> Lin<'a, 's> {
             out.join(b);
         }
         *st = out;
+        if let Some(k) = key {
+            // what this loop handed to the loops around it
+            let mut jumps = vec![];
+            for (li, (b, c)) in marks.into_iter().enumerate() {
+                let l = &self.loops[li];
+                jumps.extend(l.breaks[b..].iter().map(|s| (li, true, s.clone())));
+                jumps.extend(l.conts[c..].iter().map(|s| (li, false, s.clone())));
+            }
+            self.memo.insert(k, (st.clone(), jumps));
+        }
+    }
+
+    /// Whether anything in the block has a linear type (a value, a variable,
+    /// a place assigned): only then can a pass over it change what is left
+    /// to consume.
+    fn mentions_linear(&mut self, b: &TBlock) -> bool {
+        let key = b as *const TBlock as usize;
+        if let Some(&r) = self.lin_cache.get(&key) {
+            return r;
+        }
+        let mut r = false;
+        walk_block(b, &mut |n| {
+            if r {
+                return;
+            }
+            match n {
+                Node::Expr(e) => r = self.prog.is_linear(&e.ty),
+                Node::Stmt(TStmt::Let { local, .. } | TStmt::LetRef { local, .. }) => r = self.prog.is_linear(&self.tf.locals[*local as usize].ty),
+                _ => {}
+            }
+        });
+        self.lin_cache.insert(key, r);
+        r
     }
 
     /// One pass over a loop body from `head`: the state where the iteration
@@ -981,11 +1083,6 @@ impl<'a, 's> Lin<'a, 's> {
                 }
                 _ => self.linear_free(x) || !self.lin(&x.ty),
             },
-            TK::Call { callee: Callee::Func(f, _), args } if args.is_empty() => {
-                // `Vec[T]()`, `Vec[T].new()`
-                let fd = self.prog.func(*f);
-                fd.name == "new" && matches!(fd.ret, Ty::Vec(_))
-            }
             TK::DefaultOf => matches!(e.ty, Ty::Vec(_) | Ty::Option(_)),
             TK::Coerce(_, x) => self.linear_free(x),
             _ => false,
@@ -994,6 +1091,9 @@ impl<'a, 's> Lin<'a, 's> {
 
     /// A temporary of a linear type that nobody takes.
     fn rvalue(&mut self, e: &TExpr, ctx: Ctx) {
+        if matches!(e.kind, TK::Proj { .. } | TK::ProjUnwrap { .. }) {
+            return; // a reference lent by a projection: nothing is dropped
+        }
         if ctx == Ctx::Consumed || e.ty == Ty::Never || !self.lin(&e.ty) || self.linear_free(e) {
             return;
         }
@@ -1042,17 +1142,41 @@ impl<'a, 's> Lin<'a, 's> {
                     let c = if a.mode == ArgMode::Value { Ctx::Consumed } else { Ctx::Borrowed };
                     self.expr(st, &a.e, c);
                 }
-                // what an `inout` argument holds may have changed
-                for a in args {
+                // what an `inout` argument holds may have changed, except
+                // where the prelude's `replace` / `take` leave nothing linear
+                let left_empty = match &e.kind {
+                    TK::Call { callee: Callee::Func(f, _), .. } if self.prog.func(*f).pkg == self.prog.prelude => match self.prog.func(*f).name.as_str() {
+                        "replace" => args.get(1).map(|v| self.linear_free(&v.e)).unwrap_or(false),
+                        "take" => matches!(args[0].e.ty, Ty::Option(_) | Ty::Vec(_)),
+                        _ => false,
+                    },
+                    _ => false,
+                };
+                for (i, a) in args.iter().enumerate() {
                     if a.mode == ArgMode::Inout && self.lin(&a.e.ty) {
                         if let Some(p) = place_path(&a.e) {
-                            self.refill(st, &p);
+                            if i == 0 && left_empty {
+                                st.m.retain(|q, _| !paths_overlap(q, &p));
+                            } else {
+                                self.refill(st, &p);
+                            }
                         }
                     }
                 }
                 self.rvalue(e, ctx);
             }
-            TK::Proj { call, .. } => self.expr(st, call, Ctx::Borrowed),
+            TK::Proj { call, .. } => {
+                // the call lends a reference: only its arguments are judged
+                match &call.kind {
+                    TK::Call { args, .. } => {
+                        for a in args {
+                            let c = if a.mode == ArgMode::Value { Ctx::Consumed } else { Ctx::Borrowed };
+                            self.expr(st, &a.e, c);
+                        }
+                    }
+                    _ => self.expr(st, call, Ctx::Borrowed),
+                }
+            }
             TK::ProjUnwrap { proj, msg } => {
                 self.expr(st, proj, Ctx::Borrowed);
                 if let Some(m) = msg {
@@ -1114,7 +1238,15 @@ impl<'a, 's> Lin<'a, 's> {
             }
             TK::Match { scrut, arms, .. } => self.match_expr(st, scrut, arms, ctx),
             TK::Block(b) | TK::Unsafe(b) => self.block(st, b, ctx),
-            TK::Scope { body, .. } => self.block(st, body, ctx),
+            TK::Scope { body, errt, .. } => {
+                if let Some(et) = errt {
+                    if self.lin(et) {
+                        let d = Diag::new(e.span, format!("the tasks of this scope fail with the linear `{}`: when several fail, only the first error is kept and the others would be dropped", self.show(et))).note(None, "have each task consume its own error, or return an error that isn't linear");
+                        self.err(d);
+                    }
+                }
+                self.block(st, body, ctx)
+            }
             TK::Isolate(b) => {
                 self.block(st, b, Ctx::Consumed);
                 self.rvalue(e, ctx);
@@ -1124,6 +1256,15 @@ impl<'a, 's> Lin<'a, 's> {
                     self.expr(st, v, Ctx::Borrowed);
                 }
                 if let TK::Closure(c) = &task.kind {
+                    // (an error goes to the scope, judged there)
+                    let res = match &c.ret {
+                        Ty::Result(a, _) => (**a).clone(),
+                        t => t.clone(),
+                    };
+                    if !matches!(e.kind, TK::Spawn { handle: true, .. }) && self.lin(&res) {
+                        let d = Diag::new(e.span, format!("the task's result, a linear `{}`, is thrown away", self.show(&res))).note(None, "consume it in the task: `go () => finish(make())`");
+                        self.err(d);
+                    }
                     self.closure(st, c);
                 } else {
                     self.expr(st, task, Ctx::Consumed);
@@ -1134,16 +1275,45 @@ impl<'a, 's> Lin<'a, 's> {
                 if !st.reachable {
                     return;
                 }
+                let et = match &x.ty {
+                    Ty::Result(_, b) => Some((**b).clone()),
+                    _ => None,
+                };
                 let mut err = st.clone();
-                if let Some(TryWrap::Call(_, w)) = wrap {
-                    self.expr(&mut err, w, Ctx::Consumed);
+                let mut pushed = false;
+                match wrap {
+                    Some(TryWrap::Call(l, w)) => {
+                        // the error sits in `l` while the wrapper runs
+                        self.scopes.push(Scope { declared: vec![*l], defers: vec![] });
+                        pushed = true;
+                        if self.lin(&self.tf.locals[*l as usize].ty) {
+                            err.m.insert((*l, vec![]), S::Live);
+                        }
+                        self.expr(&mut err, w, Ctx::Consumed);
+                    }
+                    Some(TryWrap::ToError) if et.as_ref().map(|t| self.lin(t)).unwrap_or(false) => {
+                        let d = Diag::new(e.span, format!("`try` would turn the linear error `{}` into an `error` interface value, which would drop it", self.show(et.as_ref().unwrap()))).note(None, "return the error type itself, or handle the error with `catch e { ... }`");
+                        self.err(d);
+                    }
+                    _ => {}
                 }
                 self.run_defers(&mut err, 0, true);
                 self.exit(&mut err, 0, e.span, "when this `try` returns the error", false);
+                if pushed {
+                    self.scopes.pop();
+                }
                 self.rvalue(e, ctx);
             }
             TK::Catch { e: x, bind, handler } => {
                 self.expr(st, x, Ctx::Consumed);
+                if bind.is_none() {
+                    if let Ty::Result(_, et) = &x.ty {
+                        if self.lin(et) {
+                            let d = Diag::new(e.span, format!("this `catch` drops the linear error `{}`", self.show(et))).note(None, "bind it (`catch e { ... }`) and consume it");
+                            self.err(d);
+                        }
+                    }
+                }
                 let mut h = st.clone();
                 let binds: Vec<LocalId> = bind.iter().copied().collect();
                 self.scopes.push(Scope { declared: binds.clone(), defers: vec![] });
@@ -1194,10 +1364,17 @@ impl<'a, 's> Lin<'a, 's> {
                 }
             }
         }
-        decl.extend(c.params.iter().copied());
+        for &p in &c.params {
+            decl.push(p);
+            if matches!(self.tf.locals[p as usize].kind, LocalKind::Param(Mode::Sink)) && self.lin(&self.tf.locals[p as usize].ty) {
+                inner.m.insert((p, vec![]), S::Live);
+            }
+        }
         // the closure body is checked on its own: its exits are its own
         let scopes = std::mem::take(&mut self.scopes);
         let loops = std::mem::take(&mut self.loops);
+        let borrowed: HashSet<LocalId> = c.captures.iter().filter(|(_, u)| *u != CapUse::Move && !c.owned).map(|(l, _)| *l).collect();
+        let cap_ref = std::mem::replace(&mut self.cap_ref, borrowed);
         self.scopes.push(Scope { declared: decl, defers: vec![] });
         self.block(&mut inner, &c.body, Ctx::Consumed);
         if inner.reachable {
@@ -1206,10 +1383,19 @@ impl<'a, 's> Lin<'a, 's> {
         }
         self.scopes = scopes;
         self.loops = loops;
+        self.cap_ref = cap_ref;
+        // what it changes in place may hold linear values now
+        for &(l, u) in &c.captures {
+            if u == CapUse::Mutate && !c.owned && self.lin(&self.tf.locals[l as usize].ty) {
+                self.refill(st, &(l, vec![]));
+            }
+        }
     }
 
     fn match_expr(&mut self, st: &mut St, scrut: &'a TExpr, arms: &'a [TArm], ctx: Ctx) {
         let spath = if scrut.is_place() { place_path(scrut) } else { None };
+        // a reference lent by a projection (`v.get(0)`) is matched in place
+        let lent = matches!(scrut.kind, TK::Proj { .. } | TK::ProjUnwrap { .. });
         if scrut.is_place() {
             self.place_subexprs(st, scrut);
         } else {
@@ -1247,8 +1433,9 @@ impl<'a, 's> Lin<'a, 's> {
                     }
                     if a.consuming || owns {
                         self.wild_parts(&a.pat, &scrut.ty, a.body.span);
+                        self.foreign_parts(&a.pat, a.body.span);
                     }
-                } else if !scrut.is_place() {
+                } else if !scrut.is_place() && !lent {
                     let d = Diag::new(a.body.span, format!("this arm drops the matched linear `{}`", self.show(&scrut.ty))).note(None, "bind the value to a variable first, or move what the arm matches out of it");
                     self.err(d);
                 }
@@ -1329,6 +1516,39 @@ impl<'a, 's> Lin<'a, 's> {
             Ty::Result(a, b) => !self.lin(if c == 0 { a } else { b }),
             Ty::Adt(d, args) => (exempt || !self.prog.def(*d).linear) && self.prog.variant_tys(*d, args, c).iter().all(|(_, t)| !self.lin(t)),
             _ => false,
+        }
+    }
+
+    /// Only a linear type's own package takes its values apart: an arm that
+    /// moves a payload out of a variant of one declared elsewhere bypasses
+    /// its `sink self` methods.
+    fn foreign_parts(&mut self, p: &TPat, sp: Span) {
+        let here = self.prog.func(self.tf.func).pkg;
+        let mut bad: Option<DefId> = None;
+        // (a binding that only borrows takes nothing apart)
+        let moved = |l: LocalId| matches!(self.tf.locals[l as usize].kind, LocalKind::Let | LocalKind::Var);
+        fn walk(p: &TPat, prog: &Program, here: PkgId, moved: &dyn Fn(LocalId) -> bool, bad: &mut Option<DefId>, under: Option<DefId>) {
+            match p {
+                TPat::Bind(l) => {
+                    if let (Some(d), true) = (under, moved(*l)) {
+                        bad.get_or_insert(d);
+                    }
+                }
+                TPat::Variant { def, subs, .. } => {
+                    let d = prog.def(*def);
+                    let u = if d.linear && d.pkg != here { Some(*def) } else { under };
+                    subs.iter().for_each(|q| walk(q, prog, here, moved, bad, u));
+                }
+                TPat::Tuple(qs) | TPat::Or(qs) => qs.iter().for_each(|q| walk(q, prog, here, moved, bad, under)),
+                TPat::Some(q) | TPat::Ok(q) | TPat::Err(q) => walk(q, prog, here, moved, bad, under),
+                _ => {}
+            }
+        }
+        walk(p, self.prog, here, &moved, &mut bad, None);
+        if let Some(d) = bad {
+            let def = self.prog.def(d);
+            let d = Diag::new(sp, format!("this arm takes apart the linear `{}`, which only its own package may do", def.name)).note(Some(def.span), format!("consume it with one of its `sink self` methods ({})", self.how(&Ty::Adt(d, std::rc::Rc::new(vec![])))));
+            self.err(d);
         }
     }
 

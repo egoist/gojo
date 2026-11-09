@@ -1,0 +1,35 @@
+linear struct Tx {
+    id: int
+    name: String
+
+    fn commit(sink self) {
+        println("commit", self.id)
+    }
+
+    fn rollback(sink self) {
+        println("rollback", self.id)
+    }
+}
+
+fn begin(id: int) -> Tx {
+    return Tx{id: id, name: "tx" + "{id}"}
+}
+linear enum St {
+    A(Tx)
+    B
+    fn reset(inout self) {
+        self = St.B
+    }
+    fn end(sink self) {
+        match self {
+            A(t) => t.commit()
+            B => {}
+        }
+    }
+}
+fn main() {
+    var s = St.A(begin(1))
+    s.reset()
+    s.end()
+}
+// error: assigning here drops the linear `St` that was there

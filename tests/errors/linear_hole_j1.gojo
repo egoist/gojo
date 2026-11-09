@@ -1,0 +1,28 @@
+linear struct Tx {
+    id: int
+    name: String
+
+    fn commit(sink self) {
+        println("commit", self.id)
+    }
+
+    fn rollback(sink self) {
+        println("rollback", self.id)
+    }
+}
+
+fn begin(id: int) -> Tx {
+    return Tx{id: id, name: "tx" + "{id}"}
+}
+fn main() {
+    var v: Vec[Tx] = [begin(1), begin(2)]
+    for x in &v {
+        x = begin(x.id + 10)
+    }
+    loop {
+        let t = v.pop() else { break }
+        t.commit()
+    }
+    v.finish()
+}
+// error: assigning here drops the linear `Tx` that was there

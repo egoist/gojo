@@ -72,8 +72,8 @@ fn main() {
     println(task.map(ys, 0, (x) => x + offset))
     println(twice((x) => x + 1, ys))
     // the first error stops the rest
-    println(task.tryMap(ys, 2, check))
-    println(task.tryMap([1, 2], 2, check))
+    println(task.map(ys, 2, check))
+    println(task.map([1, 2], 2, check))
     let seen = Mutex(0)
     task.each(ys, 3, (x) => {
         with s = seen.lock() { s += x }

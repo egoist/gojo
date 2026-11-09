@@ -173,7 +173,7 @@ pub fn swap[T: any](a: inout T, b: inout T)
 pub fn replace[T: any](dst: inout T, value: sink T) -> T
 // Takes the value out of `dst`, leaving the type's default (`""`, `0`, `none`,
 // an empty `Vec`...).
-pub fn take[T: default](dst: inout T) -> T
+pub fn take[T: default + any](dst: inout T) -> T
 
 // The smaller of two values (`a` when they are equal).
 pub fn min[T: copy + ordered](a: T, b: T) -> T {
@@ -301,7 +301,7 @@ extend ?T {
 
 extend T ! E {
     // Whether this is a value rather than an error.
-    pub fn isOk(self) -> bool {
+    pub fn isOk(self) -> bool where T: any, E: any {
         return match self {
             ok(_) => true
             err(_) => false
@@ -309,7 +309,7 @@ extend T ! E {
     }
 
     // Whether this is an error.
-    pub fn isErr(self) -> bool {
+    pub fn isErr(self) -> bool where T: any, E: any {
         return !self.isOk()
     }
 
@@ -1211,7 +1211,7 @@ extend []T {
     }
 
     // `f` applied to each element, in order.
-    pub fn map[U](self, f: fn(T) -> U) -> Vec[U] {
+    pub fn map[U](self, f: fn(T) -> U) -> Vec[U] where T: any {
         var out = Vec[U]{}
         for x in self {
             out.push(f(x))
@@ -1677,7 +1677,7 @@ extend Vec[T] {
     pub fn sort(inout self) where T: ordered
 
     // Sorts by `less(a, b)`: true when `a` goes before `b`. Stable.
-    pub fn sortBy(inout self, less: fn(T, T) -> bool)
+    pub fn sortBy(inout self, less: fn(T, T) -> bool) where T: any
 
     // Makes room for `n` more elements without reallocating; panics ("capacity
     // overflow") for an impossible size.
@@ -2289,7 +2289,7 @@ pub struct Tuple6[A, B, C, D, E, F] {
 // (src/check/lazy.rs); these are its steps. A closure passed to one of them is
 // an ordinary argument, so it may borrow what it uses, views included.
 
-pub fn __lazyApply[A, B](a: A, f: fn(A) -> B) -> B {
+pub fn __lazyApply[A: any, B: any](a: A, f: fn(A) -> B) -> B {
     return f(a)
 }
 
@@ -2297,7 +2297,7 @@ pub fn __lazyFold[A, T](acc: sink A, x: T, f: fn(sink A, T) -> A) -> A {
     return f(acc, x)
 }
 
-pub fn __lazyApply2[K, V, B](k: K, v: V, f: fn(K, V) -> B) -> B {
+pub fn __lazyApply2[K: any, V: any, B: any](k: K, v: V, f: fn(K, V) -> B) -> B {
     return f(k, v)
 }
 

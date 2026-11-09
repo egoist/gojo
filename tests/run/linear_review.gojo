@@ -1,0 +1,164 @@
+// Programs that linear types must accept (from an adversarial review).
+
+linear struct Tx {
+    id: int
+    name: String
+
+    fn commit(sink self) {
+        println("commit", self.id)
+    }
+
+    fn rollback(sink self) {
+        println("rollback", self.id)
+    }
+}
+
+fn begin(id: int) -> Tx {
+    return Tx{id: id, name: "tx" + "{id}"}
+}
+
+// b2
+// defer on field of struct
+linear struct Pool_b2 {
+    a: Tx
+    b: Tx
+}
+fn f_b2(c: bool) {
+    let p = Pool_b2{a: begin(1), b: begin(2)}
+    defer p.a.rollback()
+    p.b.commit()
+    if c {
+        p.a.commit()
+    }
+}
+fn main_b2() {
+    f_b2(true)
+    f_b2(false)
+}
+
+// b8
+linear struct Pool_b8 {
+    a: Tx
+    n: String
+}
+fn f_b8(c: bool) {
+    let p = Pool_b8{a: begin(1), n: "pool"}
+    defer p.a.rollback()
+    if c {
+        p.a.commit()
+    }
+}
+fn main_b8() {
+    f_b8(true)
+    f_b8(false)
+}
+
+// cr13
+linear struct Q_cr13 {
+    t: Tx
+}
+linear struct P_cr13 {
+    q: Q_cr13
+    n: int
+}
+fn f_cr13(p: sink (P_cr13, int), c: bool) {
+    defer p.0.q.t.rollback()
+    if c {
+        p.0.q.t.commit()
+    }
+}
+fn main_cr13() {
+    f_cr13((P_cr13{q: Q_cr13{t: begin(1)}, n: 1}, 2), true)
+    f_cr13((P_cr13{q: Q_cr13{t: begin(2)}, n: 1}, 2), false)
+}
+
+// b11
+linear struct Pair_b11 {
+    a: Tx
+    b: Tx
+}
+fn main_b11() {
+    let p = Pair_b11{a: begin(1), b: begin(2)}
+    defer {
+        p.a.rollback()
+    }
+    p.b.commit()
+}
+
+// b10
+fn main_b10() {
+    var o: ?Tx = some(begin(1))
+    defer {
+        if let t = o {
+            t.rollback()
+        }
+    }
+}
+
+// fp7
+fn main_fp7() {
+    var v: Vec[Tx] = [begin(1), begin(2)]
+    let first = v[0]
+    println(first.id)
+    if let l = v.last() {
+        println(l.id)
+    }
+    while v.len() > 0 {
+        v.pop().unwrap().commit()
+    }
+    v.finish()
+}
+
+// fp9
+fn main_fp9() {
+    var v: Vec[Tx] = [begin(1), begin(2)]
+    match v.get(0) {
+        some(t) => println(t.id)
+        none => {}
+    }
+    while v.len() > 0 {
+        v.pop().unwrap().commit()
+    }
+    v.finish()
+}
+
+// fp5
+fn main_fp5() {
+    var v: Vec[Tx] = [begin(1), begin(2)]
+    let total = v.iter().map(t => t.id).sum()
+    let n = v.iter().filter(t => t.id > 1).count()
+    println(total, n)
+    while v.len() > 0 {
+        v.pop().unwrap().commit()
+    }
+    v.finish()
+}
+
+// c9
+fn main_c9() {
+    let xs = [1, 2, 3]
+    for t in xs.iter().map(x => begin(x)) {
+        t.commit()
+    }
+}
+
+// k5
+// take via replace with none
+fn main_k5() {
+    var o: ?Tx = some(begin(1))
+    let x = replace(&o, none)
+    if let t = x { t.commit() }
+}
+
+fn main() {
+    main_b2()
+    main_b8()
+    main_cr13()
+    main_b11()
+    main_b10()
+    main_fp7()
+    main_fp9()
+    main_fp5()
+    main_c9()
+    main_k5()
+}

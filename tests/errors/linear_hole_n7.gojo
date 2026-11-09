@@ -1,0 +1,41 @@
+linear struct Tx {
+    id: int
+    name: String
+
+    fn commit(sink self) {
+        println("commit", self.id)
+    }
+
+    fn rollback(sink self) {
+        println("rollback", self.id)
+    }
+}
+
+fn begin(id: int) -> Tx {
+    return Tx{id: id, name: "tx" + "{id}"}
+}
+linear struct E {
+    code: int
+
+    fn message(self) -> String {
+        return "E"
+    }
+
+    fn end(sink self) {
+        println("end E")
+    }
+}
+fn f() -> int ! E {
+    return err(E{code: 1})
+}
+fn wrap(e: E) -> String {
+    return "wrapped {e.code}"
+}
+fn g() -> int ! String {
+    let x = try f() else wrap
+    return x
+}
+fn main() {
+    println(g() catch e { println(e); 0 })
+}
+// error: this value is not consumed: the linear `E` would be dropped when this `try` returns the error

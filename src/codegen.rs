@@ -1321,9 +1321,17 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
         if g.len() != 1 {
             return None;
         }
-        let f = fs.flags.get(&(g[0], vec![])).cloned()?;
-        fs.used_flags.insert(f.clone());
-        Some(f)
+        // all of the place is there: neither it, nor a part of it, nor
+        // something it is part of has been moved
+        let mut fl: Vec<String> = fs.flags.iter().filter(|(p, _)| crate::linear::paths_overlap(p, &g[0])).map(|(_, f)| f.clone()).collect();
+        if fl.is_empty() {
+            return None;
+        }
+        fl.sort();
+        for f in &fl {
+            fs.used_flags.insert(f.clone());
+        }
+        Some(fl.join(" && "))
     }
 
     fn declare_flags(&mut self, fs: &mut Fs, l: LocalId) {
@@ -4549,6 +4557,11 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
 
     fn magic(&mut self, fs: &mut Fs, name: &str, _targs: &[Ty], args: &[TArg], _t: &Ty, _sp: Span) -> String {
         match name {
+            // `T ! never`: always ok
+            "never_ok" => {
+                let r = self.expr(fs, &args[0].e);
+                format!("({}).u.val", r)
+            }
             "len" => {
                 let at = self.sub(fs, &args[0].e.ty);
                 match &at {

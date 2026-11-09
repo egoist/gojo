@@ -4376,6 +4376,8 @@ impl Checker {
                 if let ExprKind::Ref(_) = &a.kind {
                     self.err(a.span, format!("parameter `{}` is borrowed read-only; `&` is only for inout parameters", p.name));
                 }
+                let wrapped = self.ok_wrap_fn_item(cx, a, &pty);
+                let a = wrapped.as_ref().unwrap_or(a);
                 let e = self.expr(cx, a, Some(&pty));
                 let e = self.coerce(cx, e, &pty, Use::Borrow);
                 TArg { mode: ArgMode::Borrow, e }
@@ -4384,11 +4386,54 @@ impl Checker {
                 if let ExprKind::Ref(_) = &a.kind {
                     self.err(a.span, format!("parameter `{}` takes ownership (sink); pass the value without `&`", p.name));
                 }
+                let wrapped = self.ok_wrap_fn_item(cx, a, &pty);
+                let a = wrapped.as_ref().unwrap_or(a);
                 let e = self.expr(cx, a, Some(&pty));
                 let e = self.coerce(cx, e, &pty, Use::Value);
                 TArg { mode: ArgMode::Value, e }
             }
         }
+    }
+
+    /// A function that can't fail, passed where one returning `R ! E` is
+    /// expected (`task.map(xs, 8, square)`), becomes the closure
+    /// `(a) => square(a)`, whose result is an `R ! E` that is always ok.
+    fn ok_wrap_fn_item(&mut self, cx: &mut FnCx, a: &Expr, pty: &Ty) -> Option<Expr> {
+        let Ty::Func(ft) = pty else { return None };
+        if !matches!(&ft.ret, Ty::Result(..)) {
+            return None;
+        }
+        let fi = cx.env.file;
+        let f = match &a.kind {
+            ExprKind::Ident(n) if !cx.scopes.iter().any(|s| s.iter().any(|(m, _)| m == n)) => match self.lookup_unqualified(fi, cx.env.pkg, n) {
+                Some(Sym::Func(f)) => f,
+                _ => return None,
+            },
+            ExprKind::Field(base, name, _) => {
+                let ExprKind::Ident(pn) = &base.kind else { return None };
+                if cx.scopes.iter().any(|s| s.iter().any(|(m, _)| m == pn)) {
+                    return None;
+                }
+                let (p, _) = self.file_cx[fi].imports.get(pn).cloned()?;
+                match self.prog.packages[p as usize].items.get(name) {
+                    Some(Sym::Func(f)) => *f,
+                    _ => return None,
+                }
+            }
+            _ => return None,
+        };
+        let fd = self.prog.func(f);
+        if matches!(fd.ret, Ty::Result(..)) || fd.recv.is_some() || fd.params.len() != ft.params.len() || fd.yields.is_some() {
+            return None;
+        }
+        let sp = a.span;
+        let params: Vec<crate::ast::ClosureParam> = ft.params.iter().enumerate().map(|(i, (m, _))| crate::ast::ClosureParam { name: format!("__w{}", i), mode: *m, ty: None, span: sp }).collect();
+        let args: Vec<Expr> = ft.params.iter().enumerate().map(|(i, (m, _))| {
+            let id = Expr { kind: ExprKind::Ident(format!("__w{}", i)), span: sp };
+            if *m == Mode::Inout { Expr { kind: ExprKind::Ref(Box::new(id)), span: sp } } else { id }
+        }).collect();
+        let body = Expr { kind: ExprKind::Call(Box::new(a.clone()), args), span: sp };
+        Some(Expr { kind: ExprKind::Closure { params, ret: None, body: Box::new(body) }, span: sp })
     }
 
     pub fn call_fn(&mut self, cx: &mut FnCx, fid: FuncId, explicit: Option<Vec<Ty>>, recv: Option<TExpr>, args: &[Expr], sp: Span, expect: Option<&Ty>) -> TExpr {
@@ -4491,6 +4536,17 @@ impl Checker {
             }
         }
         out_args.extend(checked.into_iter().map(|a| a.unwrap()));
+        // An error type parameter that nothing pinned down (`apply(x, f)`
+        // with an `f` that can't fail) is `never`: the call can't fail, and
+        // its `T ! never` result is just a `T` (below).
+        for &tp in &fd.tparams {
+            if self.resolve(cx, &s[&tp]).has_vars() && error_only(&fd, tp) {
+                let v = s[&tp].clone();
+                if let Ty::Var(_) = self.resolve(cx, &v) {
+                    self.unify(cx, &v, &Ty::Never);
+                }
+            }
+        }
         let mut targs = vec![];
         for &tp in &fd.tparams {
             let t = self.resolve(cx, &s[&tp]);
@@ -4533,6 +4589,13 @@ impl Checker {
         if let Some(y) = fd.yields {
             let ty = if fd.yield_opt { Ty::opt(ret) } else { ret };
             return TExpr::new(TK::Proj { call: Box::new(call), mutable: y == YieldKind::Mut, opt: fd.yield_opt }, ty, sp);
+        }
+        // a result that can't be an error is its value
+        if let Ty::Result(ok, e) = &ret {
+            if **e == Ty::Never {
+                let ok = (**ok).clone();
+                return TExpr::new(TK::Intrinsic { name: "never_ok".into(), targs: vec![], args: vec![TArg { mode: ArgMode::Value, e: call }] }, ok, sp);
+            }
         }
         call
     }
@@ -5589,4 +5652,34 @@ fn comp_block(list: &str, b: &ast::Block, missing: &mut Vec<Span>) -> ast::Block
         None => missing.push(b.span),
     }
     ast::Block { stmts, span: b.span }
+}
+
+/// Whether type parameter `p` of `fd` appears in its signature only as the
+/// error type of results (`fn(T) -> R ! E`, `-> Vec[R] ! E`): then a call
+/// that doesn't pin it down can't fail, and `E` is `never`.
+fn error_only(fd: &FuncDef, p: TParamId) -> bool {
+    fn walk(t: &Ty, p: TParamId, seen: &mut bool) -> bool {
+        match t {
+            Ty::Param(q) => *q != p,
+            Ty::Result(a, b) => {
+                if **b == Ty::Param(p) {
+                    *seen = true;
+                    walk(a, p, seen)
+                } else {
+                    walk(a, p, seen) && walk(b, p, seen)
+                }
+            }
+            Ty::Vec(a) | Ty::Slice(a) | Ty::Array(a, _) | Ty::Option(a) | Ty::Box(a) | Ty::Rc(a) | Ty::Arc(a) | Ty::Weak(a) | Ty::Cell(a) | Ty::Mutex(a) | Ty::MutexRef(a) | Ty::Sender(a) | Ty::Receiver(a) | Ty::Task(a) | Ty::Iso(a) | Ty::Ptr(a) => walk(a, p, seen),
+            Ty::ArrayT(a, b) | Ty::Map(a, b) => walk(a, p, seen) && walk(b, p, seen),
+            Ty::Adt(_, args) | Ty::Iface(_, args) => args.iter().all(|a| walk(a, p, seen)),
+            Ty::Func(f) => f.params.iter().all(|(_, t)| walk(t, p, seen)) && walk(&f.ret, p, seen),
+            _ => true,
+        }
+    }
+    let mut seen = false;
+    let mut ok = fd.params.iter().all(|x| walk(&x.ty, p, &mut seen)) && walk(&fd.ret, p, &mut seen);
+    if let Some(r) = &fd.recv {
+        ok = ok && walk(&r.ty, p, &mut seen);
+    }
+    ok && seen && !fd.ret_of.is_some()
 }

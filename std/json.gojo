@@ -575,16 +575,16 @@ struct Parser {
 }
 
 // The JSON text of any value, compact.
-pub fn encode[T](v: T) -> String
+pub fn encode[T: any](v: T) -> String
 
 // The JSON text of any value, indented by two spaces.
-pub fn encodePretty[T](v: T) -> String
+pub fn encodePretty[T: any](v: T) -> String
 
 // The value of type `T` that the JSON `text` describes: `json.decode[Config](text)`.
 pub fn decode[T](text: str) -> T ! Error
 
 // Any value as a `Value` tree, to inspect or change before encoding.
-pub fn toValue[T](v: T) -> Value
+pub fn toValue[T: any](v: T) -> Value
 
 // The value of type `T` that a `Value` tree describes.
 pub fn fromValue[T](v: Value) -> T ! Error

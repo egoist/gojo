@@ -1,0 +1,33 @@
+linear struct Tx {
+    id: int
+    name: String
+
+    fn commit(sink self) {
+        println("commit", self.id)
+    }
+
+    fn rollback(sink self) {
+        println("rollback", self.id)
+    }
+}
+
+fn begin(id: int) -> Tx {
+    return Tx{id: id, name: "tx" + "{id}"}
+}
+linear struct Holder {
+    tx: Tx
+
+    fn reset(inout self) {
+        self.tx = begin(2)
+    }
+
+    fn end(sink self) {
+        self.tx.commit()
+    }
+}
+fn main() {
+    var h = Holder{tx: begin(1)}
+    h.reset()
+    h.end()
+}
+// error: assigning here drops the linear `Tx` that was there

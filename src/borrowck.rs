@@ -1375,9 +1375,9 @@ impl<'a> Bc<'a> {
                     // as if it did, on the paths where it runs
                     let guards = crate::linear::defer_guards(self.prog, self.tf, b);
                     if guards.len() == 1 {
-                        let g = guards[0];
+                        let g = &guards[0];
                         let mut ran = st.clone();
-                        ran.moved.retain(|m| m.0 .0 != g);
+                        ran.moved.retain(|m| !overlap(&m.0, g));
                         self.block(&mut ran, b);
                         st.join(&ran);
                     } else {

@@ -1,0 +1,27 @@
+linear struct Tx {
+    id: int
+    name: String
+
+    fn commit(sink self) {
+        println("commit", self.id)
+    }
+
+    fn rollback(sink self) {
+        println("rollback", self.id)
+    }
+}
+
+fn begin(id: int) -> Tx {
+    return Tx{id: id, name: "tx" + "{id}"}
+}
+fn each(xs: []int, f: fn(int)) {
+    for x in xs {
+        f(x)
+    }
+}
+fn main() {
+    var v: Vec[Tx] = []
+    each([1, 2], x => v.push(begin(x)))
+    println(v.len())
+}
+// error: `v` is not consumed: the linear `Vec[Tx]` would be dropped where its block ends
