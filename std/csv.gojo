@@ -112,7 +112,7 @@ struct Parser {
                 return err(self.fail("unexpected character after a quoted field", self.pos))
             }
             let st = self.pos
-            while self.pos < n{
+            while self.pos < n {
                 let c = b[self.pos]
                 if c == self.sep || c == 10 || (c == 13 && self.pos + 1 < n && b[self.pos + 1] == 10) {
                     break

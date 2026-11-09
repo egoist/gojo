@@ -18,7 +18,7 @@ fn tokenize(s: str) -> Vec[Token] {
     var out = Vec[Token]{}
     var i = 0
     let b = s.bytes()
-    while i < b.len{
+    while i < b.len {
         let c = b[i]
         if c >= '0' && c <= '9' {
             var n = 0
@@ -43,7 +43,7 @@ fn tokenize(s: str) -> Vec[Token] {
 // recursive-descent evaluator over a token slice
 fn expr(ts: []Token, pos: inout int) -> int {
     var v = term(ts, &pos)
-    while pos < ts.len{
+    while pos < ts.len {
         match ts[pos] {
             Op(c) if c == '+' || c == '-' => {
                 pos += 1
@@ -58,7 +58,7 @@ fn expr(ts: []Token, pos: inout int) -> int {
 
 fn term(ts: []Token, pos: inout int) -> int {
     var v = atom(ts, &pos)
-    while pos < ts.len{
+    while pos < ts.len {
         match ts[pos] {
             Op(c) if c == '*' || c == '/' => {
                 pos += 1

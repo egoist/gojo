@@ -724,7 +724,7 @@ fn pushRange(cls: inout Class, lo: rune, hi: rune) {
     // every character with a case is below U+1E944
     var r = lo
     let end = min(hi, 0x1E943)
-    while r <= end{
+    while r <= end {
         let f = __fold(r)
         if f != r && (f < lo || f > hi) {
             cls.ranges.push((f, f))
@@ -767,7 +767,7 @@ fn classHas(rs: [](rune, rune), props: []int, r: rune) -> bool {
 fn inRanges(rs: [](rune, rune), r: rune) -> bool {
     var lo = 0
     var hi = rs.len()
-    while lo < hi{
+    while lo < hi {
         let m = (lo + hi) / 2
         if r < rs[m].0 {
             hi = m
@@ -1337,7 +1337,7 @@ pub struct Regex {
         var pos = 0
         var last = -1
         var n = 0
-        while pos <= text.len() && n != limit{
+        while pos <= text.len() && n != limit {
             if !self.exec(text, pos, nslots, &caps) {
                 break
             }

@@ -185,7 +185,7 @@ pub fn pbkdf2(h: Hash, password: []byte, salt: []byte, iterations: int, keyLen: 
     let base = Hmac.new(h, password)
     var out = Vec[byte]{}
     var block: u32 = 1
-    while out.len() < keyLen{
+    while out.len() < keyLen {
         var m = Hmac{inner: Digest{st: base.inner.st.clone(), algo: h}, outer: Digest{st: base.outer.st.clone(), algo: h}}
         m.update(salt)
         m.update([u8(block >> 24), u8((block >> 16) & 255), u8((block >> 8) & 255), u8(block & 255)])

@@ -167,7 +167,7 @@ pub fn relative(from: str, target: str) -> ?String {
     let fs = f.filter(s => s != ".")
     let ts = t.filter(s => s != ".")
     var i = 0
-    while i < fs.len() && i < ts.len() && fs[i] == ts[i]{
+    while i < fs.len() && i < ts.len() && fs[i] == ts[i] {
         i += 1
     }
     var out = Vec[String]{}

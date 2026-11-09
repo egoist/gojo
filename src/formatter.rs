@@ -117,7 +117,7 @@ const BINARY: &[&str] = &[
 
 /// Keywords whose statement's `{` opens a block or a declaration body.
 fn header_kw(k: Kw) -> bool {
-    matches!(k, Kw::If | Kw::For | Kw::Match | Kw::With | Kw::Select | Kw::Else | Kw::Struct | Kw::Enum | Kw::Interface | Kw::Extend | Kw::Func | Kw::Test | Kw::Unsafe | Kw::Extern | Kw::Catch | Kw::Defer | Kw::ErrDefer | Kw::Scope | Kw::Isolate)
+    matches!(k, Kw::If | Kw::For | Kw::While | Kw::Loop | Kw::Match | Kw::With | Kw::Select | Kw::Else | Kw::Struct | Kw::Enum | Kw::Interface | Kw::Extend | Kw::Func | Kw::Test | Kw::Unsafe | Kw::Extern | Kw::Catch | Kw::Defer | Kw::ErrDefer | Kw::Scope | Kw::Isolate)
 }
 
 struct Open {
@@ -356,6 +356,8 @@ mod tests {
         check("let p=P {x:1,y:2}\n", "let p = P{x: 1, y: 2}\n");
         check("if a==b{ x() }\n", "if a == b { x() }\n");
         check("for i in 0 .. n {}\n", "for i in 0..n {}\n");
+        // (`v.len {` after `while` opens the body, not a struct literal)
+        check("while i<v.len{\ni+=1\n}\n", "while i < v.len {\n    i += 1\n}\n");
         check("let v=xs[ 1 ]\nlet t:[ ]int=[1,2]\n", "let v = xs[1]\nlet t: []int = [1, 2]\n");
         check("x  // note\n\n\n\ny\n", "x // note\n\ny\n");
         check("f(a,\nb)\n", "f(a,\n    b)\n");

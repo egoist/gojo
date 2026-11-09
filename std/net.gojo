@@ -72,7 +72,7 @@ pub struct Conn {
     // Writes all of `data`.
     pub fn write(self, data: []byte) ! Error {
         var off = 0
-        while off < data.len{
+        while off < data.len {
             let n = __write(self.fd, data[off..])
             if n < 0 {
                 return err(fail("write", -n))
