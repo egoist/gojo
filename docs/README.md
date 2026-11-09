@@ -5,6 +5,7 @@ Gojo is a small, fast-compiling systems programming language with no garbage col
 ## Learn
 
 - [Why Gojo](why-gojo.md): how Gojo compares with Rust, Go, Zig, Swift and C++, the numbers, and when to choose something else.
+- [Gojo on one page](brief.md): the whole language in about 2,000 words, for a coding agent's context (`gojo spec` prints it).
 - [A tour of Gojo](tour.md): the language by example, from hello world to scopes and channels. Every program in it is compiled and run by the test suite.
 
 ## Reference

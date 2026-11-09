@@ -52,9 +52,21 @@ pub const STD: &[(&str, &str)] = &[
 pub const RUNTIME_H: &str = include_str!("../runtime/gojo_rt.h");
 pub const RUNTIME_C: &str = concat!(include_str!("../runtime/gojo_rt.c"), include_str!("../runtime/gojo_sched.c"), include_str!("../runtime/gojo_os.c"), include_str!("../runtime/gojo_unicode.c"), include_str!("../runtime/gojo_text.c"), include_str!("../runtime/gojo_lib.c"));
 
+/// `gojo check --json`: diagnostics go to stdout as JSON lines instead.
+pub static JSON_DIAGS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// Print errors (and the warnings among them, if any), with a count.
 pub fn report(sm: &SourceMap, diags: &[Diag]) {
     use std::io::IsTerminal;
+    if JSON_DIAGS.load(std::sync::atomic::Ordering::Relaxed) {
+        let mut ds: Vec<&Diag> = diags.iter().collect();
+        ds.sort_by_key(|d| (d.span.file, d.span.lo));
+        ds.dedup_by_key(|d| (d.span, d.msg.clone()));
+        for d in ds {
+            println!("{}", diag::render_json(sm, d));
+        }
+        return;
+    }
     let color = std::io::stderr().is_terminal();
     let mut ds: Vec<&Diag> = diags.iter().collect();
     ds.sort_by_key(|d| (d.span.file, d.span.lo));

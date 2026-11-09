@@ -103,12 +103,13 @@ cargo build --release
 | --- | --- |
 | `gojo run <file-or-dir> [args...]` | Compile and run |
 | `gojo build <file-or-dir> [-o output]` | Build a native binary |
-| `gojo check <file-or-dir>` | Type check and borrow check only |
+| `gojo check <file-or-dir> [--json]` | Type check and borrow check only; `--json` prints each diagnostic as a line of JSON, with the edits that fix it where there is one obvious fix (`&` for an `inout` argument, `_` for an unused variable, the move for a needless clone) |
 | `gojo test <file-or-dir>` | Run `test` blocks; each test runs in its own process, so a panic does not affect other tests |
 | `gojo fmt [--check] [file-or-dir...]` | Format in place (current directory by default); `--check` only lists unformatted files and exits with code 1 if there are any |
 | `gojo doc [module-or-path] [--out dir]` | API docs in Markdown: the standard library index, one standard library module, or one package; `--out` writes the whole standard library to a directory (that is, [`docs/std`](docs/std/README.md)) |
 | `gojo emit-c <file-or-dir>` | Print the generated C code |
 | `gojo init [name]` | Write a `gojo.toml` (package manifest, see [`docs/packages.md`](docs/packages.md)) in the current directory |
+| `gojo spec` | The whole language on one page ([`docs/brief.md`](docs/brief.md)), sized for a coding agent's context |
 | `gojo version` | Version, commit and target platform |
 
 Options: `--release` (`-O2`; overflow checks stay on), `--cc "<compiler flags>"`, `--target <triple>` (cross-compile with `zig cc`; for example `--target x86_64-linux-musl` gives a static Linux binary directly), `-v` (print the time of each phase).

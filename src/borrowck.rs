@@ -93,7 +93,7 @@ fn needless_clones(prog: &Program, tf: &TFunc, proj: &HashMap<FuncId, Vec<usize>
         b.block(&mut st, &tf.body);
         b.end_scope_defers(&mut st);
         if b.as_move_seen && b.diags.is_empty() {
-            out.push(Diag::warning(sp, format!("`{0}.clone()` copies `{0}`, which isn't used after this", loc.name)).note(None, format!("write `{}` to move it instead of copying it", loc.name)));
+            out.push(Diag::warning(sp, format!("`{0}.clone()` copies `{0}`, which isn't used after this", loc.name)).note(None, format!("write `{}` to move it instead of copying it", loc.name)).fix(sp, loc.name.clone()));
         }
     }
 }

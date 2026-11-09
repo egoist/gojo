@@ -27,7 +27,9 @@ const USAGE: &str = "Gojo — a systems language with Go's simplicity, no GC and
 usage:
   gojo run   <file.gojo|dir> [args...]   compile and run
   gojo build <file.gojo|dir> [-o out]     compile to a native binary
-  gojo check <file.gojo|dir>              type and borrow check only
+  gojo check <file.gojo|dir> [--json]     type and borrow check only; --json prints each
+                                          diagnostic as a line of JSON, with the edits
+                                          that fix it where there is one obvious fix
   gojo test  <file.gojo|dir>              run `test \"...\" {}` blocks
   gojo emit-c <file.gojo|dir>             print the generated C
   gojo fmt [--check] [file.gojo|dir...]  format in place (default: .); --check lists
@@ -41,6 +43,8 @@ usage:
                                           blocks, `unsafe fn`, `unsafe send`, `extern`),
                                           package by package, and whether gojo.toml's
                                           [unsafe] table allows it; fails when it doesn't
+  gojo spec                               the whole language on one page, for coding
+                                          agents (docs/brief.md)
   gojo version                            print the version
 
 options:
@@ -94,6 +98,11 @@ fn main() -> ExitCode {
         Some("unsafe") => {
             let rest = args[2..].to_vec();
             return gojo::with_compiler_stack(move || unsafe_command(&rest));
+        }
+        Some("spec") => {
+            // the one-page summary of the language (docs/brief.md)
+            print!("{}", include_str!("../docs/brief.md"));
+            return ExitCode::SUCCESS;
         }
         Some("version" | "--version" | "-V") => {
             println!("{}", version());
@@ -151,6 +160,7 @@ fn main() -> ExitCode {
             }
             "--real" => opts.real = true,
             "--verify-bce" => opts.verify_bce = true,
+            "--json" if cmd == "check" => gojo::JSON_DIAGS.store(true, std::sync::atomic::Ordering::Relaxed),
             _ if a.starts_with('-') && a.len() > 1 => {
                 eprintln!("error: unknown option `{}` (see `gojo help`)", a);
                 return ExitCode::from(2);

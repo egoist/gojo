@@ -88,19 +88,66 @@ pub struct Diag {
     /// A warning: the program is right, and still builds and runs; the code
     /// could be better. Everything else is an error.
     pub warning: bool,
+    /// Edits that fix it, when there is one obvious fix: replace each span
+    /// with its text (an empty span inserts). `gojo check --json` gives
+    /// them to tools; a coding agent can apply them as they are.
+    pub fixes: Vec<(Span, String)>,
 }
 
 impl Diag {
     pub fn new(span: Span, msg: impl Into<String>) -> Diag {
-        Diag { span, msg: msg.into(), notes: vec![], warning: false }
+        Diag { span, msg: msg.into(), notes: vec![], warning: false, fixes: vec![] }
     }
     pub fn warning(span: Span, msg: impl Into<String>) -> Diag {
-        Diag { span, msg: msg.into(), notes: vec![], warning: true }
+        Diag { span, msg: msg.into(), notes: vec![], warning: true, fixes: vec![] }
     }
     pub fn note(mut self, span: Option<Span>, msg: impl Into<String>) -> Diag {
         self.notes.push((span, msg.into()));
         self
     }
+    /// A machine-applicable fix: replace `span` with `text`.
+    pub fn fix(mut self, span: Span, text: impl Into<String>) -> Diag {
+        self.fixes.push((span, text.into()));
+        self
+    }
+}
+
+pub fn json_str(s: &str) -> String {
+    let mut o = String::from("\"");
+    for c in s.chars() {
+        match c {
+            '"' => o.push_str("\\\""),
+            '\\' => o.push_str("\\\\"),
+            '\n' => o.push_str("\\n"),
+            '\t' => o.push_str("\\t"),
+            c if (c as u32) < 0x20 => o.push_str(&format!("\\u{:04x}", c as u32)),
+            c => o.push(c),
+        }
+    }
+    o.push('"');
+    o
+}
+
+/// A place as JSON fields: the file, line and column of both ends (1-based,
+/// the end exclusive), and the byte offsets.
+fn json_span(sm: &SourceMap, sp: Span) -> String {
+    let f = sm.file(sp.file);
+    let (l, c) = f.line_col(sp.lo);
+    let (el, ec) = f.line_col(sp.hi.max(sp.lo));
+    format!("\"file\": {}, \"line\": {}, \"column\": {}, \"endLine\": {}, \"endColumn\": {}, \"start\": {}, \"end\": {}", json_str(&f.path), l, c, el, ec, sp.lo, sp.hi.max(sp.lo))
+}
+
+/// One diagnostic as a line of JSON (`gojo check --json`).
+pub fn render_json(sm: &SourceMap, d: &Diag) -> String {
+    let mut notes = vec![];
+    for (sp, n) in &d.notes {
+        match sp {
+            Some(sp) => notes.push(format!("{{\"message\": {}, {}}}", json_str(&tuple_names(n)), json_span(sm, *sp))),
+            None => notes.push(format!("{{\"message\": {}}}", json_str(&tuple_names(n)))),
+        }
+    }
+    let fixes: Vec<String> = d.fixes.iter().map(|(sp, t)| format!("{{{}, \"replacement\": {}}}", json_span(sm, *sp), json_str(t))).collect();
+    format!("{{\"severity\": {}, \"message\": {}, {}, \"notes\": [{}], \"fixes\": [{}]}}", json_str(if d.warning { "warning" } else { "error" }), json_str(&tuple_names(&d.msg)), json_span(sm, d.span), notes.join(", "), fixes.join(", "))
 }
 
 /// Tuple elements are fields `_0`, `_1`, ... inside; messages show `t.0` and

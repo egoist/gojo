@@ -518,7 +518,7 @@ impl Checker {
             for (name, id) in sc {
                 if !cx.used[id as usize] && !name.starts_with('_') && !matches!(cx.locals[id as usize].kind, LocalKind::Param(_)) {
                     let sp = cx.locals[id as usize].span;
-                    self.diags.push(Diag::new(sp, format!("variable `{}` is declared but never used", name)).note(None, "prefix it with `_` if this is intentional"));
+                    self.diags.push(Diag::new(sp, format!("variable `{}` is declared but never used", name)).note(None, "prefix it with `_` if this is intentional").fix(Span { file: sp.file, lo: sp.lo, hi: sp.lo }, "_"));
                 }
             }
         }
@@ -2550,6 +2550,12 @@ impl Checker {
                 }
                 if let Some(h) = super::renamed(name) {
                     d = d.note(None, h);
+                    if matches!(&name[..], "rc" | "arc" | "weak") {
+                        d = d.fix(Span { file: sp.file, lo: sp.lo, hi: sp.lo + name.len() as u32 }, format!("{}{}", name[..1].to_uppercase(), &name[1..]));
+                    }
+                }
+                if name == "nil" {
+                    d = d.fix(sp, "none");
                 }
                 self.diags.push(d);
                 TExpr::error(sp)
@@ -4325,7 +4331,7 @@ impl Checker {
                 let inner = match &a.kind {
                     ExprKind::Ref(inner) => inner,
                     _ => {
-                        self.diags.push(Diag::new(a.span, format!("parameter `{}` is inout: pass a mutable reference with `&`", p.name)).note(None, "write `&x` so that modifications are visible at the call site"));
+                        self.diags.push(Diag::new(a.span, format!("parameter `{}` is inout: pass a mutable reference with `&`", p.name)).note(None, "write `&x` so that modifications are visible at the call site").fix(Span { file: a.span.file, lo: a.span.lo, hi: a.span.lo }, "&"));
                         let e = self.expr(cx, a, Some(&pty));
                         return TArg { mode: ArgMode::Inout, e };
                     }
@@ -4374,7 +4380,7 @@ impl Checker {
             }
             Mode::Borrow => {
                 if let ExprKind::Ref(_) = &a.kind {
-                    self.err(a.span, format!("parameter `{}` is borrowed read-only; `&` is only for inout parameters", p.name));
+                    self.diags.push(Diag::new(a.span, format!("parameter `{}` is borrowed read-only; `&` is only for inout parameters", p.name)).fix(Span { file: a.span.file, lo: a.span.lo, hi: a.span.lo + 1 }, ""));
                 }
                 let wrapped = self.ok_wrap_fn_item(cx, a, &pty);
                 let a = wrapped.as_ref().unwrap_or(a);
@@ -4384,7 +4390,7 @@ impl Checker {
             }
             Mode::Sink => {
                 if let ExprKind::Ref(_) = &a.kind {
-                    self.err(a.span, format!("parameter `{}` takes ownership (sink); pass the value without `&`", p.name));
+                    self.diags.push(Diag::new(a.span, format!("parameter `{}` takes ownership (sink); pass the value without `&`", p.name)).fix(Span { file: a.span.file, lo: a.span.lo, hi: a.span.lo + 1 }, ""));
                 }
                 let wrapped = self.ok_wrap_fn_item(cx, a, &pty);
                 let a = wrapped.as_ref().unwrap_or(a);

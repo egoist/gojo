@@ -1256,6 +1256,9 @@ impl Checker {
             let mut d = Diag::new(span, format!("unknown type `{}`", name));
             if let Some(h) = renamed(name) {
                 d = d.note(None, h);
+                if matches!(&name[..], "rc" | "arc" | "weak") {
+                    d = d.fix(Span { file: span.file, lo: span.lo, hi: span.lo + name.len() as u32 }, format!("{}{}", name[..1].to_uppercase(), &name[1..]));
+                }
             }
             self.diags.push(d);
             return Ty::Error;

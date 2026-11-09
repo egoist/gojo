@@ -1,0 +1,11 @@
+fn bump(x: inout int) {
+    x += 1
+}
+
+fn main() {
+    var n = 1
+    let unused = 2
+    bump(n)
+    let r: rc[int] = Rc(3)
+    println(n, r)
+}

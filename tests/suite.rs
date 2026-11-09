@@ -145,6 +145,20 @@ fn compile_warnings() {
     }
 }
 
+/// `gojo check --json` prints each diagnostic as a line of JSON, with the
+/// edits that fix it where there is one obvious fix.
+#[test]
+fn check_json() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    for f in files("tests/json") {
+        let rel = f.strip_prefix(root).unwrap();
+        let want = std::fs::read_to_string(f.with_extension("jsonl")).unwrap();
+        let out = Command::new(gojo()).arg("check").arg("--json").arg(rel).current_dir(root).output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout), want, "{}", f.display());
+        assert!(out.stderr.is_empty(), "{}: {}", f.display(), String::from_utf8_lossy(&out.stderr));
+    }
+}
+
 /// An error that leaves `main` in a debug build prints where it was made and
 /// each `try` that passed it up (spec 8); release builds print only the error.
 #[test]
@@ -847,7 +861,7 @@ fn formatted() {
     }
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut paths = vec![];
-    for d in ["std", "examples", "bench/gojo", "tests/run", "tests/errors", "tests/panic", "tests/projects", "tests/packages", "tests/testblocks", "tests/unsafe", "tests/stdin", "tests/signals", "tests/ffi_pin", "tests/warnings", "tests/traces"] {
+    for d in ["std", "examples", "bench/gojo", "tests/run", "tests/errors", "tests/panic", "tests/projects", "tests/packages", "tests/testblocks", "tests/unsafe", "tests/stdin", "tests/signals", "tests/ffi_pin", "tests/warnings", "tests/traces", "tests/json"] {
         walk(&root.join(d), &mut paths);
     }
     let mut bad = vec![];
@@ -894,8 +908,29 @@ fn std_docs_current() {
 /// prints the ```text block after it, and is formatted.
 #[test]
 fn tour_examples() {
+    doc_programs("docs/tour.md", 15);
+}
+
+/// The one-page summary (`gojo spec`): its programs run like the tour's, its
+/// other Gojo blocks type check, and it stays short enough to hand to a
+/// coding agent whole.
+#[test]
+fn brief_examples() {
+    doc_programs("docs/brief.md", 3);
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let tour = std::fs::read_to_string(root.join("docs/tour.md")).unwrap();
+    let brief = std::fs::read_to_string(root.join("docs/brief.md")).unwrap();
+    let words = brief.split_whitespace().count();
+    assert!(words <= 2600, "docs/brief.md has {} words; keep it under 2600 (about 4k tokens)", words);
+    let out = Command::new(gojo()).arg("spec").output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout), brief);
+}
+
+/// Every ```gojo block of a document with `fn main` runs and prints the
+/// ```text block after it, and is formatted; the other ```gojo blocks type
+/// check (with an empty `main` added).
+fn doc_programs(doc: &str, min: usize) {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let tour = std::fs::read_to_string(root.join(doc)).unwrap();
     // (language, body) of each fenced block
     let mut blocks: Vec<(String, String)> = vec![];
     let mut lines = tour.lines();
@@ -912,16 +947,27 @@ fn tour_examples() {
             blocks.push((lang.to_string(), body));
         }
     }
-    let dir = std::env::temp_dir().join(format!("gojo_tour_{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("gojo_doc_{}_{}", doc.replace('/', "_"), std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let mut failures = vec![];
     let mut programs = 0;
     for (i, (lang, body)) in blocks.iter().enumerate() {
-        if lang != "gojo" || !body.contains("fn main") {
+        if lang != "gojo" {
+            continue;
+        }
+        let first = body.lines().next().unwrap_or("");
+        if !body.contains("fn main") {
+            if doc.ends_with("brief.md") {
+                let f = dir.join(format!("s{}.gojo", i));
+                std::fs::write(&f, format!("{}\nfn main() {{\n}}\n", body)).unwrap();
+                let out = Command::new(gojo()).arg("check").arg(&f).output().unwrap();
+                if !out.status.success() {
+                    failures.push(format!("block starting `{}` doesn't check:\n{}", first, String::from_utf8_lossy(&out.stderr)));
+                }
+            }
             continue;
         }
         programs += 1;
-        let first = body.lines().next().unwrap_or("");
         if gojo::formatter::format(body).as_deref() != Ok(body.as_str()) {
             failures.push(format!("program starting `{}` is not formatted", first));
         }
@@ -941,8 +987,8 @@ fn tour_examples() {
         }
     }
     let _ = std::fs::remove_dir_all(&dir);
-    assert!(programs >= 15, "only {} programs", programs);
-    assert!(failures.is_empty(), "{} tour program(s) failed:\n{}", failures.len(), failures.join("\n"));
+    assert!(programs >= min, "{}: only {} programs", doc, programs);
+    assert!(failures.is_empty(), "{}: {} program(s) failed:\n{}", doc, failures.len(), failures.join("\n"));
 }
 
 /// Debug builds carry Gojo source lines: a debugger (when there is one)
