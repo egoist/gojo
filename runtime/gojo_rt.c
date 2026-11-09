@@ -212,10 +212,6 @@ void gojo_String_pushRune(gojo_string *s, int32_t r) {
 
 void gojo_String_clear(gojo_string *s) { s->len = 0; }
 
-bool gojo_str_eq(gojo_str a, gojo_str b) {
-    return a.len == b.len && (a.len == 0 || memcmp(a.ptr, b.ptr, (size_t)a.len) == 0);
-}
-
 int gojo_str_cmp(gojo_str a, gojo_str b) {
     int64_t n = a.len < b.len ? a.len : b.len;
     int c = n ? memcmp(a.ptr, b.ptr, (size_t)n) : 0;
@@ -336,10 +332,13 @@ static int64_t str_find(gojo_str s, gojo_str sub, int64_t from) {
         return q ? (int64_t)(q - s.ptr) : -1;
     }
     const uint8_t *p = s.ptr + from, *end = s.ptr + s.len - sub.len + 1;
+    // memchr matched the first byte; compare only the rest
+    const uint8_t *rest = sub.ptr + 1;
+    size_t nrest = (size_t)sub.len - 1;
     while (p < end) {
         p = memchr(p, sub.ptr[0], (size_t)(end - p));
         if (!p) return -1;
-        if (memcmp(p, sub.ptr, (size_t)sub.len) == 0) return (int64_t)(p - s.ptr);
+        if (nrest == 0 || memcmp(p + 1, rest, nrest) == 0) return (int64_t)(p - s.ptr);
         p++;
     }
     return -1;
@@ -363,6 +362,36 @@ gojo_str gojo_str_trimEnd(gojo_str s) {
 }
 gojo_str gojo_str_trim(gojo_str s) { return gojo_str_trimEnd(gojo_str_trimStart(s)); }
 
+// `s` split at `sep` (not empty) into at most `max` pieces, the last holding
+// the rest. Counts first, so the Vec is allocated once at its exact size
+// (growing it by realloc cost more than the search); the first cuts found
+// are kept, so short strings are searched once.
+static gojo_vec split_exact(gojo_str s, gojo_str sep, int64_t max) {
+    int64_t cut[32];
+    int64_t k = 1, start = 0;
+    while (k < max) {
+        int64_t j = str_find(s, sep, start);
+        if (j < 0) break;
+        if (k <= 32) cut[k - 1] = j;
+        k++;
+        start = j + sep.len;
+    }
+    gojo_vec v = { NULL, 0, 0 };
+    gojo_vec_reserve(&v, k, sizeof(gojo_string));
+    gojo_string *out = (gojo_string *)v.ptr;
+    start = 0;
+    for (int64_t i = 0; i < k - 1; i++) {
+        int64_t j = i < 32 ? cut[i] : str_find(s, sep, start);
+        gojo_str part = { s.ptr + start, j - start };
+        out[i] = gojo_string_from(part);
+        start = j + sep.len;
+    }
+    gojo_str last = { s.ptr + start, s.len - start };
+    out[k - 1] = gojo_string_from(last);
+    v.len = k;
+    return v;
+}
+
 static void vec_push_string(gojo_vec *v, gojo_str s) {
     gojo_vec_reserve(v, 1, sizeof(gojo_string));
     ((gojo_string *)v->ptr)[v->len++] = gojo_string_from(s);
@@ -380,17 +409,7 @@ gojo_vec gojo_str_split(gojo_str s, gojo_str sep) {
         }
         return v;
     }
-    int64_t start = 0;
-    for (;;) {
-        int64_t j = str_find(s, sep, start);
-        if (j < 0) break;
-        gojo_str part = { s.ptr + start, j - start };
-        vec_push_string(&v, part);
-        start = j + sep.len;
-    }
-    gojo_str last = { s.ptr + start, s.len - start };
-    vec_push_string(&v, last);
-    return v;
+    return split_exact(s, sep, INT64_MAX);
 }
 
 gojo_vec gojo_str_lines(gojo_str s) {

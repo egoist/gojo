@@ -215,7 +215,27 @@ void gojo_fmt_fixed(gojo_string *b, double v, int64_t prec);
 void gojo_fmt_pad(gojo_string *b, gojo_string *t, int64_t width, int64_t align, uint32_t fill, bool zero, bool numeric);
 void gojo_String_pushRune(gojo_string *s, int32_t r);
 void gojo_String_clear(gojo_string *s);
-bool gojo_str_eq(gojo_str a, gojo_str b);
+// Inline: a length mismatch costs no call, and up to 16 bytes compare as
+// two overlapping loads instead of a call to memcmp.
+static inline bool gojo_str_eq(gojo_str a, gojo_str b) {
+    if (a.len != b.len) return false;
+    size_t n = (size_t)a.len;
+    const uint8_t *p = a.ptr, *q = b.ptr;
+    if (n >= 8 && n <= 16) {
+        uint64_t x0, y0, x1, y1;
+        memcpy(&x0, p, 8); memcpy(&y0, q, 8);
+        memcpy(&x1, p + n - 8, 8); memcpy(&y1, q + n - 8, 8);
+        return ((x0 ^ y0) | (x1 ^ y1)) == 0;
+    }
+    if (n >= 4 && n < 8) {
+        uint32_t x0, y0, x1, y1;
+        memcpy(&x0, p, 4); memcpy(&y0, q, 4);
+        memcpy(&x1, p + n - 4, 4); memcpy(&y1, q + n - 4, 4);
+        return ((x0 ^ y0) | (x1 ^ y1)) == 0;
+    }
+    if (n < 4) return n == 0 || (p[0] == q[0] && p[n / 2] == q[n / 2] && p[n - 1] == q[n - 1]);
+    return memcmp(p, q, n) == 0;
+}
 int gojo_str_cmp(gojo_str a, gojo_str b);
 uint64_t gojo_str_hash(gojo_str s);
 gojo_string gojo_str_concat(gojo_str a, gojo_str b);

@@ -164,26 +164,17 @@ static void vec_push_str(gojo_vec *v, gojo_str s) {
 gojo_vec gojo_str_splitN(gojo_str s, gojo_str sep, int64_t n) {
     gojo_vec v = { NULL, 0, 0 };
     if (n <= 0) return v;
+    if (sep.len) return split_exact(s, sep, n);
+    // between characters
     int64_t start = 0;
-    while (v.len < n - 1) {
-        int64_t j;
-        if (sep.len == 0) {
-            // between characters
-            if (start >= s.len) break;
-            j = start;
-            gojo_utf8_decode(s, &j);
-            gojo_str part = { s.ptr + start, j - start };
-            vec_push_str(&v, part);
-            start = j;
-            continue;
-        }
-        j = str_find_from(s, sep, start);
-        if (j < 0) break;
+    while (v.len < n - 1 && start < s.len) {
+        int64_t j = start;
+        gojo_utf8_decode(s, &j);
         gojo_str part = { s.ptr + start, j - start };
         vec_push_str(&v, part);
-        start = j + sep.len;
+        start = j;
     }
-    if (sep.len == 0 && start >= s.len && v.len > 0) return v;
+    if (start >= s.len && v.len > 0) return v;
     gojo_str last = { s.ptr + start, s.len - start };
     vec_push_str(&v, last);
     return v;

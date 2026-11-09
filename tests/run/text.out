@@ -2,6 +2,9 @@ some(3) none some(1) some(0) some(3)
 2 6 2 0
 ["a", "b=c"] ["a=b=c"] [] ["a", "b", "c"] ["h", "éj"] ["a", "b"]
 some(("key", "value=x")) none some(("", ""))
+40 w31 w32 w39 true 35 w34 w35 w36 w37 w38 w39
+["x", "y", "", "z"] ["", "", "a"] ["", "aaa"] [""] ["", ""] 41
+TF TFFFF TFFFF TFFFF TFFFF TFFFF TFFFF TFFFF TFFFF TFFFF TFFFF TFFFF TFFFF TFFFF TFFFF TFFFF TFFFF TFFFF 
 body body file.tar a
 a-b hi a 0 abc
 true true false false true
