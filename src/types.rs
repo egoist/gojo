@@ -434,6 +434,9 @@ pub struct FuncDef {
     pub is_unsafe: bool,
     /// Associated functions: the owning type (with this function's type params).
     pub owner_ty: Option<Ty>,
+    /// `gen fn`: what it yields. Its last parameter is then the hidden loop
+    /// body (`fn(T) -> Flow`) a `for` passes it, and it returns nothing.
+    pub gen_of: Option<Ty>,
 }
 
 impl FuncDef {

@@ -20,7 +20,7 @@ The fuzzing tool is `gojo-fuzz` (section 15).
 - Source files are UTF-8. Comments are `// line comments` and `/* block comments */`; block comments can span lines.
 - **Automatic semicolons**: a statement terminator is inserted when the last token on a line is an identifier, a literal, `true`, `false`, `none`, `)`, `]`, `}`, `return`, `break` or `continue`. So a line that ends with an operator continues on the next line. Newlines inside parentheses and brackets do not end a statement. `;` puts several statements on one line.
 - **Leading-dot lines**: a line that starts with `.name` continues the expression on the line before (a method chain written one step per line), unless it is a `match` arm, that is, it has a `=>` outside brackets (`.Circle(r) => ...`). Comments and blank lines may sit between the steps. A block whose last line is a bare `.Variant` after another expression statement therefore needs the variant's type: `Color.Red`.
-- Keywords: `use extend pub fn struct enum interface type copy let var if else for in match return break continue defer errdefer go try catch with yield unsafe extern none true false inout sink where test const select scope isolate`. `self`, `as` and `lib` are contextual keywords, and so are `view` and `linear` before `struct` or `enum`, `of` after a function's result type, `static` before `for`, `if` or a type, and `is` in `static if T is P`.
+- Keywords: `use extend pub fn struct enum interface type copy let var if else for in match return break continue defer errdefer go try catch with yield unsafe extern none true false inout sink where test const select scope isolate`. `self`, `as` and `lib` are contextual keywords, and so are `view` and `linear` before `struct` or `enum`, `of` after a function's result type, `static` before `for`, `if` or a type, `is` in `static if T is P`, and `gen` before `fn`.
 - Integer literals: decimal, `0x`, `0b`, `0o`, optionally separated with `_`. Floats: `1.5`, `2.5e3`, `1e-3`.
 - Strings `"..."` support `\n \t \\ \" \$ \xNN \u{...}`. Backquoted strings are raw and process no escapes (and no interpolation).
 - **Interpolation**: `"x = ${expr}"` embeds the value of `expr`, shown as `print` shows it; `${expr:spec}` formats it with a `fmt.format` spec (`${n:>8}`, `${f:.2}`, `${b:08b}`), checked at compile time. A string with an interpolation is a new `String`; one without stays a literal. The expression stays on the string's line, and `\${` is a literal `${`. A character literal `'é'` is a `rune` (an `i32` code point); when the expected type is `u8` it is converted to a byte.
@@ -363,6 +363,35 @@ When a type provides both protocols, the cursor is used. A type that satisfies n
 Whether a view of an element can outlive the current iteration: with the cursor protocol, it can when `next` lends a part of `self` (as when iterating a `Vec`; the iterated value then cannot be modified); it cannot when `next` lends data in the cursor, because the next step changes the cursor. With the push protocol it cannot, because `each` may pass the body a value that is valid only for one call.
 
 Tests: `run/iterators`, `run/iterator_views`, `run/constraints`, `run/push_flow`, `errors/iter_misuse`, `errors/iter_mutation`, `errors/iterator_views`.
+
+### 7.3 Generators
+
+A `gen fn` produces values one at a time with `yield`, for a `for` loop to consume:
+
+```gojo
+gen fn lines(src: str) -> str {
+    var start = 0
+    for i, b in src.bytes() {
+        if b == 10 {
+            yield src[start..i]
+            start = i + 1
+        }
+    }
+    if start < src.len() {
+        yield src[start..]
+    }
+}
+
+for l in lines(text) { println(l) }
+```
+
+- The result type is what it yields. A method can be one (`gen fn walk(self) -> int`), and generators can call generators and themselves (`for x in k.walk() { yield x }`, a tree walk).
+- A generator is consumed by `for x in g(args)` (or `for x in v.g(args)` for a method of a variable); calling it anywhere else is an error. The loop body runs for each value; `break`, `continue`, `return`, `try` and labeled jumps in it work as in any loop, and `break` (or leaving the loop any way) stops the generator: its `yield` returns into it no more, and its defers and drops run.
+- It is the push protocol of 7.1 written as a function: the loop body is a closure the generator calls at each `yield`, so it costs a call per value and nothing else (no coroutine, no allocation). Each value is lent to the body for one iteration, like `each`'s: a view yielded can be used in the iteration, not kept after it (copy it out to keep it).
+- `yield` takes a value. It can be in the generator's body, or in the body of a `for` loop in it, but not in another closure (it would yield from that closure). `return` ends a generator; it takes no value. `for i, x in g()` and `for x in &g()` aren't allowed.
+- What generators don't do: give values on demand to code other than a `for` (`next()`), or zip two of them. Those need the cursor protocol of 7.1 (a struct with `cursor` and `next`).
+
+Tests: `run/generators`, `errors/generators`.
 
 ### 7.2 Lazy chains
 

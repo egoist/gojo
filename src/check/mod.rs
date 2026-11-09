@@ -366,6 +366,7 @@ impl Checker {
                             is_extern_c_export: false,
                             is_unsafe: false,
                             owner_ty: None,
+                            gen_of: None,
                         });
                         if pkg == self.prog.main_pkg {
                             self.tests.push((name.clone(), id));
@@ -394,6 +395,7 @@ impl Checker {
                             is_extern_c_export: false,
                             is_unsafe: false,
                             owner_ty: None,
+                            gen_of: None,
                         });
                         let id = self.prog.globals.len() as u32;
                         self.prog.globals.push(GlobalDef { name: name.clone(), ty: t, pkg, is_pub: item.is_pub, span: item.span, init: fid });
@@ -765,6 +767,21 @@ impl Checker {
             }
         }
         let ret_of = self.ret_of(f, recv.as_ref(), &params, &ret);
+        // a generator yields `ret`; a `for` passes it the loop body, which it
+        // calls once per value (spec 7.3)
+        let mut params = params;
+        let gen_of = if f.is_gen {
+            if f.yields.is_some() || f.is_extern_c {
+                self.err(f.name_span, "a `gen fn` yields values to a `for`: it can't be a projection or `extern`");
+            }
+            let flow = self.prog.prelude_type("Flow").map(|d| Ty::Adt(d, Rc::new(vec![]))).unwrap_or(Ty::Error);
+            let elem = ret.clone();
+            params.push(FuncParam { name: "__body".into(), mode: Mode::Borrow, ty: Ty::Func(Rc::new(FuncTy { params: vec![(Mode::Borrow, elem.clone())], ret: flow, send: false })), span: f.name_span });
+            ret = Ty::Unit;
+            Some(elem)
+        } else {
+            None
+        };
         let id = self.prog.funcs.len() as FuncId;
         self.prog.funcs.push(FuncDef {
             name: f.name.clone(),
@@ -785,6 +802,7 @@ impl Checker {
             is_extern_c_export: f.is_extern_c && f.body.is_some(),
             is_unsafe: f.is_unsafe,
             owner_ty: owner_ty.clone(),
+            gen_of,
         });
         if owner_ty.is_some() {
             let keys: Vec<TyKey> = if ext_keys.is_empty() { recv_key.into_iter().collect() } else { ext_keys };

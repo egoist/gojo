@@ -491,10 +491,16 @@ impl Parser {
             self.bump();
             send_iface = true;
         }
+        // `gen fn lines(s: str) -> str { ... yield ... }`
+        let is_gen = matches!(self.peek(), Tok::Ident(g) if g == "gen") && matches!(self.peek_at(1), Tok::Kw(Kw::Func));
+        if is_gen {
+            self.bump();
+        }
         let kind = match self.peek().clone() {
             Tok::Kw(Kw::Func) => {
                 let mut f = self.func_decl(None)?;
                 f.is_unsafe = unsafe_fn;
+                f.is_gen = is_gen;
                 ItemKind::Func(f)
             }
             Tok::Kw(Kw::Struct) => {
@@ -687,17 +693,19 @@ impl Parser {
     fn body_method(&mut self, owner: &TypeExpr, methods: &mut Vec<Item>) -> PResult<bool> {
         let at = if self.is_kw(Kw::Pub) { 1 } else { 0 };
         let is_unsafe = matches!(self.peek_at(at), Tok::Kw(Kw::Unsafe)) && matches!(self.peek_at(at + 1), Tok::Kw(Kw::Func));
-        let is_func = matches!(self.peek_at(at), Tok::Kw(Kw::Func)) || is_unsafe;
+        let is_gen = matches!(self.peek_at(at), Tok::Ident(g) if g == "gen") && matches!(self.peek_at(at + 1), Tok::Kw(Kw::Func));
+        let is_func = matches!(self.peek_at(at), Tok::Kw(Kw::Func)) || is_unsafe || is_gen;
         if !is_func {
             return Ok(false);
         }
         let lo = self.span();
         let is_pub = self.eat_kw(Kw::Pub);
-        if is_unsafe {
+        if is_unsafe || is_gen {
             self.bump();
         }
         let mut f = self.func_decl(Some(owner))?;
         f.is_unsafe = is_unsafe;
+        f.is_gen = is_gen;
         methods.push(Item { kind: ItemKind::Func(f), is_pub, span: self.sp_from(lo) });
         self.skip_nl();
         Ok(true)
@@ -876,6 +884,7 @@ impl Parser {
         }
         let body = if self.is_p("{") { Some(self.block()?) } else { None };
         Ok(FuncDecl {
+            is_gen: false,
             name,
             name_span,
             recv,

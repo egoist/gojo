@@ -14,6 +14,7 @@ pub struct Frame {
     saved_ret: Ty,
     saved_loops: Vec<(Option<String>, u32)>,
     saved_yields: Option<(YieldKind, bool)>,
+    saved_gen: Option<Ty>,
 }
 
 pub struct FnCx {
@@ -61,6 +62,11 @@ pub struct FnCx {
     pub static_fields: Vec<(String, TParamId, Ty)>,
     /// In a `static if T is P` arm: `T` is `P` there (spec 9.1).
     pub type_eqs: Vec<(TParamId, Ty)>,
+    /// In a `gen fn` (and the bodies of its `for` loops): what it yields,
+    /// and its hidden loop-body parameter.
+    pub gen_elem: Option<(Ty, LocalId)>,
+    /// The next call is a `for` loop's call of a generator.
+    pub gen_call_ok: bool,
     /// Lazy chains with `flatMap` being checked (lazy.rs): the labels of
     /// their innermost and outermost loops, and the user's label. A `break`
     /// in the body leaves the outermost; `continue label`, the innermost.
@@ -154,6 +160,8 @@ impl FnCx {
             with_value: None,
             static_fields: vec![],
             type_eqs: vec![],
+            gen_elem: None,
+            gen_call_ok: false,
         }
     }
     pub fn depth(&self) -> u32 {
@@ -455,6 +463,7 @@ impl Checker {
             cx.yields = Some((y, fd.yield_opt));
             cx.ret = Ty::Unit;
         }
+        let gen_of = fd.gen_of.clone();
         let mut recv = None;
         if let Some(r) = &fd.recv {
             let id = self.declare(&mut cx, &r.name, r.ty.clone(), LocalKind::Param(r.mode), r.span, true);
@@ -464,6 +473,10 @@ impl Checker {
         for p in &fd.params {
             let id = self.declare(&mut cx, &p.name, p.ty.clone(), LocalKind::Param(p.mode), p.span, true);
             params.push(id);
+        }
+        if let (Some(g), Some(&b)) = (gen_of, params.last()) {
+            cx.used[b as usize] = true;
+            cx.gen_elem = Some((g, b));
         }
         let _ = decl;
         let unit_result = matches!(&fd.ret, Ty::Result(t, _) if **t == Ty::Unit);
@@ -1378,6 +1391,10 @@ impl Checker {
                 TStmt::Expr(te)
             }
             StmtKind::Assign { place, op, value } => return self.assign(cx, place, op, value, sp),
+            StmtKind::Return(Some(_)) if cx.gen_elem.is_some() => {
+                self.err(sp, "a `gen fn` gives its values with `yield`; `return` ends it, without a value");
+                return None;
+            }
             StmtKind::Return(v) => {
                 if cx.defer_depth > 0 {
                     self.err(sp, "cannot `return` from a defer");
@@ -1419,6 +1436,29 @@ impl Checker {
                         }
                     }
                 }
+            }
+            StmtKind::Yield(v) if cx.gen_elem.is_some() || self.in_gen_closure(cx) => {
+                // in a generator: hand the value to the `for` loop's body, and
+                // stop when it breaks out (spec 7.3)
+                if cx.defer_depth > 0 {
+                    self.err(sp, "cannot `yield` from a defer");
+                    return None;
+                }
+                let Some((_, body)) = cx.gen_elem.clone() else {
+                    self.err(sp, "a `yield` in a closure inside a `gen fn` would yield from the closure: yield in the generator's own body (or the body of a `for` loop in it)");
+                    return None;
+                };
+                let Some(v) = v else {
+                    self.err(sp, "`yield` in a `gen fn` needs a value: `yield x`");
+                    return None;
+                };
+                let _ = body;
+                let call = Expr { kind: ExprKind::Call(Box::new(Expr { kind: ExprKind::Ident("__body".into()), span: sp }), vec![v.clone()]), span: sp };
+                let brk = Expr { kind: ExprKind::Field(Box::new(Expr { kind: ExprKind::Ident("Flow".into()), span: sp }), "Break".into(), sp), span: sp };
+                let cond = Expr { kind: ExprKind::Binary("==", Box::new(call), Box::new(brk)), span: sp };
+                let ret = Stmt { kind: StmtKind::Return(None), span: sp };
+                let e = Expr { kind: ExprKind::If { cond: Box::new(cond), then: ast::Block { stmts: vec![ret], span: sp }, else_: None }, span: sp };
+                return self.stmt(cx, &Stmt { kind: StmtKind::Expr(e), span: sp });
             }
             StmtKind::Yield(v) => {
                 if cx.defer_depth > 0 {
@@ -1781,6 +1821,9 @@ impl Checker {
             cx.loops.pop();
             return Some(TStmt::For { id, kind: IterKind::Range { inclusive: *inclusive }, iter: l, hi: Some(h), elem, index: None, mutable: false, body: b, span: sp });
         }
+        if let Some(r) = self.for_gen(cx, first, second, iter, by_ref, body, sp) {
+            return r;
+        }
         let it = self.expr(cx, iter, None);
         let ity = self.resolve(cx, &it.ty);
         let iter_root = self.place_root(cx, &it).map(|r| cx.locals[r as usize].ref_root.unwrap_or(r));
@@ -1946,6 +1989,85 @@ impl Checker {
                 .note(None, format!("make it iterable with `fn cursor(self) -> C` and `fn {}({}self, c: inout C) yield ?&T`, or with `fn {}({}self, body: fn(T) -> Flow)`", next, if by_ref { "inout " } else { "" }, each, if by_ref { "inout " } else { "" })),
         );
         None
+    }
+
+    /// `for x in g(args)` with `g` a `gen fn` (or `v.g(args)` a generator
+    /// method of a variable): the loop body becomes the closure `g` calls for
+    /// each value it yields, as for a type with `each` (spec 7.3).
+    #[allow(clippy::too_many_arguments)]
+    fn for_gen(&mut self, cx: &mut FnCx, first: &(String, Span), second: Option<&(String, Span)>, iter: &Expr, by_ref: bool, body: &ast::Block, sp: Span) -> Option<Option<TStmt>> {
+        let ExprKind::Call(callee, args) = &iter.kind else { return None };
+        enum G {
+            Func(FuncId, Option<Vec<Ty>>),
+            Method(Expr, String),
+        }
+        let g = match &callee.kind {
+            ExprKind::Field(base, name, _) if matches!(&base.kind, ExprKind::Ident(n) if self.lookup_local_quiet(cx, n).is_some()) => {
+                let ExprKind::Ident(n) = &base.kind else { unreachable!() };
+                let l = self.lookup_local_quiet(cx, n)?;
+                let lt = self.resolve(cx, &cx.locals[l as usize].ty.clone());
+                let k = TyKey::of(&lt)?;
+                let fs = self.prog.methods.get(&(k, name.clone()))?;
+                if !fs.iter().any(|&f| self.prog.func(f).gen_of.is_some()) {
+                    return None;
+                }
+                G::Method((**base).clone(), name.clone())
+            }
+            ExprKind::Ident(_) | ExprKind::Field(..) | ExprKind::Index(..) => match self.peek_path_func(cx, callee) {
+                Some((f, targs)) if self.prog.func(f).gen_of.is_some() => G::Func(f, targs),
+                _ => return None,
+            },
+            _ => return None,
+        };
+        if by_ref || second.is_some() {
+            self.err(iter.span, "a generator gives one value per iteration: `for x in g(...)`");
+            return Some(None);
+        }
+        let label = cx.pending_label.take();
+        let id = cx.next_loop;
+        cx.next_loop += 1;
+        let params = vec![ast::ClosureParam { name: first.0.clone(), mode: Mode::Borrow, ty: None, span: first.1 }];
+        let closure = Expr { kind: ExprKind::Closure { params, ret: None, body: Box::new(Expr { kind: ExprKind::Block(body.clone()), span: body.span }) }, span: body.span };
+        let mut all = args.clone();
+        all.push(closure);
+        cx.loop_body_next = Some((id, label));
+        cx.gen_call_ok = true;
+        let call = match g {
+            G::Func(f, targs) => self.call_fn(cx, f, targs, None, &all, sp, None),
+            G::Method(base, name) => {
+                let b = self.expr(cx, &base, None);
+                self.method_call_on(cx, b, &name, iter.span, None, &all, sp, None)
+            }
+        };
+        cx.gen_call_ok = false;
+        cx.loop_body_next = None;
+        if !matches!(call.kind, TK::Call { .. }) {
+            return Some(None);
+        }
+        Some(Some(TStmt::ForEach { id, call }))
+    }
+
+    /// The function a callee path names, without reporting anything.
+    fn peek_path_func(&mut self, cx: &mut FnCx, e: &Expr) -> Option<(FuncId, Option<Vec<Ty>>)> {
+        let fi = cx.env.file;
+        match &e.kind {
+            ExprKind::Ident(n) if !cx.scopes.iter().any(|s| s.iter().any(|(m, _)| m == n)) => match self.lookup_unqualified(fi, cx.env.pkg, n) {
+                Some(Sym::Func(f)) => Some((f, None)),
+                _ => None,
+            },
+            ExprKind::Field(base, name, _) => {
+                let ExprKind::Ident(pn) = &base.kind else { return None };
+                if cx.scopes.iter().any(|s| s.iter().any(|(m, _)| m == pn)) {
+                    return None;
+                }
+                let (p, _) = self.file_cx[fi].imports.get(pn).cloned()?;
+                match self.prog.packages[p as usize].items.get(name) {
+                    Some(Sym::Func(f)) => Some((*f, None)),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
     }
 
     /// `par for x in &v { }`: the body becomes a `send fn` called for each
@@ -3688,10 +3810,12 @@ impl Checker {
         if let Some((lid, label)) = &loop_body {
             // a loop body: outer loops stay reachable and `return` / `try`
             // keep referring to the enclosing function
-            cx.frames.push(Frame { depth, captures: vec![], saved_ret, saved_loops: cx.loops.clone(), saved_yields: cx.yields });
+            cx.frames.push(Frame { depth, captures: vec![], saved_ret, saved_loops: cx.loops.clone(), saved_yields: cx.yields, saved_gen: None });
             cx.loops.push((label.clone(), *lid));
         } else {
-            cx.frames.push(Frame { depth, captures: vec![], saved_ret, saved_loops: std::mem::take(&mut cx.loops), saved_yields: cx.yields });
+            // (a `yield` in an ordinary closure would yield from the closure)
+            let g = cx.gen_elem.take().map(|g| g.0);
+            cx.frames.push(Frame { depth, captures: vec![], saved_ret, saved_loops: std::mem::take(&mut cx.loops), saved_yields: cx.yields, saved_gen: g });
             cx.ret = ret_ty.clone();
         }
         cx.yields = None;
@@ -3786,6 +3910,12 @@ impl Checker {
         cx.ret = fr.saved_ret;
         cx.loops = fr.saved_loops;
         cx.yields = fr.saved_yields;
+        if let Some(g) = fr.saved_gen {
+            let body = cx.scopes.iter().flatten().find(|(n, _)| n == "__body").map(|(_, id)| *id);
+            if let Some(b) = body {
+                cx.gen_elem = Some((g, b));
+            }
+        }
         let ret_final = self.resolve(cx, &ret_ty);
         let id = cx.closure_ids;
         cx.closure_ids += 1;
@@ -4694,6 +4824,11 @@ impl Checker {
         TExpr::new(TK::Intrinsic { name: "static_build".into(), targs: vec![t.clone(), Ty::Param(fp)], args: vec![TArg { mode: ArgMode::Value, e: v }] }, t, sp)
     }
 
+    /// Inside an ordinary closure in a `gen fn` (where `yield` can't go).
+    fn in_gen_closure(&self, cx: &FnCx) -> bool {
+        cx.frames.iter().any(|f| f.saved_gen.is_some())
+    }
+
     /// A function that can't fail, passed where one returning `R ! E` is
     /// expected (`task.map(xs, 8, square)`), becomes the closure
     /// `(a) => square(a)`, whose result is an `R ! E` that is always ok.
@@ -4737,6 +4872,10 @@ impl Checker {
 
     pub fn call_fn(&mut self, cx: &mut FnCx, fid: FuncId, explicit: Option<Vec<Ty>>, recv: Option<TExpr>, args: &[Expr], sp: Span, expect: Option<&Ty>) -> TExpr {
         let fd = self.prog.func(fid).clone();
+        if fd.gen_of.is_some() && !std::mem::take(&mut cx.gen_call_ok) {
+            self.err(sp, format!("`{}` is a generator: iterate over what it yields with `for x in {}(...)`", fd.name, fd.name));
+            return TExpr::error(sp);
+        }
         if fd.kind == FuncKind::Test {
             self.err(sp, "tests cannot be called");
             return TExpr::error(sp);
