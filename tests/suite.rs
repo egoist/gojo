@@ -62,7 +62,9 @@ fn asan_command(bin: &Path) -> Command {
     c
 }
 
-/// Every program in tests/run, and every single-file example, prints its `.out`.
+/// Every program in tests/run, and every single-file example, prints its `.out`:
+/// as built, and with the bounds checks the compiler removed put back
+/// (`--verify-bce`), where one that fails is a compiler bug.
 #[test]
 fn run_programs() {
     let mut failures = vec![];
@@ -71,10 +73,12 @@ fn run_programs() {
             failures.push(format!("{}: no .out file", f.display()));
             continue;
         };
-        let out = Command::new(gojo()).arg("run").arg(&f).output().unwrap();
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        if stdout != expected {
-            failures.push(format!("{}:\n--- expected\n{}\n--- got\n{}\n--- stderr\n{}", f.display(), expected, stdout, String::from_utf8_lossy(&out.stderr)));
+        for flags in [&[][..], &["--verify-bce"][..]] {
+            let out = Command::new(gojo()).arg("run").args(flags).arg(&f).output().unwrap();
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            if stdout != expected {
+                failures.push(format!("{} {:?}:\n--- expected\n{}\n--- got\n{}\n--- stderr\n{}", f.display(), flags, expected, stdout, String::from_utf8_lossy(&out.stderr)));
+            }
         }
     }
     if !failures.is_empty() {
@@ -109,14 +113,20 @@ fn compile_errors() {
     }
 }
 
+/// Every program in tests/panic panics as its `// panic:` lines say, as built
+/// and with `--verify-bce` (see `run_programs`).
 #[test]
 fn runtime_panics() {
     let mut failures = vec![];
-    for f in files("tests/panic") {
+    for (f, flags) in files("tests/panic").into_iter().flat_map(|f| [(f.clone(), &[][..]), (f, &["--verify-bce"][..])]) {
         let src = std::fs::read_to_string(&f).unwrap();
         let wanted: Vec<String> = src.lines().filter_map(|l| l.trim().strip_prefix("// panic: ").map(|s| s.to_string())).collect();
-        let out = Command::new(gojo()).arg("run").arg(&f).output().unwrap();
+        let out = Command::new(gojo()).arg("run").args(flags).arg(&f).output().unwrap();
         let stderr = String::from_utf8_lossy(&out.stderr);
+        if stderr.contains("bounds check the compiler removed") {
+            failures.push(format!("{} {:?}: {}", f.display(), flags, stderr));
+            continue;
+        }
         if out.status.code() != Some(2) {
             failures.push(format!("{}: expected exit code 2, got {:?}\n{}", f.display(), out.status.code(), stderr));
             continue;
@@ -571,6 +581,89 @@ fn nesting_limits() {
     let _ = std::fs::remove_dir_all(&dir);
     if !failures.is_empty() {
         panic!("{} nesting case(s) failed:\n{}", failures.len(), failures.join("\n"));
+    }
+}
+
+/// The calls in generated C that start at `pat`, with the location each one
+/// reports (its last argument, a string literal `"file:line:col"`).
+fn c_call_locs<'a>(c: &'a str, pat: &str) -> Vec<&'a str> {
+    let mut out = vec![];
+    for (pos, _) in c.match_indices(pat) {
+        let start = pos + pat.len();
+        let (mut depth, mut in_str, mut end) = (1, false, start);
+        let bytes = c.as_bytes();
+        let mut k = start;
+        while k < bytes.len() {
+            match bytes[k] {
+                b'\\' if in_str => k += 1,
+                b'"' => in_str = !in_str,
+                b'(' if !in_str => depth += 1,
+                b')' if !in_str => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = k;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+            k += 1;
+        }
+        let args = &c[start..end];
+        if let Some(close) = args.rfind('"') {
+            if let Some(open) = args[..close].rfind('"') {
+                out.push(&args[open + 1..close]);
+            }
+        }
+    }
+    out
+}
+
+/// Bounds-check elimination: tests/run/bce.gojo marks every index and slice
+/// `// bce: proven` (the compiler removes its check) or `// bce: checked`, in
+/// order along the line, and the generated C must agree. (`run_programs` and
+/// `runtime_panics` also run every program with the removed checks put back.)
+#[test]
+fn bounds_check_elimination() {
+    use std::collections::BTreeMap;
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/run/bce.gojo");
+    let src = std::fs::read_to_string(&path).unwrap();
+    let out = Command::new(gojo()).arg("emit-c").arg(&path).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let c = String::from_utf8_lossy(&out.stdout);
+    // (line, col, slice before index) -> what the C does there
+    let mut sites: BTreeMap<(usize, usize, u8), Vec<&str>> = BTreeMap::new();
+    let kinds = [("GOJO_IDX_PROVEN(", 1, "proven"), ("gojo_idx(", 1, "checked"), ("GOJO_SLICE_PROVEN(", 0, "proven"), ("gojo_panic(\"slice bounds out of range\", ", 0, "checked")];
+    for (pat, order, kind) in kinds {
+        for loc in c_call_locs(&c, pat) {
+            let mut parts = loc.rsplitn(3, ':');
+            let (Some(col), Some(line), Some(file)) = (parts.next(), parts.next(), parts.next()) else { continue };
+            if !file.ends_with("bce.gojo") {
+                continue;
+            }
+            let v = sites.entry((line.parse().unwrap(), col.parse().unwrap(), order)).or_default();
+            if !v.contains(&kind) {
+                v.push(kind);
+            }
+        }
+    }
+    let mut failures = vec![];
+    let mut by_line: BTreeMap<usize, Vec<String>> = BTreeMap::new();
+    for ((line, col, _), ks) in &sites {
+        if ks.len() > 1 {
+            failures.push(format!("line {}:{}: both proven and checked", line, col));
+        }
+        by_line.entry(*line).or_default().push(ks.join("+"));
+    }
+    for (i, l) in src.lines().enumerate() {
+        let want: Vec<String> = l.split_once("// bce: ").map(|(_, w)| w.split_whitespace().map(String::from).collect()).unwrap_or_default();
+        let got = by_line.remove(&(i + 1)).unwrap_or_default();
+        if want != got {
+            failures.push(format!("line {}: expected [{}], the C has [{}]\n    {}", i + 1, want.join(" "), got.join(" "), l.trim()));
+        }
+    }
+    if !failures.is_empty() {
+        panic!("bounds checks in tests/run/bce.gojo:\n{}", failures.join("\n"));
     }
 }
 

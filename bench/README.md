@@ -10,7 +10,7 @@
 
 Apple M5 (10 cores), 32 GB of memory, macOS. Gojo prototype (C back end, Apple clang 21, `--release` = `-O2`), Go 1.27.3, Zig 0.17.0. The programs themselves are all single-threaded; Go's GC runs in parallel on other cores. Zig uses the system `malloc` (`std.heap.c_allocator`).
 
-- **Gojo `--release`**: integer overflow checks and index bounds checks are on (Gojo's default).
+- **Gojo `--release`**: integer overflow checks and index bounds checks are on (Gojo's default; the compiler leaves out only the bounds checks it proves can't fail).
 - **Go**: index bounds checks; integers wrap silently.
 - **Zig ReleaseFast**: no checks at all. **Zig ReleaseSafe**: overflow and bounds checks are on; its safety level is the closest to Gojo.
 

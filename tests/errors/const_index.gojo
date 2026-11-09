@@ -1,0 +1,28 @@
+const Last = 3
+const Past = Last + 1
+
+fn main() {
+    var a: [4]int = [1, 2, 3, 4]
+    let v = Vec[int]{}
+    let s = "abc"
+    println(a[4])
+    // error: index 4 is out of range for `[4]int` (length 4)
+    println(a[Past])
+    // error: index 4 is out of range
+    a[7] = 1
+    // error: index 7 is out of range
+    println(v[-1])
+    // error: index -1 is negative
+    println(s[-2])
+    // error: index -2 is negative
+    println(a[1..5])
+    // error: slice bound 5 is out of range for `[4]int` (length 4)
+    println(v[-1..])
+    // error: slice bound -1 is negative
+    println(v[3..1])
+    // error: slice bounds are reversed: 3 is after 1
+    println(s[2..1])
+    // error: slice bounds are reversed: 2 is after 1
+    // these are fine: the last element, and empty slices at either end
+    println(a[Last], a[4..], a[..0], a[0..4])
+}

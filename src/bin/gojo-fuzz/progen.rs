@@ -633,7 +633,7 @@ impl<'a> Gen<'a> {
 
     fn stmt(&mut self, d: u32) {
         self.budget -= 1;
-        match self.below(20) {
+        match self.below(22) {
             0..=2 => {
                 let ty = *self.rng.pick(&[T::I64, T::I64, T::I32, T::U8, T::U64, T::Bool, T::Str, T::VecI, T::OptI, T::P, T::E, T::VecP, T::MapI]);
                 let name = self.fresh("v");
@@ -911,6 +911,7 @@ impl<'a> Gen<'a> {
                 self.line(&format!("    return err({}.toString())", msg));
                 self.line("}");
             }
+            20 | 21 if d > 0 && self.loops < 2 => self.index_loop(d),
             _ => {
                 let ty = *self.rng.pick(&[T::I64, T::Str, T::Bool]);
                 if let Some(c) = self.call_returning(ty, 2) {
@@ -918,6 +919,103 @@ impl<'a> Gen<'a> {
                 }
             }
         }
+    }
+
+    /// A loop that indexes a vector or string by its counter: the shapes the
+    /// compiler proves in range (src/codegen/bce.rs), near misses that must
+    /// keep their checks, and bodies that change the length.
+    fn index_loop(&mut self, d: u32) {
+        let is_str = self.chance(1, 4);
+        let ty = if is_str { T::Str } else { T::VecI };
+        let Some(v) = self.pick_var(ty, false) else { return };
+        // `for i, _ in v` borrows `v`: nothing in the body may change it
+        let by_iter = self.chance(1, 6);
+        let mutable = !by_iter && !self.iterating.contains(&v) && !self.vars(|x| x.name == v && x.mutable).is_empty();
+        let len = if self.chance(1, 2) { format!("{}.len()", v) } else { format!("{}.len", v) };
+        // (not `i`: `i32`, `i64`... would be type names)
+        let (i, acc) = (self.fresh("ix"), self.fresh("acc"));
+        let lo = *self.rng.pick(&[0, 0, 0, 1, 2]);
+        let read = |ix: &str| if is_str { format!("int({}[{}])", v, ix) } else { format!("{}[{}]", v, ix) };
+        self.line(&format!("var {} = 0", acc));
+        if by_iter {
+            self.iterating.push(v.clone());
+        }
+        match self.below(5) {
+            _ if by_iter => self.line(&format!("for {}, _ in {} {{", i, v)),
+            1 => self.line(&format!("for {} in {}..={} - 1 {{", i, lo, len)),
+            2 => {
+                let k = self.below(3);
+                self.line(&format!("for {} in {}..{} - {} {{", i, lo, len, k))
+            }
+            // occasionally one past the end: the check must stay, and fire
+            3 if self.chance(1, 4) => self.line(&format!("for {} in {}..={} {{", i, lo, len)),
+            _ => self.line(&format!("for {} in {}..{} {{", i, lo, len)),
+        }
+        self.loops += 1;
+        self.heavy = true;
+        self.ind += 1;
+        self.push_scope();
+        self.declare(&i, T::I64, false);
+        // the counter itself, or through conversions (which keep integers
+        // and may round through a float)
+        let ix = match self.below(6) {
+            0 => format!("int(i32({}))", i),
+            1 => format!("int(f64({}))", i),
+            2 => format!("int(u8({} & 255))", i),
+            _ => i.clone(),
+        };
+        let r = read(&ix);
+        self.line(&format!("{} +%= {}", acc, r));
+        for _ in 0..self.below(3) {
+            match self.below(9) {
+                0 if lo >= 1 => {
+                    let k = 1 + self.below(lo);
+                    let r = read(&format!("{} - {}", i, k));
+                    self.line(&format!("{} +%= {}", acc, r));
+                }
+                1 => {
+                    let r = read(&format!("{} + 1", i));
+                    self.line(&format!("if {} % 3 == 0 {{ {} +%= {} }}", i, acc, r));
+                }
+                2 if !is_str => self.line(&format!("{} +%= {}[{}..].len() +% {}[..{}].len() +% {}[{}..{} + 1].len()", acc, v, i, v, i, v, i, i)),
+                3 => {
+                    let j = self.fresh("jx");
+                    let r = read(&j);
+                    if self.chance(1, 2) {
+                        self.line(&format!("for {} in 0..{} {{ {} +%= {} }}", j, i, acc, r));
+                    } else {
+                        self.line(&format!("for {} in {} + 1..{} {{ {} +%= {} }}", j, i, len, acc, r));
+                    }
+                }
+                4 if mutable && self.chance(1, 2) => {
+                    let what = if is_str {
+                        format!("{}.push(\"z\")", v)
+                    } else {
+                        match self.below(4) {
+                            0 => format!("{}.push({})", v, i),
+                            1 => format!("_ = {}.pop()", v),
+                            2 => format!("{}.truncate({} & 3)", v, acc),
+                            _ => format!("{} = [7, 8]", v),
+                        }
+                    };
+                    let at = self.below(4);
+                    self.line(&format!("if {} == {} {{ {} }}", i, at, what));
+                }
+                5 => {
+                    let r = read(&i);
+                    self.line(&format!("{} +%= apply((x) => x +% {}, {})", acc, r, i));
+                }
+                _ => self.stmt(d - 1),
+            }
+        }
+        self.pop_scope();
+        self.ind -= 1;
+        self.loops -= 1;
+        if by_iter {
+            self.iterating.pop();
+        }
+        self.line("}");
+        self.line(&format!("println(\"{}\", {})", acc, acc));
     }
 
     fn block(&mut self, d: u32, n: usize) {

@@ -1,0 +1,10 @@
+// The loop's bound is the length at the start, but the body shrinks the
+// vector: the check stays.
+fn main() {
+    var v: Vec[int] = [1, 2, 3]
+    for i in 0..v.len {
+        _ = v.pop()
+        println(v[i])
+    }
+    // panic: index out of range: index 1, length 1
+}

@@ -2232,6 +2232,7 @@ impl Checker {
                         return TExpr::error(sp);
                     }
                 };
+                self.const_bounds(&bty, lo.as_deref(), hi.as_deref(), true);
                 let b = self.borrow(cx, b);
                 TExpr::new(TK::SliceOf { base: Box::new(b), lo, hi }, rty, sp)
             }
@@ -2889,10 +2890,12 @@ impl Checker {
                     let i = self.expr(cx, &idx[0], Some(&Ty::int()));
                     let ity = self.resolve(cx, &i.ty);
                     let i = if ity.is_int() { self.value(cx, i) } else { self.coerce(cx, i, &Ty::int(), Use::Value) };
+                    self.const_bounds(&bty, Some(&i), None, false);
                     return TExpr::new(TK::Index { base: Box::new(b), index: Box::new(i) }, t, sp);
                 }
                 Ty::Str | Ty::String => {
                     let i = self.expr_value(cx, &idx[0], Some(&Ty::int()));
+                    self.const_bounds(&bty, Some(&i), None, false);
                     let b = self.borrow(cx, b);
                     return TExpr::new(TK::StrIndex { base: Box::new(b), index: Box::new(i) }, Ty::Int(IntTy::U8), sp);
                 }
@@ -2911,6 +2914,39 @@ impl Checker {
                     self.err(sp, format!("cannot index into a value of type `{}`", s));
                     return TExpr::error(sp);
                 }
+            }
+        }
+    }
+
+    /// Rejects an index (`lo`, `slice` false) or slice bounds that are
+    /// constants and can only panic: negative, past a fixed array's length, or
+    /// a start after the end.
+    fn const_bounds(&mut self, bty: &Ty, lo: Option<&TExpr>, hi: Option<&TExpr>, slice: bool) {
+        let len = match bty {
+            Ty::Array(_, n) => Some(*n as i128),
+            _ => None,
+        };
+        let shown = self.prog.show(bty);
+        let mut vals = vec![];
+        for e in [lo, hi].into_iter().flatten() {
+            let Some(v) = crate::tir::const_int(e, &self.prog) else {
+                vals.push(None);
+                continue;
+            };
+            vals.push(Some(v));
+            let what = if slice { "slice bound" } else { "index" };
+            if v < 0 {
+                self.err(e.span, format!("{} {} is negative", what, v));
+            } else if let Some(n) = len {
+                // a slice may end at the length; an index must be below it
+                if v > n || (!slice && v == n) {
+                    self.err(e.span, format!("{} {} is out of range for `{}` (length {})", what, v, shown, n));
+                }
+            }
+        }
+        if let (Some(lo), Some(hi), [Some(a), Some(b)]) = (lo, hi, vals.as_slice()) {
+            if a > b && *a >= 0 && *b >= 0 {
+                self.err(lo.span.to(hi.span), format!("slice bounds are reversed: {} is after {}", a, b));
             }
         }
     }

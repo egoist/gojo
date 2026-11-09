@@ -591,3 +591,37 @@ pub fn locals_in_stmt(s: &TStmt, out: &mut Vec<LocalId>) {
         }
     });
 }
+
+/// The value of an integer constant expression: literals, constants, and
+/// `-`, `+`, `-`, `*` and conversions of them. `None` when it isn't one, or
+/// when evaluating it would overflow (the program then panics or is
+/// rejected).
+pub fn const_int(e: &TExpr, prog: &Program) -> Option<i128> {
+    const_int_d(e, prog, 0)
+}
+
+fn const_int_d(e: &TExpr, prog: &Program, depth: u32) -> Option<i128> {
+    if depth > 64 {
+        return None;
+    }
+    let v = match &e.kind {
+        TK::Int(v) => *v,
+        TK::Const(c) => const_int_d(prog.consts.get(*c as usize)?.value.as_ref()?, prog, depth + 1)?,
+        TK::Copy(x) | TK::Cast(x) => const_int_d(x, prog, depth + 1)?,
+        TK::Unary { op: "-", e: x } => const_int_d(x, prog, depth + 1)?.checked_neg()?,
+        TK::Binary { op, l, r } => {
+            let (a, b) = (const_int_d(l, prog, depth + 1)?, const_int_d(r, prog, depth + 1)?);
+            match op {
+                BinOp::Add => a.checked_add(b)?,
+                BinOp::Sub => a.checked_sub(b)?,
+                BinOp::Mul => a.checked_mul(b)?,
+                _ => return None,
+            }
+        }
+        _ => return None,
+    };
+    match &e.ty {
+        Ty::Int(k) if v >= k.min() && v <= k.max() => Some(v),
+        _ => None,
+    }
+}

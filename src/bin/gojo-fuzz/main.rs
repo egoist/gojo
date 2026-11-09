@@ -18,15 +18,19 @@
 //   asan-*       an accepted program without `unsafe` misbehaved at run time
 //                under AddressSanitizer / UBSan: a hole in the safety checks or
 //                a miscompilation
+//   bce-*        a bounds check the compiler removed would have failed (the
+//                programs are built with `--verify-bce`, which keeps them)
 //
 // Mutants that the compiler accepts, or that produce an error message not seen
 // before, join the corpus, which is kept in `<out>/corpus` across runs.
 //
 // `diff` generates random well-typed programs (progen.rs) and builds each four
-// ways: debug, release, and both under AddressSanitizer + UBSan. All four must
-// print the same output and end the same way (and the sanitizers must stay
-// quiet), and the values the generator computed itself must come out (else
-// `wrong-*`). Findings go to `<out>/findings` as `diff-*`, `asan-*`, and
+// ways: debug, release, and both under AddressSanitizer + UBSan (the debug one
+// keeping the bounds checks the compiler proved unnecessary, `--verify-bce`).
+// All four must print the same output and end the same way (and the
+// sanitizers must stay quiet), and the values the generator computed itself
+// must come out (else `wrong-*`). Findings go to `<out>/findings` as `diff-*`,
+// `asan-*`, `bce-*` (a removed bounds check would have failed), and
 // `rejected-*` (a generated program the compiler refused: a bug in the
 // generator or a false positive in the compiler's checks).
 //
@@ -702,7 +706,7 @@ fn exec_check(text: &str, work: &Path, findings: &Findings) {
         return;
     }
     let mut build = Command::new(gojo_bin());
-    build.arg("build").arg("--cc").arg("cc -fsanitize=address,undefined -fno-sanitize-recover=undefined -g").arg(&src).arg("-o").arg(&bin);
+    build.arg("build").arg("--verify-bce").arg("--cc").arg("cc -fsanitize=address,undefined -fno-sanitize-recover=undefined -g").arg(&src).arg("-o").arg(&bin);
     build.env("GOJO_CACHE", work.join("cache"));
     let Some(out) = run_limited(&mut build, Duration::from_secs(120)) else {
         findings.report("hang", "c-compile", text, "the C compiler took more than 120 s");
@@ -728,6 +732,9 @@ fn exec_check(text: &str, work: &Path, findings: &Findings) {
         let kind = l.split(" on ").next().unwrap_or(l).split("runtime error:").last().unwrap_or(l).trim();
         let frame = stderr.lines().find(|l| l.contains(" in kx_") || l.contains(" in gojo_")).and_then(|l| l.split(" in ").nth(1)).and_then(|f| f.split_whitespace().next()).unwrap_or("");
         findings.report("asan", &format!("{} @ {}", normalize(kind), frame), text, &stderr);
+    }
+    if stderr.contains("bounds check the compiler removed") {
+        findings.report("bce", "removed bounds check failed", text, &stderr);
     }
     use std::os::unix::process::ExitStatusExt;
     if let Some(sig) = out.status.signal() {
@@ -991,7 +998,7 @@ fn deep_signature(f: &Path, scratch: &Path) -> String {
     let bin = scratch.join("prog");
     let _ = std::fs::remove_file(&bin);
     let mut build = Command::new(gojo_bin());
-    build.arg("build").arg("--cc").arg("cc -fsanitize=address,undefined -fno-sanitize-recover=undefined -g").arg(f).arg("-o").arg(&bin);
+    build.arg("build").arg("--verify-bce").arg("--cc").arg("cc -fsanitize=address,undefined -fno-sanitize-recover=undefined -g").arg(f).arg("-o").arg(&bin);
     build.env("GOJO_CACHE", scratch.join("cache"));
     let Some(out) = run_limited(&mut build, Duration::from_secs(120)) else { return "hang".into() };
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -1012,6 +1019,9 @@ fn deep_signature(f: &Path, scratch: &Path) -> String {
     if let Some(l) = stderr.lines().find(|l| l.contains("ERROR: AddressSanitizer") || l.contains("runtime error:")) {
         let kind = l.split(" on ").next().unwrap_or(l).split("runtime error:").last().unwrap_or(l).trim();
         return format!("asan {}", normalize(kind));
+    }
+    if stderr.contains("bounds check the compiler removed") {
+        return "bce".into();
     }
     "ok".into()
 }
@@ -1154,6 +1164,9 @@ fn run_variant(src: &Path, work: &Path, name: &str, flags: &[&str], findings: &F
             }
             let status = o.status.code().or_else(|| o.status.signal().map(|s| 128 + s));
             let panic = stderr.lines().find(|l| l.starts_with("panic:")).unwrap_or("").to_string();
+            if panic.contains("bounds check the compiler removed") {
+                findings.report("bce", &format!("removed bounds check failed ({})", name), text, &stderr);
+            }
             RunResult { status, stdout: String::from_utf8_lossy(&o.stdout).to_string(), panic }
         }
     };
@@ -1166,7 +1179,9 @@ fn diff_one(text: &str, work: &Path, findings: &Findings) -> bool {
         return false;
     }
     let san = "cc -fsanitize=address,undefined -fno-sanitize-recover=undefined -g";
-    let variants: [(&str, Vec<&str>); 4] = [("debug", vec![]), ("release", vec!["--release"]), ("asan", vec!["--cc", san]), ("asan-release", vec!["--release", "--cc", san])];
+    // the debug ASan build keeps the bounds checks the compiler removed
+    // (`--verify-bce`); the release one runs without them, as shipped
+    let variants: [(&str, Vec<&str>); 4] = [("debug", vec![]), ("release", vec!["--release"]), ("asan", vec!["--cc", san, "--verify-bce"]), ("asan-release", vec!["--release", "--cc", san])];
     let mut results: Vec<(&str, RunResult)> = vec![];
     for (name, flags) in &variants {
         match run_variant(&src, work, name, flags, findings, text) {
