@@ -14,4 +14,6 @@ python3 bench/realworld/run_realworld.py
 
 Results: [`results/RESULTS.md`](results/RESULTS.md), [`results/results.json`](results/results.json), [`results/results.csv`](results/results.csv), [`results/chart.png`](results/chart.png).
 
+Independent issue #4 rerun (Gojo baseline `0c6e3f9` vs PR #5 `a8a7643` vs Rust, pinned CPUs): [`results/issue-4-rerun/REPORT.md`](results/issue-4-rerun/REPORT.md).
+
 The MoonBit / Go / Gojo microbenchmarks (PR #2) live under `bench/compare-moonbit/` on that branch and are not part of this suite.
