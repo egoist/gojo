@@ -146,11 +146,27 @@ function langOf(pre: Element) {
   return classes.find((c) => c.startsWith("language-"))?.slice("language-".length) ?? "text"
 }
 
-/** A highlighted code block with a copy button; the output of a program has a caption instead. */
+/** The names shown in the corner of code blocks; a language not listed shows none. */
+const languageNames: Record<string, string> = {
+  gojo: "Gojo",
+  sh: "Shell",
+  toml: "TOML",
+  c: "C",
+  json: "JSON",
+  rust: "Rust",
+  go: "Go",
+}
+
+/**
+ * A highlighted code block with its language and a copy button; the output of
+ * a program has a caption instead.
+ */
 function codeBlock(pre: Element, shiki: Highlighter): Element {
   const output = pre.properties.dataOutput !== undefined
   const code = pre.children.find((c): c is Element => c.type === "element" && c.tagName === "code")
-  const highlighted = highlight(shiki, toString(code ?? pre).replace(/\n$/, ""), langOf(pre))
+  const lang = langOf(pre)
+  const highlighted = highlight(shiki, toString(code ?? pre).replace(/\n$/, ""), lang)
+  const name = languageNames[lang]
   if (output) {
     return {
       type: "element",
@@ -168,6 +184,7 @@ function codeBlock(pre: Element, shiki: Highlighter): Element {
     properties: { className: ["code-block"] },
     children: [
       highlighted,
+      ...(name ? [label(name)] : []),
       {
         type: "element",
         tagName: "button",
@@ -178,6 +195,15 @@ function codeBlock(pre: Element, shiki: Highlighter): Element {
         ],
       },
     ],
+  }
+}
+
+function label(name: string): Element {
+  return {
+    type: "element",
+    tagName: "span",
+    properties: { className: ["code-lang"], ariaHidden: "true" },
+    children: [{ type: "text", value: name }],
   }
 }
 
