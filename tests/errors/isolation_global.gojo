@@ -1,0 +1,17 @@
+// A package-level value's initializer is checked like a function body.
+fn bump(c: sink Rc[Cell[int]]) {
+    c.set(c.get() + 1)
+}
+
+let N = scope {
+    let c = Rc(Cell(0))
+    let keep = c.clone()
+    go bump(c)
+    keep.get()
+}
+
+fn main() {
+    println(N)
+}
+// error: a task captures `c` of type `Rc[Cell[int]]`, which is not safe to share between threads
+// error: `c` is used here, which may leave another reference to what it holds

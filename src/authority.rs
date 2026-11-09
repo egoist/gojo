@@ -38,7 +38,10 @@ pub fn needs(module: &str, name: &str) -> &'static [&'static str] {
         ("os", "run" | "runWithInput" | "call" | "command" | "notify") => &["process"],
         ("path", "abs") => &["fs"],
         ("net", "listen" | "dial" | "listenUdp" | "dialUdp" | "lookup") => &["net"],
-        ("tls", "dial" | "dialWith") => &["net"],
+        ("tls", "dial") => &["net"],
+        // and read the `caFile` of the configuration, when it names one
+        ("tls", "dialWith") => &["net", "fs"],
+        ("tls", "client") => &["fs"],
         // and reads the certificate and key files
         ("tls", "listen") => &["net", "fs"],
         ("http", "request" | "get" | "post") => &["net"],
@@ -52,7 +55,7 @@ pub const MODULES: [&str; 5] = ["os", "path", "net", "tls", "http"];
 
 /// The public functions of `MODULES` that need nothing: pure ones, the
 /// standard streams, the program's arguments, exiting (which `panic` can do
-/// anyway), and those that take the listener or connection they use.
+/// anyway), and those that take the listener they use.
 pub const FREE: &[(&str, &str)] = &[
     ("os", "args"),
     ("os", "exit"),
@@ -63,7 +66,6 @@ pub const FREE: &[(&str, &str)] = &[
     ("os", "dirName"),
     ("os", "baseName"),
     ("os", "pid"),
-    ("tls", "client"),
     ("http", "findHeader"),
     ("http", "text"),
     ("http", "json"),

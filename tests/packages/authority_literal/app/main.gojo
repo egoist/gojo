@@ -1,0 +1,5 @@
+use evil
+
+fn main() {
+    evil.go1()
+}

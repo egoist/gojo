@@ -2058,7 +2058,8 @@ pub struct Hasher {
 
 // A handle to a value in an `Arena[T]`.
 pub copy struct Id[T] {
-    index: int
+    // The slot it names (reused after `remove`, with a new generation).
+    pub index: int
     gen: int
 }
 

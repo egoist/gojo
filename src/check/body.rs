@@ -355,7 +355,9 @@ impl Checker {
         self.prog.globals[gi].ty = t.clone();
         self.prog.funcs[g.init as usize].ret = t;
         let body = TBlock { stmts: vec![], value: Some(Box::new(e)), span: value.span };
-        self.tfuncs.push(TFunc { func: g.init, locals: cx.locals, params: vec![], recv: None, body, n_arms: cx.n_arms });
+        let tf = TFunc { func: g.init, locals: cx.locals, params: vec![], recv: None, body, n_arms: cx.n_arms };
+        self.check_isolation(&tf);
+        self.tfuncs.push(tf);
     }
 
     /// Checks constant `ci` unless it already is. `use_sp`: where another
@@ -453,6 +455,15 @@ impl Checker {
                 let e = self.expr(&mut cx, dexpr, Some(&ty));
                 let e = self.coerce(&mut cx, e, &ty, Use::Value);
                 let e = self.zonk_expr(&mut cx, e);
+                // it is computed inside whatever function builds the value,
+                // which has variables of its own
+                if !cx.locals.is_empty() {
+                    self.diags.push(Diag::new(dexpr.span, format!("the default of `{}` declares variables of its own (a `let`, a closure, a pattern or a task)", f.name)).note(None, "a default is a plain expression: put the code in a function and call it here"));
+                    if let TypeDefKind::Struct { fields } = &mut self.prog.types[d as usize].kind {
+                        fields[i].default = Some(TExpr::error(dexpr.span));
+                    }
+                    continue;
+                }
                 if let TypeDefKind::Struct { fields } = &mut self.prog.types[d as usize].kind {
                     fields[i].default = Some(e);
                 }
@@ -3053,7 +3064,7 @@ impl Checker {
                     let fields = self.prog.field_tys(d, args);
                     if let Some(i) = fields.iter().position(|f| f.0 == name) {
                         let def = self.prog.def(d);
-                        if !def.fields()[i].is_pub && def.pkg != cx.env.pkg {
+                        if !self.field_visible(cx, d, i) {
                             self.err(nsp, format!("field `{}` of `{}` is private", name, def.name));
                         }
                         let ft = fields[i].1.clone();
@@ -3564,7 +3575,9 @@ impl Checker {
             Ty::Adt(d, args) if self.prog.def(*d).is_struct() => {
                 let (d, args) = (*d, args.clone());
                 let def = self.prog.def(d).clone();
-                if def.pkg != cx.env.pkg && def.fields().iter().any(|f| !f.is_pub) {
+                // private fields can be left to their defaults, not set
+                let named = |n: &str| !positional.is_empty() || fields.iter().any(|f| f.0 == n);
+                if (0..def.fields().len()).any(|i| !self.field_visible(cx, d, i) && (named(&def.fields()[i].name) || def.fields()[i].default.is_none())) {
                     self.err(sp, format!("cannot build `{}` with a literal outside its package: it has private fields", def.name));
                 }
                 // `Point{x, y}` is `Point{x: x, y: y}`
@@ -5564,6 +5577,25 @@ impl Checker {
                 }
             }
             _ => scope,
+        }
+    }
+
+    /// Whether code in this function's package may name field `i` of `d`:
+    /// its own package's, public ones, and the standard library's private
+    /// ones from inside the standard library (whose modules share them), but
+    /// not from outside it: `os.Command{prog: ...}` or `os.File{fd: 3}` would
+    /// make what only `os` functions may make.
+    fn field_visible(&self, cx: &FnCx, d: DefId, i: usize) -> bool {
+        let def = self.prog.def(d);
+        let f = &def.fields()[i];
+        if def.pkg == cx.env.pkg {
+            return true;
+        }
+        let std = |p: PkgId| self.prog.packages[p as usize].is_std;
+        if std(def.pkg) {
+            f.declared_pub || std(cx.env.pkg)
+        } else {
+            f.is_pub
         }
     }
 

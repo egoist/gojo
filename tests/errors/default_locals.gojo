@@ -1,0 +1,13 @@
+struct S {
+    n: int = {
+        let v = [1, 2, 3]
+        v.len()
+    }
+    f: int = ((x: int) => x + 1)(1)
+}
+
+fn main() {
+    println(S{}.n)
+}
+// error: the default of `n` declares variables of its own
+// error: the default of `f` declares variables of its own

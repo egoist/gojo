@@ -253,6 +253,8 @@ Mixes in the hash of any hashable value.
 
 ```gojo
 pub copy struct Id[T] {
+    // The slot it names (reused after `remove`, with a new generation).
+    pub index: int
     // and private fields
 }
 ```

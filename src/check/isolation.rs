@@ -288,6 +288,9 @@ impl<'a> Facts<'a> {
             if Some(a) == moved || inside.contains(&a) || self.harmless.contains(&a) && !self.in_other_closure(a, inside) {
                 continue;
             }
+            if self.in_other_closure(a, inside) {
+                return Err((format!("`{}` is used here, in a closure (the body of a loop over a generator or a type's `each` is one), which holds a reference to it", loc.name), Some(m.span)));
+            }
             return Err((format!("`{}` is used here, which may leave another reference to what it holds", loc.name), Some(m.span)));
         }
         Ok(())

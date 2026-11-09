@@ -1,0 +1,13 @@
+// The standard library's private fields are its own: a lock's value is
+// reached only through the lock.
+fn main() {
+    let rw = RwLock(1)
+    println(rw.val)
+    let copy2 = RwLock[int]{lk: rw.lk, val: 2}
+    _ = copy2
+    let a = Atomic(1)
+    println(a.v)
+}
+// error: field `val` of `RwLock` is private
+// error: cannot build `RwLock` with a literal outside its package: it has private fields
+// error: field `v` of `Atomic` is private
