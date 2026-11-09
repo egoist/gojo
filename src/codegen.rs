@@ -3563,14 +3563,28 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
     fn call_iface(&mut self, fs: &mut Fs, d: DefId, mi: usize, args: &[TArg], ret: &Ty, rt: &Ty) -> String {
         let (vtn, ms) = self.vt_struct(d, rt);
         let m = ms.method(mi).clone();
-        let recv = self.lval(fs, &args[0].e);
+        // a `sink self` method takes the value out of the box: the box goes
+        // after the call, without dropping what was in it
+        let owned = args[0].mode == ArgMode::Value;
+        let recv = if owned {
+            let v = self.expr(fs, &args[0].e);
+            let t = self.tmp();
+            self.emit(fs, &format!("gojo_iface {} = {};", t, v));
+            t
+        } else {
+            self.lval(fs, &args[0].e)
+        };
         let modes: Vec<Mode> = m.1.iter().map(|p| p.1).collect();
         let tys: Vec<Ty> = m.1.iter().map(|p| p.2.clone()).collect();
         let avs = self.args(fs, &args[1..], &modes, &tys);
         let mut all = vec![format!("{}.data", recv)];
         all.extend(avs);
         let call = format!("(({} *){}.vt)->m{}({})", vtn, recv, mi, all.join(", "));
-        self.finish_call(fs, call, ret)
+        let r = self.finish_call(fs, call, ret);
+        if owned {
+            self.emit(fs, &format!("gojo_box_free({}.data, ((const gojo_vt_base *){}.vt)->size);", recv, recv));
+        }
+        r
     }
 
     // ------------------------------------------------------------------

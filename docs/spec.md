@@ -172,6 +172,7 @@ Tests: `run/basics`, `run/generics`, `run/edge`, `run/patterns`.
 - A borrowed interface parameter (`r Reader`, `r: inout Reader`) is a data pointer plus a method table and allocates no memory.
 - An interface value (a variable, field or collection element) is an exclusive box on the heap plus a method table; dropping it drops the value inside. An interface value is never empty; write `?Reader` for an optional one.
 - `match r { f File => ..., _ => ... }` branches on the concrete type.
+- A method with a `sink self` receiver takes the value out of an interface value, which must be owned where it is called (not a borrowed interface parameter); the interface value is consumed.
 - Interfaces can embed other interfaces. Methods with type parameters and conditional methods do not count toward the method set.
 - **Type sets**: `interface Num { ~int | ~f64 }`. `~T` also accepts newtypes whose underlying type is `T`. An interface with a type set can only be used as a constraint, not as the type of a value.
 - `error` is a built-in interface with the single method `fn message(self) -> String`.
@@ -251,7 +252,7 @@ Tests: `run/ownership`, `run/errdefer`, `run/labels`, `run/push_flow`, `run/temp
 ### 5.4 Views and projections
 
 - The view types `str`, `[]T` and `MutexRef[T]`, and references lent by projections, **cannot be stored**: they cannot be struct fields, collection elements or captures of escaping closures, and cannot be returned from functions (except through the `yield` of a projection).
-- A projection function lends a reference with `yield`: `yield &T`, `yield inout T`, `yield ?&T`. `v[i]`, `m.get(k)`, `m.entry(k)` and `mu.lock()` are all projections.
+- A projection function lends a reference with `yield`: `yield &T`, `yield inout T`, `yield ?&T`. It can't yield a reference into its own locals, or into a parameter it gets by value (a `sink` one, or a read-only one of a copy type, such as `self` of a copy struct): the caller would keep a reference into a copy that is gone. `v[i]`, `m.get(k)`, `m.entry(k)` and `mu.lock()` are all projections.
 - `let x = v[i]`: when the element is copy it is copied out; otherwise `x` is a reference. To own the value, write `.clone()`.
 - `if let u = m.get(k) { }` and `with e = m.entry(k) { }` bind the reference to the block; the reference cannot be taken out of the block. The block cannot modify the borrowed container. A `with` body runs exactly once, so a function can end with a `with` whose body returns. A `with` is an expression with its body's value (`let n = with v = m.lock() { v.len() }`, or the last expression of a function); that value can't be a view (what the block borrows, such as locked data, is reachable only inside it), and moving out of the borrowed value is an error as anywhere else.
 - **Last use**: a view or reference bound with `let` stops holding the borrowed value after its last use in the block; after that the original value can be modified.
@@ -308,6 +309,7 @@ linear struct Tx {
 
 - **Consuming** a value means moving it: into a `sink` parameter (its own `sink self` methods above all), out of the function with `return`, or into something that is consumed in turn (a field of a linear struct, a `Vec`, a `?T`, a result or a tuple). Panics abort, so no value is ever dropped on the way out of a panic.
 - **What is rejected**: a variable or `sink` parameter (of a function or a closure) that still holds the value where its block ends, at a `return`, `break` or `continue` that leaves it, or where a `try` returns an error; a temporary nobody takes (`begin()` as a statement, `_ = begin()`, `begin().id`, the result of a plain `go`); assigning over a variable that holds one, and assigning to any place the function doesn't own (an `inout` parameter or `self`, an element, a reference, a variable a closure captures), since what was there would be dropped: `let old = replace(&x, new)` gives it back instead; moving it into a closure other than the body of a `go` (a closure could be dropped, or called twice); and a `match` arm that moves out of the value but drops a linear part with `_`.
+- **Projections and scopes**: a projection's body ends at its `yield` (its defers run there), so a linear value it still holds is dropped there: an error. A `scope` whose tasks can fail can't have a linear value: when one fails, the value is dropped.
 - **Linear errors**: an error type can be linear, and is then consumed like any other value. A `catch` must bind it, `try` can't turn it into an `error` interface value, a `try ... else wrap` hands it to `wrap` (which must consume it), and the tasks of a `scope` can't fail with one (when several fail, only the first error is kept). Errors name the path (`pool.tx`), say whether it is unconsumed on every path or only some, and list the type's `sink self` methods.
 - **Variables that may be empty**: `none`, `[]` and variants without linear payload hold nothing to consume, so `var o: ?Tx = none` needs nothing until a value is put in. A `match` (or `if let`) arm that can only see such variants consumes the value too: after `if let t = o { t.commit() }` there is nothing left. A vector of linear values is consumed by popping each one and ending the empty vector with `v.finish()`, which panics if it still holds values.
 - **Taking it apart**: only the type's own package can move fields out of a linear value (elsewhere, `cannot move out of field`), or move a payload out of a variant of a linear enum. In its own methods with a `sink self` receiver, `self` is being ended: when the method returns, its fields are dropped as usual, except its linear fields, which must be consumed. In a linear enum's own `sink self` method, a `match` on `self` ends it in arms whose variant has no linear payload.
@@ -317,7 +319,7 @@ linear struct Tx {
 - A linear type is not `copy`, has no derived `clone` (a `clone` method of its own still works), and can't have a `drop` method. A package-level value can't be linear: nothing could consume it.
 - The check is per function: a forward analysis over the paths that hold a value still to be consumed, like the borrow checker's. It needs nothing from other functions' bodies.
 
-Tests: `run/linear`, `run/linear_review`, `errors/linear_leaks`, `errors/linear_generic`, `errors/linear_decl`, `errors/linear_copy`, `errors/linear_paths`, `errors/linear_hole_*`, `projects/linear`, `projects/linear_enum`.
+Tests: `run/linear`, `run/linear_review`, `errors/linear_leaks`, `errors/linear_generic`, `errors/linear_decl`, `errors/linear_copy`, `errors/linear_paths`, `errors/linear_hole_*`, `errors/linear_hole2_*`, `run/linear_review2`, `projects/linear`, `projects/linear_enum`.
 
 ## 6. Expressions
 
@@ -344,6 +346,7 @@ Tests: `run/basics`, `run/edge`, `run/misc`, `run/constraints`, `run/patterns`, 
 - `match` is exhaustive. Patterns: literals (including negative ones), ranges `1..=9`, alternatives with `|`, `_`, bindings, enum variants (can nest; every field must be written), `ok(x)`/`err(e)`, `some(x)`/`none`, tuples `(a, b)`, and the concrete type of an interface value, `f: File`. An arm can have a guard `if cond`; guarded arms do not count toward the exhaustiveness check.
 - **`let ... else`**: `let pattern = e else { ... }` matches `e` against a pattern that may fail (`let .Circle(r) = s else { return 0 }`, `let ok(v) = r else { ... }`, `let (k, 0) = pair else { ... }`); `let x = opt else { ... }` unwraps an optional. The `else` block must leave (`return`, `break`, `continue`, a panic); the names it binds are in scope for the rest of the block. It is the same as `match e { pattern => { rest of the block }, _ => { else } }`, with the same binding rules.
 - When the matched value is a place, bindings are references by default. When an arm moves a binding away, that arm consumes the matched value.
+- A guard can't move a value (a binding or anything else): it runs before its arm is chosen, and when it is false another arm may still use the value. The same holds for the guards of a `select`, which all run before an arm is picked.
 - There is no `switch`.
 
 Tests: `run/basics`, `run/labels`, `run/edge`, `run/misc`, `run/patterns`, `run/loop_views`, `errors/labels`, `errors/non_exhaustive`, `errors/iterator_invalidation`, `errors/iter_mutation`, `errors/iter_let`, `errors/rules`, `errors/loop_exits`, `errors/loop_carried_view`.

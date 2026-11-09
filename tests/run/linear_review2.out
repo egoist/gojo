@@ -1,0 +1,12 @@
+zero
+none
+commit 2
+none
+P none
+commit 1
+commit 2
+rollback 3
+neither
+commit 1
+none 2
+ended boxed

@@ -1,0 +1,34 @@
+fn done(t: sink Tx) -> bool {
+    println("guard consumed", t.id, t.name)
+    t.rollback()
+    return false
+}
+fn main() {
+    let o = some(begin(1))
+    match o {
+        some(t) if done(t) => println("guard")
+        some(t) => {
+            println("second arm", t.name)
+            t.commit()
+        }
+        none => {}
+    }
+}
+
+linear struct Tx {
+    id: int
+    name: String
+
+    fn commit(sink self) {
+        println("commit", self.id)
+    }
+
+    fn rollback(sink self) {
+        println("rollback", self.id)
+    }
+}
+
+fn begin(id: int) -> Tx {
+    return Tx{id: id, name: "tx" + "{id}"}
+}
+// error: a `match` guard can't move a value: it runs before its arm is chosen, and when it is false another arm may still use the value

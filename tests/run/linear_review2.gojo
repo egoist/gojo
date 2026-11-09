@@ -1,0 +1,112 @@
+// Programs linear types must accept (from a second adversarial review).
+
+linear struct Tx {
+    id: int
+    name: String
+
+    fn commit(sink self) {
+        println("commit", self.id)
+    }
+
+    fn rollback(sink self) {
+        println("rollback", self.id)
+    }
+}
+
+fn begin(id: int) -> Tx {
+    return Tx{id: id, name: "tx" + "{id}"}
+}
+
+// o4
+fn mk_o4(k: int) -> ?Tx ! String {
+    if k == 0 { return err("zero") }
+    if k == 1 { return none }
+    return some(begin(k))
+}
+fn f_o4(k: int) {
+    let r = mk_o4(k)
+    match r {
+        ok(some(t)) => t.commit()
+        ok(none) => println("none")
+        err(e) => println(e)
+    }
+}
+fn g_o4(k: int) {
+    match mk_o4(k) {
+        ok(some(t)) => t.commit()
+        ok(none) => println("none")
+        err(e) => println(e)
+    }
+}
+linear enum Two_o4 {
+    P(?Tx)
+    Q
+    fn end(sink self) {
+        match self {
+            P(some(t)) => t.commit()
+            P(none) => println("P none")
+            Q => println("Q")
+        }
+    }
+}
+fn main_o4() {
+    f_o4(0)
+    f_o4(1)
+    f_o4(2)
+    g_o4(1)
+    Two_o4.P(none).end()
+}
+
+// tp1
+fn f_tp1(x: sink ?Tx, y: sink ?Tx) {
+    match (x, y) {
+        (some(a), some(b)) => {
+            a.commit()
+            b.commit()
+        }
+        (some(a), none) => a.rollback()
+        (none, some(b)) => b.rollback()
+        (none, none) => println("neither")
+    }
+}
+fn main_tp1() {
+    f_tp1(some(begin(1)), some(begin(2)))
+    f_tp1(some(begin(3)), none)
+    f_tp1(none, none)
+}
+
+// tp2
+fn f_tp2(p: sink (?Tx, int)) {
+    match p {
+        (some(a), _) => a.commit()
+        (none, n) => println("none", n)
+    }
+}
+fn main_tp2() {
+    f_tp2((some(begin(1)), 1))
+    f_tp2((none, 2))
+}
+
+interface Ender {
+    fn end(sink self)
+}
+
+struct Named {
+    name: String
+
+    fn end(sink self) {
+        println("ended", self.name)
+    }
+}
+
+fn mainIface() {
+    let e: Ender = Named{name: "boxed"}
+    e.end()
+}
+
+fn main() {
+    main_o4()
+    main_tp1()
+    main_tp2()
+    mainIface()
+}

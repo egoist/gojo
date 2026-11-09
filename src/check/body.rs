@@ -4679,7 +4679,13 @@ impl Checker {
                         self.require_mut(cx, &b, &format!("call `{}` (it modifies its receiver) on", name));
                         TArg { mode: ArgMode::Inout, e: b }
                     }
-                    _ => {
+                    // the method takes the value out of the interface value,
+                    // which must be owned here
+                    Mode::Sink => {
+                        let b = self.value(cx, b);
+                        TArg { mode: ArgMode::Value, e: b }
+                    }
+                    Mode::Borrow => {
                         let b = self.borrow(cx, b);
                         TArg { mode: ArgMode::Borrow, e: b }
                     }

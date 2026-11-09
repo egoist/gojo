@@ -233,6 +233,9 @@ fn yield_sources(prog: &Program, tfuncs: &[TFunc], diags: &mut Vec<Diag>) -> Has
                 };
                 let r = root(p.0);
                 match params.iter().position(|q| *q == r) {
+                    // a parameter passed by value is this function's own
+                    // copy: gone once it returns
+                    Some(_) if by_value(prog, &tf.locals[r as usize]) => bad.push((*sp, tf.locals[r as usize].name.clone())),
                     Some(i) => idx.push(i),
                     None if matches!(tf.locals[r as usize].kind, LocalKind::Let | LocalKind::Var) => bad.push((*sp, tf.locals[r as usize].name.clone())),
                     None => idx.extend(0..params.len()),
@@ -241,7 +244,8 @@ fn yield_sources(prog: &Program, tfuncs: &[TFunc], diags: &mut Vec<Diag>) -> Has
         });
         if !prog.packages[prog.func(tf.func).pkg as usize].is_std {
             for (sp, name) in bad {
-                diags.push(Diag::new(sp, format!("`yield` lends a reference into `{}`, a local of this function", name)).note(None, "the caller may keep views of what it gets, after this function has ended; yield a part of `self` or of a parameter, or return an owned value instead"));
+                let what = if params.iter().any(|&q| tf.locals[q as usize].name == name) { "a parameter passed by value (its type is copy), which is this function's own copy" } else { "a local of this function" };
+                diags.push(Diag::new(sp, format!("`yield` lends a reference into `{}`, {}", name, what)).note(None, "the caller may keep views of what it gets, after this function has ended; yield a part of a parameter passed by reference, or return the value instead"));
             }
         }
         idx.sort_unstable();
@@ -249,6 +253,26 @@ fn yield_sources(prog: &Program, tfuncs: &[TFunc], diags: &mut Vec<Diag>) -> Has
         out.insert(tf.func, idx);
     }
     out
+}
+
+/// A parameter the function gets its own copy of: `sink`, or a read-only
+/// one of a copy type (numbers, copy structs, arrays, tuples of them, view
+/// structs), which is passed by value.
+fn by_value(prog: &Program, l: &crate::tir::Local) -> bool {
+    fn copy(prog: &Program, t: &Ty) -> bool {
+        match t {
+            Ty::Unit | Ty::Bool | Ty::Int(_) | Ty::F32 | Ty::F64 | Ty::Ptr(_) => true,
+            Ty::Option(a) | Ty::Array(a, _) => copy(prog, a),
+            Ty::Result(a, b) => copy(prog, a) && copy(prog, b),
+            Ty::Adt(d, args) => prog.def(*d).is_copy || (prog.def(*d).tuple && args.iter().all(|a| copy(prog, a))),
+            _ => false,
+        }
+    }
+    match l.kind {
+        LocalKind::Param(Mode::Sink) => true,
+        LocalKind::Param(Mode::Borrow) => copy(prog, &l.ty),
+        _ => false,
+    }
 }
 
 /// Whether a value of this type keeps a view inside storage of its own: a
@@ -1759,6 +1783,7 @@ impl<'a> Bc<'a> {
                         _ => {}
                     }
                     if let Some(g) = &a.guard {
+                        self.guard_moves(g, "select");
                         self.expr(st, g);
                     }
                 }
@@ -2118,6 +2143,9 @@ impl<'a> Bc<'a> {
                         }
                     }
                     if let Some(g) = &a.guard {
+                        // a guard runs before its arm is chosen: when it is
+                        // false, a later arm still sees the value
+                        self.guard_moves(g, "match");
                         self.expr(&mut s2, g);
                     }
                     self.expr(&mut s2, &a.body);
@@ -2382,6 +2410,22 @@ impl<'a> Bc<'a> {
         let depth = self.decl_depth.get(&v).copied().unwrap_or(0);
         self.bind_view(v, depth, srcs, false, target.span, st, target);
         true
+    }
+
+    /// A guard runs before its arm is chosen (a `select` runs them all): a
+    /// value it moved would be gone for the arm that runs instead.
+    fn guard_moves(&mut self, g: &TExpr, what: &str) {
+        let mut moved: Vec<Span> = vec![];
+        visit_expr(g, &mut |x| {
+            if let TK::Move(p) = &x.kind {
+                if p.is_place() {
+                    moved.push(x.span);
+                }
+            }
+        });
+        for sp in moved {
+            self.err(Diag::new(sp, format!("a `{}` guard can't move a value: it runs before its arm is chosen, and when it is false another arm may still use the value", what)).note(None, "borrow it in the guard, and move it in the arm's body"));
+        }
     }
 
     /// Arguments of a call, with exclusivity checking.

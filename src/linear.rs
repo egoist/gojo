@@ -105,7 +105,7 @@ pub fn check(prog: &Program, tfuncs: &[TFunc]) -> Vec<Diag> {
         }
     }
     for tf in tfuncs {
-        let mut l = Lin { prog, tf, diags: vec![], seen: &mut seen, scopes: vec![], loops: vec![], suppress: 0, exempt: None, cap_ref: HashSet::new(), lin_cache: HashMap::new(), memo: HashMap::new() };
+        let mut l = Lin { prog, tf, diags: vec![], seen: &mut seen, scopes: vec![], loops: vec![], suppress: 0, exempt: None, cap_ref: HashSet::new(), lin_cache: HashMap::new(), memo: HashMap::new(), loop_nest: 0 };
         l.wf_func();
         l.func();
         diags.extend(l.diags);
@@ -166,6 +166,19 @@ fn place_path(e: &TExpr) -> Option<Path> {
     }
 }
 
+/// The variables a block mentions (closures' captures included).
+fn mentioned_locals(b: &TBlock) -> HashSet<LocalId> {
+    let mut out = HashSet::new();
+    visit_block(b, &mut |e| match &e.kind {
+        TK::Local(l) => {
+            out.insert(*l);
+        }
+        TK::Closure(c) => out.extend(c.captures.iter().map(|c| c.0)),
+        _ => {}
+    });
+    out
+}
+
 /// A state as a key: its paths in order, with whether each is only `Maybe`
 /// (an unreachable state has none).
 fn canon(st: &St) -> Vec<(Path, bool)> {
@@ -203,6 +216,8 @@ struct Lin<'a, 's> {
     lin_cache: HashMap<usize, bool>,
     /// Loops already run (while nothing is reported) by entry state.
     memo: HashMap<(u32, Vec<(Path, bool)>), (St, Vec<(usize, bool, St)>)>,
+    /// Loops being run around the current point.
+    loop_nest: u32,
 }
 
 impl<'a, 's> Lin<'a, 's> {
@@ -255,6 +270,9 @@ impl<'a, 's> Lin<'a, 's> {
 
     fn path_name(&self, p: &Path) -> String {
         let mut s = self.tf.locals[p.0 as usize].name.clone();
+        if s.starts_with("__") {
+            s = "this value".into();
+        }
 
         let mut t = self.tf.locals[p.0 as usize].ty.clone();
         for &i in &p.1 {
@@ -726,7 +744,12 @@ impl<'a, 's> Lin<'a, 's> {
             let g = guards[0].clone();
             let over: Vec<(Path, S)> = st.m.iter().filter(|(p, _)| paths_overlap(p, &g)).map(|(p, s)| (p.clone(), *s)).collect();
             if over.is_empty() {
-                return; // consumed already: the defer doesn't run
+                // consumed, or holding nothing linear (`none`): where it wasn't
+                // moved the defer still runs, so check what else it does
+                let mut run = st.clone();
+                self.block(&mut run, b, Ctx::Discarded);
+                st.join(&run);
+                return;
             }
             // it runs where all of `g` is there; where part of it was taken
             // (or all of it), it doesn't
@@ -842,7 +865,8 @@ impl<'a, 's> Lin<'a, 's> {
                 let body: &'a TBlock = body;
                 let cond = cond.as_ref();
                 let lb = self.mentions_linear(body);
-                self.run_loop(st, *id, lb, |me, s| {
+                let ms = mentioned_locals(body);
+                self.run_loop(st, *id, lb, &ms, |me, s| {
                     let mut exit = None;
                     if let Some(c) = cond {
                         me.expr(s, c, Ctx::Borrowed);
@@ -859,7 +883,8 @@ impl<'a, 's> Lin<'a, 's> {
                 }
                 let body: &'a TBlock = body;
                 let lb = self.mentions_linear(body);
-                self.run_loop(st, *id, lb, |me, s| {
+                let ms = mentioned_locals(body);
+                self.run_loop(st, *id, lb, &ms, |me, s| {
                     let exit = s.clone();
                     me.block(s, body, Ctx::Discarded);
                     Some(exit)
@@ -877,7 +902,8 @@ impl<'a, 's> Lin<'a, 's> {
                     if let Some(TArg { e: TExpr { kind: TK::Closure(c), .. }, .. }) = args.last() {
                         let body: &'a TBlock = &c.body;
                         let lb = self.mentions_linear(body);
-                        self.run_loop(st, *id, lb, |me, s| {
+                        let ms = mentioned_locals(body);
+                        self.run_loop(st, *id, lb, &ms, |me, s| {
                             let exit = s.clone();
                             me.block(s, body, Ctx::Discarded);
                             Some(exit)
@@ -910,10 +936,17 @@ impl<'a, 's> Lin<'a, 's> {
                 }
                 self.block(st, body, Ctx::Discarded);
             }
-            TStmt::Yield(e, _) => {
+            TStmt::Yield(e, sp) => {
+                // a projection's body ends at its `yield` (its defers run
+                // there): what it still holds would be dropped
                 if let Some(e) = e {
                     self.expr(st, e, Ctx::Borrowed);
                 }
+                if st.reachable {
+                    self.run_defers(st, 0, false);
+                    self.exit(st, 0, *sp, "by this `yield`, where the projection ends", false);
+                }
+                *st = St::unreachable();
             }
             TStmt::Select { arms, .. } => {
                 let start = st.clone();
@@ -959,7 +992,7 @@ impl<'a, 's> Lin<'a, 's> {
 
     /// Runs a loop body to a fixpoint. `body` returns the state in which the
     /// loop ends by its own test (none for `loop { }`).
-    fn run_loop(&mut self, st: &mut St, id: u32, linear_body: bool, mut body: impl FnMut(&mut Self, &mut St) -> Option<St>) {
+    fn run_loop(&mut self, st: &mut St, id: u32, linear_body: bool, mentioned: &HashSet<LocalId>, mut body: impl FnMut(&mut Self, &mut St) -> Option<St>) {
         // While an outer loop is iterated to its fixpoint (nothing is
         // reported), a loop entered in a state it was entered in before ends
         // the same way: reuse that, or nested loops would take exponential
@@ -981,8 +1014,25 @@ impl<'a, 's> Lin<'a, 's> {
         let mut head = entry.clone();
         // A body with nothing linear in it can't change what is left to
         // consume: one pass checks its exits. Otherwise iterate to the
-        // fixpoint.
-        let rounds = if linear_body { 8 } else { 0 };
+        // fixpoint, except in loops nested three deep in others: those get
+        // one pass from a head that holds everything an iteration could
+        // leave there (all of it `Maybe`, each linear variable the body
+        // mentions as a whole), so deep nests take linear time.
+        let coarse = linear_body && self.loop_nest >= 3;
+        if coarse {
+            for v in head.m.values_mut() {
+                *v = S::Maybe;
+            }
+            for &l in mentioned {
+                let loc = &self.tf.locals[l as usize];
+                if matches!(loc.kind, LocalKind::Let | LocalKind::Var | LocalKind::Param(Mode::Sink)) && self.lin(&loc.ty) && self.scopes.iter().any(|sc| sc.declared.contains(&l)) {
+                    head.m.retain(|p, _| p.0 != l);
+                    head.m.insert((l, vec![]), S::Maybe);
+                }
+            }
+        }
+        let rounds = if linear_body && !coarse { 8 } else { 0 };
+        self.loop_nest += 1;
         self.suppress += 1;
         for _ in 0..rounds {
             let (end, _, _) = self.loop_once(&head, id, &mut body);
@@ -995,6 +1045,7 @@ impl<'a, 's> Lin<'a, 's> {
         }
         self.suppress -= 1;
         let (_, exit, breaks) = self.loop_once(&head, id, &mut body);
+        self.loop_nest -= 1;
         let mut out = exit.unwrap_or_else(St::unreachable);
         for b in &breaks {
             out.join(b);
@@ -1156,7 +1207,8 @@ impl<'a, 's> Lin<'a, 's> {
                     if a.mode == ArgMode::Inout && self.lin(&a.e.ty) {
                         if let Some(p) = place_path(&a.e) {
                             if i == 0 && left_empty {
-                                st.m.retain(|q, _| !paths_overlap(q, &p));
+                                // (its value moved out, into the result)
+                                self.consume(st, &p);
                             } else {
                                 self.refill(st, &p);
                             }
@@ -1191,9 +1243,16 @@ impl<'a, 's> Lin<'a, 's> {
                 self.expr(st, x, Ctx::Borrowed);
                 self.rvalue(e, ctx);
             }
-            TK::Binary { l, r, .. } => {
+            TK::Binary { op, l, r } => {
                 self.expr(st, l, Ctx::Borrowed);
-                self.expr(st, r, Ctx::Borrowed);
+                if matches!(op, BinOp::And | BinOp::Or) {
+                    // the right side may not run
+                    let mut s2 = st.clone();
+                    self.expr(&mut s2, r, Ctx::Borrowed);
+                    st.join(&s2);
+                } else {
+                    self.expr(st, r, Ctx::Borrowed);
+                }
             }
             TK::Move(p) => {
                 self.place_subexprs(st, p);
@@ -1239,6 +1298,14 @@ impl<'a, 's> Lin<'a, 's> {
             TK::Match { scrut, arms, .. } => self.match_expr(st, scrut, arms, ctx),
             TK::Block(b) | TK::Unsafe(b) => self.block(st, b, ctx),
             TK::Scope { body, errt, .. } => {
+                if errt.is_some() {
+                    if let Some(v) = &body.value {
+                        if self.lin(&v.ty) {
+                            let d = Diag::new(v.span, format!("this scope's tasks can fail, and then its value, the linear `{}`, would be dropped", self.show(&v.ty))).note(None, "make the value after the scope, or consume it inside");
+                            self.err(d);
+                        }
+                    }
+                }
                 if let Some(et) = errt {
                     if self.lin(et) {
                         let d = Diag::new(e.span, format!("the tasks of this scope fail with the linear `{}`: when several fail, only the first error is kept and the others would be dropped", self.show(et))).note(None, "have each task consume its own error, or return an error that isn't linear");
@@ -1418,7 +1485,7 @@ impl<'a, 's> Lin<'a, 's> {
                 let mine = self.pat_ctors(&a.pat, &scrut.ty);
                 r.iter().copied().filter(|c| mine.as_ref().map(|m| m.contains(c)).unwrap_or(true)).collect::<Vec<usize>>()
             });
-            let free = lin && seen_ctors.as_ref().map(|cs| cs.iter().all(|&c| self.ctor_linear_free(&scrut.ty, c, exempt))).unwrap_or(false);
+            let free = lin && (seen_ctors.as_ref().map(|cs| cs.iter().all(|&c| self.ctor_linear_free(&scrut.ty, c, exempt))).unwrap_or(false) || self.pat_free(&a.pat, &scrut.ty, exempt));
             if a.guard.is_none() {
                 if let (Some(r), Some(mine)) = (remaining.as_mut(), self.full_ctors(&a.pat, &scrut.ty)) {
                     r.retain(|c| !mine.contains(c));
@@ -1506,6 +1573,25 @@ impl<'a, 's> Lin<'a, 's> {
                 Some(out)
             }
             _ => Some(vec![]),
+        }
+    }
+
+    /// Whether every value the pattern matches holds nothing linear
+    /// (`ok(none)`, `(none, none)`, `.Done`).
+    fn pat_free(&self, p: &TPat, t: &Ty, exempt: bool) -> bool {
+        match (p, t) {
+            (TPat::Wild | TPat::Bind(_), _) => !self.lin(t),
+            (TPat::Int(_) | TPat::Range(..) | TPat::Bool(_) | TPat::Str(_), _) => true,
+            (TPat::None, _) => true,
+            (TPat::Some(q), Ty::Option(a)) => self.pat_free(q, a, false),
+            (TPat::Ok(q), Ty::Result(a, _)) => self.pat_free(q, a, false),
+            (TPat::Err(q), Ty::Result(_, b)) => self.pat_free(q, b, false),
+            (TPat::Variant { def, variant, subs }, Ty::Adt(d, args)) if def == d => {
+                (exempt || !self.prog.def(*d).linear) && subs.iter().zip(self.prog.variant_tys(*d, args, *variant)).all(|(q, (_, ft))| self.pat_free(q, &ft, false))
+            }
+            (TPat::Tuple(qs), Ty::Adt(d, args)) => !self.prog.def(*d).linear && qs.iter().zip(self.prog.field_tys(*d, args)).all(|(q, (_, ft))| self.pat_free(q, &ft, false)),
+            (TPat::Or(ps), _) => ps.iter().all(|q| self.pat_free(q, t, exempt)),
+            _ => false,
         }
     }
 

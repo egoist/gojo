@@ -1,0 +1,40 @@
+fn done(t: sink Tx) -> bool {
+    t.commit()
+    return true
+}
+fn f(c: bool) {
+    let t = begin(1)
+    if c && done(t) {
+        println("both")
+    }
+    println("end f", c)
+}
+fn g(c: bool) {
+    let t = begin(2)
+    let ok = c || done(t)
+    println("end g", ok)
+}
+fn main() {
+    f(true)
+    f(false)
+    g(true)
+    g(false)
+}
+
+linear struct Tx {
+    id: int
+    name: String
+
+    fn commit(sink self) {
+        println("commit", self.id)
+    }
+
+    fn rollback(sink self) {
+        println("rollback", self.id)
+    }
+}
+
+fn begin(id: int) -> Tx {
+    return Tx{id: id, name: "tx" + "{id}"}
+}
+// error: `t` may not be consumed on every path: the linear `Tx` would be dropped where its block ends

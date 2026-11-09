@@ -1,0 +1,28 @@
+linear struct H {
+    o: ?Tx
+    b: Tx
+}
+fn main() {
+    var h = H{o: some(begin(1)), b: begin(2)}
+    let x = take(&h.o)
+    if let t = x { t.commit() }
+    println("end")
+}
+
+linear struct Tx {
+    id: int
+    name: String
+
+    fn commit(sink self) {
+        println("commit", self.id)
+    }
+
+    fn rollback(sink self) {
+        println("rollback", self.id)
+    }
+}
+
+fn begin(id: int) -> Tx {
+    return Tx{id: id, name: "tx" + "{id}"}
+}
+// error: `h.b` is not consumed: the linear `Tx` would be dropped where its block ends

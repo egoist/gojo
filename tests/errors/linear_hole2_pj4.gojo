@@ -1,0 +1,34 @@
+struct S {
+    n: int
+    name: String
+    fn proj(self) yield &int {
+        let t = begin(self.n)
+        yield self.n
+        t.commit()
+    }
+}
+fn main() {
+    let s = S{n: 7, name: "a" + "b"}
+    with x = s.proj() {
+        println("x", x)
+    }
+    println("end")
+}
+
+linear struct Tx {
+    id: int
+    name: String
+
+    fn commit(sink self) {
+        println("commit", self.id)
+    }
+
+    fn rollback(sink self) {
+        println("rollback", self.id)
+    }
+}
+
+fn begin(id: int) -> Tx {
+    return Tx{id: id, name: "tx" + "{id}"}
+}
+// error: `t` is not consumed: the linear `Tx` would be dropped by this `yield`, where the projection ends
