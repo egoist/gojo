@@ -85,11 +85,17 @@ pub struct Diag {
     pub span: Span,
     pub msg: String,
     pub notes: Vec<(Option<Span>, String)>,
+    /// A warning: the program is right, and still builds and runs; the code
+    /// could be better. Everything else is an error.
+    pub warning: bool,
 }
 
 impl Diag {
     pub fn new(span: Span, msg: impl Into<String>) -> Diag {
-        Diag { span, msg: msg.into(), notes: vec![] }
+        Diag { span, msg: msg.into(), notes: vec![], warning: false }
+    }
+    pub fn warning(span: Span, msg: impl Into<String>) -> Diag {
+        Diag { span, msg: msg.into(), notes: vec![], warning: true }
     }
     pub fn note(mut self, span: Option<Span>, msg: impl Into<String>) -> Diag {
         self.notes.push((span, msg.into()));
@@ -109,14 +115,14 @@ fn tuple_names(m: &str) -> String {
 
 pub fn render(sm: &SourceMap, d: &Diag, color: bool) -> String {
     let (red, blue, bold, reset) = if color {
-        ("\x1b[31;1m", "\x1b[34;1m", "\x1b[1m", "\x1b[0m")
+        (if d.warning { "\x1b[33;1m" } else { "\x1b[31;1m" }, "\x1b[34;1m", "\x1b[1m", "\x1b[0m")
     } else {
         ("", "", "", "")
     };
     let mut out = String::new();
     let f = sm.file(d.span.file);
     let (line, col) = f.line_col(d.span.lo);
-    let _ = writeln!(out, "{red}error{reset}{bold}: {}{reset}", tuple_names(&d.msg));
+    let _ = writeln!(out, "{red}{}{reset}{bold}: {}{reset}", if d.warning { "warning" } else { "error" }, tuple_names(&d.msg));
     let _ = writeln!(out, "  {blue}-->{reset} {}:{}:{}", f.path, line, col);
     snippet(&mut out, sm, d.span, blue, red, reset);
     for (sp, n) in &d.notes {

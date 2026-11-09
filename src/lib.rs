@@ -51,6 +51,7 @@ pub const STD: &[(&str, &str)] = &[
 pub const RUNTIME_H: &str = include_str!("../runtime/gojo_rt.h");
 pub const RUNTIME_C: &str = concat!(include_str!("../runtime/gojo_rt.c"), include_str!("../runtime/gojo_sched.c"), include_str!("../runtime/gojo_os.c"), include_str!("../runtime/gojo_unicode.c"), include_str!("../runtime/gojo_text.c"), include_str!("../runtime/gojo_lib.c"));
 
+/// Print errors (and the warnings among them, if any), with a count.
 pub fn report(sm: &SourceMap, diags: &[Diag]) {
     use std::io::IsTerminal;
     let color = std::io::stderr().is_terminal();
@@ -61,10 +62,22 @@ pub fn report(sm: &SourceMap, diags: &[Diag]) {
     for d in ds.iter().take(50) {
         eprint!("{}", diag::render(sm, d, color));
     }
+    let errors = ds.iter().filter(|d| !d.warning).count();
+    let warnings = n - errors;
     if n > 50 {
-        eprintln!("... and {} more errors", n - 50);
+        eprintln!("... and {} more", n - 50);
     }
-    eprintln!("{} error{} found", n, if n == 1 { "" } else { "s" });
+    let count = |n: usize, what: &str| format!("{} {}{}", n, what, if n == 1 { "" } else { "s" });
+    match (errors, warnings) {
+        (0, w) => eprintln!("{}", count(w, "warning")),
+        (e, 0) => eprintln!("{} found", count(e, "error")),
+        (e, w) => eprintln!("{} found ({})", count(e, "error"), count(w, "warning")),
+    }
+}
+
+/// Split diagnostics into errors and warnings.
+pub fn split_warnings(diags: Vec<Diag>) -> (Vec<Diag>, Vec<Diag>) {
+    diags.into_iter().partition(|d| !d.warning)
 }
 
 pub struct Loaded {
@@ -521,6 +534,8 @@ pub struct Checked {
     pub prog: types::Program,
     pub tfuncs: Vec<tir::TFunc>,
     pub tests: Vec<(String, types::FuncId)>,
+    /// The program builds; these say where it could be better.
+    pub warnings: Vec<Diag>,
 }
 
 /// Parse, type check and borrow check.
@@ -535,9 +550,9 @@ pub fn frontend(input: &str, source: Option<&str>) -> Result<Checked, (SourceMap
         Ok(r) => r,
         Err(diags) => return Err((sm, diags)),
     };
-    let bdiags = borrowck::check(&prog, &tfuncs);
-    if !bdiags.is_empty() {
-        return Err((sm, bdiags));
+    let (errors, warnings) = split_warnings(borrowck::check(&prog, &tfuncs));
+    if !errors.is_empty() {
+        return Err((sm, errors));
     }
-    Ok(Checked { sm, prog, tfuncs, tests })
+    Ok(Checked { sm, prog, tfuncs, tests, warnings })
 }

@@ -1,0 +1,220 @@
+// Drops of values moved on some paths: where the compiler knows statically
+// whether a value is still there, and the values freed early, at the end of
+// a branch that didn't move them (codegen/drops.rs). Values with a `drop`
+// method print it, so their drops must happen exactly where they did with
+// flags: at the end of the scope, in reverse order. The others only free
+// memory; AddressSanitizer and the leak check run this file too.
+
+struct Noisy {
+    name: String
+
+    fn drop(inout self) {
+        println("drop ${self.name}")
+    }
+}
+
+fn noisy(n: str) -> Noisy {
+    return Noisy{name: n.toString()}
+}
+
+fn eat(n: sink Noisy) {
+    println("eat ${n.name}")
+}
+
+fn take(s: sink String) -> int {
+    return s.len()
+}
+
+fn takeVec(v: sink Vec[String]) -> int {
+    return v.len()
+}
+
+// a value with a `drop` method moved on one branch: dropped at the end of
+// the scope on the other, after what was declared later
+fn observable(c: bool) {
+    let a = noisy("a")
+    if c {
+        eat(a)
+    }
+    let _b = noisy("b")
+    println("end of observable(${c})")
+}
+
+// moved on every path, or on none: no flags
+fn plain(c: bool) -> int {
+    let s: String = "plain"
+    let t: String = "kept"
+    var n = t.len()
+    if c {
+        n += take(s)
+    } else {
+        n += take(s) * 2
+    }
+    return n
+}
+
+// freed early: `s` is moved on one branch only and never used again
+fn early(c: bool) -> int {
+    let s: String = "early"
+    let v = ["x".toString(), "y".toString()]
+    var n = 0
+    if c {
+        n += take(s)
+    }
+    match n {
+        0 => n += takeVec(v)
+        _ => {}
+    }
+    return n
+}
+
+// an `if` used as a value, and `return` of a branch that moves
+fn asValue(c: bool) -> int {
+    let s: String = "value"
+    let n = if c { take(s) } else { 7 }
+    return n
+}
+
+fn returned(c: bool) -> ?String {
+    let s: String = "returned"
+    return if c { some(s) } else { none }
+}
+
+// a branch that moves and then leaves: after the `if`, the value is still
+// there
+fn leaves(c: bool) -> int {
+    let s: String = "leaves"
+    if c {
+        return take(s)
+    }
+    return s.len() + 100
+}
+
+// moved in a loop, then the loop is left: the value is only ever live when
+// the loop goes round again
+fn inLoop(xs: []int) -> int {
+    let s: String = "loop"
+    for x in xs {
+        if x > 2 {
+            return take(s) + x
+        }
+    }
+    return 0
+}
+
+// moved and reassigned in a loop: the flag is still needed after it
+fn reassigned(n: int) -> int {
+    var s: String = "r"
+    var total = 0
+    for i in 0..n {
+        if i % 2 == 0 {
+            total += take(s)
+            s = "again"
+        }
+    }
+    if n > 3 {
+        total += take(s)
+    }
+    return total
+}
+
+// `break` and `continue` out of blocks that moved
+fn breaks(n: int) -> int {
+    var total = 0
+    for i in 0..n {
+        let s: String = "b${i}"
+        if i == 1 {
+            total += take(s)
+            continue
+        }
+        if i == 3 {
+            total += take(s)
+            break
+        }
+    }
+    return total
+}
+
+// `try` leaving after a move
+fn parse(ok: bool) -> int ! String {
+    if ok {
+        return 1
+    }
+    return err("bad")
+}
+
+fn tries(ok: bool) -> int ! String {
+    let s: String = "tries"
+    let n = take(s)
+    let m = try parse(ok)
+    return n + m
+}
+
+// partial moves keep their flags
+struct Pair {
+    left: String
+    right: String
+}
+
+fn partial(c: bool) -> int {
+    let p = Pair{left: "l", right: "rr"}
+    if c {
+        return take(p.left)
+    }
+    return p.right.len()
+}
+
+// a match that consumes what it matches on some arms
+fn consumes(x: sink ?String) -> int {
+    return match x {
+        some(s) => take(s)
+        none => 0
+    }
+}
+
+// a view taken on the other branch keeps the value alive
+fn viewKept(c: bool) -> int {
+    let s: String = "viewed"
+    var v: str = ""
+    if c {
+        _ = take(s)
+    } else {
+        v = s.asStr()
+    }
+    return v.len()
+}
+
+// moved into a task on one path
+fn consume(s: sink String) {
+    _ = s.len()
+}
+
+fn tasks(c: bool) -> int {
+    let s: String = "task"
+    var n = 0
+    scope {
+        if c {
+            go consume(s)
+        }
+        n = 1
+    }
+    return n
+}
+
+fn main() {
+    observable(true)
+    observable(false)
+    println(plain(true), plain(false))
+    println(early(true), early(false))
+    println(asValue(true), asValue(false))
+    println(returned(true) ?? "none", returned(false) ?? "none")
+    println(leaves(true), leaves(false))
+    println(inLoop([1, 2, 3]), inLoop([1]))
+    println(reassigned(5), reassigned(2))
+    println(breaks(5))
+    println(tries(true) catch { -1 }, tries(false) catch { -1 })
+    println(partial(true), partial(false))
+    println(consumes(some("abc")), consumes(none))
+    println(viewKept(true), viewKept(false))
+    println(tasks(true), tasks(false))
+}

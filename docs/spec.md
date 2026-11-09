@@ -211,12 +211,13 @@ Tests: `run/tuples`, `errors/tuples`, `errors/tuples_views`, `errors/tuples_move
 
 - Every value has exactly one owner. Assigning, passing to a `sink` parameter, returning, storing in a collection and sending on a channel all transfer ownership; using the original variable afterwards is a compile error.
 - Copy types are copied bitwise and never moved. Other types are copied explicitly with `.clone()`.
-- A variable that is moved on only some branches cannot be used afterwards: that is a "may have been moved" compile error. The compiler inserts a flag for dropping it.
+- `x.clone()` of an owned variable that nothing uses afterwards is a **warning** (the program still builds and runs): moving `x` does the same without the copy. It is given only where the move would be accepted, and where the copy can't be told apart from the original: no `clone` or `drop` method of a type in it runs, and it shares nothing (`Rc`, `Arc`, channel ends, function and interface values). It is the compiler's only warning; everything else it reports is an error.
+- A variable that is moved on only some branches cannot be used afterwards: that is a "may have been moved" compile error. Where it is dropped on the other branches is in 5.3.
 - A loop body cannot move a variable from outside the loop (the next iteration would move it again). Likewise, a view assigned inside a loop to a view variable from outside the loop is still there when the next iteration starts: if the next iteration may read it before reassigning it (or the loop may exit), the borrowed value cannot be modified in the next iteration.
 - A single field of a struct can be moved (a partial move). After that the struct cannot be used as a whole; the fields that were not moved are dropped as usual.
 - You cannot move out of a borrowed place: `return v[0]` (where `v` is a borrowed parameter) is a compile error; write `.clone()`.
 
-Tests: `run/ownership`, `errors/use_after_move`, `errors/maybe_moved`, `errors/move_in_loop`, `errors/partial_move`, `errors/move_out_of_borrow`.
+Tests: `run/ownership`, `errors/use_after_move`, `errors/maybe_moved`, `errors/move_in_loop`, `errors/partial_move`, `errors/move_out_of_borrow`, `warnings/clones`.
 
 ### 5.2 Parameter modes
 
@@ -235,6 +236,7 @@ Tests: `run/ownership`, `run/slices_mut`, `errors/borrowed_param_mutation`, `err
 ### 5.3 Dropping
 
 - A value is dropped when its owner goes out of scope. Variables in the same scope are dropped in reverse order of declaration; struct fields are dropped in declaration order.
+- A value that was moved is not dropped. A value moved on only some paths is dropped, on the others, where its owner goes out of scope, like any other. One exception, which no program can observe: when dropping it only frees memory (no type in it has a `drop` method, and it holds no `Rc`, `Arc`, `Weak`, `Mutex`, channel end, task, function or interface value), and nothing uses it or a view of it after the `if` or `match` whose branches moved it, it is freed at the end of the branches that didn't move it.
 - A `fn drop(inout self)` method is called when the value is dropped. A type with a `drop` method cannot be copy.
 - `drop(x)` drops early. It is an ordinary `sink` function.
 - `defer stmt` runs when the **current block** ends; several defers run in reverse order. `errdefer stmt` runs only when the function returns an error, and can only be used in functions that return a result or an optional value.
@@ -242,7 +244,7 @@ Tests: `run/ownership`, `run/slices_mut`, `errors/borrowed_param_mutation`, `err
 - Deferred code cannot leave itself: it cannot contain `return`, `try` or `yield`, and cannot `break`/`continue` an outer loop. Its own loops and closures are not affected.
 - Temporaries in a statement (for example the `Vec` in `String(try readBytes())`) live until the statement is done with them.
 
-Tests: `run/ownership`, `run/errdefer`, `run/labels`, `run/push_flow`, `run/temporaries`, `run/defer_moves`, `errors/defer_exit`, `errors/rules`, `errors/defer_moves`.
+Tests: `run/ownership`, `run/errdefer`, `run/labels`, `run/push_flow`, `run/temporaries`, `run/defer_moves`, `run/drop_states`, `errors/defer_exit`, `errors/rules`, `errors/defer_moves`.
 
 ### 5.4 Views and projections
 

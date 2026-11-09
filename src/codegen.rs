@@ -13,6 +13,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 
 mod bce;
+mod drops;
 
 /// The largest value, in bytes. Values live on stacks or inline in other values;
 /// one this big could never be used, and C compilers reject sizes near 2^63.
@@ -241,6 +242,16 @@ struct Fs<'a> {
     bce: Vec<bce::Fact>,
     /// Places whose length nothing in the function changes (bce.rs).
     bce_steady: HashMap<bce::Path, bool>,
+    /// Where drop flags have known values, and drops moved to the ends of
+    /// branches (drops.rs). `None` in closure bodies: flags everywhere.
+    dinfo: Option<std::rc::Rc<drops::DropInfo>>,
+    /// The place drops are being emitted for, while they are.
+    site: Option<drops::Site>,
+    /// Drop flags some drop tests: the others are never declared or set
+    /// (`resolve_flags`).
+    used_flags: HashSet<String>,
+    /// Join drops emitted (each must be, or the value would leak).
+    jd_done: HashSet<(usize, usize)>,
 }
 
 /// The body of `for x in t` over a type with `each`, compiled as a closure.
@@ -1006,7 +1017,7 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
         let (sig, ps) = self.fn_signature(f, &subst, &name);
         let _ = writeln!(self.protos, "{};", sig);
         let ret = if fd.yields.is_some() { fd.ret.subst(&subst) } else { fd.ret.subst(&subst) };
-        let mut fs = Fs { tf, subst, out: String::new(), decls: String::new(), ind: 1, scopes: vec![], repr: HashMap::new(), flagged: HashSet::new(), flags: HashMap::new(), ret, yields: fd.yields.is_some(), err_mode: None, loop_labels: vec![], lb: None, line: (u32::MAX, 0), tscopes: HashMap::new(), bce: vec![], bce_steady: HashMap::new() };
+        let mut fs = Fs { tf, subst, out: String::new(), decls: String::new(), ind: 1, scopes: vec![], repr: HashMap::new(), flagged: HashSet::new(), flags: HashMap::new(), ret, yields: fd.yields.is_some(), err_mode: None, loop_labels: vec![], lb: None, line: (u32::MAX, 0), tscopes: HashMap::new(), bce: vec![], bce_steady: HashMap::new(), dinfo: None, site: None, used_flags: HashSet::new(), jd_done: HashSet::new() };
         collect_moves_block(&tf.body, &mut fs.flagged, tf);
         fs.scopes.push(Scope { kind: SK::Func, items: vec![], wait: None });
         let mut lids = vec![];
@@ -1014,6 +1025,7 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
             lids.push(r);
         }
         lids.extend(tf.params.iter().copied());
+        let sinks: Vec<LocalId> = lids.iter().zip(ps.iter()).filter(|(_, p)| p.1 == Mode::Sink).map(|(l, _)| *l).collect();
         for (lid, (pn, m, t)) in lids.iter().zip(ps.iter()) {
             let cn = format!("p_{}", sanitize(pn));
             let byptr = match m {
@@ -1030,6 +1042,8 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
             }
         }
         let body = tf.body.clone();
+        // (on the copy codegen walks: the analysis keys its results by address)
+        self.analyze_drops(&mut fs, &body, &sinks);
         self.line_directive(&mut fs, body.span);
         // the prelude's lazy-chain steps only call the closure they are given,
         // which polls in its own body if it can recurse
@@ -1038,7 +1052,13 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
             self.emit(&mut fs, "GOJO_POLL();");
         }
         self.fn_body(&mut fs, &body);
-        let _ = writeln!(self.bodies, "{} {{\n{}{}}}\n{}", sig, fs.decls, fs.out, C_LINE_MARK);
+        if let Some(info) = &fs.dinfo {
+            // a join drop not emitted would leak its value
+            let missing = info.join_drops.keys().filter(|k| !fs.jd_done.contains(k)).count();
+            assert!(missing == 0, "internal error: {} drops at the ends of branches were not emitted in {}", missing, fd.name);
+        }
+        let out = resolve_flags(&fs.out, &fs.used_flags);
+        let _ = writeln!(self.bodies, "{} {{\n{}{}}}\n{}", sig, fs.decls, out, C_LINE_MARK);
     }
 
     fn fn_body(&mut self, fs: &mut Fs, body: &TBlock) {
@@ -1048,7 +1068,7 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
             self.stmt(fs, s);
         }
         if fs.yields {
-            self.pop_scope(fs);
+            self.at_site(fs, drops::Site::block(body), |g, fs| g.pop_scope(fs));
             let l = self.loc(body.span);
             self.emit(fs, &format!("gojo_panic(\"projection ended without yielding\", {});", l));
             return;
@@ -1064,7 +1084,7 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
                     Ty::Option(_) => Some(format!("!{}", self.osome(&ret, &r))),
                     _ => None,
                 };
-                self.cleanup_to(fs, 0);
+                self.at_site(fs, drops::Site::block(body), |g, fs| g.cleanup_to(fs, 0));
                 fs.err_mode = None;
                 self.emit(fs, &format!("return {};", r));
                 fs.scopes.pop();
@@ -1072,13 +1092,17 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
             Some(v) => {
                 let s = self.expr(fs, v);
                 self.discard(fs, &s, &v.ty, v.is_place());
-                self.pop_scope(fs);
-                self.cleanup_to(fs, 0);
+                self.at_site(fs, drops::Site::block(body), |g, fs| {
+                    g.pop_scope(fs);
+                    g.cleanup_to(fs, 0)
+                });
                 self.end_without_value(fs, &ret, body.span);
             }
             None => {
-                self.pop_scope(fs);
-                self.cleanup_to(fs, 0);
+                self.at_site(fs, drops::Site::block(body), |g, fs| {
+                    g.pop_scope(fs);
+                    g.cleanup_to(fs, 0)
+                });
                 self.end_without_value(fs, &ret, body.span);
             }
         }
@@ -1201,6 +1225,7 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
                 self.emit(fs, &format!("if ({}) {{ {}(&{}); {} = 0; }}", flag, d, n, flag));
             }
             Cl::Defer(b) => {
+                let site = fs.site.take();
                 self.emit(fs, "{");
                 fs.ind += 1;
                 // the deferred code can't leave its own block, so it must not see the
@@ -1214,9 +1239,11 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
                 fs.scopes = outer;
                 fs.ind -= 1;
                 self.emit(fs, "}");
+                fs.site = site;
             }
             Cl::ErrDefer(b) => {
                 if let Some(cond) = fs.err_mode.clone() {
+                    let site = fs.site.take();
                     self.emit(fs, &format!("if ({}) {{", cond));
                     fs.ind += 1;
                     let outer = std::mem::replace(&mut fs.scopes, vec![Scope { kind: SK::Func, items: vec![], wait: None }]);
@@ -1230,6 +1257,7 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
                     fs.err_mode = saved_mode;
                     fs.ind -= 1;
                     self.emit(fs, "}");
+                    fs.site = site;
                 }
             }
             Cl::Unlock(m) => self.emit(fs, &format!("gojo_mutex_unlock({});", m)),
@@ -1272,7 +1300,7 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
         paths.sort();
         for p in paths {
             let n = format!("df{}_{}", l, p.iter().map(|x| x.to_string()).collect::<Vec<_>>().join("_"));
-            self.emit(fs, &format!("bool {} = 1;", n));
+            self.emit(fs, &format!("{}bool {} = 1;", flag_mark(&n), n));
             fs.flags.insert((l, p), n);
         }
     }
@@ -1281,7 +1309,18 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
         if !self.needs_drop(t) {
             return;
         }
-        let flag = fs.flags.get(&(l, path.clone())).cloned();
+        let mut flag = fs.flags.get(&(l, path.clone())).cloned();
+        if flag.is_some() {
+            // what the analysis knows at this site makes the test unneeded
+            let known = fs.dinfo.as_ref().map_or(drops::Known::Unknown, |i| i.known(fs.site, &(l, path.clone())));
+            match known {
+                drops::Known::Dead | drops::Known::Moved => return,
+                drops::Known::Live => flag = None,
+                drops::Known::Unknown => {
+                    fs.used_flags.insert(flag.clone().unwrap());
+                }
+            }
+        }
         let has_sub = fs.flags.keys().any(|(r, p)| *r == l && p.len() > path.len() && p.starts_with(&path));
         let mut place = self.local_place(fs, l);
         let mut cur = fs.tf.locals[l as usize].ty.subst(&fs.subst);
@@ -1319,8 +1358,60 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
     fn set_live(&mut self, fs: &mut Fs, l: LocalId, path: &[usize]) {
         let names: Vec<String> = fs.flags.iter().filter(|((r, p), _)| *r == l && p.starts_with(path)).map(|(_, n)| n.clone()).collect();
         for n in names {
-            self.emit(fs, &format!("{} = 1;", n));
+            self.set_flag(fs, &n, true);
         }
+    }
+
+    /// Set a drop flag: `live` where the value is (re)initialized, not where it
+    /// is moved. Dropped from the C if no drop ends up testing the flag.
+    fn set_flag(&mut self, fs: &mut Fs, flag: &str, live: bool) {
+        self.emit(fs, &format!("{}{} = {};", flag_mark(flag), flag, live as u8));
+    }
+
+    /// Work out where drop flags have known values (drops.rs) for `body`, in
+    /// which `owned` (the owned parameters) are live from the start.
+    fn analyze_drops(&mut self, fs: &mut Fs, body: &TBlock, owned: &[LocalId]) {
+        let tf = fs.tf;
+        let facts: Vec<drops::LocalFact> = (0..tf.locals.len() as LocalId)
+            .map(|l| {
+                let t = self.local_ty(fs, l);
+                let borrows = matches!(tf.locals[l as usize].kind, LocalKind::Ref { .. }) || self.prog.may_borrow(&t);
+                drops::LocalFact { copy: self.is_copy(&t), needs_drop: self.needs_drop(&t), silent: self.prog.drop_silent(&t), borrows }
+            })
+            .collect();
+        let prog = self.prog;
+        let info = drops::analyze(body, &fs.flagged, &facts, owned, &|t: &Ty| prog.may_borrow(&t.subst(&fs.subst)));
+        fs.dinfo = Some(std::rc::Rc::new(info));
+    }
+
+    /// Drops moved to the end of a branch (drops.rs): the values `key`'s
+    /// branch `branch` didn't move, where other branches did.
+    fn join_drops(&mut self, fs: &mut Fs, key: usize, branch: usize) -> Vec<LocalId> {
+        let ls = fs.dinfo.as_ref().and_then(|i| i.join_drops.get(&(key, branch)).cloned()).unwrap_or_default();
+        if !ls.is_empty() {
+            fs.jd_done.insert((key, branch));
+        }
+        ls
+    }
+
+    fn emit_join_drops(&mut self, fs: &mut Fs, ls: &[LocalId]) {
+        for &l in ls {
+            let t = self.local_ty(fs, l);
+            let d = self.drop_fn(&t);
+            let p = self.local_place(fs, l);
+            self.emit(fs, &format!("{}(&{}); /* moved on another branch */", d, p));
+            if let Some(f) = fs.flags.get(&(l, vec![])).cloned() {
+                self.set_flag(fs, &f, false);
+            }
+        }
+    }
+
+    /// Run `f` with drops being emitted for `site`.
+    fn at_site<R>(&mut self, fs: &mut Fs, site: drops::Site, f: impl FnOnce(&mut Self, &mut Fs) -> R) -> R {
+        let saved = fs.site.replace(site);
+        let r = f(self, fs);
+        fs.site = saved;
+        r
     }
 
     fn materialize(&mut self, fs: &mut Fs, s: &str, t: &Ty, owned: bool) -> String {
@@ -1414,7 +1505,7 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
             }
             TStmt::Assign { place, op, value, span } => {
                 self.push_scope(fs, SK::Stmt);
-                self.assign(fs, place, *op, value, *span);
+                self.assign(fs, place, *op, value, *span, drops::Site::stmt(s));
                 self.pop_scope(fs);
             }
             TStmt::MapInsert { map, key, value } => {
@@ -1470,7 +1561,7 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
                             Ty::Option(_) => Some(format!("!{}", self.osome(&ret, &r))),
                             _ => None,
                         };
-                        self.cleanup_to(fs, 0);
+                        self.at_site(fs, drops::Site::stmt(s), |g, fs| g.cleanup_to(fs, 0));
                         fs.err_mode = None;
                         self.emit(fs, &format!("return {};", r));
                     }
@@ -1484,11 +1575,11 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
                         let v = self.expr(fs, e);
                         let t = self.sub(fs, &e.ty);
                         self.discard(fs, &v, &t, e.is_place());
-                        self.cleanup_to(fs, 0);
+                        self.at_site(fs, drops::Site::stmt(s), |g, fs| g.cleanup_to(fs, 0));
                         self.emit(fs, "return;");
                     }
                     None => {
-                        self.cleanup_to(fs, 0);
+                        self.at_site(fs, drops::Site::stmt(s), |g, fs| g.cleanup_to(fs, 0));
                         self.emit(fs, "return;");
                     }
                 }
@@ -1503,11 +1594,11 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
                         let c = self.cty(&t);
                         let r = self.tmp();
                         self.emit(fs, &format!("{} *{} = &{};", c, r, p));
-                        self.cleanup_to(fs, 0);
+                        self.at_site(fs, drops::Site::stmt(s), |g, fs| g.cleanup_to(fs, 0));
                         self.emit(fs, &format!("return {};", r));
                     }
                     None => {
-                        self.cleanup_to(fs, 0);
+                        self.at_site(fs, drops::Site::stmt(s), |g, fs| g.cleanup_to(fs, 0));
                         self.emit(fs, "return NULL;");
                     }
                 }
@@ -1540,10 +1631,10 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
                 let (lb, lc) = fs.loop_labels.iter().rev().find(|l| l.0 == *id).map(|l| (l.1.clone(), l.2.clone())).unwrap_or_default();
                 if is_break {
                     // leave the loop: run the loop scope's own cleanups too
-                    self.cleanup_to(fs, idx);
+                    self.at_site(fs, drops::Site::stmt(s), |g, fs| g.cleanup_to(fs, idx));
                     self.emit(fs, &format!("goto {};", lb));
                 } else {
-                    self.cleanup_to(fs, idx + 1);
+                    self.at_site(fs, drops::Site::stmt(s), |g, fs| g.cleanup_to(fs, idx + 1));
                     self.emit(fs, &format!("goto {};", lc));
                 }
             }
@@ -1807,7 +1898,7 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
             self.discard(fs, &s, &t, v.is_place());
             self.pop_scope(fs);
         }
-        self.pop_scope(fs);
+        self.at_site(fs, drops::Site::block(b), |g, fs| g.pop_scope(fs));
         fs.ind -= 1;
         self.emit(fs, "}");
     }
@@ -1831,13 +1922,13 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
             }
             later = self.pop_scope_keeping_later(fs);
         }
-        self.pop_scope(fs);
+        self.at_site(fs, drops::Site::block(b), |g, fs| g.pop_scope(fs));
         fs.ind -= 1;
         self.emit(fs, "}");
         fs.scopes.last_mut().unwrap().items.extend(later);
     }
 
-    fn assign(&mut self, fs: &mut Fs, place: &TExpr, op: Option<BinOp>, value: &TExpr, span: Span) {
+    fn assign(&mut self, fs: &mut Fs, place: &TExpr, op: Option<BinOp>, value: &TExpr, span: Span, site: drops::Site) {
         let pt = self.sub(fs, &place.ty);
         match op {
             None => {
@@ -1850,9 +1941,8 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
                 if self.needs_drop(&pt) {
                     match &lp {
                         Some((l, path)) => {
-                            let lt = self.local_ty(fs, *l);
-                            let _ = lt;
-                            self.drop_path(fs, *l, path.clone(), &pt);
+                            let (l, path) = (*l, path.clone());
+                            self.at_site(fs, site, |g, fs| g.drop_path(fs, l, path, &pt));
                         }
                         None => {
                             let d = self.drop_fn(&pt);
@@ -2569,15 +2659,46 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
                 } else {
                     None
                 };
-                self.emit(fs, &format!("if ({})", cv));
-                self.block_into(fs, then, r.as_deref());
-                if let Some(eb) = else_ {
-                    self.emit(fs, "else");
-                    self.block_into(fs, eb, r.as_deref());
+                // values moved on one branch and not the other are dropped at
+                // the end of the other (drops.rs)
+                let key = e as *const TExpr as usize;
+                let (jd0, jd1) = (self.join_drops(fs, key, 0), self.join_drops(fs, key, 1));
+                if jd0.is_empty() {
+                    self.emit(fs, &format!("if ({})", cv));
+                    self.block_into(fs, then, r.as_deref());
+                } else {
+                    self.emit(fs, &format!("if ({}) {{", cv));
+                    fs.ind += 1;
+                    self.block_into(fs, then, r.as_deref());
+                    self.emit_join_drops(fs, &jd0);
+                    fs.ind -= 1;
+                    self.emit(fs, "}");
+                }
+                match else_ {
+                    Some(eb) if jd1.is_empty() => {
+                        self.emit(fs, "else");
+                        self.block_into(fs, eb, r.as_deref());
+                    }
+                    Some(eb) => {
+                        self.emit(fs, "else {");
+                        fs.ind += 1;
+                        self.block_into(fs, eb, r.as_deref());
+                        self.emit_join_drops(fs, &jd1);
+                        fs.ind -= 1;
+                        self.emit(fs, "}");
+                    }
+                    None if !jd1.is_empty() => {
+                        self.emit(fs, "else {");
+                        fs.ind += 1;
+                        self.emit_join_drops(fs, &jd1);
+                        fs.ind -= 1;
+                        self.emit(fs, "}");
+                    }
+                    None => {}
                 }
                 r.unwrap_or_else(|| "0".into())
             }
-            TK::Match { scrut, owned, arms } => self.match_expr(fs, scrut, *owned, arms, &t, e.span),
+            TK::Match { scrut, owned, arms } => self.match_expr(fs, scrut, *owned, arms, &t, e.span, e as *const TExpr as usize),
             TK::Block(b) | TK::Unsafe(b) | TK::Isolate(b) => {
                 let has_val = !matches!(t, Ty::Unit | Ty::Never);
                 let r = if has_val {
@@ -2593,7 +2714,7 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
             }
             TK::Scope { id, handle, body, errt, .. } => self.scope_block(fs, *id, *handle, body, errt.as_ref(), &t, e.span),
             TK::Spawn { target, task, handle } => self.spawn(fs, target, task, *handle, e.span),
-            TK::Try { e: x, wrap } => self.try_expr(fs, x, wrap.as_ref(), &t, e.span),
+            TK::Try { e: x, wrap } => self.try_expr(fs, x, wrap.as_ref(), &t, drops::Site::expr(e)),
             TK::Catch { e: x, bind, handler } => {
                 let xt = self.sub(fs, &x.ty);
                 let v = self.expr(fs, x);
@@ -2716,7 +2837,7 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
             TK::Move(x) => {
                 if let Some((l, path)) = local_path(x) {
                     if let Some(f) = fs.flags.get(&(l, path.clone())).cloned() {
-                        self.emit(fs, &format!("{} = 0;", f));
+                        self.set_flag(fs, &f, false);
                     }
                 }
                 self.place(fs, x)
@@ -3472,7 +3593,7 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
         let ret = fty.ret.clone();
         let rc = self.ret_cty(&ret);
         let mut ps = vec!["void *envp".to_string()];
-        let mut nfs = Fs { tf: fs.tf, subst: fs.subst.clone(), out: String::new(), decls: String::new(), ind: 1, scopes: vec![], repr: HashMap::new(), flagged: fs.flagged.clone(), flags: HashMap::new(), ret: ret.clone(), yields: false, err_mode: None, loop_labels: vec![], lb: None, line: (u32::MAX, 0), tscopes: HashMap::new(), bce: vec![], bce_steady: HashMap::new() };
+        let mut nfs = Fs { tf: fs.tf, subst: fs.subst.clone(), out: String::new(), decls: String::new(), ind: 1, scopes: vec![], repr: HashMap::new(), flagged: fs.flagged.clone(), flags: HashMap::new(), ret: ret.clone(), yields: false, err_mode: None, loop_labels: vec![], lb: None, line: (u32::MAX, 0), tscopes: HashMap::new(), bce: vec![], bce_steady: HashMap::new(), dinfo: None, site: None, used_flags: HashSet::new(), jd_done: HashSet::new() };
         if let (Some(lid), Some(_)) = (c.loop_body, &lbp) {
             // `return` / `try` in the body act on the enclosing function
             nfs.ret = fs.ret.clone();
@@ -3531,9 +3652,23 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
             let go = self.flow(false);
             self.emit(&mut nfs, &format!("return {};", go));
         } else {
+            // owned from the start: the parameters passed by value, and
+            // what a task owns (as declared above)
+            let mut owned: Vec<LocalId> = c.params.iter().enumerate().filter(|(i, _)| fty.params[*i].0 == Mode::Sink).map(|(_, p)| *p).collect();
+            for (l, lt, _) in &fields {
+                if byv(l) && c.scoped && c.by_value.contains(l) && self.needs_drop(lt) {
+                    owned.push(*l);
+                }
+            }
+            self.analyze_drops(&mut nfs, &body, &owned);
             self.fn_body(&mut nfs, &body);
+            if let Some(info) = &nfs.dinfo {
+                let missing = info.join_drops.keys().filter(|k| !nfs.jd_done.contains(k)).count();
+                assert!(missing == 0, "internal error: {} drops at the ends of branches were not emitted in a closure", missing);
+            }
         }
-        let _ = writeln!(self.bodies, "{} {{\n{}{}}}\n{}", sig, nfs.decls, nfs.out, C_LINE_MARK);
+        let nout = resolve_flags(&nfs.out, &nfs.used_flags);
+        let _ = writeln!(self.bodies, "{} {{\n{}{}}}\n{}", sig, nfs.decls, nout, C_LINE_MARK);
         // environment value
         if let Some((ctlp, retp)) = &lbp {
             let mut inits = vec![];
@@ -3557,7 +3692,7 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
                 let p = self.local_place(fs, *l);
                 if !self.is_copy(lt) {
                     if let Some(f) = fs.flags.get(&(*l, vec![])).cloned() {
-                        self.emit(fs, &format!("{} = 0;", f));
+                        self.set_flag(fs, &f, false);
                     }
                 }
                 self.emit(fs, &format!("{}->c{} = {};", e, l, p));
@@ -3594,7 +3729,7 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
                 for (l, lt, _) in &fields {
                     if c.by_value.contains(l) && !self.is_copy(lt) {
                         if let Some(f) = fs.flags.get(&(*l, vec![])).cloned() {
-                            self.emit(fs, &format!("{} = 0;", f));
+                            self.set_flag(fs, &f, false);
                         }
                     }
                 }
@@ -3618,7 +3753,8 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
     // match
     // ------------------------------------------------------------------
 
-    fn match_expr(&mut self, fs: &mut Fs, scrut: &TExpr, owned: bool, arms: &[TArm], t: &Ty, sp: Span) -> String {
+    /// `key`: the address of the `match` (join drops are keyed by it).
+    fn match_expr(&mut self, fs: &mut Fs, scrut: &TExpr, owned: bool, arms: &[TArm], t: &Ty, sp: Span, key: usize) -> String {
         let st = self.sub(fs, &scrut.ty);
         let optptr = matches!(scrut.kind, TK::Proj { opt: true, .. });
         let has_val = !matches!(t, Ty::Unit | Ty::Never);
@@ -3670,7 +3806,7 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
             r
         };
         let end = self.label();
-        for arm in arms {
+        for (ai, arm) in arms.iter().enumerate() {
             let cond = self.pat_cond(&arm.pat, &place, &st, optptr);
             self.emit(fs, &format!("if ({}) {{", cond));
             fs.ind += 1;
@@ -3694,7 +3830,7 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
                 }
                 if let Some((l, path)) = &scrut_path {
                     if let Some(f) = fs.flags.get(&(*l, path.clone())).cloned() {
-                        self.emit(fs, &format!("{} = 0;", f));
+                        self.set_flag(fs, &f, false);
                     }
                 }
                 self.residual_drop(fs, &arm.pat, &place, &st);
@@ -3714,8 +3850,10 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
                 _ => self.discard(fs, &bv, &bt, arm.body.is_place()),
             }
             let later = self.pop_scope_keeping_later(fs);
-            self.pop_scope(fs);
+            self.at_site(fs, drops::Site::arm(arm), |g, fs| g.pop_scope(fs));
             fs.scopes.last_mut().unwrap().items.extend(later);
+            let jd = self.join_drops(fs, key, ai);
+            self.emit_join_drops(fs, &jd);
             self.emit(fs, &format!("goto {};", end));
             if guard_open {
                 fs.ind -= 1;
@@ -3897,7 +4035,7 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
     // try
     // ------------------------------------------------------------------
 
-    fn try_expr(&mut self, fs: &mut Fs, x: &TExpr, wrap: Option<&TryWrap>, t: &Ty, _sp: Span) -> String {
+    fn try_expr(&mut self, fs: &mut Fs, x: &TExpr, wrap: Option<&TryWrap>, t: &Ty, site: drops::Site) -> String {
         let xt = self.sub(fs, &x.ty);
         let v = self.expr(fs, x);
         let xc = self.cty(&xt);
@@ -3911,7 +4049,7 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
                 self.emit(fs, &format!("if (!{}) {{", cond));
                 fs.ind += 1;
                 let none = format!("(({}){{0}})", rc);
-                self.emit_return(fs, &none);
+                self.at_site(fs, site, |g, fs| g.emit_return(fs, &none));
                 fs.ind -= 1;
                 self.emit(fs, "}");
                 if *t == Ty::Unit {
@@ -3952,7 +4090,7 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
                 };
                 let r = self.tmp();
                 self.emit(fs, &format!("{} {} = {{ .ok = 0, .u.err = {} }};", rc, r, errv));
-                self.emit_return(fs, &r);
+                self.at_site(fs, site, |g, fs| g.emit_return(fs, &r));
                 fs.ind -= 1;
                 self.emit(fs, "}");
                 if *t == Ty::Unit {
@@ -4218,7 +4356,7 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
                     };
                     if let Some(p) = local_path(task) {
                         if let Some(f) = fs.flags.get(&p).cloned() {
-                            self.emit(fs, &format!("{} = 0;", f));
+                            self.set_flag(fs, &f, false);
                         }
                     }
                     let has = !matches!(rt, Ty::Unit | Ty::Never);
@@ -5183,7 +5321,8 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
             }
             self.pop_scope(fs);
         }
-        self.pop_scope(fs);
+        // (the scope's tasks are waited for first)
+        self.at_site(fs, drops::Site::block(body), |g, fs| g.pop_scope(fs));
         fs.ind -= 1;
         self.emit(fs, "}");
         fs.tscopes.remove(&id);
@@ -6738,7 +6877,7 @@ impl<'a> Gen<'a> {
         if !self.helper_header(&name, &sig) {
             return name;
         }
-        let mut nfs = Fs { tf, subst: HashMap::new(), out: String::new(), decls: String::new(), ind: 1, scopes: vec![], repr: HashMap::new(), flagged: HashSet::new(), flags: HashMap::new(), ret: ft.clone(), yields: false, err_mode: None, loop_labels: vec![], lb: None, line: (u32::MAX, 0), tscopes: HashMap::new(), bce: vec![], bce_steady: HashMap::new() };
+        let mut nfs = Fs { tf, subst: HashMap::new(), out: String::new(), decls: String::new(), ind: 1, scopes: vec![], repr: HashMap::new(), flagged: HashSet::new(), flags: HashMap::new(), ret: ft.clone(), yields: false, err_mode: None, loop_labels: vec![], lb: None, line: (u32::MAX, 0), tscopes: HashMap::new(), bce: vec![], bce_steady: HashMap::new(), dinfo: None, site: None, used_flags: HashSet::new(), jd_done: HashSet::new() };
         nfs.scopes.push(Scope { kind: SK::Func, items: vec![], wait: None });
         self.push_scope(&mut nfs, SK::Block);
         let v = self.field_default(&mut nfs, d, args.as_slice(), i);
@@ -6746,7 +6885,8 @@ impl<'a> Gen<'a> {
         self.emit(&mut nfs, &format!("{} {} = {};", c, r, v));
         self.cleanup_to(&mut nfs, 0);
         self.emit(&mut nfs, &format!("return {};", r));
-        let _ = writeln!(self.bodies, "{} {{\n{}{}}}\n{}", sig, nfs.decls, nfs.out, C_LINE_MARK);
+        let nout = resolve_flags(&nfs.out, &nfs.used_flags);
+        let _ = writeln!(self.bodies, "{} {{\n{}{}}}\n{}", sig, nfs.decls, nout, C_LINE_MARK);
         name
     }
 }
@@ -6833,6 +6973,32 @@ fn local_path(e: &TExpr) -> Option<(LocalId, Vec<usize>)> {
         }
         _ => None,
     }
+}
+
+/// Drop flags are declared and set on lines starting with this mark; once a
+/// function is generated, `resolve_flags` keeps the lines of the flags some
+/// drop tests and removes the others.
+fn flag_mark(flag: &str) -> String {
+    format!("/*?{}*/", flag)
+}
+
+fn resolve_flags(out: &str, used: &HashSet<String>) -> String {
+    let mut r = String::with_capacity(out.len());
+    for line in out.split_inclusive('\n') {
+        let t = line.trim_start();
+        if let Some(rest) = t.strip_prefix("/*?") {
+            if let Some(end) = rest.find("*/") {
+                if !used.contains(&rest[..end]) {
+                    continue;
+                }
+                r.push_str(&line[..line.len() - t.len()]);
+                r.push_str(&rest[end + 2..]);
+                continue;
+            }
+        }
+        r.push_str(line);
+    }
+    r
 }
 
 fn has_effects(e: &TExpr) -> bool {
