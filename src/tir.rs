@@ -232,6 +232,9 @@ pub struct TClosure {
     pub scoped: bool,
     /// Captures stored by value even though the closure borrows (scoped tasks).
     pub by_value: Vec<LocalId>,
+    /// A task's captures that aren't `send`, moved in: allowed only if
+    /// nothing else can reach them (check/isolation.rs).
+    pub sending: Vec<LocalId>,
     /// The body of a `for` loop over a type with `each`: break / continue /
     /// return / try inside it act on the enclosing function (loop id).
     pub loop_body: Option<u32>,
@@ -399,15 +402,15 @@ impl TExpr {
 
 /// Calls `f` on every expression in the block (pre-order), including closure bodies.
 /// Calls `f` on every expression in the block, nested blocks and closures included.
-pub fn visit_block(b: &TBlock, f: &mut dyn FnMut(&TExpr)) {
+pub fn visit_block<'a>(b: &'a TBlock, f: &mut dyn FnMut(&'a TExpr)) {
     walk_block(b, &mut |n| if let Node::Expr(e) = n { f(e) })
 }
 
-pub fn visit_stmt(s: &TStmt, f: &mut dyn FnMut(&TExpr)) {
+pub fn visit_stmt<'a>(s: &'a TStmt, f: &mut dyn FnMut(&'a TExpr)) {
     walk_stmt(s, &mut |n| if let Node::Expr(e) = n { f(e) })
 }
 
-pub fn visit_expr(e: &TExpr, f: &mut dyn FnMut(&TExpr)) {
+pub fn visit_expr<'a>(e: &'a TExpr, f: &mut dyn FnMut(&'a TExpr)) {
     walk_expr(e, &mut |n| if let Node::Expr(e) = n { f(e) })
 }
 
@@ -419,7 +422,7 @@ pub enum Node<'a> {
 }
 
 /// Like `visit_*`, but also calls `f` on every statement, nested ones included.
-pub fn walk_block(b: &TBlock, f: &mut dyn FnMut(Node)) {
+pub fn walk_block<'a>(b: &'a TBlock, f: &mut dyn FnMut(Node<'a>)) {
     for s in &b.stmts {
         walk_stmt(s, f);
     }
@@ -428,7 +431,7 @@ pub fn walk_block(b: &TBlock, f: &mut dyn FnMut(Node)) {
     }
 }
 
-pub fn walk_stmt(s: &TStmt, f: &mut dyn FnMut(Node)) {
+pub fn walk_stmt<'a>(s: &'a TStmt, f: &mut dyn FnMut(Node<'a>)) {
     f(Node::Stmt(s));
     match s {
         TStmt::Let { init, .. } => walk_expr(init, f),
@@ -502,9 +505,9 @@ pub fn walk_stmt(s: &TStmt, f: &mut dyn FnMut(Node)) {
     }
 }
 
-pub fn walk_expr(e: &TExpr, f: &mut dyn FnMut(Node)) {
+pub fn walk_expr<'a>(e: &'a TExpr, f: &mut dyn FnMut(Node<'a>)) {
     f(Node::Expr(e));
-    let mut g = |x: &TExpr| walk_expr(x, f);
+    let mut g = |x: &'a TExpr| walk_expr(x, f);
     match &e.kind {
         TK::Field { base, .. } | TK::Deref(base) | TK::OptField { base, .. } | TK::StaticField { base, .. } => g(base),
         TK::Index { base, index } | TK::StrIndex { base, index } => {

@@ -516,7 +516,11 @@ impl Checker {
             self.report_uninferred(&cx, &tb);
         }
         let tb = self.zonk_block(&mut cx, tb);
-        TFunc { func: fid, locals: cx.locals, params, recv, body: tb, n_arms: cx.n_arms }
+        let tf = TFunc { func: fid, locals: cx.locals, params, recv, body: tb, n_arms: cx.n_arms };
+        if self.diags.len() == diags_before {
+            self.check_isolation(&tf);
+        }
+        tf
     }
 
     /// Implicit `ok(())` for `! E` functions, missing-return errors.
@@ -3977,7 +3981,7 @@ impl Checker {
             let e = e.clone();
             self.unify(cx, &e, &fty);
         }
-        let c = TClosure { id, params: ps, ret: ret_final, body: tb, captures: fr.captures, owned: false, scoped: false, by_value: vec![], loop_body: loop_body.map(|l| l.0), span: sp };
+        let c = TClosure { id, params: ps, ret: ret_final, body: tb, captures: fr.captures, owned: false, scoped: false, by_value: vec![], sending: vec![], loop_body: loop_body.map(|l| l.0), span: sp };
         TExpr::new(TK::Closure(Box::new(c)), fty, sp)
     }
 
@@ -5677,10 +5681,11 @@ impl Checker {
         for (l, u) in c.captures.clone() {
             let local = cx.locals[l as usize].clone();
             let t = self.resolve(cx, &local.ty);
-            if !self.is_send(&t) {
-                let s = self.prog.show(&t);
-                self.diags.push(Diag::new(c.span, format!("a task captures `{}` of type `{}`, which is not safe to share between threads", local.name, s)).note(Some(local.span), "declared here").note(None, "`Rc`, `Cell`, `Weak`, raw pointers and function values can't cross tasks; use `Arc`, `Mutex` or `send fn`"));
-            }
+            let send = self.is_send(&t);
+            let not_send = |this: &mut Self| {
+                let s = this.prog.show(&t);
+                this.diags.push(Diag::new(c.span, format!("a task captures `{}` of type `{}`, which is not safe to share between threads", local.name, s)).note(Some(local.span), "declared here").note(None, "`Rc`, `Cell`, `Weak`, raw pointers and function values can't cross tasks; use `Arc`, `Mutex` or `send fn`"));
+            };
             let is_ref = matches!(local.kind, LocalKind::Ref { .. });
             let borrowed = if owned {
                 false
@@ -5692,18 +5697,28 @@ impl Checker {
                 lives(cx, l)
             };
             if borrowed {
+                if !send {
+                    not_send(self);
+                }
                 if u == CapUse::Move {
                     self.diags.push(Diag::new(c.span, format!("a task cannot move `{}`: it borrows it from outside", local.name)).note(Some(local.span), "declared here").note(None, "move it into the task by passing it to a `sink` parameter: `go f(x)`, or declare it inside the scope's inner blocks"));
                 }
                 continue;
             }
             if is_ref || matches!(local.kind, LocalKind::Param(Mode::Borrow | Mode::Inout)) || self.prog.is_view(&t) {
+                if !send {
+                    not_send(self);
+                }
                 if owned {
                     self.diags.push(Diag::new(c.span, format!("a task started through a `Scope` value borrows `{}`", local.name)).note(Some(local.span), "declared here").note(None, "it may outlive this function: give it owned values (`.clone()` them first)"));
                 } else {
                     self.diags.push(Diag::new(c.span, format!("a task borrows `{}`, which does not live until the scope ends", local.name)).note(Some(local.span), "declared here").note(None, "declare it directly in the scope's body or outside the scope, or `.clone()` it into a local so the task can take it"));
                 }
                 continue;
+            }
+            // moved into the task: fine if nothing else can reach it
+            if !send {
+                c.sending.push(l);
             }
             if u == CapUse::Mutate {
                 self.diags.push(Diag::new(c.span, format!("a task cannot modify `{}`: it gets its own copy", local.name)).note(Some(local.span), "declared in a block inside the scope, so it is moved (or copied) into the task").note(None, "to share the result, declare it directly in the scope's body or outside the scope, so the task borrows it"));

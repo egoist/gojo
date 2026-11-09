@@ -152,7 +152,7 @@ fn main() {
 ```
 
 - `go` starts a task in the innermost `scope`, which waits for all of them; tasks may borrow what outlives the scope. `let t = go f()` gives a handle: `t.join()`. A failing task cancels the others (`try scope { }`).
-- Values crossing tasks must be `send` (derived; `Rc` and `Cell` aren't). Shared mutable state needs `Mutex`, `RwLock` or `Atomic`; data races don't compile.
+- Values crossing tasks must be `send` (derived; `Rc` and `Cell` aren't), except a value moved into a task that nothing else can reach: built from `send` values and not shared before the `go` (`let t = build(); go total(t)`); `isolate { }` covers the rest. Shared mutable state needs `Mutex`, `RwLock` or `Atomic`; data races don't compile.
 - Channels: `let c = Chan[int](8)`, `c.tx <- v`, `<-c.rx` (gives `?T`), `for v in c.rx`; closes when the last sender is dropped. `select` waits on several. Cancellation flows down the task tree; `par for x in &v { }` runs iterations in parallel.
 
 ## Tools

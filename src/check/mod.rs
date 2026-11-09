@@ -5,6 +5,7 @@
 // functions' checking.
 
 pub mod body;
+mod isolation;
 pub mod lazy;
 pub mod pattern;
 

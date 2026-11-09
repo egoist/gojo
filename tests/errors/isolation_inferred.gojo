@@ -1,0 +1,104 @@
+// A task takes a value that isn't `send` only when nothing else can reach it.
+struct Node {
+    value: int
+    next: ?Rc[Node]
+}
+
+fn mk(v: int) -> Rc[Node] {
+    return Rc(Node{value: v, next: none})
+}
+
+fn take(n: sink Rc[Node]) {
+    println(n.value)
+}
+
+fn link(a: Rc[Node], b: Rc[Node]) -> int {
+    return a.value + b.value
+}
+
+// a clone stays behind
+fn kept() {
+    let n = mk(1)
+    let keep = n.clone()
+    scope {
+        go take(n)
+    }
+    println(keep.value)
+}
+
+// the caller may hold other references
+fn param(n: sink Rc[Node]) {
+    scope {
+        go take(n)
+    }
+}
+
+// built from a value other code still reaches
+fn shared() {
+    let a = mk(1)
+    let b = Rc(Node{value: 2, next: a.clone()})
+    scope {
+        go take(b)
+    }
+    println(a.value)
+}
+
+// a call that could connect it to another value
+fn linked() {
+    let a = mk(1)
+    let b = mk(2)
+    println(link(a, b))
+    scope {
+        go take(a)
+    }
+    println(b.value)
+}
+
+// a closure holds on to it
+fn captured() {
+    let a = mk(1)
+    let peek = () => a.value
+    println(peek())
+    scope {
+        go take(a)
+    }
+}
+
+// borrowed by the task, not moved: the parent keeps it
+fn borrowed() {
+    let a = mk(1)
+    scope {
+        go () => {
+            println(a.value)
+        }
+    }
+}
+
+// bound by a pattern to a part of another value
+fn part() {
+    let a = Rc(Node{value: 1, next: mk(2)})
+    if let n = a.next {
+        let m = n.clone()
+        scope {
+            go take(m)
+        }
+    }
+    println(a.value)
+}
+
+fn main() {
+    kept()
+    param(mk(1))
+    shared()
+    linked()
+    captured()
+    borrowed()
+    part()
+}
+// error: a task captures `n` of type `Rc[Node]`, which is not safe to share between threads
+// error: `n` is used here, which may leave another reference to what it holds
+// error: `n` is a parameter: the caller may still reach what it holds
+// error: it is made from `a`, which other code may still reach
+// error: `a` is used here, which may leave another reference to what it holds
+// error: a task captures `a` of type `Rc[Node]`, which is not safe to share between threads
+// error: it is made from `n`, which other code may still reach
