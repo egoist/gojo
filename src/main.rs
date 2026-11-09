@@ -1,6 +1,5 @@
 // Gojo compiler driver.
 
-use gojo::diag::Diag;
 use gojo::{codegen, report, RUNTIME_C, RUNTIME_H};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
@@ -768,10 +767,13 @@ fn drive(cmd: &str, input: &str, opts: &Options, prog_args: &[String]) -> Result
         }
     };
     let t_check = t0.elapsed();
-    let bdiags: Vec<Diag> = gojo::borrowck::check(&prog, &tfuncs);
-    if !bdiags.is_empty() {
-        report(&sm, &bdiags);
+    let (errors, warnings) = gojo::split_warnings(gojo::borrowck::check(&prog, &tfuncs));
+    if !errors.is_empty() {
+        report(&sm, &errors);
         return Err(());
+    }
+    if !warnings.is_empty() {
+        report(&sm, &warnings);
     }
     let t_borrow = t0.elapsed();
     if cmd == "check" {

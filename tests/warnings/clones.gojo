@@ -1,0 +1,128 @@
+// `.clone()` of a value nothing uses afterwards: moving it does the same
+// without the copy. Lines ending in `// warning` get the warning; no other
+// line may.
+
+fn take(s: sink String) -> int {
+    return s.len()
+}
+
+fn takeVec(v: sink Vec[int]) -> int {
+    return v.len()
+}
+
+fn last(s: sink String) -> int {
+    let t: String = "t"
+    let n = take(t.clone()) // warning
+    return n + take(s.clone()) // warning
+}
+
+fn returned() -> Vec[int] {
+    let v = [1, 2, 3]
+    return v.clone() // warning
+}
+
+fn onBranch(c: bool) -> int {
+    let s: String = "branch"
+    if c {
+        return take(s.clone()) // warning
+    }
+    return 0
+}
+
+fn inLoopBody(n: int) -> int {
+    var total = 0
+    for i in 0..n {
+        let s: String = "${i}"
+        total += take(s.clone()) // warning
+    }
+    return total
+}
+
+fn twice() -> int {
+    let s: String = "twice"
+    let a = take(s.clone())
+    return a + take(s.clone()) // warning
+}
+
+// still used: no warning
+
+fn usedAfter() -> int {
+    let s: String = "used"
+    let n = take(s.clone())
+    return n + s.len()
+}
+
+fn outerInLoop(n: int) -> int {
+    let s: String = "outer"
+    var total = 0
+    for _ in 0..n {
+        total += take(s.clone())
+    }
+    return total
+}
+
+fn viewed() -> int {
+    let s: String = "viewed"
+    let v = s.asStr()
+    let n = take(s.clone())
+    return n + v.len()
+}
+
+fn borrowedParam(s: String) -> int {
+    return take(s.clone())
+}
+
+fn element(v: Vec[String]) -> int {
+    var n = 0
+    for x in v {
+        n += take(x.clone())
+    }
+    return n
+}
+
+fn captured() -> int {
+    let s: String = "captured"
+    let f = () => take(s.clone())
+    return f()
+}
+
+fn deferred() {
+    let s: String = "deferred"
+    defer _ = take(s.clone())
+    println("deferred")
+}
+
+fn generic[T: clone](x: sink T) -> T {
+    return x.clone()
+}
+
+// a copy that can be told apart from the original: no warning (a type
+// with a `drop` method can't be cloned at all)
+
+struct Counted {
+    n: int
+
+    fn clone(self) -> Counted {
+        println("cloned")
+        return Counted{n: self.n + 1}
+    }
+}
+
+fn counted() -> int {
+    let a = Counted{n: 1}
+    let b = a.clone()
+    return b.n
+}
+
+fn shared() -> int {
+    let a = Rc([1, 2])
+    let b = a.clone()
+    return b.len()
+}
+
+fn main() {
+    println(last("s"), returned(), onBranch(true), inLoopBody(3), twice())
+    println(usedAfter(), outerInLoop(2), viewed(), borrowedParam("p"), element(["e".toString()]), captured())
+    deferred()
+    println(generic(1), counted(), shared(), takeVec([1]))
+}

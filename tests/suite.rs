@@ -113,6 +113,38 @@ fn compile_errors() {
     }
 }
 
+/// Every program in tests/warnings builds, with a warning on each line that
+/// ends in `// warning` and on no other line.
+#[test]
+fn compile_warnings() {
+    let mut failures = vec![];
+    for f in files("tests/warnings") {
+        let src = std::fs::read_to_string(&f).unwrap();
+        let wanted: Vec<usize> = src.lines().enumerate().filter(|(_, l)| l.trim_end().ends_with("// warning")).map(|(i, _)| i + 1).collect();
+        let out = Command::new(gojo()).arg("check").arg(&f).output().unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        if !out.status.success() {
+            failures.push(format!("{}: expected it to build:\n{}", f.display(), stderr));
+            continue;
+        }
+        // the line of each warning: `  --> path:line:col` after `warning: ...`
+        let mut got: Vec<usize> = vec![];
+        let mut lines = stderr.lines();
+        while let Some(l) = lines.next() {
+            if l.starts_with("warning: ") {
+                let at = lines.next().and_then(|x| x.trim().strip_prefix("--> ")).and_then(|x| x.rsplitn(3, ':').nth(1)).and_then(|n| n.parse::<usize>().ok());
+                got.extend(at);
+            }
+        }
+        if got != wanted {
+            failures.push(format!("{}: warnings on lines {:?}, wanted {:?}:\n{}", f.display(), got, wanted, stderr));
+        }
+    }
+    if !failures.is_empty() {
+        panic!("{} warning test(s) failed:\n{}", failures.len(), failures.join("\n"));
+    }
+}
+
 /// Every program in tests/panic panics as its `// panic:` lines say, as built
 /// and with `--verify-bce` (see `run_programs`).
 #[test]
@@ -727,7 +759,7 @@ fn formatted() {
     }
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut paths = vec![];
-    for d in ["std", "examples", "bench/gojo", "tests/run", "tests/errors", "tests/panic", "tests/projects", "tests/packages", "tests/testblocks", "tests/unsafe", "tests/stdin", "tests/signals", "tests/ffi_pin"] {
+    for d in ["std", "examples", "bench/gojo", "tests/run", "tests/errors", "tests/panic", "tests/projects", "tests/packages", "tests/testblocks", "tests/unsafe", "tests/stdin", "tests/signals", "tests/ffi_pin", "tests/warnings"] {
         walk(&root.join(d), &mut paths);
     }
     let mut bad = vec![];

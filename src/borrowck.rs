@@ -9,7 +9,7 @@ use crate::ast::Mode;
 use crate::diag::{Diag, Span};
 use crate::tir::*;
 use crate::types::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 type Path = (LocalId, Vec<usize>);
 
@@ -25,13 +25,75 @@ pub fn check(prog: &Program, tfuncs: &[TFunc]) -> Vec<Diag> {
         if stored_views(prog, tf, &mut diags) {
             continue;
         }
-        let mut b = Bc::new(prog, tf, &proj, fd.ret.is_view() && fd.yields.is_none());
+        let view_ret = fd.ret.is_view() && fd.yields.is_none();
+        let mut b = Bc::new(prog, tf, &proj, view_ret);
         let mut st = St::new();
         b.block(&mut st, &tf.body);
         b.end_scope_defers(&mut st);
+        if b.diags.is_empty() {
+            needless_clones(prog, tf, &proj, view_ret, &mut diags);
+        }
         diags.extend(b.diags);
     }
     diags
+}
+
+/// Warnings for `x.clone()` where `x` itself could be moved: `x` is an owned
+/// local that nothing uses afterwards, and a copy of it can't be told apart
+/// from the original (no `clone` or `drop` method of its own runs, nothing is
+/// shared), so moving it does the same without copying. Coding agents clone
+/// to get past the borrow checker; this says when they didn't need to.
+///
+/// Whether nothing uses `x` afterwards is the borrow checker's own answer:
+/// the function is checked again with that clone as a move of `x`, and a
+/// warning given only if that is accepted.
+fn needless_clones(prog: &Program, tf: &TFunc, proj: &HashMap<FuncId, Vec<usize>>, view_ret: bool, out: &mut Vec<Diag>) {
+    let mut cands: Vec<(usize, LocalId, Span)> = vec![];
+    visit_block(&tf.body, &mut |e| match &e.kind {
+        TK::Intrinsic { name, args, .. } if name == "clone" && args.len() == 1 => {
+            if let TK::Local(l) = args[0].e.kind {
+                cands.push((e as *const TExpr as usize, l, e.span));
+            }
+        }
+        _ => {}
+    });
+    if cands.is_empty() {
+        return;
+    }
+    // Not in closures (moving a captured value changes what the closure
+    // captures) or defers (checked on copies of their code).
+    let mut captured: HashSet<LocalId> = HashSet::new();
+    let mut inside: HashSet<usize> = HashSet::new();
+    walk_block(&tf.body, &mut |n| match n {
+        Node::Expr(e) => {
+            if let TK::Closure(c) = &e.kind {
+                captured.extend(c.captures.iter().map(|c| c.0));
+                visit_block(&c.body, &mut |x| {
+                    inside.insert(x as *const TExpr as usize);
+                });
+            }
+        }
+        Node::Stmt(TStmt::Defer(b) | TStmt::ErrDefer(b)) => visit_block(b, &mut |x| {
+            inside.insert(x as *const TExpr as usize);
+        }),
+        _ => {}
+    });
+    let probe = Bc::new(prog, tf, proj, view_ret);
+    for (addr, l, sp) in cands {
+        let loc = &tf.locals[l as usize];
+        let owned = matches!(loc.kind, LocalKind::Let | LocalKind::Var | LocalKind::Param(Mode::Sink));
+        if !owned || loc.name.starts_with("__") || captured.contains(&l) || inside.contains(&addr) || probe.is_copy(&loc.ty) || !prog.drop_silent(&loc.ty) || !prog.plain_clone(&loc.ty) {
+            continue;
+        }
+        let mut b = Bc::new(prog, tf, proj, view_ret);
+        b.as_move = Some(addr);
+        let mut st = St::new();
+        b.block(&mut st, &tf.body);
+        b.end_scope_defers(&mut st);
+        if b.as_move_seen && b.diags.is_empty() {
+            out.push(Diag::warning(sp, format!("`{0}.clone()` copies `{0}`, which isn't used after this", loc.name)).note(None, format!("write `{}` to move it instead of copying it", loc.name)));
+        }
+    }
 }
 
 /// For each projection function written in Gojo, the arguments (receiver
@@ -361,6 +423,10 @@ struct Bc<'a> {
     tscopes: Vec<(u32, usize, LocalId)>,
     /// While checking a task closure: the depth its borrows last until.
     spawn_depth: Option<usize>,
+    /// The `x.clone()` (by address) to check as a move of `x` instead
+    /// (`needless_clones`), and whether the check got to it.
+    as_move: Option<usize>,
+    as_move_seen: bool,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -397,7 +463,7 @@ fn place_path(e: &TExpr) -> Option<Path> {
 
 impl<'a> Bc<'a> {
     fn new(prog: &'a Program, tf: &'a TFunc, proj: &'a HashMap<FuncId, Vec<usize>>, view_ret: bool) -> Bc<'a> {
-        Bc { prog, tf, proj, diags: vec![], loans: vec![], holders: HashMap::new(), depth: 0, suppress: 0, loops: vec![], view_ret, defers: vec![vec![]], decl_depth: HashMap::new(), escaped: vec![], locked: vec![], in_closure: false, in_each_body: false, via_parents: HashMap::new(), tscopes: vec![], spawn_depth: None }
+        Bc { prog, tf, proj, diags: vec![], loans: vec![], holders: HashMap::new(), depth: 0, suppress: 0, loops: vec![], view_ret, defers: vec![vec![]], decl_depth: HashMap::new(), escaped: vec![], locked: vec![], in_closure: false, in_each_body: false, via_parents: HashMap::new(), tscopes: vec![], spawn_depth: None, as_move: None, as_move_seen: false }
     }
 
     fn err(&mut self, d: Diag) {
@@ -1495,6 +1561,12 @@ impl<'a> Bc<'a> {
     // ------------------------------------------------------------------
 
     fn expr(&mut self, st: &mut St, e: &TExpr) {
+        if self.as_move == Some(e as *const TExpr as usize) {
+            if let TK::Intrinsic { args, .. } = &e.kind {
+                self.as_move_seen = true;
+                return self.do_move(st, &args[0].e);
+            }
+        }
         match &e.kind {
             TK::Move(x) => self.do_move(st, x),
             TK::Copy(x) => self.read(st, x),
@@ -1709,7 +1781,7 @@ impl<'a> Bc<'a> {
             }
         }
         // the body is checked on its own
-        let mut inner = Bc { prog: self.prog, tf: self.tf, proj: self.proj, diags: vec![], loans: vec![], holders: self.holders.clone(), depth: 0, suppress: self.suppress, loops: vec![], view_ret: false, defers: vec![vec![]], decl_depth: c.params.iter().map(|p| (*p, 0)).collect(), escaped: vec![], locked: self.locked.iter().map(|(_, ps, sp, n)| (0, ps.clone(), *sp, n.clone())).collect(), in_closure: true, in_each_body: c.loop_body.is_some(), via_parents: self.via_parents.clone(), tscopes: vec![], spawn_depth: None };
+        let mut inner = Bc { prog: self.prog, tf: self.tf, proj: self.proj, diags: vec![], loans: vec![], holders: self.holders.clone(), depth: 0, suppress: self.suppress, loops: vec![], view_ret: false, defers: vec![vec![]], decl_depth: c.params.iter().map(|p| (*p, 0)).collect(), escaped: vec![], locked: self.locked.iter().map(|(_, ps, sp, n)| (0, ps.clone(), *sp, n.clone())).collect(), in_closure: true, in_each_body: c.loop_body.is_some(), via_parents: self.via_parents.clone(), tscopes: vec![], spawn_depth: None, as_move: None, as_move_seen: false };
         let mut s = St::new();
         inner.block(&mut s, &c.body);
         inner.end_scope_defers(&mut s);

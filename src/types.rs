@@ -4,7 +4,7 @@
 use crate::ast::{Mode, YieldKind};
 use crate::diag::Span;
 use crate::tir::TExpr;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 pub type DefId = u32;
@@ -583,6 +583,79 @@ pub struct Program {
 }
 
 impl Program {
+    /// Whether some type reachable from `t` (its fields, elements, and what
+    /// it boxes or points to) satisfies `bad`. Each type is visited once, so
+    /// recursive types end; a type that grows as it recurses
+    /// (`struct Node[T] { next: ?Box[Node[Vec[T]]] }`) has endless types in
+    /// it, so after `REACH_LIMIT` of them the answer is yes: every caller
+    /// takes "reaches" as the cautious answer.
+    pub fn reaches(&self, t: &Ty, bad: &dyn Fn(&Ty) -> bool) -> bool {
+        const REACH_LIMIT: usize = 512;
+        let mut seen: HashSet<Ty> = HashSet::new();
+        let mut todo = vec![t.clone()];
+        while let Some(t) = todo.pop() {
+            if !seen.insert(t.clone()) {
+                continue;
+            }
+            if seen.len() > REACH_LIMIT || bad(&t) {
+                return true;
+            }
+            match &t {
+                Ty::Vec(a) | Ty::Slice(a) | Ty::Array(a, _) | Ty::ArrayT(a, _) | Ty::Option(a) | Ty::Box(a) | Ty::Rc(a) | Ty::Arc(a) | Ty::Weak(a) | Ty::Cell(a) | Ty::Mutex(a) | Ty::MutexRef(a) | Ty::Sender(a) | Ty::Receiver(a) | Ty::Task(a) | Ty::Iso(a) | Ty::Ptr(a) => todo.push((**a).clone()),
+                Ty::Map(a, b) | Ty::Result(a, b) => {
+                    todo.push((**a).clone());
+                    todo.push((**b).clone());
+                }
+                Ty::Adt(d, args) => match &self.def(*d).kind {
+                    TypeDefKind::Struct { .. } => todo.extend(self.field_tys(*d, args).into_iter().map(|f| f.1)),
+                    TypeDefKind::Enum { variants } => {
+                        for v in 0..variants.len() {
+                            todo.extend(self.variant_tys(*d, args, v).into_iter().map(|f| f.1));
+                        }
+                    }
+                    TypeDefKind::Iface { .. } => {}
+                },
+                _ => {}
+            }
+        }
+        false
+    }
+
+    /// Dropping a value of this type only frees memory, which no program can
+    /// observe: no `drop` method runs, no channel closes, no task is
+    /// cancelled, no shared count changes (a `Weak` could tell), and no
+    /// unknown code (interfaces, function values, type parameters) is
+    /// involved. Such a value may be dropped earlier than the end of its
+    /// scope (codegen/drops.rs), and moved instead of copied (a needless
+    /// `.clone()`, borrowck.rs).
+    pub fn drop_silent(&self, t: &Ty) -> bool {
+        !self.reaches(t, &|t| match t {
+            Ty::Rc(_) | Ty::Arc(_) | Ty::Weak(_) | Ty::Mutex(_) | Ty::MutexRef(_) | Ty::Sender(_) | Ty::Receiver(_) | Ty::Task(_) | Ty::Scope | Ty::Func(_) | Ty::Iface(..) | Ty::Param(_) | Ty::Var(_) | Ty::ArrayT(..) | Ty::Error => true,
+            Ty::Adt(d, _) => {
+                let def = self.def(*d);
+                def.has_drop || matches!(def.kind, TypeDefKind::Iface { .. })
+            }
+            _ => false,
+        })
+    }
+
+    /// Whether `.clone()` of this type only copies: no `clone` method of a
+    /// type in it runs code of its own.
+    pub fn plain_clone(&self, t: &Ty) -> bool {
+        !self.reaches(t, &|t| match t {
+            Ty::Adt(d, _) => self.methods.contains_key(&(TyKey::Adt(*d), "clone".to_string())) || matches!(self.def(*d).kind, TypeDefKind::Iface { .. }),
+            Ty::Iface(..) | Ty::Func(_) | Ty::Param(_) | Ty::Var(_) | Ty::Error => true,
+            _ => false,
+        })
+    }
+
+    /// Whether a value of this type may hold a borrow of something else: a
+    /// view, reference-like handle, raw pointer, function or interface value.
+    pub fn may_borrow(&self, t: &Ty) -> bool {
+        t.contains_view()
+            || self.reaches(t, &|t| matches!(t, Ty::Str | Ty::Slice(_) | Ty::MutexRef(_) | Ty::Task(_) | Ty::Scope | Ty::Func(_) | Ty::Iface(..) | Ty::Ptr(_) | Ty::Param(_) | Ty::Var(_) | Ty::Error) || matches!(t, Ty::Adt(d, _) if matches!(self.def(*d).kind, TypeDefKind::Iface { .. })))
+    }
+
     pub fn def(&self, d: DefId) -> &TypeDef {
         &self.types[d as usize]
     }

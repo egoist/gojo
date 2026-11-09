@@ -151,7 +151,7 @@ Every value has exactly one owner, and the value is released when its owner goes
 - Assignment, passing to a `sink` parameter, returning and sending on a channel all **move** ownership. Using the original variable afterwards is a compile error.
 - Scalars and `copy` types are copied bitwise: `copy struct Point { x, y f64 }`. A type that has fields needing release (`String`, `Vec`, `Box`, ...) or a `drop` method cannot be `copy`.
 - Exported types must declare `copy` explicitly. A package-private, non-generic type becomes `copy` automatically when all its fields are copy and it has no `drop` method. This way, adding a field to a public type never silently changes the semantics of downstream code.
-- To copy any other type, call `.clone()` explicitly, so the cost is visible in the code.
+- To copy any other type, call `.clone()` explicitly, so the cost is visible in the code. Coding agents tend to clone whatever the borrow checker complains about, so a `.clone()` of a variable nothing uses afterwards gets a warning saying to move it instead. Whether nothing uses it is the borrow checker's own answer (the function is checked again with the clone replaced by a move), so the warning never suggests a move that wouldn't compile. It is the compiler's only warning: the code is right, it just copies for nothing.
 - `match` on a place (a variable, a field, an element) binds references by default. An arm that moves a binding out (`some(v) => v`) consumes the matched value instead, which needs an owned value. So there is no `ref` keyword, and `unwrap` can still be written with a `sink` receiver.
 
 ### 4.2 Parameter modes
@@ -195,7 +195,7 @@ with e = counts.entry(word) {   // with binds a projection to a block
 ### 4.4 Release and defer
 
 - A type that defines a `fn drop(inout self)` method has it called automatically when it goes out of scope. Variables in the same scope are released in **reverse** declaration order; struct fields are released in declaration order.
-- A variable that has been moved out is not released. For a variable moved only on some branches, the compiler inserts a flag.
+- A variable that has been moved out is not released. For a variable moved only on some branches, the compiler keeps a drop flag, and tests it only where it can't tell from the code whether the value is still there (a dataflow pass per function; most moves need no flag at all). A value whose release only frees memory is instead freed at the end of the branches that didn't move it, when nothing uses it afterwards: no program can tell the difference. This is Mojo's "as soon as possible" destruction taken only as far as it stays invisible; [drops.md](drops.md) proposes going further.
 - `defer` runs at the end of the current block. Since resources are released automatically, code like `defer f.Close()` is mostly unnecessary; defer is mainly for restoring state and logging. Deferred code cannot change where the function goes: it cannot contain `return` or `try`, and it cannot jump out of an enclosing loop.
 - To release early, call `drop(x)`, which is just an ordinary function that takes a `sink` parameter.
 
@@ -500,7 +500,7 @@ The goal is debug builds no slower than 1.3 times Go. The checks are built for i
 | --- | --- | --- |
 | Parsing and type checking | Same as Go; only local bidirectional type inference | On par with Go |
 | Borrow checking | One dataflow pass per function body | Low, close to linear |
-| Drop insertion | Drops and flags at scope exits and conditional moves | Low, but the generated code grows |
+| Drop insertion | Drops at scope exits; a dataflow pass finds where a moved value's drop flag is known, so most need none | Low, close to linear |
 | Escape analysis | **Not needed**: the type decides whether a value is on the stack or the heap | Saves this part of Go's work |
 | Generics | Monomorphization of the reachable instantiations | Grows with the instantiations |
 | Back end | The C compiler | Most of the build time |
