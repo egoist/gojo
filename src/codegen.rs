@@ -2590,15 +2590,24 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
                 let v = self.expr(fs, x);
                 self.omake(&t, &v)
             }
+            // Built in a temporary of their own, like enum literals: clang
+            // builds an initializer field by field straight into its
+            // destination, and a destination that held the other member (a
+            // caller's result slot reused in a loop) would be written through
+            // a type it doesn't have. Copying the temporary copies its types.
             TK::OkLit(x) => {
                 let v = self.expr(fs, x);
                 let c = self.cty(&t);
-                format!("(({}){{ .ok = 1, .u.val = {} }})", c, v)
+                let n = self.tmp();
+                self.emit(fs, &format!("{} {} = {{ .ok = 1, .u.val = {} }};", c, n, v));
+                n
             }
             TK::ErrLit(x) => {
                 let v = self.expr(fs, x);
                 let c = self.cty(&t);
-                format!("(({}){{ .ok = 0, .u.err = {} }})", c, v)
+                let n = self.tmp();
+                self.emit(fs, &format!("{} {} = {{ .ok = 0, .u.err = {} }};", c, n, v));
+                n
             }
             TK::VecLit(xs) => {
                 let el = match &t {
