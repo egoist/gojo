@@ -116,6 +116,18 @@ describe("highlights", () => {
     ["let ys = xs.map(x => x * 2)", "x", "variable.parameter.gojo"],
     ["// a comment", "a comment", "comment.line.double-slash.gojo"],
     ["/* a\ncomment */ fn f() {}", "fn", "storage.type.function.gojo"],
+    ["linear struct Tx { id: int }", "linear", "storage.modifier.gojo"],
+    ["gen fn lines(src: str) -> str {}", "gen", "storage.modifier.gojo"],
+    ["gen fn lines(src: str) -> str {}", "lines", "entity.name.function.gojo"],
+    ["checkfree gen fn items(xs: []int) -> int {}", "checkfree", "storage.modifier.gojo"],
+    ["fn at(v: []int, i: int) -> int requires i < v.len() {}", "requires", "keyword.other.requires.gojo"],
+    ["fn at(v: []int, i: int)\n    requires i < v.len() {}", "requires", "keyword.other.requires.gojo"],
+    ["static for f in fields(T) {}", "static", "keyword.control.static.gojo"],
+    ["static if T is String {}", "is", "keyword.operator.is.gojo"],
+    ["static if T is String {}", "static", "keyword.control.static.gojo"],
+    ["return static P{f => x.[f]}", "static", "keyword.control.static.gojo"],
+    ["struct Doc {\n    text: String\n    words: Vec[str] of text\n}", "of", "storage.modifier.gojo"],
+    ["fn f(e: int ! never) {}", "never", "support.type.primitive.gojo"],
   ]
   for (const [code, text, scope] of cases) {
     test(`${JSON.stringify(text)} in ${JSON.stringify(code)}`, () => {

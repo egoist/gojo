@@ -16,7 +16,7 @@ export const keywords = {
 } as const
 
 /** Contextual keywords: names everywhere else. */
-export const contextual = ["self", "as", "lib", "static", "send", "view", "of"] as const
+export const contextual = ["self", "as", "lib", "static", "send", "view", "linear", "of", "gen", "checkfree", "requires", "is"] as const
 
 /** The types the checker knows by name (builtin_type and the generic builtins). */
 export const primitiveTypes = [
@@ -141,9 +141,35 @@ export const gojoGrammar: LanguageRegistration = {
         },
         {
           // A send struct is safe to move between tasks; a view struct holds
-          // views and is one.
-          match: String.raw`\b(send|view)\s+(?=(?:struct|enum)\b)`,
+          // views and is one; a linear struct must be consumed.
+          match: String.raw`\b(send|view|linear)\s+(?=(?:struct|enum)\b)`,
           captures: { 1: { name: "storage.modifier.gojo" } },
+        },
+        {
+          // gen fn lines(src: str) -> str, checkfree fn dot(...), in any order
+          match: String.raw`\b(gen|checkfree)\s+(?=(?:(?:gen|checkfree|unsafe)\s+)*fn\b)`,
+          captures: { 1: { name: "storage.modifier.gojo" } },
+        },
+        {
+          // fn at(v: []int, i: int) -> int requires i < v.len() { ... },
+          // on the signature's line or the next
+          match: String.raw`(?:^\s*|(?<=[)\]\w>])\s+)(requires)\b(?=\s)`,
+          captures: { 1: { name: "keyword.other.requires.gojo" } },
+        },
+        {
+          // static if T is String { ... }
+          match: String.raw`\b(static)\s+(if)\s+(${ident})\s+(is)\b`,
+          captures: {
+            1: { name: "keyword.control.static.gojo" },
+            2: { name: "keyword.control.gojo" },
+            3: { name: "entity.name.type.gojo" },
+            4: { name: "keyword.operator.is.gojo" },
+          },
+        },
+        {
+          // static for f in fields(T), static if T: struct, static T{f => ...}
+          match: String.raw`\b(static)\s+(?=(?:for|if)\b|[A-Z])`,
+          captures: { 1: { name: "keyword.control.static.gojo" } },
         },
         {
           // fn first(a: str, b: str) -> str of a { ... }
