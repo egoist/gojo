@@ -1084,6 +1084,22 @@ fn packages() {
     if !allowed.status.success() || !aout.contains("\"name\": \"@c/fastabs\", \"version\": \"1.2.0\", \"path\": \"unsafe_allowed/fastabs\", \"root\": false, \"status\": \"allowed\", \"lines\": 4") || !aout.ends_with("\"ok\": true}\n") {
         failures.push(format!("gojo unsafe --json (allowed): {:?}\n{}{}", allowed.status, aout, String::from_utf8_lossy(&allowed.stderr)));
     }
+    // `gojo authority` reports what each dependency does, and fails when
+    // [authority] doesn't allow it
+    let adenied = Command::new(gojo()).arg("authority").arg("authority_denied/app").current_dir(&base).output().unwrap();
+    let aallowed = Command::new(gojo()).arg("authority").arg("--json").arg("authority_allowed/app").current_dir(&base).output().unwrap();
+    let (dout, aout) = (String::from_utf8_lossy(&adenied.stdout), String::from_utf8_lossy(&aallowed.stdout));
+    if adenied.status.code() != Some(1)
+        || !dout.contains("leftpad 0.1.0 (authority_denied/leftpad): fs, env (NOT ALLOWED by [authority])")
+        || !dout.contains("authority_denied/leftpad/leftpad.gojo:4  env      os.getenv")
+        || !dout.contains("s3 0.1.0 (authority_denied/s3): fs (NOT ALLOWED by [authority])\n    fs through its dependencies")
+        || !dout.contains("[authority]\nleftpad = [\"fs\", \"env\"]\nutil = [\"fs\"]\ns3 = [\"fs\"]")
+    {
+        failures.push(format!("gojo authority (denied): {:?}\n{}{}", adenied.status, dout, String::from_utf8_lossy(&adenied.stderr)));
+    }
+    if !aallowed.status.success() || !aout.contains("{\"name\": \"util\", \"version\": \"0.1.0\", \"path\": \"authority_allowed/util\", \"needs\": [\"fs\"], \"status\": \"allowed\", \"uses\": [{\"kind\": \"fs\", \"what\": \"os.readText\", \"file\": \"authority_allowed/util/util.gojo\", \"line\": 4}]}") || !aout.ends_with("\"ok\": true}\n") {
+        failures.push(format!("gojo authority --json (allowed): {:?}\n{}{}", aallowed.status, aout, String::from_utf8_lossy(&aallowed.stderr)));
+    }
     // ...and in a workspace, member by member
     let wsu = Command::new(gojo()).arg("unsafe").arg("workspace").current_dir(&base).output().unwrap();
     let wsout = String::from_utf8_lossy(&wsu.stdout);

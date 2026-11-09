@@ -988,6 +988,13 @@ package. A dependency that has any builds only once your `gojo.toml` allows it
 (`[unsafe] allow = ["name"]`), and `forbid = true` there keeps your own package
 free of it.
 
+`[authority]` limits what dependencies may do with files, environment
+variables, other programs and the network: `leftpad = []` keeps `leftpad` (and
+whatever it depends on) to pure code, `s3 = ["net"]` lets `s3` use the network
+and nothing else. A package may still write to a file its caller hands it.
+`gojo authority` shows what each dependency uses and the table that allows
+exactly that.
+
 ## Where next
 
 - [Examples](../examples): a JSON API server (`todo`), `grep`, an HTTP server

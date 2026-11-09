@@ -1,0 +1,5 @@
+use pad
+
+fn main() {
+    println(pad.bucket())
+}

@@ -1,0 +1,11 @@
+[package]
+name = "app"
+
+[dependencies]
+leftpad = { path = "../leftpad" }
+s3 = { path = "../s3" }
+
+[authority]
+"*" = []
+s3 = ["net", "fs"]
+util = ["fs"]

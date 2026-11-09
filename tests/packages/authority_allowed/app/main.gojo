@@ -1,0 +1,13 @@
+use std/os
+use leftpad
+use s3
+
+fn main() {
+    // leftpad may not open files, but may write to one it is handed
+    let out = os.stdout()
+    leftpad.write(out, "x", 3) catch e {
+        println("failed:", e.kind)
+    }
+    println(s3.bucket())
+    println(os.getenv("NO_SUCH_VARIABLE_HERE") ?? "unset")
+}

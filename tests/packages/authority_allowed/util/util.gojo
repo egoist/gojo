@@ -1,0 +1,5 @@
+use std/os
+
+pub fn config() -> String {
+    return os.readText("no-such-s3.conf") catch _ { "default" }
+}

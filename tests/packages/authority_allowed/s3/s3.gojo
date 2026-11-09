@@ -1,0 +1,5 @@
+use util
+
+pub fn bucket() -> String {
+    return util.config()
+}

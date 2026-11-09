@@ -1,6 +1,7 @@
 // Gojo compiler: library interface shared by the `gojo` driver and the fuzzer.
 
 pub mod ast;
+pub mod authority;
 pub mod borrowck;
 pub mod check;
 pub mod codegen;
@@ -115,12 +116,19 @@ pub struct UnsafeInfo {
     pub aliases: Vec<(String, String)>,
     /// Packages whose gojo.toml says `forbid = true`.
     pub forbidding: Vec<String>,
+    /// The `[authority]` table of the package being built.
+    pub authority: manifest::AuthorityPolicy,
+    /// Which package depends on which, by the names in their gojo.toml.
+    pub deps: Vec<(String, String)>,
 }
 
 impl UnsafeInfo {
-    /// Errors for unsafe code the policy doesn't allow.
+    /// Errors for unsafe code the policy doesn't allow, and for names in the
+    /// `[authority]` table that aren't dependencies.
     pub fn check(&self) -> Vec<Diag> {
-        unsafety::check_policy(self)
+        let mut diags = unsafety::check_policy(self);
+        diags.extend(authority::check_table(self));
+        diags
     }
 }
 
@@ -489,6 +497,7 @@ fn unsafe_info(sm: &mut SourceMap, diags: &mut Vec<Diag>, manifests: &mut HashMa
     if let Some(r) = main_pkg {
         if let Some(Some(m)) = manifest_of(r, sm, diags, manifests) {
             info.policy = m.unsafe_policy.clone();
+            info.authority = m.authority.clone();
         }
         let mut todo = vec![r.to_path_buf()];
         let mut seen: Vec<PathBuf> = vec![];
@@ -499,6 +508,7 @@ fn unsafe_info(sm: &mut SourceMap, diags: &mut Vec<Diag>, manifests: &mut HashMa
             seen.push(dir.clone());
             let Some(Some(m)) = manifest_of(&dir, sm, diags, manifests) else { continue };
             let deps = m.dependencies.clone();
+            let from = m.package.as_ref().map(|p| p.name.clone());
             for d in deps {
                 // its own name: in its manifest, or (until it is fetched) what
                 // the dependency says
@@ -513,6 +523,11 @@ fn unsafe_info(sm: &mut SourceMap, diags: &mut Vec<Diag>, manifests: &mut HashMa
                 }
                 if d.name != real && !info.aliases.iter().any(|(a, r)| *a == d.name && *r == real) {
                     info.aliases.push((d.name.clone(), real.clone()));
+                }
+                if let Some(from) = &from {
+                    if !info.deps.contains(&(from.clone(), real.clone())) {
+                        info.deps.push((from.clone(), real.clone()));
+                    }
                 }
                 if !info.known.contains(&real) {
                     info.known.push(real);
@@ -567,11 +582,15 @@ pub fn frontend(input: &str, source: Option<&str>) -> Result<Checked, (SourceMap
     if !policy.is_empty() {
         return Err((loaded.sm, policy));
     }
-    let sm = loaded.sm;
+    let (sm, unsafe_info) = (loaded.sm, loaded.unsafe_info);
     let (prog, tfuncs, tests) = match check::check_program(loaded.units) {
         Ok(r) => r,
         Err(diags) => return Err((sm, diags)),
     };
+    let authority = authority::check(&prog, &tfuncs, &unsafe_info);
+    if !authority.is_empty() {
+        return Err((sm, authority));
+    }
     let (errors, warnings) = split_warnings(ownership_checks(&prog, &tfuncs));
     if !errors.is_empty() {
         return Err((sm, errors));

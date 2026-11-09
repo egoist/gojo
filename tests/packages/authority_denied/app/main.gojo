@@ -1,0 +1,8 @@
+use leftpad
+use s3
+
+fn main() {
+    println(leftpad.pad("x", 3))
+    println(s3.bucket())
+    println(leftpad.Opts{}.fill)
+}

@@ -43,6 +43,10 @@ usage:
                                           blocks, `unsafe fn`, `unsafe send`, `extern`),
                                           package by package, and whether gojo.toml's
                                           [unsafe] table allows it; fails when it doesn't
+  gojo authority [file.gojo|dir] [--json] what each dependency does with the file system,
+                                          environment, other programs and the network,
+                                          whether gojo.toml's [authority] table allows it,
+                                          and the table that grants exactly that
   gojo claims [file.gojo|dir] [--json]    what the compiler proved about each function:
                                           the bounds checks it removed, and where they stay
   gojo spec                               the whole language on one page, for coding
@@ -99,7 +103,11 @@ fn main() -> ExitCode {
         Some("init") => return init_command(&args[2..]),
         Some("unsafe") => {
             let rest = args[2..].to_vec();
-            return gojo::with_compiler_stack(move || unsafe_command(&rest));
+            return gojo::with_compiler_stack(move || report_command("unsafe", &rest, unsafe_report));
+        }
+        Some("authority") => {
+            let rest = args[2..].to_vec();
+            return gojo::with_compiler_stack(move || report_command("authority", &rest, authority_report));
         }
         Some("claims") => {
             let rest = args[2..].to_vec();
@@ -375,19 +383,20 @@ The prelude is available everywhere; other modules are imported with `use std/na
     }
 }
 
-/// `gojo unsafe`: every site of unsafe code in the program, by package.
-fn unsafe_command(args: &[String]) -> ExitCode {
+/// `gojo unsafe` and `gojo authority`: a report on the program (each member
+/// of a workspace in turn), printed or as JSON; fails when the policy does.
+fn report_command(cmd: &str, args: &[String], one: fn(&str, bool) -> (bool, Option<String>)) -> ExitCode {
     let mut json = false;
     let mut input = None;
     for a in args {
         match a.as_str() {
             "--json" => json = true,
             _ if a.starts_with('-') => {
-                eprintln!("error: unknown option `{}` (`gojo unsafe [file.gojo|dir] [--json]`)", a);
+                eprintln!("error: unknown option `{}` (`gojo {} [file.gojo|dir] [--json]`)", a, cmd);
                 return ExitCode::from(2);
             }
             _ if input.is_some() => {
-                eprintln!("error: `gojo unsafe` takes one file or directory");
+                eprintln!("error: `gojo {}` takes one file or directory", cmd);
                 return ExitCode::from(2);
             }
             _ => input = Some(a.clone()),
@@ -404,7 +413,7 @@ fn unsafe_command(args: &[String]) -> ExitCode {
                 if !json {
                     println!("== {}", shown_path(&m));
                 }
-                let (good, j) = unsafe_report(&m, json);
+                let (good, j) = one(&m, json);
                 ok &= good;
                 if let Some(j) = j {
                     parts.push(format!("{{\"member\": {}, \"report\": {}}}", json_str(&shown_path(&m)), j));
@@ -412,12 +421,124 @@ fn unsafe_command(args: &[String]) -> ExitCode {
             }
             (ok, json.then(|| format!("{{\"members\": [{}], \"ok\": {}}}", parts.join(", "), ok)))
         }
-        None => unsafe_report(&input, json),
+        None => one(&input, json),
     };
     if let Some(j) = out {
         println!("{}", j);
     }
     if ok { ExitCode::SUCCESS } else { ExitCode::from(1) }
+}
+
+/// The report for `gojo authority`: what each dependency does (directly and
+/// through its own dependencies), whether `[authority]` allows it, and the
+/// table that would grant exactly that.
+fn authority_report(input: &str, json: bool) -> (bool, Option<String>) {
+    use gojo::authority;
+    let loaded = match gojo::load(input, None) {
+        Ok(l) => l,
+        Err((sm, diags)) => {
+            report(&sm, &diags);
+            return (false, None);
+        }
+    };
+    let table = authority::check_table(&loaded.unsafe_info);
+    if !table.is_empty() {
+        report(&loaded.sm, &table);
+        return (false, None);
+    }
+    let (sm, info) = (loaded.sm, loaded.unsafe_info);
+    let (prog, tfuncs, _) = match gojo::check::check_program(loaded.units) {
+        Ok(r) => r,
+        Err(diags) => {
+            report(&sm, &diags);
+            return (false, None);
+        }
+    };
+    let uses = authority::uses(&prog, &tfuncs, &info);
+    let needed = authority::needed(&info, &uses);
+    let violations = authority::check(&prog, &tfuncs, &info);
+    let list = |ks: &[&str]| format!("[{}]", ks.iter().map(|k| format!("\"{}\"", k)).collect::<Vec<_>>().join(", "));
+    let mut suggested = String::from("[authority]\n");
+    for (name, ks) in &needed {
+        suggested.push_str(&format!("{} = {}\n", authority::quoted(name), list(ks)));
+    }
+    // each package's own uses, one per function and line
+    let own = |i: usize| -> Vec<&authority::Use> {
+        let mut v: Vec<&authority::Use> = vec![];
+        for u in uses.iter().filter(|u| u.pkg == i) {
+            if !v.iter().any(|w| w.what == u.what && w.kind == u.kind && sm.file(w.span.file).line_col(w.span.lo).0 == sm.file(u.span.file).line_col(u.span.lo).0 && w.span.file == u.span.file) {
+                v.push(u);
+            }
+        }
+        v
+    };
+    let q = json_str;
+    let status = |name: &str, ks: &[&str]| -> &'static str {
+        let lim = authority::limits(&info, name);
+        if lim.is_empty() {
+            "not limited"
+        } else if lim.iter().all(|(_, _, g)| ks.iter().all(|k| g.iter().any(|x| x == k))) {
+            "allowed"
+        } else {
+            "not allowed"
+        }
+    };
+    let mut out = None;
+    if json {
+        let pkgs: Vec<String> = needed
+            .iter()
+            .map(|(name, ks)| {
+                let i = info.packages.iter().position(|p| p.name == *name).unwrap_or(0);
+                let p = &info.packages[i];
+                let us: Vec<String> = own(i).iter().map(|u| format!("{{\"kind\": {}, \"what\": {}, \"file\": {}, \"line\": {}}}", q(u.kind), q(&u.what), q(&shown_path(&sm.file(u.span.file).path)), sm.file(u.span.file).line_col(u.span.lo).0)).collect();
+                format!(
+                    "{{\"name\": {}, \"version\": {}, \"path\": {}, \"needs\": {}, \"status\": {}, \"uses\": [{}]}}",
+                    q(name),
+                    p.version.as_ref().map(|v| q(v)).unwrap_or_else(|| "null".into()),
+                    p.root.as_ref().map(|r| q(&shown_path(&r.display().to_string()))).unwrap_or_else(|| "null".into()),
+                    list(ks),
+                    q(status(name, ks)),
+                    us.join(", ")
+                )
+            })
+            .collect();
+        out = Some(format!("{{\"packages\": [{}], \"suggested\": {}, \"ok\": {}}}", pkgs.join(", "), q(&suggested), violations.is_empty()));
+    } else {
+        for (name, ks) in &needed {
+            let i = info.packages.iter().position(|p| p.name == *name).unwrap_or(0);
+            let p = &info.packages[i];
+            let at = match (&p.version, &p.root) {
+                (Some(v), Some(r)) => format!(" {} ({})", v, shown_path(&r.display().to_string())),
+                _ => String::new(),
+            };
+            let what = if ks.is_empty() { "nothing".to_string() } else { ks.join(", ") };
+            let note = match status(name, ks) {
+                "not limited" => "not limited by [authority]",
+                "allowed" => "allowed by [authority]",
+                _ => "NOT ALLOWED by [authority]",
+            };
+            println!("{}{}: {} ({})", name, at, what, note);
+            let mine = own(i);
+            let locs: Vec<String> = mine.iter().map(|u| format!("{}:{}", shown_path(&sm.file(u.span.file).path), sm.file(u.span.file).line_col(u.span.lo).0)).collect();
+            let width = locs.iter().map(|l| l.chars().count()).max().unwrap_or(0);
+            for (u, loc) in mine.iter().zip(&locs) {
+                println!("    {:<width$}  {:<7}  {}", loc, u.kind, u.what, width = width);
+            }
+            let through: Vec<&str> = ks.iter().copied().filter(|k| !mine.iter().any(|u| u.kind == *k)).collect();
+            if !through.is_empty() {
+                println!("    {} through its dependencies", through.join(", "));
+            }
+        }
+        if needed.is_empty() {
+            println!("no dependencies");
+        } else {
+            println!("\nA table granting exactly this (gojo.toml):\n{}", suggested.trim_end());
+        }
+    }
+    if !violations.is_empty() && !json {
+        report(&sm, &violations);
+    }
+    (violations.is_empty(), out)
 }
 
 /// A path relative to here (`../zlib/lib.gojo`), unless that takes a long way round.
@@ -838,7 +959,7 @@ fn drive(cmd: &str, input: &str, opts: &Options, prog_args: &[String]) -> Result
         report(&loaded.sm, &policy);
         return Err(());
     }
-    let sm = loaded.sm;
+    let (sm, unsafe_info) = (loaded.sm, loaded.unsafe_info);
     let t_parse = t0.elapsed();
     let (prog, tfuncs, tests) = match gojo::check::check_program(loaded.units) {
         Ok(r) => r,
@@ -848,6 +969,11 @@ fn drive(cmd: &str, input: &str, opts: &Options, prog_args: &[String]) -> Result
         }
     };
     let t_check = t0.elapsed();
+    let authority = gojo::authority::check(&prog, &tfuncs, &unsafe_info);
+    if !authority.is_empty() {
+        report(&sm, &authority);
+        return Err(());
+    }
     let (errors, warnings) = gojo::split_warnings(gojo::ownership_checks(&prog, &tfuncs));
     if !errors.is_empty() {
         report(&sm, &errors);

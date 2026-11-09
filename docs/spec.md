@@ -58,6 +58,10 @@ uuid = { path = "../uuid", package = "@carol/uuid" }
 allow = ["@c/zlib"]                             # dependencies that may have unsafe code
 forbid = true                                   # this package may not
 
+[authority]                                     # optional: see below
+leftpad = []                                    # may not use files, environment, programs or network
+"@aws/s3" = ["net"]
+
 [workspace]                                     # optional: members checked and tested together
 members = ["app", "libs/*"]
 ```
@@ -68,9 +72,10 @@ members = ["app", "libs/*"]
 - A directory that several packages depend on is compiled once (diamond dependencies).
 - `gojo.toml` is a strict subset of TOML (tables, strings, integers, booleans, arrays, inline tables). Unknown keys, misspelled names and paths that don't exist are errors with a location; they are never ignored.
 - **`[unsafe]`.** A dependency, direct or not, that has `unsafe` blocks, `unsafe fn`s, `unsafe send` types or `extern` blocks only builds when the manifest of the package being built lists it in `allow`, by the name in its own `gojo.toml`; the error says where its unsafe code is, and `gojo unsafe` lists all of it. Only the manifest being built decides, so a program sees and approves every package in its tree that has unsafe code (the dependencies' own `allow` lists don't count). A name in `allow` that isn't in the dependency tree is an error. `forbid = true` makes any unsafe code in the package's own files an error, which keeps a coding agent from reaching for `unsafe`. The standard library is not subject to it. A workspace's members each have their own `[unsafe]`.
+- **`[authority]`.** Limits what dependencies may do through the standard library. Each key is a dependency anywhere in the tree, by the name in its own `gojo.toml`, or `"*"` for every dependency not listed; each value lists the kinds it may use: `fs` (files and directories, the working directory: `os.open`, `os.readText`, `os.remove`, `os.walk`, `path.abs`, ...), `env` (`os.getenv`, `os.setenv`, `os.unsetenv`, `os.environ`), `process` (`os.run`, `os.command`, `os.notify`, ...) and `net` (`net.dial`, `net.listen`, `net.lookup`, `tls.dial`, `http.get`, `http.request`, ...; `tls.listen` needs `fs` too, for its key files). A call to one of these functions, or a use of it as a value, in the code of a listed package (field defaults and package-level values included) is an error unless its entry grants the kind, and so is one in a package it depends on, directly or not: the entries of every listed package above a package in the tree apply to it as well. The other functions of the standard library are free, among them the standard streams, `os.args` and `os.exit`; so are methods, which need a value (an `os.File`, a `net.Conn`) the package was handed or made with a granted function. Unlisted dependencies, when there is no `"*"`, and the package being built are not limited. A name that isn't in the dependency tree, or is the package being built, is an error; so is an unknown kind. `unsafe` code is not checked against it (see `[unsafe]`). `gojo authority [--json]` lists what each dependency uses, with its call sites, and the table that grants exactly that; it fails when the table doesn't hold.
 - `gojo init [name]` writes a `gojo.toml` in the current directory. In a workspace root without `[package]`, `gojo check` and `gojo test` process each member in turn, and `gojo run`/`build` require a member to be named. `gojo doc yaml/schema` shows the API of a dependency.
 
-Tests: `projects/app`, `projects/cycle`, `projects/private`, `projects/groups`, `packages/*` (`packages/unsafe_*` for `[unsafe]`), `errors/bad_use`, `errors/bad_use_names`, `errors/unused`, `errors/use_groups`.
+Tests: `projects/app`, `projects/cycle`, `projects/private`, `projects/groups`, `packages/*` (`packages/unsafe_*` for `[unsafe]`, `packages/authority_*` for `[authority]`), `errors/bad_use`, `errors/bad_use_names`, `errors/unused`, `errors/use_groups`.
 
 ## 3. Declarations
 

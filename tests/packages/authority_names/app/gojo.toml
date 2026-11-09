@@ -1,0 +1,10 @@
+[package]
+name = "app"
+
+[dependencies]
+pad = { path = "../s3", package = "s3" }
+
+[authority]
+app = []
+pad = ["net"]
+nope = []
