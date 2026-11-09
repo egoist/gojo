@@ -29,6 +29,9 @@
 #include <netdb.h>
 #include <signal.h>
 #include <sched.h>
+#if defined(__GLIBC__) || defined(__APPLE__)
+#include <execinfo.h>
+#endif
 #include <poll.h>
 #if defined(__APPLE__)
 #include <sys/event.h>
@@ -1604,6 +1607,34 @@ void gojo_start_worker(void) {
 
 // ------------------------------------------------------------------ stack overflow
 
+// A crash that isn't a stack overflow: what was touched, and from where. The
+// address is located among the goroutine stacks (a stack put away or one C was
+// given a pointer into says much), then a backtrace where libc has one.
+static void fault_report(int sig, const uint8_t *addr, gojo_g *cur) {
+    // (what the program printed before is worth more than strict signal safety)
+    fflush(stdout);
+    char b[512];
+    int n = snprintf(b, sizeof b, "panic: %s at address %p\n", sig == SIGBUS ? "bus error" : "segmentation fault", (const void *)addr);
+    ssize_t r = write(2, b, (size_t)n);
+    uint32_t count = GOJO_RELAXED(&s_g_count);
+    for (uint32_t i = 0; i < count; i++) {
+        gojo_g *g = g_slot(i);
+        if (!g->mapping || addr < g->mapping || addr >= g->mapping + g->mapping_size) continue;
+        n = snprintf(b, sizeof b, "    in the %s of goroutine %u%s: alive %d, blocked %d, hibernated %d, pinned %d, sp %p, stack %p..%p\n", addr < g->stack ? "guard page" : "stack", i, g == cur ? " (the one running)" : "", (int)GOJO_RELAXED(&g->alive), (int)GOJO_RELAXED(&g->blocked), (int)GOJO_RELAXED(&g->hib), (int)GOJO_RELAXED(&g->pinned), g->sp, (void *)g->stack, (void *)(g->stack + g->stack_size));
+        r = write(2, b, (size_t)n);
+    }
+    if (cur) {
+        n = snprintf(b, sizeof b, "    running goroutine %u, stack %p..%p\n", (unsigned)cur->idx, (void *)cur->stack, (void *)(cur->stack + cur->stack_size));
+        r = write(2, b, (size_t)n);
+    }
+#if defined(__GLIBC__) || defined(__APPLE__)
+    void *frames[48];
+    int nf = backtrace(frames, 48);
+    backtrace_symbols_fd(frames, nf, 2);
+#endif
+    (void)r;
+}
+
 static void on_fault(int sig, siginfo_t *si, void *uc) {
     gojo_worker *w = t_worker;
     uint8_t *addr = si->si_addr;
@@ -1617,6 +1648,7 @@ static void on_fault(int sig, siginfo_t *si, void *uc) {
             _exit(2);
         }
     }
+    fault_report(sig, addr, w ? w->cur : NULL);
     signal(sig, SIG_DFL);
     raise(sig);
 }
