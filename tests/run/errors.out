@@ -9,3 +9,7 @@ ok(2) err("3 is odd") err("5 is odd")
 3
 some(5) none
 7 true true
+entry 0
+skipped Syntax(1, "bad entry")
+entry 2
+<none>
