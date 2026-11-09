@@ -1,0 +1,99 @@
+// Read-mostly in-memory JSON catalog over std/http (HTTP/1.1).
+// Same routes and payloads as ../rust/src/bin/httpserver.rs.
+use std/{http, io, json, net, os, time}
+
+struct Item {
+    id: int
+    sku: String
+    region: String
+    cents: int
+    tag: String
+}
+
+struct Query {
+    region: String
+    min_cents: int
+    tag: String
+}
+
+struct QueryOut {
+    n: int
+    ids: Vec[int]
+}
+
+copy struct Health {
+    ok: bool
+}
+
+copy struct StatsOut {
+    n: int
+    cents: int
+}
+
+struct Api {
+    items: Vec[Item]
+    n: int
+    cents: int
+
+    fn serve(self, req: http.Request) -> http.Response {
+        // Bind the optional; `if let _ = route(...)` matches none as well as some.
+        if let p = req.route("GET", "/health") {
+            _ = p
+            return http.json(200, json.encode(Health{ok: true}))
+        }
+        if let p = req.route("GET", "/stats") {
+            _ = p
+            return http.json(200, json.encode(StatsOut{n: self.n, cents: self.cents}))
+        }
+        if let p = req.route("GET", "/products/:id") {
+            let id = p.int("id") ?? return http.json(400, `{"error":"id"}`)
+            if id < 1 || id > self.items.len() {
+                return http.json(404, `{"error":"not found"}`)
+            }
+            return http.json(200, json.encode(self.items[id - 1]))
+        }
+        if let p = req.route("POST", "/query") {
+            _ = p
+            let q = json.decode[Query](req.text()) catch _e {
+                return http.json(400, `{"error":"json"}`)
+            }
+            var n = 0
+            var ids = Vec[int]{}
+            for it in self.items {
+                if it.region == q.region && it.cents >= q.min_cents && it.tag == q.tag {
+                    n += 1
+                    if ids.len() < 50 {
+                        ids.push(it.id)
+                    }
+                }
+            }
+            return http.json(200, json.encode(QueryOut{n: n, ids: ids}))
+        }
+        return http.json(404, `{"error":"no such resource"}`)
+    }
+}
+
+fn main() ! io.Error {
+    let args = os.args()
+    if args.len() < 2 {
+        eprintln("usage: httpserver products.json [host:port]")
+        os.exit(2)
+    }
+    let text = try os.readText(args[1])
+    let items = json.decode[Vec[Item]](text) catch e {
+        eprintln("products json:", e.message())
+        os.exit(1)
+    }
+    var cents = 0
+    for it in items {
+        cents += it.cents
+    }
+    let n = items.len()
+    let api = Api{items: items, n: n, cents: cents}
+    let bind = if args.len() > 2 { args[2].asStr() } else { "127.0.0.1:0" }
+    let ln = try net.listen(bind)
+    println("listening 127.0.0.1:${ln.port()}")
+    os.stdout().flush()
+    http.serve(ln, api, http.Options{deadline: 10 * time.second, maxBody: 1_000_000, keepAlive: true})
+    return
+}

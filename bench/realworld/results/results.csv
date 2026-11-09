@@ -1,0 +1,13 @@
+kind,lang,name,concurrency,median_s,mad_s,rps,p50_ms,p95_ms,p99_ms,ok,err,rss_bytes
+batch,gojo,jsonpipe,,0.142972,0.000628,,,,,,,3657728
+batch,rust,jsonpipe,,0.092513,0.001012,,,,,,,3616768
+batch,gojo,logscan,,0.275385,0.001077,,,,,,,3620864
+batch,rust,logscan,,0.097844,0.000555,,,,,,,3661824
+http,gojo,httpserver,1,,,21243.107,0.0388,0.0817,0.0922,106236,0,7032832
+http,gojo,httpserver,4,,,49109.643,0.0656,0.1645,0.4520,245564,0,8376320
+http,gojo,httpserver,8,,,51162.224,0.1323,0.3117,0.6295,255863,0,8818688
+http,gojo,httpserver,16,,,77349.001,0.1704,0.4440,0.8786,386822,0,10338304
+http,rust,httpserver,1,,,30591.591,0.0248,0.0605,0.0694,152985,0,6762496
+http,rust,httpserver,4,,,70987.781,0.0482,0.1124,0.1460,355010,0,6926336
+http,rust,httpserver,8,,,88648.484,0.0795,0.1768,0.2462,443317,0,7065600
+http,rust,httpserver,16,,,108527.645,0.1306,0.2780,0.3972,542756,0,7516160

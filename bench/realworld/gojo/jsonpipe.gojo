@@ -1,0 +1,94 @@
+// NDJSON parse → filter → aggregate → serialize.
+// Same algorithm as ../rust/src/bin/jsonpipe.rs. Std: json, bufio, os.
+use std/{bufio, json, os}
+
+struct Event {
+    id: int
+    user: String
+    region: String
+    sku: String
+    qty: int
+    cents: int
+    ok: bool
+    tags: Vec[String]
+}
+
+copy struct Agg {
+    n: int = 0
+    cents: int = 0
+}
+
+struct RegionRow {
+    k: String
+    n: int
+    cents: int
+}
+
+struct Summary {
+    matched: int
+    cents: int
+    regions: Vec[RegionRow]
+}
+
+fn hasVip(tags: []String) -> bool {
+    for t in tags {
+        if t == "vip" {
+            return true
+        }
+    }
+    return false
+}
+
+fn main() {
+    let args = os.args()
+    if args.len() < 2 {
+        eprintln("usage: jsonpipe FILE.ndjson")
+        os.exit(2)
+    }
+    let f = os.open(args[1]) catch e {
+        eprintln(e.message())
+        os.exit(1)
+    }
+    var input = bufio.reader(f)
+    var matched = 0
+    var totalCents = 0
+    var regions = Map[String, Agg]{}
+    loop {
+        let line = input.readLine() catch e {
+            eprintln(e.message())
+            os.exit(1)
+        }
+        let row = line ?? break
+        if row.len() == 0 {
+            continue
+        }
+        let ev = json.decode[Event](row) catch e {
+            eprintln("json:", e.message())
+            os.exit(1)
+        }
+        if !ev.ok || ev.cents < 500 || !hasVip(ev.tags) {
+            continue
+        }
+        matched += 1
+        totalCents += ev.cents
+        var a = Agg{}
+        if let prev = regions.get(ev.region) {
+            a = prev
+        }
+        a.n += 1
+        a.cents += ev.cents
+        regions[ev.region.clone()] = a
+    }
+    var keys = Vec[String]{}
+    for k, _ in regions {
+        keys.push(k.clone())
+    }
+    keys.sort()
+    var rows = Vec[RegionRow]{}
+    for k in keys {
+        let a = regions.get(k).unwrap()
+        rows.push(RegionRow{k: k.clone(), n: a.n, cents: a.cents})
+    }
+    let out = Summary{matched: matched, cents: totalCents, regions: rows}
+    println(json.encode(out))
+}

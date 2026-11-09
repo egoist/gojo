@@ -1,0 +1,33 @@
+[package]
+name = "gojo-realworld-bench"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Idiomatic Rust counterparts of the Gojo real-application benchmarks (serde_json, axum/hyper)."
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+axum = { version = "0.8", default-features = true }
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["client", "client-legacy", "http1", "tokio"] }
+http-body-util = "0.1"
+bytes = "1"
+http = "1"
+
+[[bin]]
+name = "jsonpipe"
+path = "src/bin/jsonpipe.rs"
+
+[[bin]]
+name = "logscan"
+path = "src/bin/logscan.rs"
+
+[[bin]]
+name = "httpserver"
+path = "src/bin/httpserver.rs"
+
+[[bin]]
+name = "loadgen"
+path = "src/bin/loadgen.rs"

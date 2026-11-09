@@ -1,0 +1,61 @@
+// Stream a UTF-8 log: fixed substring search + field parse/aggregate.
+// Same algorithm as ../rust/src/bin/logscan.rs.
+// Semantics: str.contains is a UTF-8 byte-substring test (needle is valid UTF-8).
+use std/{bufio, json, os}
+
+const needle = "GET /api/orders/"
+const han = "订单"
+
+copy struct Report {
+    lines: int = 0
+    needle: int = 0
+    errors: int = 0
+    han: int = 0
+    s2: int = 0
+    s4: int = 0
+    s5: int = 0
+}
+
+fn main() {
+    let args = os.args()
+    if args.len() < 2 {
+        eprintln("usage: logscan FILE.log")
+        os.exit(2)
+    }
+    let f = os.open(args[1]) catch e {
+        eprintln(e.message())
+        os.exit(1)
+    }
+    var input = bufio.reader(f)
+    var r = Report{}
+    loop {
+        let line = input.readLine() catch e {
+            eprintln(e.message())
+            os.exit(1)
+        }
+        let row = line ?? break
+        r.lines += 1
+        if row.contains(needle) {
+            r.needle += 1
+        }
+        if row.contains(han) {
+            r.han += 1
+        }
+        let parts = row.splitN(" ", 8)
+        if parts.len() < 7 {
+            continue
+        }
+        if parts[1] == "ERROR" {
+            r.errors += 1
+        }
+        let status = parts[5].parseInt() ?? continue
+        if status >= 200 && status < 300 {
+            r.s2 += 1
+        } else if status >= 400 && status < 500 {
+            r.s4 += 1
+        } else if status >= 500 && status < 600 {
+            r.s5 += 1
+        }
+    }
+    println(json.encode(r))
+}
