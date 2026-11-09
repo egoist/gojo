@@ -95,9 +95,93 @@ struct LoopCx {
     conts: Vec<St>,
 }
 
+/// Which types are linear, answered in one walk over the type: for each type
+/// declaration, whether it is linear whatever its arguments (it is declared
+/// `linear`, or holds such a type), and which of its type parameters make it
+/// linear when their argument is. (`Program::is_linear` substitutes the
+/// fields of every type it meets, which costs the square of a deeply nested
+/// type's depth; this pass asks it of every expression.)
+pub struct LinTable {
+    always: Vec<bool>,
+    via: Vec<Vec<bool>>,
+}
+
+impl LinTable {
+    pub fn new(prog: &Program) -> LinTable {
+        let mut t = LinTable { always: prog.types.iter().map(|d| d.linear).collect(), via: prog.types.iter().map(|d| vec![false; d.tparams.len()]).collect() };
+        // the least fixpoint over every declaration's fields
+        loop {
+            let mut changed = false;
+            for (d, def) in prog.types.iter().enumerate() {
+                let tys: Vec<&Ty> = match &def.kind {
+                    TypeDefKind::Struct { fields } => fields.iter().map(|f| &f.ty).collect(),
+                    TypeDefKind::Enum { variants } => variants.iter().flat_map(|v| v.fields.iter().map(|f| &f.1)).collect(),
+                    TypeDefKind::Iface { .. } => vec![],
+                };
+                for ty in tys {
+                    let mut ps = vec![];
+                    let a = t.walk(prog, ty, Some(&def.tparams), &mut ps);
+                    if a && !t.always[d] {
+                        t.always[d] = true;
+                        changed = true;
+                    }
+                    for i in ps {
+                        if !t.via[d][i] {
+                            t.via[d][i] = true;
+                            changed = true;
+                        }
+                    }
+                }
+            }
+            if !changed {
+                return t;
+            }
+        }
+    }
+
+    pub fn is_linear(&self, prog: &Program, t: &Ty) -> bool {
+        self.walk(prog, t, None, &mut vec![])
+    }
+
+    /// Whether `t` is linear (as `Program::is_linear` says). In a declaration
+    /// with type parameters `own`, those are unknown: the indexes of the ones
+    /// that would make it linear go to `via`.
+    fn walk(&self, prog: &Program, t: &Ty, own: Option<&Vec<TParamId>>, via: &mut Vec<usize>) -> bool {
+        match t {
+            Ty::Param(p) => match own.and_then(|o| o.iter().position(|q| q == p)) {
+                Some(i) => {
+                    via.push(i);
+                    false
+                }
+                None => prog.tparam_any(*p),
+            },
+            Ty::Vec(a) | Ty::Array(a, _) | Ty::ArrayT(a, _) | Ty::Option(a) | Ty::Box(a) | Ty::Rc(a) | Ty::Arc(a) | Ty::Cell(a) | Ty::Mutex(a) | Ty::Sender(a) | Ty::Receiver(a) | Ty::Task(a) | Ty::Iso(a) => self.walk(prog, a, own, via),
+            Ty::Map(a, b) | Ty::Result(a, b) => {
+                let x = self.walk(prog, a, own, via);
+                self.walk(prog, b, own, via) || x
+            }
+            Ty::Adt(d, args) if (*d as usize) < self.always.len() => {
+                let d = *d as usize;
+                if self.always[d] {
+                    return true;
+                }
+                let mut r = false;
+                for (i, a) in args.iter().enumerate() {
+                    if self.via[d].get(i).copied().unwrap_or(false) {
+                        r |= self.walk(prog, a, own, via);
+                    }
+                }
+                r
+            }
+            _ => false,
+        }
+    }
+}
+
 pub fn check(prog: &Program, tfuncs: &[TFunc]) -> Vec<Diag> {
     let mut diags = vec![];
     let mut seen = HashSet::new();
+    let table = LinTable::new(prog);
     for (i, g) in prog.globals.iter().enumerate() {
         let _ = i;
         if prog.is_linear(&g.ty) {
@@ -105,7 +189,7 @@ pub fn check(prog: &Program, tfuncs: &[TFunc]) -> Vec<Diag> {
         }
     }
     for tf in tfuncs {
-        let mut l = Lin { prog, tf, diags: vec![], seen: &mut seen, scopes: vec![], loops: vec![], suppress: 0, exempt: None, cap_ref: HashSet::new(), lin_cache: HashMap::new(), memo: HashMap::new(), loop_nest: 0, yields: gen_yields(tf) };
+        let mut l = Lin { prog, tf, diags: vec![], seen: &mut seen, scopes: vec![], loops: vec![], suppress: 0, exempt: None, cap_ref: HashSet::new(), lin_cache: HashMap::new(), table: &table, wf_done: HashSet::new(), memo: HashMap::new(), loop_nest: 0, yields: gen_yields(tf) };
         l.wf_func();
         l.func();
         diags.extend(l.diags);
@@ -255,6 +339,10 @@ struct Lin<'a, 's> {
     /// in place). Assigning one drops what it held.
     cap_ref: HashSet<LocalId>,
     lin_cache: HashMap<usize, bool>,
+    /// Which types are linear (asked of every expression's type).
+    table: &'s LinTable,
+    /// Types `wf_ty` has looked at.
+    wf_done: HashSet<Ty>,
     /// Loops already run (while nothing is reported) by entry state.
     memo: HashMap<(u32, Vec<(Path, bool)>), (St, Vec<(usize, bool, St)>)>,
     /// Loops being run around the current point.
@@ -274,7 +362,7 @@ impl<'a, 's> Lin<'a, 's> {
     }
 
     fn lin(&self, t: &Ty) -> bool {
-        self.prog.is_linear(t)
+        self.table.is_linear(self.prog, t)
     }
 
     fn show(&self, t: &Ty) -> String {
@@ -564,11 +652,20 @@ impl<'a, 's> Lin<'a, 's> {
     }
 
     fn wf_ty(&mut self, t: &Ty, sp: Span) {
+        // each type once per function (it is asked of every expression's)
+        if !self.wf_done.insert(t.clone()) {
+            return;
+        }
+        // nothing linear in it: nothing to hold one wrongly
+        if !self.mentions_lin_ty(t) {
+            return;
+        }
         let mut todo = vec![t.clone()];
-        let mut seen = HashSet::new();
+        let mut budget = 4096;
         while let Some(t) = todo.pop() {
-            if !seen.insert(t.clone()) || seen.len() > 256 {
-                continue;
+            budget -= 1;
+            if budget == 0 {
+                break;
             }
             match &t {
                 Ty::Rc(a) | Ty::Arc(a) | Ty::Weak(a) | Ty::Cell(a) | Ty::Mutex(a) | Ty::Sender(a) | Ty::Receiver(a) | Ty::Task(a) | Ty::Iso(a) | Ty::Box(a) | Ty::Array(a, _) | Ty::ArrayT(a, _) => {
@@ -605,6 +702,20 @@ impl<'a, 's> Lin<'a, 's> {
                 }
                 _ => {}
             }
+        }
+    }
+
+    /// Whether a linear type appears anywhere in `t`, in any position
+    /// `wf_ty` looks at.
+    fn mentions_lin_ty(&self, t: &Ty) -> bool {
+        if self.lin(t) {
+            return true;
+        }
+        match t {
+            Ty::Rc(a) | Ty::Arc(a) | Ty::Weak(a) | Ty::Cell(a) | Ty::Mutex(a) | Ty::Sender(a) | Ty::Receiver(a) | Ty::Task(a) | Ty::Iso(a) | Ty::Box(a) | Ty::Array(a, _) | Ty::ArrayT(a, _) | Ty::Vec(a) | Ty::Option(a) | Ty::Slice(a) | Ty::Ptr(a) | Ty::MutexRef(a) => self.mentions_lin_ty(a),
+            Ty::Map(a, b) | Ty::Result(a, b) => self.mentions_lin_ty(a) || self.mentions_lin_ty(b),
+            Ty::Adt(_, args) | Ty::Iface(_, args) => args.iter().any(|a| self.mentions_lin_ty(a)),
+            _ => false,
         }
     }
 
@@ -1124,8 +1235,8 @@ impl<'a, 's> Lin<'a, 's> {
                 return;
             }
             match n {
-                Node::Expr(e) => r = self.prog.is_linear(&e.ty),
-                Node::Stmt(TStmt::Let { local, .. } | TStmt::LetRef { local, .. }) => r = self.prog.is_linear(&self.tf.locals[*local as usize].ty),
+                Node::Expr(e) => r = self.lin(&e.ty),
+                Node::Stmt(TStmt::Let { local, .. } | TStmt::LetRef { local, .. }) => r = self.lin(&self.tf.locals[*local as usize].ty),
                 _ => {}
             }
         });
