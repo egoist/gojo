@@ -1,0 +1,9 @@
+fn into(p: String, out: inout Vec[str]) { out.push(p.asStr()) }
+fn main() {
+    var p = "hello".toString()
+    var ws: Vec[str] = []
+    into(p, &ws)
+    p.push("defghijklmnopqrstuvwxyz0123456789")
+    println(ws)
+}
+// error: cannot modify `p` while it is borrowed by `ws`

@@ -1,0 +1,8 @@
+fn mk() -> Map[String, int] { var m: Map[String, int] = [:]; m["hello world".toString()] = 1; return m }
+fn main() {
+    var best = ""
+    for k in mk() { best = k }
+    let junk = "XXXXXXXXXXXXXXXXXXXXXXX".toString()
+    println(best, junk)
+}
+// error: `k` does not live long enough: `best` would still view it after it is dropped

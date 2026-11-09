@@ -1,0 +1,11 @@
+fn into(p: String, out: inout Vec[str]) { out.push(p.asStr()) }
+fn main() {
+    var ws: Vec[str] = []
+    {
+        let p = "hello".toString()
+        into(p, &ws)
+    }
+    let junk = "XXXXXXXXXXXXXXXXXXXXXXX".toString()
+    println(ws, junk)
+}
+// error: `p` does not live long enough: `ws` would still view it after it is dropped

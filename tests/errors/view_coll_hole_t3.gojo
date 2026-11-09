@@ -1,0 +1,6 @@
+fn main() {
+    let w = "hello world".toString().splitViews(" ")[0]
+    let junk = "XXXXXXXXXXXXXXXXXXXXXXX".toString()
+    println(w, junk)
+}
+// error: this temporary value is dropped at the end of the statement, but a view of it is kept

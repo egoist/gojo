@@ -1705,6 +1705,20 @@ extend []String {
     }
 }
 
+extend []str {
+    // The strings with `sep` between them: `["a", "b"].join(", ")` is `"a, b"`.
+    pub fn join(self, sep: str) -> String {
+        var out: String = ""
+        for i, s in self {
+            if i > 0 {
+                out += sep
+            }
+            out += s
+        }
+        return out
+    }
+}
+
 extend Vec[T] {
     // Appends `x`.
     pub fn push(inout self, x: sink T) where T: any

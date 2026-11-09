@@ -1,0 +1,10 @@
+fn head(ws: Vec[str]) -> []str { return ws[0..2] }
+fn main() {
+    let s = "aa bb cc".toString()
+    var ws = s.splitViews(" ")
+    let p = head(ws)
+    ws.clear()
+    ws.extend(["x", "y", "z", "w", "v"])
+    println(p)
+}
+// error: cannot modify `ws` while it is borrowed by `p`

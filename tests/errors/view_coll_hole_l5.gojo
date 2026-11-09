@@ -1,0 +1,12 @@
+fn main() {
+    let mu = Mutex("hello world".toString())
+    var ws: Vec[str] = [""]
+    with g = mu.lock() {
+        ws[0] = g.asStr()
+    }
+    with g = mu.lock() {
+        g.push("defghijklmnopqrstuvwxyz0123456789")
+    }
+    println(ws)
+}
+// error: a view into data locked by `mu` cannot leave the `with` block

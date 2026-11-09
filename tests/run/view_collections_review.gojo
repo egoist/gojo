@@ -1,0 +1,43 @@
+// View-collection programs that must be accepted (from an adversarial review).
+
+// fp1
+fn main_fp1() {
+    let s = "a bb ccc".toString()
+    var out: Vec[str] = []
+    let parts = s.splitViews(" ")
+    for p in parts { out.push(p) }
+    println(out)
+}
+
+// fp2
+fn main_fp2() {
+    let s = "aa bb".toString()
+    var ws = s.splitViews(" ")
+    for w in &ws { w = w[1..] }
+    println(ws)
+}
+
+// fp4
+fn main_fp4() {
+    let s = "aa bb".toString()
+    var ws = s.splitViews(" ")
+    let w = ws.first() ?? ""
+    ws.clear()
+    println(w, ws)
+}
+
+// w1
+fn main_w1() {
+    let s = "aa bb cc".toString()
+    var ws = s.split(" ")
+    let d = ws.clone()
+    ws.push("x".toString())
+    println(d, ws)
+}
+
+fn main() {
+    main_fp1()
+    main_fp2()
+    main_fp4()
+    main_w1()
+}

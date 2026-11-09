@@ -1,0 +1,9 @@
+fn main() {
+    var s = "hello".toString()
+    var ws: Vec[str] = []
+    let mu = Mutex(&ws)
+    with g = mu.lock() { g.push(s.asStr()) }
+    s.push("defghijklmnopqrstuvwxyz0123456789")
+    println(ws)
+}
+// error: cannot modify `s` while it is borrowed by `ws`

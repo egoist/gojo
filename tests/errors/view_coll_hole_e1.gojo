@@ -1,0 +1,8 @@
+fn main() {
+    var m: Map[str, int] = [:]
+    var s = "hello world".toString()
+    with e = m.entry(s.asStr()) { e += 1 }
+    s.push("defghijklmnopqrstuvwxyz0123456789")
+    println(m)
+}
+// error: `s` does not live long enough: `m` would still view it after it is dropped

@@ -1,0 +1,8 @@
+fn main() {
+    var src = "abc".toString()
+    var ws: Vec[str] = ["a"]
+    ws[0] = src.asStr()
+    src.push("defghijklmnopqrstuvwxyz0123456789")
+    println(ws)
+}
+// error: cannot modify `src` while it is borrowed by `ws`

@@ -1,0 +1,8 @@
+fn main() {
+    let src = "aa bb".toString()
+    var ws = src.splitViews(" ")
+    let sl = ws[0..2]
+    drop(ws)
+    println(sl)
+}
+// error: cannot move `ws` while it is borrowed

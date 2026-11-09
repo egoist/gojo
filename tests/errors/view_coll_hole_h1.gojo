@@ -1,0 +1,10 @@
+fn main() {
+    let s = "aa bb cc".toString()
+    var ws = s.splitViews(" ")
+    let ps: Vec[[]str] = [ws[0..2]]
+    let p = ps[0]
+    ws.clear()
+    ws.extend(["x", "y", "z", "w", "v"])
+    println(p)
+}
+// error: cannot modify `ws` while it is borrowed by `p`

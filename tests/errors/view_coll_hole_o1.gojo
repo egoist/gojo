@@ -1,0 +1,8 @@
+fn main() {
+    var s = "hello".toString()
+    var o: ?Vec[str] = Vec[str]{}
+    if let v = o { v.push(s.asStr()) }
+    s.push("defghijklmnopqrstuvwxyz0123456789")
+    println(o)
+}
+// error: cannot modify `s` while it is borrowed by `o`

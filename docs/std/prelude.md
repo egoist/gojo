@@ -10,7 +10,7 @@ Functions without a body are implemented by the compiler or runtime.
 
 **Functions:** [`panic`](#panic), [`assert`](#assert), [`assertEq`](#asserteq), [`unreachable`](#unreachable), [`drop`](#drop), [`swap`](#swap), [`replace`](#replace), [`take`](#take), [`min`](#min), [`max`](#max), [`setOf`](#setof)
 
-**Methods on other types:** [`extend ?T`](#extend-t), [`extend T ! E`](#extend-t--e), [`extend T: Integer`](#extend-t-integer), [`extend T: Float`](#extend-t-float), [`extend f64`](#extend-f64), [`extend f32`](#extend-f32), [`extend rune`](#extend-rune), [`extend str`](#extend-str), [`extend String`](#extend-string), [`extend []T`](#extend-t-1), [`extend []Vec[T]`](#extend-vect), [`extend []String`](#extend-string-1), [`extend Vec[T]`](#extend-vect-1), [`extend Map[K, V]`](#extend-mapk-v), [`extend Rc[T]`](#extend-rct), [`extend Weak[T]`](#extend-weakt), [`extend Arc[T]`](#extend-arct), [`extend Cell[T]`](#extend-cellt), [`extend Mutex[T]`](#extend-mutext), [`extend Sender[T]`](#extend-sendert), [`extend Receiver[T]`](#extend-receivert), [`extend Task[T]`](#extend-taskt), [`extend Iso[T]`](#extend-isot), [`extend Scope`](#extend-scope), [`extend MutexRef[T]`](#extend-mutexreft)
+**Methods on other types:** [`extend ?T`](#extend-t), [`extend T ! E`](#extend-t--e), [`extend T: Integer`](#extend-t-integer), [`extend T: Float`](#extend-t-float), [`extend f64`](#extend-f64), [`extend f32`](#extend-f32), [`extend rune`](#extend-rune), [`extend str`](#extend-str), [`extend String`](#extend-string), [`extend []T`](#extend-t-1), [`extend []Vec[T]`](#extend-vect), [`extend []String`](#extend-string-1), [`extend []str`](#extend-str-1), [`extend Vec[T]`](#extend-vect-1), [`extend Map[K, V]`](#extend-mapk-v), [`extend Rc[T]`](#extend-rct), [`extend Weak[T]`](#extend-weakt), [`extend Arc[T]`](#extend-arct), [`extend Cell[T]`](#extend-cellt), [`extend Mutex[T]`](#extend-mutext), [`extend Sender[T]`](#extend-sendert), [`extend Receiver[T]`](#extend-receivert), [`extend Task[T]`](#extend-taskt), [`extend Iso[T]`](#extend-isot), [`extend Scope`](#extend-scope), [`extend MutexRef[T]`](#extend-mutexreft)
 
 ## Types
 
@@ -2241,6 +2241,16 @@ Copies of the elements of every `Vec`, one after the other.
 ### extend []String
 
 #### []String.join
+
+```gojo
+pub fn join(self, sep: str) -> String
+```
+
+The strings with `sep` between them: `["a", "b"].join(", ")` is `"a, b"`.
+
+### extend []str
+
+#### []str.join
 
 ```gojo
 pub fn join(self, sep: str) -> String

@@ -1,0 +1,11 @@
+fn keep(ws: Vec[str], out: inout Vec[[]str]) { out.push(ws[0..2]) }
+fn main() {
+    let s = "aa bb cc".toString()
+    var ws = s.splitViews(" ")
+    var out: Vec[[]str] = []
+    keep(ws, &out)
+    ws.clear()
+    ws.extend(["x", "y", "z", "w", "v"])
+    println(out)
+}
+// error: cannot modify `ws` while it is borrowed by `out`

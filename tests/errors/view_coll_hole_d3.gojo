@@ -1,0 +1,8 @@
+fn main() {
+    var ws: Vec[str] = [""]
+    let s = "hello world".toString()
+    ws[0] = s.asStr()
+    let junk = "XXXXXXXXXXXXXXXXXXXXXXX".toString()
+    println(ws, junk)
+}
+// error: `s` does not live long enough: `ws` would still view it after it is dropped
