@@ -358,6 +358,10 @@ pub struct TypeDef {
     /// `view struct` / `view enum`: may hold views and is one itself, so it
     /// lives only in variables, like `str` (spec 5.4). Always copy.
     pub view: bool,
+    /// `linear struct` / `linear enum`: never dropped implicitly. Every value
+    /// must be consumed: moved into a `sink` parameter (its own `sink self`
+    /// methods above all), returned, or stored in something that is (spec 5.7).
+    pub linear: bool,
 }
 
 impl TypeDef {
@@ -636,6 +640,56 @@ impl Program {
             }
         }
         false
+    }
+
+    /// Whether a value of this type must be consumed instead of dropped
+    /// (spec 5.7): a `linear` type, a type parameter declared `any` (it may
+    /// stand for one), or anything that owns one. References and views
+    /// (`[]T`, raw pointers, `Weak`) don't own what they point to.
+    pub fn is_linear(&self, t: &Ty) -> bool {
+        const LIMIT: usize = 512;
+        let mut seen: HashSet<Ty> = HashSet::new();
+        let mut todo = vec![t.clone()];
+        while let Some(t) = todo.pop() {
+            if !seen.insert(t.clone()) || seen.len() > LIMIT {
+                continue;
+            }
+            match &t {
+                Ty::Param(p) => {
+                    if self.tparam(*p).bounds.iter().any(|b| matches!(b, Bound::Cap(Cap::Any))) {
+                        return true;
+                    }
+                }
+                Ty::Vec(a) | Ty::Array(a, _) | Ty::ArrayT(a, _) | Ty::Option(a) | Ty::Box(a) | Ty::Rc(a) | Ty::Arc(a) | Ty::Cell(a) | Ty::Mutex(a) | Ty::Sender(a) | Ty::Receiver(a) | Ty::Task(a) | Ty::Iso(a) => todo.push((**a).clone()),
+                Ty::Map(a, b) | Ty::Result(a, b) => {
+                    todo.push((**a).clone());
+                    todo.push((**b).clone());
+                }
+                Ty::Adt(d, args) => {
+                    let def = self.def(*d);
+                    if def.linear {
+                        return true;
+                    }
+                    match &def.kind {
+                        TypeDefKind::Struct { .. } => todo.extend(self.field_tys(*d, args).into_iter().map(|f| f.1)),
+                        TypeDefKind::Enum { variants } => {
+                            for v in 0..variants.len() {
+                                todo.extend(self.variant_tys(*d, args, v).into_iter().map(|f| f.1));
+                            }
+                        }
+                        TypeDefKind::Iface { .. } => {}
+                    }
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+
+    /// Whether type parameter `p` may stand for a linear type: declared
+    /// `[T: any]` (or `where T: any`).
+    pub fn tparam_any(&self, p: TParamId) -> bool {
+        self.tparam(p).bounds.iter().any(|b| matches!(b, Bound::Cap(Cap::Any)))
     }
 
     /// Dropping a value of this type only frees memory, which no program can

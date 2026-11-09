@@ -199,6 +199,7 @@ with e = counts.entry(word) {   // with binds a projection to a block
 - A value whose release only frees memory (`String`, `Vec[int]`, structs of those: no `drop` method, nothing shared) is freed right after its last use, and, when some branches moved it, at the end of the others. No program can tell the difference, and memory doesn't sit unused until a scope ends. This is Mojo's "as soon as possible" destruction taken only as far as it stays invisible: values whose drop does something (closing a file or a channel, cancelling a task) keep scope-end drops. See [drops.md](drops.md).
 - `defer` runs at the end of the current block. Since resources are released automatically, code like `defer f.Close()` is mostly unnecessary; defer is mainly for restoring state and logging. Deferred code cannot change where the function goes: it cannot contain `return` or `try`, and it cannot jump out of an enclosing loop.
 - To release early, call `drop(x)`, which is just an ordinary function that takes a `sink` parameter.
+- A **linear** type (`linear struct Tx`) is never dropped implicitly: each value must be consumed, by a `sink` parameter (its own `sink self` methods: `commit`, `rollback`), a `return`, or something that is consumed in turn. Leaving one in a variable where its block ends, at a `return`, `break` or `try` that leaves it, or as a temporary nobody takes, is a compile error that names the methods to call. A `defer` that consumes a linear variable runs only while it still holds its value, so `defer tx.rollback()` covers every early exit and does nothing after `tx.commit()`. Panics abort, so no path is unwound, and the check is per function over the drop states the compiler already tracks. Containers that would drop such values (`Rc`, `Map`, `Box`, interface values) can't hold them, and a type parameter takes them only when declared `any`. This answers what scope-end drops can't: a cleanup that can fail (`try f.close()`), or a protocol step that must not be skipped. See spec 5.7.
 
 ### 4.5 Shared ownership and cyclic structures
 
@@ -363,7 +364,7 @@ let names = users
 
 | Constraint | Meaning | How it is satisfied |
 | --- | --- | --- |
-| `any` | Any type; can only be moved and borrowed | All types |
+| `any` | Any type, linear ones included; can only be moved and borrowed | All types; a type parameter without it takes only types that can be dropped |
 | `copy` | Copied bitwise; assignment does not move | Scalars; types declared as `copy struct` |
 | `clone` | Can be explicitly `.clone()`d | A `clone()` method, or all fields clonable (derived); `copy` types satisfy it automatically |
 | `default` | Has a default value; `var x: T` is allowed | All fields have default values |

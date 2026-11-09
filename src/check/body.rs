@@ -795,7 +795,9 @@ impl Checker {
                 let b = self.place_info(cx, base)?;
                 let bty = &base.ty;
                 let (fname, has_drop) = match bty {
-                    Ty::Adt(d, _) => (self.prog.def(*d).fields().get(*index).map(|f| f.name.clone()).unwrap_or_default(), self.prog.def(*d).has_drop),
+                    // a linear value's fields move out only in its own package
+                    // (where its `sink self` methods take it apart)
+                    Ty::Adt(d, _) => (self.prog.def(*d).fields().get(*index).map(|f| f.name.clone()).unwrap_or_default(), self.prog.def(*d).has_drop || (self.prog.def(*d).linear && self.prog.def(*d).pkg != cx.env.pkg)),
                     _ => (String::new(), false),
                 };
                 Some(PInfo { root: b.root, owned: b.owned && !has_drop, mutable: b.mutable, desc: format!("field `{}` of {}", fname, b.desc) })
@@ -921,9 +923,16 @@ impl Checker {
             }
         }
         let s = self.prog.show(&ty);
-        self.diags.push(
-            Diag::new(e.span, format!("cannot move out of {} (type `{}`)", info.desc, s)).note(None, if self.is_clone(&ty) { "use `.clone()` to make an explicit copy" } else { "the value is only borrowed here" }),
-        );
+        let mut d = Diag::new(e.span, format!("cannot move out of {} (type `{}`)", info.desc, s)).note(None, if self.is_clone(&ty) { "use `.clone()` to make an explicit copy" } else { "the value is only borrowed here" });
+        if let TK::Field { base, .. } = &e.kind {
+            if let Ty::Adt(dd, _) = &base.ty {
+                let def = self.prog.def(*dd);
+                if def.linear && def.pkg != cx.env.pkg {
+                    d = d.note(None, format!("`{}` is linear: only its own package takes it apart; consume it with one of its `sink self` methods", def.name));
+                }
+            }
+        }
+        self.diags.push(d);
         TExpr::error(e.span)
     }
 

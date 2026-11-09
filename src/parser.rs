@@ -476,6 +476,15 @@ impl Parser {
             self.bump();
             is_view = true;
         }
+        // `linear struct Tx { ... }`: a value that must be consumed
+        let mut is_linear = false;
+        if matches!(self.peek(), Tok::Ident(s) if s == "linear") && matches!(self.peek_at(1), Tok::Kw(Kw::Struct | Kw::Enum)) {
+            if is_copy || is_view {
+                return self.err(format!("a `linear` type is never copied: it can't be `{}` too", if is_copy { "copy" } else { "view" }));
+            }
+            self.bump();
+            is_linear = true;
+        }
         // `send interface Handler { ... }`
         let mut send_iface = false;
         if matches!(self.peek(), Tok::Ident(s) if s == "send") && matches!(self.peek_at(1), Tok::Kw(Kw::Interface)) {
@@ -494,7 +503,7 @@ impl Parser {
                 let tparams = self.tparams_opt()?;
                 let owner = Self::owner_type(&name, &tparams, nsp);
                 let fields = self.struct_fields(&owner, &mut methods)?;
-                ItemKind::Struct(StructDecl { name, tparams, fields, is_copy, unsafe_send, is_view })
+                ItemKind::Struct(StructDecl { name, tparams, fields, is_copy, unsafe_send, is_view, is_linear })
             }
             Tok::Kw(Kw::Enum) => {
                 self.bump();
@@ -502,7 +511,7 @@ impl Parser {
                 let tparams = self.tparams_opt()?;
                 let owner = Self::owner_type(&name, &tparams, nsp);
                 let variants = self.enum_variants(&owner, &mut methods)?;
-                ItemKind::Enum(EnumDecl { name, tparams, variants, is_copy, is_view })
+                ItemKind::Enum(EnumDecl { name, tparams, variants, is_copy, is_view, is_linear })
             }
             Tok::Kw(Kw::Interface) => {
                 self.bump();

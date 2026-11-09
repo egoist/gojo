@@ -1370,7 +1370,19 @@ impl<'a> Bc<'a> {
         for level in levels.iter().rev() {
             for (b, err_only) in level.iter().rev() {
                 if !*err_only || with_err {
-                    self.block(st, b);
+                    // a defer that consumes a linear variable runs only while
+                    // the variable still holds its value (spec 5.7): check it
+                    // as if it did, on the paths where it runs
+                    let guards = crate::linear::defer_guards(self.prog, self.tf, b);
+                    if guards.len() == 1 {
+                        let g = guards[0];
+                        let mut ran = st.clone();
+                        ran.moved.retain(|m| m.0 .0 != g);
+                        self.block(&mut ran, b);
+                        st.join(&ran);
+                    } else {
+                        self.block(st, b);
+                    }
                 }
             }
         }

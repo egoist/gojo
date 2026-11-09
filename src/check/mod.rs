@@ -176,12 +176,12 @@ impl Checker {
             let pkg = self.file_cx[fi].pkg;
             for ii in 0..self.files[fi].items.len() {
                 let item = &self.files[fi].items[ii];
-                let (name, kind, tps, is_copy, unsafe_send, view) = match &item.kind {
-                    ast::ItemKind::Struct(s) => (s.name.clone(), TypeDefKind::Struct { fields: vec![] }, s.tparams.clone(), s.is_copy || s.is_view, s.unsafe_send, s.is_view),
-                    ast::ItemKind::Enum(e) => (e.name.clone(), TypeDefKind::Enum { variants: vec![] }, e.tparams.clone(), e.is_copy || e.is_view, false, e.is_view),
+                let (name, kind, tps, is_copy, unsafe_send, view, linear) = match &item.kind {
+                    ast::ItemKind::Struct(s) => (s.name.clone(), TypeDefKind::Struct { fields: vec![] }, s.tparams.clone(), s.is_copy || s.is_view, s.unsafe_send, s.is_view, s.is_linear),
+                    ast::ItemKind::Enum(e) => (e.name.clone(), TypeDefKind::Enum { variants: vec![] }, e.tparams.clone(), e.is_copy || e.is_view, false, e.is_view, e.is_linear),
                     // (for interfaces, `unsafe_send` records `send interface`)
-                    ast::ItemKind::Interface(i) => (i.name.clone(), TypeDefKind::Iface { methods: vec![], type_set: None }, i.tparams.clone(), false, i.is_send, false),
-                    ast::ItemKind::TypeAlias { newtype: true, name, tparams, .. } => (name.clone(), TypeDefKind::Struct { fields: vec![] }, tparams.clone(), false, false, false),
+                    ast::ItemKind::Interface(i) => (i.name.clone(), TypeDefKind::Iface { methods: vec![], type_set: None }, i.tparams.clone(), false, i.is_send, false, false),
+                    ast::ItemKind::TypeAlias { newtype: true, name, tparams, .. } => (name.clone(), TypeDefKind::Struct { fields: vec![] }, tparams.clone(), false, false, false, false),
                     ast::ItemKind::TypeAlias { .. } => {
                         alias_items.push((fi, ii));
                         continue;
@@ -197,7 +197,7 @@ impl Checker {
                     tparams.push(self.new_tparam(&tp.name, tp.is_int));
                 }
                 let tuple = self.prog.packages[pkg as usize].is_std && self.prog.packages[pkg as usize].name == "prelude" && name.starts_with("Tuple");
-                self.prog.types.push(TypeDef { name: name.clone(), pkg, tparams, kind, is_copy, is_pub, unsafe_send, newtype, span, has_drop: false, tuple, view });
+                self.prog.types.push(TypeDef { name: name.clone(), pkg, tparams, kind, is_copy, is_pub, unsafe_send, newtype, span, has_drop: false, tuple, view, linear });
                 if self.prog.packages[pkg as usize].items.insert(name.clone(), Sym::Type(id)).is_some() {
                     self.err(span, format!("`{}` is declared twice", name));
                 }
@@ -450,7 +450,7 @@ impl Checker {
         let mut auto: Vec<DefId> = (0..self.prog.types.len() as DefId)
             .filter(|&d| {
                 let def = self.prog.def(d);
-                !def.is_pub && !def.is_copy && def.tparams.is_empty() && !def.has_drop && !matches!(def.kind, TypeDefKind::Iface { .. }) && !self.prog.packages[def.pkg as usize].is_std
+                !def.is_pub && !def.is_copy && !def.linear && def.tparams.is_empty() && !def.has_drop && !matches!(def.kind, TypeDefKind::Iface { .. }) && !self.prog.packages[def.pkg as usize].is_std
             })
             .collect();
         for &d in &auto {
@@ -503,6 +503,25 @@ impl Checker {
                     } else {
                         self.err(def.span, format!("`{}` is declared `copy` but has a `drop` method", def.name));
                     }
+                }
+            }
+            if def.linear && def.has_drop {
+                self.err(def.span, format!("`{}` is linear, so it is never dropped implicitly: it can't have a `drop` method; its `sink self` methods end its values", def.name));
+            }
+            if !def.linear && !matches!(def.kind, TypeDefKind::Iface { .. }) {
+                // a type that owns a linear value is linear itself, and says so
+                // (its own `any` type parameters aside: `Stack[T: any]` is
+                // linear exactly when its argument is)
+                let unit: HashMap<TParamId, Ty> = def.tparams.iter().map(|&p| (p, Ty::Unit)).collect();
+                let tys: Vec<(String, Ty)> = match &def.kind {
+                    TypeDefKind::Struct { fields } => fields.iter().map(|f| (f.name.clone(), f.ty.subst(&unit))).collect(),
+                    TypeDefKind::Enum { variants } => variants.iter().flat_map(|v| v.fields.iter().map(|f| (v.name.clone(), f.1.subst(&unit)))).collect(),
+                    _ => vec![],
+                };
+                if let Some((n, t)) = tys.iter().find(|(_, t)| self.prog.is_linear(t)) {
+                    let (ts, kw) = (self.prog.show(t), if def.is_struct() { "struct" } else { "enum" });
+                    let what = if def.is_struct() { format!("field `{}`", n) } else { format!("variant `{}`", n) };
+                    self.diags.push(Diag::new(def.span, format!("`{}` holds the linear `{}` ({}), so it must be consumed too: declare it `linear {} {}`", def.name, ts, what, kw, def.name)));
                 }
             }
             if self.is_infinite(id, &mut vec![]) {
@@ -1487,7 +1506,9 @@ impl Checker {
                 if self.prog.methods.contains_key(&(TyKey::Adt(*d), "clone".into())) {
                     return true;
                 }
-                if self.prog.def(*d).has_drop {
+                // a linear value is consumed once: copies only where its
+                // own `clone` method says how
+                if self.prog.def(*d).has_drop || self.prog.def(*d).linear {
                     return false;
                 }
                 self.all_fields(*d, args, "clone", &|c, t| c.is_clone(t))

@@ -1,0 +1,17 @@
+// A transaction that must end in `commit` or `rollback`.
+pub linear struct Tx {
+    pub id: int
+    pub log: String
+
+    pub fn commit(sink self) {
+        println("commit", self.id, self.log)
+    }
+
+    pub fn rollback(sink self) {
+        println("rollback", self.id)
+    }
+}
+
+pub fn begin(id: int) -> Tx {
+    return Tx{id, log: "tx"}
+}

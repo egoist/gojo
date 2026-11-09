@@ -115,7 +115,7 @@ Options: `--release` (`-O2`; overflow checks stay on), `--cc "<compiler flags>"`
 
 ## Safety guarantees, and how they are enforced
 
-Every check looks only at function signatures and a single function body. There is no cross-function inference and there are no lifetime annotations. Each guarantee has compile-error tests (`tests/errors/`, 83 in total).
+Every check looks only at function signatures and a single function body. There is no cross-function inference and there are no lifetime annotations. Each guarantee has compile-error tests (`tests/errors/`, 153 in total).
 
 | Guarantee | Mechanism | Typical error |
 | --- | --- | --- |
@@ -125,6 +125,7 @@ Every check looks only at function signatures and a single function body. There 
 | Iterators are not invalidated | `for`/`with`/`if let` bindings hold a borrow inside the block | `` cannot modify `v` while it is borrowed by `x` `` |
 | Exclusive mutable borrows | Arguments of the same call are checked for overlap; `inout` must be written with `&` at the call site | `` `a` is used by two arguments of the same call `` |
 | No data races at compile time | `send` is derived from the structure of the type; `Rc`/`Cell`/raw pointers cannot cross tasks; a variable a task changes is borrowed by that task alone until its scope ends (or the range of it the task uses); shared mutable state goes through a `Mutex`, `RwLock` or `Atomic` | `` a task captures `r` of type `Rc[int]`, which is not safe to share between threads `` / `` cannot use `total`: a task modifies it until its scope ends `` |
+| Linear values are consumed | A `linear struct` is never dropped implicitly: every path must hand it to a `sink` parameter (its `commit`/`rollback`), return it, or store it in something consumed in turn; a `defer` that consumes it runs only while it is still there | `` `tx` is not consumed: the linear `Tx` would be dropped by this `return` `` |
 | Errors must be handled | An unhandled `T ! E` is a compile error; to discard it, write `_ = f()` | `` result of type `! String` is not handled `` |
 | Exhaustive matching | Based on the usefulness algorithm; reports the exact missing pattern | `` `match` is not exhaustive: `Rect(_, _)` is not covered `` |
 | Runtime checks | Integer overflow, out-of-bounds index, division by zero, out-of-range shift, out-of-range numeric conversion and a failed `unwrap` all panic and report the call site | `panic: integer overflow in addition` |
@@ -140,7 +141,7 @@ The memory safety of the generated code is verified separately. All test program
 - **Methods**: written inside the braces of a `struct`/`enum`; the first parameter, `self`, carries the receiver mode. Associated functions: `Stack[String].new()` (generic arguments can be inferred from the expected type); a type with a `new` function is called like one, `Stack[String]()`, `RwLock(x)`, `Atomic(0)`. `extend T { ... }` adds methods; the standard library also uses it to add methods to built-in types and to specific instances of them (such as `extend []String`).
 - **Collections**: `[a, b]` lists (a `Set` where one is expected), `["k": v]` / `[:]` maps, and `if` / `for` / `..` elements inside list literals, so built data keeps its shape: `[header, if let e = err { Text{text: e.clone()} }, for t in todos { row(t) }, ..footer()]` (see [`examples/ui`](examples/ui)).
 - **Structs and enums**: field defaults (a missing required field is a compile error), `copy struct`, automatic copy derivation for package-private types, sum-type enums, `.Variant` shorthand and `.{field: v}` literals typed by the context, `P{x, y}` field shorthand, struct embedding (fields and methods are promoted).
-- **Ownership**: three parameter modes (borrow / `inout` / `sink`), deterministic destruction (reverse scope order, `drop` method, `drop(x)`), partial moves, conditional moves (flags are inserted only when needed), `.clone()`.
+- **Ownership**: three parameter modes (borrow / `inout` / `sink`), deterministic destruction (reverse scope order, `drop` method, `drop(x)`), partial moves, conditional moves (flags are inserted only when needed), `.clone()`. Linear types (`linear struct Tx`) that must be consumed, never dropped, with guarded `defer tx.rollback()`.
 - **Projections**: `yield &T` / `yield inout T` / `yield ?&T` functions. `v[i]`, `m.get(k)`, `m.entry(k)` and `mu.lock()` are all projections, and the reference they lend cannot leave the block. References and views bound with `let` stop holding the borrowed value after their last use. Structures such as parsers store ranges as `Span` and do not need self-references.
 - **Custom iteration**: a cursor protocol (`cursor` + `next`/`nextMut`; `zip` and merging just advance several cursors together) and a push protocol (`each`/`eachMut`, suited to recursive structures such as trees). In both protocols `break`, `continue`, `return`, `try` and labeled jumps work as usual.
 - **Error handling**: `try`, `try x else Wrap`, `catch e { ... }`, `match` destructuring of `ok`/`err`, `try` on `?T`, `??`, `?.` for fields and method calls, `if let x { }` to unwrap a variable in place.

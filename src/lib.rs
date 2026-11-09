@@ -10,6 +10,7 @@ pub mod formatter;
 pub mod doc;
 pub mod manifest;
 pub mod lexer;
+pub mod linear;
 pub mod parser;
 pub mod tir;
 pub mod types;
@@ -538,6 +539,14 @@ pub struct Checked {
     pub warnings: Vec<Diag>,
 }
 
+/// The checks that run on a type-checked program: borrows, then linear
+/// values (spec 5.7).
+pub fn ownership_checks(prog: &types::Program, tfuncs: &[tir::TFunc]) -> Vec<Diag> {
+    let mut diags = borrowck::check(prog, tfuncs);
+    diags.extend(linear::check(prog, tfuncs));
+    diags
+}
+
 /// Parse, type check and borrow check.
 pub fn frontend(input: &str, source: Option<&str>) -> Result<Checked, (SourceMap, Vec<Diag>)> {
     let loaded = load(input, source)?;
@@ -550,7 +559,7 @@ pub fn frontend(input: &str, source: Option<&str>) -> Result<Checked, (SourceMap
         Ok(r) => r,
         Err(diags) => return Err((sm, diags)),
     };
-    let (errors, warnings) = split_warnings(borrowck::check(&prog, &tfuncs));
+    let (errors, warnings) = split_warnings(ownership_checks(&prog, &tfuncs));
     if !errors.is_empty() {
         return Err((sm, errors));
     }

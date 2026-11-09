@@ -767,7 +767,7 @@ fn drive(cmd: &str, input: &str, opts: &Options, prog_args: &[String]) -> Result
         }
     };
     let t_check = t0.elapsed();
-    let (errors, warnings) = gojo::split_warnings(gojo::borrowck::check(&prog, &tfuncs));
+    let (errors, warnings) = gojo::split_warnings(gojo::ownership_checks(&prog, &tfuncs));
     if !errors.is_empty() {
         report(&sm, &errors);
         return Err(());

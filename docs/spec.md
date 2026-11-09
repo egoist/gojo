@@ -20,7 +20,7 @@ The fuzzing tool is `gojo-fuzz` (section 15).
 - Source files are UTF-8. Comments are `// line comments` and `/* block comments */`; block comments can span lines.
 - **Automatic semicolons**: a statement terminator is inserted when the last token on a line is an identifier, a literal, `true`, `false`, `none`, `)`, `]`, `}`, `return`, `break` or `continue`. So a line that ends with an operator continues on the next line. Newlines inside parentheses and brackets do not end a statement. `;` puts several statements on one line.
 - **Leading-dot lines**: a line that starts with `.name` continues the expression on the line before (a method chain written one step per line), unless it is a `match` arm, that is, it has a `=>` outside brackets (`.Circle(r) => ...`). Comments and blank lines may sit between the steps. A block whose last line is a bare `.Variant` after another expression statement therefore needs the variant's type: `Color.Red`.
-- Keywords: `use extend pub fn struct enum interface type copy let var if else for in match return break continue defer errdefer go try catch with yield unsafe extern none true false inout sink where test const select scope isolate`. `self`, `as` and `lib` are contextual keywords, and so are `view` before `struct` or `enum` and `of` after a function's result type.
+- Keywords: `use extend pub fn struct enum interface type copy let var if else for in match return break continue defer errdefer go try catch with yield unsafe extern none true false inout sink where test const select scope isolate`. `self`, `as` and `lib` are contextual keywords, and so are `view` and `linear` before `struct` or `enum` and `of` after a function's result type.
 - Integer literals: decimal, `0x`, `0b`, `0o`, optionally separated with `_`. Floats: `1.5`, `2.5e3`, `1e-3`.
 - Strings `"..."` support `\n \t \\ \" \$ \xNN \u{...}`. Backquoted strings are raw and process no escapes (and no interpolation).
 - **Interpolation**: `"x = ${expr}"` embeds the value of `expr`, shown as `print` shows it; `${expr:spec}` formats it with a `fmt.format` spec (`${n:>8}`, `${f:.2}`, `${b:08b}`), checked at compile time. A string with an interpolation is a new `String`; one without stays a literal. The expression stays on the string's line, and `\${` is a literal `${`. A character literal `'é'` is a `rune` (an `i32` code point); when the expected type is `u8` it is converted to a byte.
@@ -184,6 +184,7 @@ Capabilities are built-in constraints that the compiler decides:
 
 | Capability | Types that satisfy it |
 | --- | --- |
+| `any` | every type, linear ones included (5.7); a type parameter without it takes only types that can be dropped |
 | `copy` | scalars, `Span`, copy structs and enums, fixed-length arrays of copy elements |
 | `clone` | copy types; `String`, `Rc`, `Arc`, `Chan`; containers whose elements can be cloned; types with a `clone` method or whose fields can all be cloned |
 | `default` | scalars, `String`, `Vec`, `Map`, `?T`; fixed-length arrays whose elements have a default; structs whose fields all have defaults; newtypes whose underlying type has a default |
@@ -288,6 +289,31 @@ Tests: `run/misc`, `run/interfaces`, `run/niche`, `run/arena`.
 - A closure given to `go` cannot modify outer variables.
 
 Tests: `run/basics`, `run/concurrency`, `errors/escaping_view`, `errors/go_closure_mutation`.
+
+### 5.7 Linear types
+
+A value of a **linear** type is never dropped implicitly: every value must be consumed. `linear struct` and `linear enum` declare one:
+
+```gojo
+linear struct Tx {
+    id: int
+
+    fn commit(sink self) ! DbError { ... }
+    fn rollback(sink self) { ... }
+}
+```
+
+- **Consuming** a value means moving it: into a `sink` parameter (its own `sink self` methods above all), out of the function with `return`, or into something that is consumed in turn (a field of a linear struct, a `Vec`, a `?T`, a result or a tuple). Panics abort, so no value is ever dropped on the way out of a panic.
+- **What is rejected**: a variable or `sink` parameter that still holds the value where its block ends, at a `return`, `break` or `continue` that leaves it, or where a `try` returns an error; a temporary nobody takes (`begin()` as a statement, `_ = begin()`, `begin().id`); assigning over a variable or element that holds one; moving it into a closure other than the body of a `go` (a closure could be dropped, or called twice); and a `match` arm that moves out of the value but drops a linear part with `_`. Errors name the path (`pool.tx`), say whether it is unconsumed on every path or only some, and list the type's `sink self` methods.
+- **Variables that may be empty**: `none`, `[]` and variants without linear payload hold nothing to consume, so `var o: ?Tx = none` needs nothing until a value is put in. A `match` (or `if let`) arm that can only see such variants consumes the value too: after `if let t = o { t.commit() }` there is nothing left. A vector of linear values is consumed by popping each one and ending the empty vector with `v.finish()`, which panics if it still holds values.
+- **Taking it apart**: only the type's own package can move fields out of a linear value (elsewhere, `cannot move out of field`). In its own methods with a `sink self` receiver, `self` is being ended: when the method returns, its fields are dropped as usual, except its linear fields, which must be consumed. In a linear enum's own `sink self` method, a `match` on `self` ends it in arms whose variant has no linear payload.
+- **Guarded defers**: a `defer` or `errdefer` whose body consumes a linear variable declared outside it runs only while that variable still holds its value. `defer tx.rollback()` rolls back on every way out before `tx.commit()`, and does nothing after it; `errdefer tx.rollback()` does the same on error exits only. A defer may consume at most one linear variable.
+- **Types that hold linear values**: a struct or enum with a linear field or payload must be declared `linear` itself. Linear values can be held by linear structs and enums, `Vec`, `?T`, results and tuples, which are consumed in turn. `Rc`, `Arc`, `Weak`, `Cell`, `Mutex`, channels, tasks, `Iso`, `Box`, `Map`, arrays and interface values (a borrowed interface parameter is fine) would drop them, so `Rc[Tx]` and `let r: Reader = tx` are errors.
+- **Generics**: a type parameter takes linear types only if declared `any` (`[T: any]`, or `where T: any` on a method): a generic body may drop a `T` otherwise. In a body where `T` is `any`, values of type `T` are linear, and checked as such. `Stack[T: any]` holding a `Vec[T]` is linear exactly when its argument is. In the standard library, `swap`, `replace`, the `Vec` methods that move elements (`push`, `pop`, `insert`, `remove`, `swapRemove`, `extend`, `reverse`, `swap`, `drain`, `splitOff`, `reserve`, `cap`, `finish`), the read-only slice methods, and `?T`'s `isSome`, `isNone`, `unwrap` and `expect` are `any`; `drop`, `clear` and `truncate` are not.
+- A linear type is not `copy`, has no derived `clone` (a `clone` method of its own still works), and can't have a `drop` method. A package-level value can't be linear: nothing could consume it.
+- The check is per function: a forward analysis over the paths that hold a value still to be consumed, like the borrow checker's. It needs nothing from other functions' bodies.
+
+Tests: `run/linear`, `errors/linear_leaks`, `errors/linear_generic`, `errors/linear_decl`, `errors/linear_copy`, `errors/linear_paths`, `projects/linear`.
 
 ## 6. Expressions
 

@@ -125,6 +125,8 @@ pub struct StructDecl {
     pub unsafe_send: bool,
     /// `view struct`: may hold views, and is one (spec 5.4).
     pub is_view: bool,
+    /// `linear struct`: never dropped implicitly; must be consumed (spec 5.7).
+    pub is_linear: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -143,6 +145,8 @@ pub struct EnumDecl {
     pub is_copy: bool,
     /// `view enum`: may hold views, and is one.
     pub is_view: bool,
+    /// `linear enum`: must be consumed.
+    pub is_linear: bool,
 }
 
 #[derive(Clone, Debug)]

@@ -168,9 +168,9 @@ pub fn unreachable() -> never
 // Explicitly end the lifetime of a value.
 pub fn drop[T](x: sink T) {}
 // Exchanges two places.
-pub fn swap[T](a: inout T, b: inout T)
+pub fn swap[T: any](a: inout T, b: inout T)
 // Puts `value` into `dst` and returns what was there.
-pub fn replace[T](dst: inout T, value: sink T) -> T
+pub fn replace[T: any](dst: inout T, value: sink T) -> T
 // Takes the value out of `dst`, leaving the type's default (`""`, `0`, `none`,
 // an empty `Vec`...).
 pub fn take[T: default](dst: inout T) -> T
@@ -195,7 +195,7 @@ pub fn max[T: copy + ordered](a: T, b: T) -> T {
 
 extend ?T {
     // Whether there is a value.
-    pub fn isSome(self) -> bool {
+    pub fn isSome(self) -> bool where T: any {
         return match self {
             none => false
             _ => true
@@ -203,7 +203,7 @@ extend ?T {
     }
 
     // Whether there is no value.
-    pub fn isNone(self) -> bool {
+    pub fn isNone(self) -> bool where T: any {
         return match self {
             none => true
             _ => false
@@ -212,7 +212,7 @@ extend ?T {
 
     // The value; panics on none. Prefer `??`, `if let` or `try` where none can
     // happen.
-    pub fn unwrap(sink self) -> T {
+    pub fn unwrap(sink self) -> T where T: any {
         return match self {
             some(v) => v
             none => panic("unwrap() called on none")
@@ -220,7 +220,7 @@ extend ?T {
     }
 
     // The value; panics with `msg` on none.
-    pub fn expect(sink self, msg: str) -> T {
+    pub fn expect(sink self, msg: str) -> T where T: any {
         return match self {
             some(v) => v
             none => panic(msg)
@@ -314,7 +314,7 @@ extend T ! E {
     }
 
     // The value; panics with the error. Prefer `try` or `catch`.
-    pub fn unwrap(sink self) -> T {
+    pub fn unwrap(sink self) -> T where T: any {
         return match self {
             ok(v) => v
             err(e) => __panicErr("unwrap() called on an error", e)
@@ -322,7 +322,7 @@ extend T ! E {
     }
 
     // The value; panics with `msg` and the error.
-    pub fn expect(sink self, msg: str) -> T {
+    pub fn expect(sink self, msg: str) -> T where T: any {
         return match self {
             ok(v) => v
             err(e) => __panicErr(msg, e)
@@ -1142,32 +1142,32 @@ extend String {
 
 extend []T {
     // The number of elements.
-    pub fn len(self) -> int
+    pub fn len(self) -> int where T: any
 
     // Reverses the order in place. Only an `inout []T` (or a range of a
     // `var` Vec or array, `v[a..b]`) can be changed.
-    pub fn reverse(inout self)
+    pub fn reverse(inout self) where T: any
 
     // Exchanges elements `i` and `j`; panics when either is out of range.
-    pub fn swap(inout self, i: int, j: int)
+    pub fn swap(inout self, i: int, j: int) where T: any
 
     // Sorts in ascending order. Stable; O(n log n).
     pub fn sort(inout self) where T: ordered
 
     // Sorts by `less(a, b)`: true when `a` goes before `b`. Stable.
-    pub fn sortBy(inout self, less: fn(T, T) -> bool)
+    pub fn sortBy(inout self, less: fn(T, T) -> bool) where T: any
 
     // raw pointer to the first element, for FFI
-    pub fn ptr(self) -> *T
+    pub fn ptr(self) -> *T where T: any
 
     // Whether there are no elements.
-    pub fn isEmpty(self) -> bool {
+    pub fn isEmpty(self) -> bool where T: any {
         return self.len() == 0
     }
 
     // Element `i`, or none when `i` is out of range (indexing with `xs[i]`
     // panics instead).
-    pub fn get(self, i: int) yield ?&T {
+    pub fn get(self, i: int) yield ?&T where T: any {
         if i < 0 || i >= self.len() {
             yield none
         }
@@ -1175,7 +1175,7 @@ extend []T {
     }
 
     // The first element, if any.
-    pub fn first(self) yield ?&T {
+    pub fn first(self) yield ?&T where T: any {
         if self.len() == 0 {
             yield none
         }
@@ -1183,7 +1183,7 @@ extend []T {
     }
 
     // The last element, if any.
-    pub fn last(self) yield ?&T {
+    pub fn last(self) yield ?&T where T: any {
         if self.len() == 0 {
             yield none
         }
@@ -1231,14 +1231,14 @@ extend []T {
     }
 
     // Calls `f` on each element, in order.
-    pub fn each(self, f: fn(T)) {
+    pub fn each(self, f: fn(T)) where T: any {
         for x in self {
             f(x)
         }
     }
 
     // Whether `f` is true for some element (stops at the first).
-    pub fn any(self, f: fn(T) -> bool) -> bool {
+    pub fn any(self, f: fn(T) -> bool) -> bool where T: any {
         for x in self {
             if f(x) {
                 return true
@@ -1248,7 +1248,7 @@ extend []T {
     }
 
     // Whether `f` is true for every element (stops at the first false).
-    pub fn all(self, f: fn(T) -> bool) -> bool {
+    pub fn all(self, f: fn(T) -> bool) -> bool where T: any {
         for x in self {
             if !f(x) {
                 return false
@@ -1258,7 +1258,7 @@ extend []T {
     }
 
     // How many elements `f` is true for.
-    pub fn count(self, f: fn(T) -> bool) -> int {
+    pub fn count(self, f: fn(T) -> bool) -> int where T: any {
         var n = 0
         for x in self {
             if f(x) {
@@ -1325,7 +1325,7 @@ extend []T {
     }
 
     // The first element `pred` is true for.
-    pub fn find(self, pred: fn(T) -> bool) yield ?&T {
+    pub fn find(self, pred: fn(T) -> bool) yield ?&T where T: any {
         for i in 0..self.len() {
             if pred(self[i]) {
                 yield self[i]
@@ -1335,7 +1335,7 @@ extend []T {
     }
 
     // The index of the first element `pred` is true for.
-    pub fn findIndex(self, pred: fn(T) -> bool) -> ?int {
+    pub fn findIndex(self, pred: fn(T) -> bool) -> ?int where T: any {
         for i, x in self {
             if pred(x) {
                 return i
@@ -1377,7 +1377,7 @@ extend []T {
     // The index of the first element `pred` is false for, in a slice where
     // `pred` is true for a prefix and false after it; O(log n). With
     // `x => x < v` on a sorted slice, where `v` would be inserted.
-    pub fn partitionPoint(self, pred: fn(T) -> bool) -> int {
+    pub fn partitionPoint(self, pred: fn(T) -> bool) -> int where T: any {
         var lo = 0
         var hi = self.len()
         while lo < hi {
@@ -1402,13 +1402,13 @@ extend []T {
     }
 
     // Sorts by the key `key` gives for each element, ascending. Stable.
-    pub fn sortByKey[K: ordered](inout self, key: fn(T) -> K) {
+    pub fn sortByKey[K: ordered](inout self, key: fn(T) -> K) where T: any {
         self.sortBy((a, b) => key(a) < key(b))
     }
 
     // The element with the smallest key (the first of equal ones), or none
     // for no elements.
-    pub fn minBy[K: ordered](self, key: fn(T) -> K) yield ?&T {
+    pub fn minBy[K: ordered](self, key: fn(T) -> K) yield ?&T where T: any {
         if self.len() == 0 {
             yield none
         }
@@ -1426,7 +1426,7 @@ extend []T {
 
     // The element with the largest key (the first of equal ones), or none
     // for no elements.
-    pub fn maxBy[K: ordered](self, key: fn(T) -> K) yield ?&T {
+    pub fn maxBy[K: ordered](self, key: fn(T) -> K) yield ?&T where T: any {
         if self.len() == 0 {
             yield none
         }
@@ -1479,7 +1479,7 @@ extend []T {
     // Moves every element `n` places towards the front, the first `n` going
     // to the end: `[1, 2, 3, 4]` becomes `[3, 4, 1, 2]` for `n` = 2. Any `n`
     // works (negative rotates the other way).
-    pub fn rotateLeft(inout self, n: int) {
+    pub fn rotateLeft(inout self, n: int) where T: any {
         let len = self.len()
         if len < 2 {
             return
@@ -1498,7 +1498,7 @@ extend []T {
 
     // Moves every element `n` places towards the end, the last `n` going to
     // the front.
-    pub fn rotateRight(inout self, n: int) {
+    pub fn rotateRight(inout self, n: int) where T: any {
         let len = self.len()
         if len < 2 {
             return
@@ -1634,22 +1634,27 @@ extend []String {
 
 extend Vec[T] {
     // Appends `x`.
-    pub fn push(inout self, x: sink T)
+    pub fn push(inout self, x: sink T) where T: any
 
     // Removes and returns the last element, or none when empty.
-    pub fn pop(inout self) -> ?T
+    pub fn pop(inout self) -> ?T where T: any
 
     // Inserts `x` at index `i` (0 <= `i` <= `len()`), moving the later elements
     // up; panics otherwise.
-    pub fn insert(inout self, i: int, x: sink T)
+    pub fn insert(inout self, i: int, x: sink T) where T: any
 
     // Removes and returns element `i`, moving the later elements down; panics when
     // `i` is out of range.
-    pub fn remove(inout self, i: int) -> T
+    pub fn remove(inout self, i: int) -> T where T: any
 
     // Removes and returns element `i`, putting the last element in its place:
     // O(1), but changes the order. Panics when `i` is out of range.
-    pub fn swapRemove(inout self, i: int) -> T
+    pub fn swapRemove(inout self, i: int) -> T where T: any
+
+    // Ends an empty vector of linear values (spec 5.7): a vector that holds
+    // them must be consumed like they are, so pop each one and consume it,
+    // then call `finish`. Panics when the vector still holds values.
+    pub fn finish(sink self) where T: any
 
     // Removes (and drops) every element, keeping the buffer.
     pub fn clear(inout self)
@@ -1659,13 +1664,13 @@ extend Vec[T] {
     pub fn truncate(inout self, n: int)
 
     // Moves the elements of `other` to the end.
-    pub fn extend(inout self, other: sink Vec[T])
+    pub fn extend(inout self, other: sink Vec[T]) where T: any
 
     // Reverses the order in place.
-    pub fn reverse(inout self)
+    pub fn reverse(inout self) where T: any
 
     // Exchanges elements `i` and `j`; panics when either is out of range.
-    pub fn swap(inout self, i: int, j: int)
+    pub fn swap(inout self, i: int, j: int) where T: any
 
     // Sorts in ascending order. The sort is stable (equal elements keep their
     // order) and takes O(n log n) time.
@@ -1676,10 +1681,10 @@ extend Vec[T] {
 
     // Makes room for `n` more elements without reallocating; panics ("capacity
     // overflow") for an impossible size.
-    pub fn reserve(inout self, n: int)
+    pub fn reserve(inout self, n: int) where T: any
 
     // The number of elements there is room for.
-    pub fn cap(self) -> int
+    pub fn cap(self) -> int where T: any
 
     // Keeps the elements `keep` is true for, in order, and drops the rest; in
     // place, O(n), no copies.
@@ -1717,7 +1722,7 @@ extend Vec[T] {
 
     // Removes the elements from index `lo` up to (not including) `hi` and
     // returns them, in order; panics unless 0 <= `lo` <= `hi` <= `len()`.
-    pub fn drain(inout self, lo: int, hi: int) -> Vec[T] {
+    pub fn drain(inout self, lo: int, hi: int) -> Vec[T] where T: any {
         if lo < 0 || hi > self.len() || lo > hi {
             panic("drain: range out of bounds")
         }
@@ -1734,7 +1739,7 @@ extend Vec[T] {
 
     // Splits in two at index `at`: keeps the elements before it and returns
     // the rest. Panics unless 0 <= `at` <= `len()`.
-    pub fn splitOff(inout self, at: int) -> Vec[T] {
+    pub fn splitOff(inout self, at: int) -> Vec[T] where T: any {
         return self.drain(at, self.len())
     }
 

@@ -1,0 +1,22 @@
+linear struct Tx {
+    id: int
+
+    fn commit(sink self) {}
+
+    fn drop(inout self) {}
+}
+
+struct Holder {
+    tx: Tx
+}
+
+enum Slot {
+    Empty
+    Full(Tx)
+}
+
+fn main() {
+}
+// error: `Tx` is linear, so it is never dropped implicitly: it can't have a `drop` method
+// error: `Holder` holds the linear `Tx` (field `tx`), so it must be consumed too: declare it `linear struct Holder`
+// error: `Slot` holds the linear `Tx` (variant `Full`), so it must be consumed too: declare it `linear enum Slot`

@@ -1236,7 +1236,10 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
                 // (deferred code emitted here runs only on this way out:
                 // what it says about indexes stays on it)
                 let facts = fs.bce.clone();
-                self.emit(fs, "{");
+                match self.defer_guard(fs, b) {
+                    Some(f) => self.emit(fs, &format!("if ({}) {{", f)),
+                    None => self.emit(fs, "{"),
+                }
                 fs.ind += 1;
                 // the deferred code can't leave its own block, so it must not see the
                 // enclosing scopes: their cleanups include this very `defer`
@@ -1256,6 +1259,10 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
                 if let Some(cond) = fs.err_mode.clone() {
                     let site = fs.site.take();
                     let facts = fs.bce.clone();
+                    let cond = match self.defer_guard(fs, b) {
+                        Some(f) => format!("({}) && {}", cond, f),
+                        None => cond,
+                    };
                     self.emit(fs, &format!("if ({}) {{", cond));
                     fs.ind += 1;
                     let outer = std::mem::replace(&mut fs.scopes, vec![Scope { kind: SK::Func, items: vec![], wait: None }]);
@@ -1305,6 +1312,18 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
 
     fn local_cname(&self, fs: &Fs, l: LocalId) -> String {
         format!("l{}_{}", l, sanitize(&fs.tf.locals[l as usize].name))
+    }
+
+    /// A `defer` that consumes a linear variable runs only while the variable
+    /// still holds its value (spec 5.7): the drop flag that says so.
+    fn defer_guard(&mut self, fs: &mut Fs, b: &TBlock) -> Option<String> {
+        let g = crate::linear::defer_guards(self.prog, fs.tf, b);
+        if g.len() != 1 {
+            return None;
+        }
+        let f = fs.flags.get(&(g[0], vec![])).cloned()?;
+        fs.used_flags.insert(f.clone());
+        Some(f)
     }
 
     fn declare_flags(&mut self, fs: &mut Fs, l: LocalId) {
@@ -5187,6 +5206,13 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
     }
 
     fn vec_intrinsic(&mut self, fs: &mut Fs, name: &str, el: &Ty, args: &[TArg], ret: &Ty, l: &str) -> String {
+        if name == "finish" {
+            // ends an empty vector of linear values: there is nothing to drop
+            let x = self.expr(fs, &args[0].e);
+            let t = self.tmp();
+            self.emit(fs, &format!("gojo_vec {} = {}; if ({}.len) gojo_panic(\"finish() on a vector that still holds linear values\", {}); free({}.ptr);", t, x, t, l, t));
+            return "0".into();
+        }
         let ec = self.cty(el);
         let v = self.addr(fs, &args[0].e);
         let vp = self.tmp();

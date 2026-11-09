@@ -1,0 +1,77 @@
+linear struct Tx {
+    id: int
+
+    fn commit(sink self) {}
+}
+
+linear struct Pair {
+    a: Tx
+    b: Tx
+    n: int
+
+    // the own `sink self` method takes the value apart; its linear fields
+    // remain to be consumed
+    fn half(sink self) {
+        self.a.commit()
+    }
+}
+
+linear enum Step {
+    Pending(Tx)
+    Done
+
+    fn end(sink self) {
+        match self {
+            Pending(_) => {}
+            Done => {}
+        }
+    }
+}
+
+fn twoGuards() {
+    let a = Tx{id: 1}
+    let b = Tx{id: 2}
+    defer {
+        a.commit()
+        b.commit()
+    }
+}
+
+fn wild(s: sink Step) {
+    match s {
+        Pending(t) => t.commit()
+        Done => {}
+    }
+}
+
+fn wild2(o: sink ?(Tx, Tx)) {
+    match o {
+        some((x, _)) => x.commit()
+        none => {}
+    }
+}
+
+fn loopLeak(n: int) {
+    var i = 0
+    while i < n {
+        let t = Tx{id: i}
+        if i == 3 {
+            break
+        }
+        t.commit()
+        i += 1
+    }
+}
+
+fn assignElem(v: inout Vec[Tx]) {
+    v[0] = Tx{id: 9}
+}
+
+fn main() {
+}
+// error: `self.b` is not consumed: the linear `Tx` would be dropped where the function ends
+// error: `self` may not be consumed on every path
+// error: this defer consumes several linear values (`a`, `b`)
+// error: its `_` drops the linear `Tx`
+// error: `t` is not consumed: the linear `Tx` would be dropped by this `break`
+// error: assigning here drops the linear `Tx` that was there
