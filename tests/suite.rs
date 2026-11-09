@@ -229,65 +229,91 @@ fn runtime_panics() {
 #[test]
 #[ignore]
 fn address_sanitizer() {
-    let mut failures = vec![];
     let dir = std::env::temp_dir().join("gojo_asan");
     let _ = std::fs::create_dir_all(&dir);
     // (not stack overflows: ASan catches those itself, before the guard page)
     let panics = files("tests/panic").into_iter().filter(|f| !std::fs::read_to_string(f).unwrap().contains("panic: stack overflow"));
-    for f in files("tests/run").into_iter().chain(panics) {
-        let bin = dir.join(f.file_stem().unwrap());
-        let out = Command::new(gojo()).arg("build").arg("--cc").arg("cc -fsanitize=address,undefined -g").arg(&f).arg("-o").arg(&bin).output().unwrap();
+    let all: Vec<PathBuf> = files("tests/run").into_iter().chain(panics).collect();
+    let failures: Vec<String> = par_each(&all, |f| {
+        // (tests/panic and tests/run share names: keep their binaries apart)
+        let bin = dir.join(format!("{}_{}", f.parent().unwrap().file_name().unwrap().to_string_lossy(), f.file_stem().unwrap().to_string_lossy()));
+        let out = Command::new(gojo()).arg("build").arg("--cc").arg("cc -fsanitize=address,undefined -g").arg(f).arg("-o").arg(&bin).output().unwrap();
         if !out.status.success() {
-            failures.push(format!("{}: build failed\n{}", f.display(), String::from_utf8_lossy(&out.stderr)));
-            continue;
+            return Some(format!("{}: build failed\n{}", f.display(), String::from_utf8_lossy(&out.stderr)));
         }
         let run = match output_within(&mut asan_command(&bin), Duration::from_secs(300)) {
             Ok(run) => run,
-            Err(e) => {
-                failures.push(format!("{}: {}", f.display(), e));
-                continue;
-            }
+            Err(e) => return Some(format!("{}: {}", f.display(), e)),
         };
         let stderr = String::from_utf8_lossy(&run.stderr);
         if stderr.contains("Sanitizer") || stderr.contains("runtime error") {
-            failures.push(format!("{}:\n{}", f.display(), stderr.lines().take(20).collect::<Vec<_>>().join("\n")));
+            return Some(format!("{}:\n{}", f.display(), stderr.lines().take(20).collect::<Vec<_>>().join("\n")));
         }
-    }
+        None
+    })
+    .into_iter()
+    .flatten()
+    .collect();
     if !failures.is_empty() {
         panic!("{} program(s) failed under sanitizers:\n{}", failures.len(), failures.join("\n"));
     }
+}
+
+/// Runs `f` on each item, up to `GOJO_SAN_JOBS` (default: the CPUs, at most
+/// 4) at a time: sanitizer runs build and run every program, one process per
+/// program, so they spread over the machine. Each item's result, in order.
+fn par_each<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec<R> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let jobs = std::env::var("GOJO_SAN_JOBS").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or_else(|| std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2).min(4)).max(1);
+    let next = AtomicUsize::new(0);
+    let out: std::sync::Mutex<Vec<Option<R>>> = std::sync::Mutex::new((0..items.len()).map(|_| None).collect());
+    std::thread::scope(|s| {
+        for _ in 0..jobs {
+            s.spawn(|| loop {
+                let i = next.fetch_add(1, Ordering::Relaxed);
+                if i >= items.len() {
+                    break;
+                }
+                let r = f(&items[i]);
+                out.lock().unwrap()[i] = Some(r);
+            });
+        }
+    });
+    out.into_inner().unwrap().into_iter().map(|r| r.unwrap()).collect()
 }
 
 /// Runs the concurrent programs under ThreadSanitizer: `cargo test -- --ignored`.
 #[test]
 #[ignore]
 fn thread_sanitizer() {
-    let mut failures = vec![];
     let dir = std::env::temp_dir().join("gojo_tsan");
     let _ = std::fs::create_dir_all(&dir);
-    for f in files("tests/run") {
-        let src = std::fs::read_to_string(&f).unwrap();
-        if !(src.contains("go ") || src.contains("task.") || src.contains("Chan[")) {
-            continue;
-        }
+    let all: Vec<PathBuf> = files("tests/run")
+        .into_iter()
+        .filter(|f| {
+            let src = std::fs::read_to_string(f).unwrap();
+            src.contains("go ") || src.contains("task.") || src.contains("Chan[")
+        })
+        .collect();
+    let failures: Vec<String> = par_each(&all, |f| {
         let bin = dir.join(f.file_stem().unwrap());
-        let out = Command::new(gojo()).arg("build").arg("--cc").arg("cc -fsanitize=thread -g -O1").arg(&f).arg("-o").arg(&bin).output().unwrap();
+        let out = Command::new(gojo()).arg("build").arg("--cc").arg("cc -fsanitize=thread -g -O1").arg(f).arg("-o").arg(&bin).output().unwrap();
         if !out.status.success() {
-            failures.push(format!("{}: build failed\n{}", f.display(), String::from_utf8_lossy(&out.stderr)));
-            continue;
+            return Some(format!("{}: build failed\n{}", f.display(), String::from_utf8_lossy(&out.stderr)));
         }
         let run = match output_within(&mut Command::new(&bin), Duration::from_secs(300)) {
             Ok(run) => run,
-            Err(e) => {
-                failures.push(format!("{}: {}", f.display(), e));
-                continue;
-            }
+            Err(e) => return Some(format!("{}: {}", f.display(), e)),
         };
         let stderr = String::from_utf8_lossy(&run.stderr);
         if stderr.contains("ThreadSanitizer") {
-            failures.push(format!("{}:\n{}", f.display(), stderr.lines().take(30).collect::<Vec<_>>().join("\n")));
+            return Some(format!("{}:\n{}", f.display(), stderr.lines().take(30).collect::<Vec<_>>().join("\n")));
         }
-    }
+        None
+    })
+    .into_iter()
+    .flatten()
+    .collect();
     if !failures.is_empty() {
         panic!("{} program(s) failed under ThreadSanitizer:\n{}", failures.len(), failures.join("\n"));
     }
@@ -321,35 +347,34 @@ fn type_sanitizer() {
         return;
     }
     let cc = format!("{} -fsanitize=type -g", clang);
-    let mut failures = vec![];
-    for f in files("tests/run") {
-        for release in [false, true] {
-            let bin = dir.join(format!("{}{}", f.file_stem().unwrap().to_string_lossy(), if release { "_rel" } else { "" }));
-            let mut c = Command::new(gojo());
-            c.arg("build").arg("--cc").arg(&cc).arg(&f).arg("-o").arg(&bin).env("GOJO_CACHE", dir.join("cache"));
-            if release {
-                c.arg("--release");
-            }
-            let out = c.output().unwrap();
-            if !out.status.success() {
-                failures.push(format!("{}: build failed\n{}", f.display(), String::from_utf8_lossy(&out.stderr)));
-                continue;
-            }
-            let mut run = Command::new(&bin);
-            run.current_dir(f.parent().unwrap());
-            let run = match output_within(&mut run, Duration::from_secs(300)) {
-                Ok(run) => run,
-                Err(e) => {
-                    failures.push(format!("{}: {}", f.display(), e));
-                    continue;
-                }
-            };
-            let stderr = String::from_utf8_lossy(&run.stderr);
-            if stderr.contains("TypeSanitizer") {
-                failures.push(format!("{}{}:\n{}", f.display(), if release { " (release)" } else { "" }, stderr.lines().take(12).collect::<Vec<_>>().join("\n")));
-            }
+    let all: Vec<(PathBuf, bool)> = files("tests/run").into_iter().flat_map(|f| [(f.clone(), false), (f, true)]).collect();
+    let failures: Vec<String> = par_each(&all, |(f, release)| {
+        let release = *release;
+        let bin = dir.join(format!("{}{}", f.file_stem().unwrap().to_string_lossy(), if release { "_rel" } else { "" }));
+        let mut c = Command::new(gojo());
+        c.arg("build").arg("--cc").arg(&cc).arg(f).arg("-o").arg(&bin).env("GOJO_CACHE", dir.join("cache"));
+        if release {
+            c.arg("--release");
         }
-    }
+        let out = c.output().unwrap();
+        if !out.status.success() {
+            return Some(format!("{}: build failed\n{}", f.display(), String::from_utf8_lossy(&out.stderr)));
+        }
+        let mut run = Command::new(&bin);
+        run.current_dir(f.parent().unwrap());
+        let run = match output_within(&mut run, Duration::from_secs(300)) {
+            Ok(run) => run,
+            Err(e) => return Some(format!("{}: {}", f.display(), e)),
+        };
+        let stderr = String::from_utf8_lossy(&run.stderr);
+        if stderr.contains("TypeSanitizer") {
+            return Some(format!("{}{}:\n{}", f.display(), if release { " (release)" } else { "" }, stderr.lines().take(12).collect::<Vec<_>>().join("\n")));
+        }
+        None
+    })
+    .into_iter()
+    .flatten()
+    .collect();
     if !failures.is_empty() {
         panic!("{} program(s) failed under TypeSanitizer:\n{}", failures.len(), failures.join("\n"));
     }
