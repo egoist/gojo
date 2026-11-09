@@ -18,6 +18,9 @@ struct Options {
     seed: Option<String>,
     explore: Option<String>,
     real: bool,
+    /// Keep the bounds checks the compiler proved unnecessary, and report one
+    /// that fails as a compiler bug.
+    verify_bce: bool,
 }
 
 const USAGE: &str = "Gojo — a systems language with Go's simplicity, no GC and no nil.
@@ -42,7 +45,7 @@ usage:
   gojo version                            print the version
 
 options:
-  --release        optimize (overflow checks stay on)
+  --release        optimize (overflow and bounds checks stay on)
   --cc <compiler>  C compiler for the backend (default: $GOJO_CC, else the
                    first of cc, clang, gcc and `zig cc` on the PATH)
   --target <t>     cross-compile with `zig cc -target <t>` (Linux or macOS,
@@ -54,6 +57,8 @@ options:
   --explore <n>    `test`: run each test under n seeds, stop at the first
                    failure and print its seed
   --real           `test`: use the real scheduler (threads, real time)
+  --verify-bce     keep the bounds checks the compiler removed because it proved
+                   them unnecessary; one that fails is a compiler bug
 
 Gojo compiles to C: it needs a C compiler (cc, clang, gcc, or zig) on the PATH.";
 
@@ -105,7 +110,7 @@ fn main() -> ExitCode {
         return usage();
     }
     let cmd = args[1].as_str();
-    let mut opts = Options { release: false, output: None, verbose: false, cc: std::env::var("GOJO_CC").ok(), target: None, keep_c: false, seed: None, explore: None, real: false };
+    let mut opts = Options { release: false, output: None, verbose: false, cc: std::env::var("GOJO_CC").ok(), target: None, keep_c: false, seed: None, explore: None, real: false, verify_bce: false };
     let mut input = None;
     let mut prog_args = vec![];
     let mut i = 2;
@@ -146,6 +151,7 @@ fn main() -> ExitCode {
                 }
             }
             "--real" => opts.real = true,
+            "--verify-bce" => opts.verify_bce = true,
             _ if a.starts_with('-') && a.len() > 1 => {
                 eprintln!("error: unknown option `{}` (see `gojo help`)", a);
                 return ExitCode::from(2);
@@ -811,6 +817,9 @@ fn drive(cmd: &str, input: &str, opts: &Options, prog_args: &[String]) -> Result
     let mut flags: Vec<&str> = if opts.release { vec!["-O2"] } else { vec!["-O0", "-g", "-gno-column-info"] };
     flags.push("-w");
     flags.extend(C_SEMANTICS);
+    if opts.verify_bce {
+        flags.push("-DGOJO_VERIFY_BCE");
+    }
     if opts.release {
         // Where a small hot function lands relative to the CPU's fetch blocks
         // changed its speed by up to 7% when unrelated code before it grew;

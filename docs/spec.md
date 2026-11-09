@@ -285,6 +285,7 @@ Tests: `run/basics`, `run/concurrency`, `errors/escaping_view`, `errors/go_closu
 - Operator precedence from lowest to highest: `??` (right-associative), `||`, `&&`, comparisons, `|`, `^`, `&`, `<< >>`, `+ - +% -%`, `* / % *%`, then unary `- ! ~ & <- *` and postfix `.f`, `?.f`, `(...)`, `[...]`.
 - Both sides must have the same type; there is no implicit promotion. `+` concatenates strings.
 - `+ - *` panic on integer overflow (in both debug and release); `+% -% *%` wrap. `/` and `%` panic on division by zero. Out-of-bounds indexing panics. `<<` and `>>` panic when the shift amount is not between `0` and the bit width minus one.
+- An index or slice bound that is a constant and can only panic is a compile error: a negative one, one past a fixed array's length (`a[4]` of a `[4]int`; a slice may end at the length), or slice bounds whose start is after their end (`v[3..1]`).
 - A numeric conversion `T(x)` uses the target type only to decide the type of literals (`u64(18446744073709551615)`, `u64(1 << 63)`); other arguments are converted from their own type (when `b` is a `u8`, `int(~b)` first complements on `u8`).
 - `if`, `match` and blocks are expressions; their value is the last expression.
 - Operations on `?T`: `if let v = x { }` (and `if let x { }`, which unwraps the variable `x` under the same name inside the block), `x ?? d`, `x?.field` (the result is still optional, and `field` must be a copy type; otherwise use `if let`), `x?.method(args)` (`none` when `x` is `none`; a method that returns `?U` gives `?U`, not `??U`; the method may only read its receiver, and a view it returns borrows `x`, so `x` must be a variable to keep it), `x.unwrap()` (panics on `none`), `match`.
@@ -293,7 +294,7 @@ Tests: `run/basics`, `run/concurrency`, `errors/escaping_view`, `errors/go_closu
 - `a..b` is a half-open range and `a..=b` a closed range; `s[a..b]` takes a view of a string or slice.
 - A `T ! E` result must be handled; discard it with `_ = f()`.
 
-Tests: `run/basics`, `run/edge`, `run/misc`, `run/constraints`, `run/patterns`, `panic/overflow`, `panic/div_zero`, `panic/bounds`, `panic/shift`, `panic/unwrap_none`, `errors/unhandled_result`, `errors/rules`.
+Tests: `run/basics`, `run/edge`, `run/misc`, `run/constraints`, `run/patterns`, `panic/overflow`, `panic/div_zero`, `panic/bounds`, `panic/bounds_loop_*`, `panic/shift`, `panic/unwrap_none`, `errors/unhandled_result`, `errors/rules`, `errors/const_index`.
 
 ## 7. Statements and control flow
 
@@ -510,6 +511,7 @@ Tests: `testblocks/blocks`.
 ## 14. Execution model
 
 - The compiler generates C and compiles it with `cc` or `zig cc`. Debug and release (`-O2`) differ in optimization level and debug info: overflow checks and index checks stay in both.
+- An index or slice the compiler proves in range has no check, in both builds (`src/codegen/bce.rs`). The proofs use loop counters (`for i in 0..v.len`, `for i, _ in v`), immutable locals (`let n = v.len`), constants, integer types and `&`/`%` masks, and a bound relative to `v.len` counts only where nothing can change `v`'s length. `gojo build --verify-bce` keeps the removed checks and reports a failed one as a compiler bug; the tests and `gojo-fuzz` build that way (test: `bounds_check_elimination`, which also checks which indexes of `run/bce` are proven).
 - Debug builds have debug info (`-g`), and the generated C uses `#line` to point at lines of the Gojo source, so lldb/gdb can set breakpoints like `main.gojo:12`, and stack traces and sanitizer reports show Gojo lines. On macOS the debug info is in a `.dSYM` next to the binary; `gojo build -o prog` also writes `prog.dSYM`. `gojo emit-c` and `--keep-c` output C without `#line`, which makes it easier to debug the compiler itself.
 - Generics are monomorphized. Functions with at most 60 IR nodes get an `inline` hint.
 - `Box`, `Rc`/`Arc` and interface boxes are allocated from thread-local free lists in size classes; `Vec`/`String` buffers use `malloc`.

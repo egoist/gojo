@@ -57,6 +57,16 @@ _Noreturn void gojo_panic_index(int64_t i, int64_t len, const char *loc) {
     gojo_panic(buf, loc);
 }
 
+_Noreturn void gojo_bce_failed(int slice, int64_t lo, int64_t hi, int64_t len, const char *loc) {
+    char buf[200];
+    if (!slice) {
+        snprintf(buf, sizeof buf, "internal error: a bounds check the compiler removed failed: index %lld, length %lld (please report this)", (long long)lo, (long long)len);
+    } else {
+        snprintf(buf, sizeof buf, "internal error: a bounds check the compiler removed failed: slice [%lld:%lld], length %lld (please report this)", (long long)lo, (long long)hi, (long long)len);
+    }
+    gojo_panic(buf, loc);
+}
+
 _Noreturn void gojo_panic_overflow(const char *op, const char *loc) {
     char buf[128];
     snprintf(buf, sizeof buf, "integer overflow in %s", op);

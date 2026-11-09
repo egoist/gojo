@@ -140,7 +140,7 @@ log(.Warn, "disk almost full")   // the enum name can be omitted when the type i
 
 **Optional values `?T`** support these operations: `if let v = x { }` unwraps, `x ?? d` supplies a default, `x?.field` chains access (the result is still optional), and `x.unwrap()` panics on none. The memory layout of `?T` uses the niche of non-null types: `?Box[T]` is the size of one pointer.
 
-**Integer overflow**: in debug builds, overflow in `+ - *` panics. Release builds also check (turning the checks off per package, in `gojo.toml`, is planned). Write `+%` explicitly when you want wrapping; saturating arithmetic (`a.saturatingAdd(b)`) is planned. Array and slice indexing is always bounds-checked.
+**Integer overflow**: in debug builds, overflow in `+ - *` panics. Release builds also check (turning the checks off per package, in `gojo.toml`, is planned). Write `+%` explicitly when you want wrapping; saturating arithmetic (`a.saturatingAdd(b)`) is planned. Array and slice indexing is always bounds-checked; the compiler removes a check only where it proves the index in range (`for i in 0..v.len { v[i] }`, see spec 14), and a constant index that can only fail is a compile error.
 
 ## 4. Ownership and borrowing
 
@@ -491,7 +491,7 @@ The goal is debug builds no slower than 1.3 times Go. The checks are built for i
 
 **Today** the compiler works on the whole program at once:
 
-- It loads the program, the packages it uses and the standard modules they import, checks everything, and writes one C file. `cc`, `clang`, `gcc` or `zig cc` compiles it. Debug builds use `-O0 -g` with `#line` directives, so debuggers show Gojo lines; release builds use `-O2`. Overflow and bounds checks stay on in both.
+- It loads the program, the packages it uses and the standard modules they import, checks everything, and writes one C file. `cc`, `clang`, `gcc` or `zig cc` compiles it. Debug builds use `-O0 -g` with `#line` directives, so debuggers show Gojo lines; release builds use `-O2`. Overflow and bounds checks stay on in both, except bounds checks the compiler proves can't fail: it removes those itself, which also speeds up `-O0` debug builds, and catches what the C compiler can't, since it knows that nothing outside a loop can change a vector the loop reads (`for i in 0..v.len { f(v[i]) }` with a call `f` that isn't inlined).
 - The C runtime is compiled once per compiler and C toolchain, and binaries are cached by their C source and toolchain, so rebuilding an unchanged program costs only the front end.
 - Cross-compilation comes from `zig cc -target`, which gives static Linux binaries.
 - Generics are monomorphized (section 7).

@@ -1,0 +1,13 @@
+// `v[i..]` is proven only while `v` keeps its length.
+fn shrink(v: inout Vec[int]) {
+    v.truncate(1)
+}
+
+fn main() {
+    var v: Vec[int] = [1, 2, 3]
+    for i in 0..v.len {
+        println(v[i..].len)
+        shrink(&v)
+    }
+    // panic: slice bounds out of range
+}

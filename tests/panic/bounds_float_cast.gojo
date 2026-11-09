@@ -1,0 +1,11 @@
+// A conversion through a float rounds: 16777217 becomes 16777216 as an f32,
+// so the index is -1. (The bounds-check elimination once assumed every
+// conversion keeps the value; found by an adversarial review.)
+fn main() {
+    var a: [2]int = [10, 20]
+    for i in 16777217..16777218 {
+        a[int(f32(i)) - 16777217] = 7
+    }
+    println(a)
+    // panic: index out of range: index -1, length 2
+}

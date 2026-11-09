@@ -1,0 +1,9 @@
+fn main() {
+    let v: Vec[int] = [1, 2, 3]
+    var s = 0
+    for i in 0..=v.len {
+        s += v[i]
+    }
+    println(s)
+    // panic: index out of range: index 3, length 3
+}

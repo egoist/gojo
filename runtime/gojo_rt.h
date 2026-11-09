@@ -58,6 +58,22 @@ static inline int64_t gojo_idx(int64_t i, int64_t len, const char *loc) {
     return i;
 }
 
+// Indexes and slices the compiler proved in range (src/codegen/bce.rs) skip
+// their check. Built with -DGOJO_VERIFY_BCE (`gojo build --verify-bce`), they
+// keep it, and a failure is a bug in the compiler, reported as such.
+_Noreturn void gojo_bce_failed(int slice, int64_t lo, int64_t hi, int64_t len, const char *loc);
+#ifdef GOJO_VERIFY_BCE
+static inline int64_t gojo_idx_proven(int64_t i, int64_t len, const char *loc) {
+    if ((uint64_t)i >= (uint64_t)len) gojo_bce_failed(0, i, i, len, loc);
+    return i;
+}
+#define GOJO_IDX_PROVEN(i, len, loc) gojo_idx_proven((i), (len), (loc))
+#define GOJO_SLICE_PROVEN(lo, hi, len, loc) do { if ((lo) < 0 || (hi) > (len) || (lo) > (hi)) gojo_bce_failed(1, (lo), (hi), (len), (loc)); } while (0)
+#else
+#define GOJO_IDX_PROVEN(i, len, loc) (i)
+#define GOJO_SLICE_PROVEN(lo, hi, len, loc) ((void)0)
+#endif
+
 // ---- checked arithmetic
 #define GOJO_ARITH(N, T, MIN, BITS) \
     static inline T gojo_add_##N(T a, T b, const char *loc) { T r; if (__builtin_add_overflow(a, b, &r)) gojo_panic_overflow("addition", loc); return r; } \

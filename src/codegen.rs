@@ -12,6 +12,8 @@ use crate::types::*;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 
+mod bce;
+
 /// The largest value, in bytes. Values live on stacks or inline in other values;
 /// one this big could never be used, and C compilers reject sizes near 2^63.
 pub const MAX_VALUE_BYTES: u128 = 1 << 40;
@@ -221,6 +223,10 @@ struct Fs<'a> {
     line: (u32, u32),
     /// `scope` blocks being generated: id -> C name of their state.
     tscopes: HashMap<u32, String>,
+    /// What is known about the enclosing loops' variables (bce.rs).
+    bce: Vec<bce::Fact>,
+    /// Places whose length nothing in the function changes (bce.rs).
+    bce_steady: HashMap<bce::Path, bool>,
 }
 
 /// The body of `for x in t` over a type with `each`, compiled as a closure.
@@ -977,7 +983,7 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
         let (sig, ps) = self.fn_signature(f, &subst, &name);
         let _ = writeln!(self.protos, "{};", sig);
         let ret = if fd.yields.is_some() { fd.ret.subst(&subst) } else { fd.ret.subst(&subst) };
-        let mut fs = Fs { tf, subst, out: String::new(), ind: 1, scopes: vec![], repr: HashMap::new(), flagged: HashSet::new(), flags: HashMap::new(), ret, yields: fd.yields.is_some(), err_mode: None, loop_labels: vec![], lb: None, line: (u32::MAX, 0), tscopes: HashMap::new() };
+        let mut fs = Fs { tf, subst, out: String::new(), ind: 1, scopes: vec![], repr: HashMap::new(), flagged: HashSet::new(), flags: HashMap::new(), ret, yields: fd.yields.is_some(), err_mode: None, loop_labels: vec![], lb: None, line: (u32::MAX, 0), tscopes: HashMap::new(), bce: vec![], bce_steady: HashMap::new() };
         collect_moves_block(&tf.body, &mut fs.flagged, tf);
         fs.scopes.push(Scope { kind: SK::Func, items: vec![], wait: None });
         let mut lids = vec![];
@@ -1331,6 +1337,9 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
                 self.declare_flags(fs, *local);
                 if self.needs_drop(&t) {
                     self.register(fs, Cl::DropLocal(*local));
+                }
+                if let Some(f) = self.bce_let_fact(fs, *local, init) {
+                    fs.bce.push(f);
                 }
             }
             TStmt::LetRef { local, place } => {
@@ -1818,7 +1827,16 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
         }
     }
 
-    fn for_loop(&mut self, fs: &mut Fs, id: u32, kind: IterKind, iter: &TExpr, hi: Option<&TExpr>, elem: LocalId, index: Option<LocalId>, body: &TBlock, _span: Span) {
+    fn for_loop(&mut self, fs: &mut Fs, id: u32, kind: IterKind, iter: &TExpr, hi: Option<&TExpr>, elem: LocalId, index: Option<LocalId>, body: &TBlock, span: Span) {
+        let n = fs.bce.len();
+        if let Some(f) = self.bce_loop_fact(fs, kind, iter, hi, elem, index, body) {
+            fs.bce.push(f);
+        }
+        self.for_loop_inner(fs, id, kind, iter, hi, elem, index, body, span);
+        fs.bce.truncate(n);
+    }
+
+    fn for_loop_inner(&mut self, fs: &mut Fs, id: u32, kind: IterKind, iter: &TExpr, hi: Option<&TExpr>, elem: LocalId, index: Option<LocalId>, body: &TBlock, _span: Span) {
         self.emit(fs, "{");
         fs.ind += 1;
         self.push_scope(fs, SK::Block);
@@ -2157,12 +2175,13 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
                 let b = self.lval(fs, base);
                 let i = self.expr(fs, index);
                 let l = self.loc(e.span);
+                let check = if self.bce_index_ok(fs, base, index) { "GOJO_IDX_PROVEN" } else { "gojo_idx" };
                 match &bt {
                     Ty::Vec(t) | Ty::Slice(t) => {
                         let c = self.cty(t);
-                        format!("(({} *){}.ptr)[gojo_idx({}, {}.len, {})]", c, b, i, b, l)
+                        format!("(({} *){}.ptr)[{}({}, {}.len, {})]", c, b, check, i, b, l)
                     }
-                    Ty::Array(_, n) => format!("{}.a[gojo_idx({}, {}, {})]", b, i, n, l),
+                    Ty::Array(_, n) => format!("{}.a[{}({}, {}, {})]", b, check, i, n, l),
                     _ => "?".into(),
                 }
             }
@@ -2279,7 +2298,8 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
                 let st = self.tmp();
                 let l = self.loc(e.span);
                 self.emit(fs, &format!("gojo_str {} = {};", st, sv));
-                format!("{}.ptr[gojo_idx({}, {}.len, {})]", st, i, st, l)
+                let check = if self.bce_index_ok(fs, base, index) { "GOJO_IDX_PROVEN" } else { "gojo_idx" };
+                format!("{}.ptr[{}({}, {}.len, {})]", st, check, i, st, l)
             }
             TK::SliceOf { base, lo, hi } => {
                 let bt = self.sub(fs, &base.ty);
@@ -2307,6 +2327,7 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
                     }
                     Ty::Vec(el) | Ty::Slice(el) | Ty::Array(el, _) => {
                         let el = (**el).clone();
+                        let (lo_e, hi_e) = (lo.as_deref(), hi.as_deref());
                         let b = self.lval(fs, base);
                         let (ptr, len) = match &bt {
                             Ty::Array(_, n) => (format!("{}.a", b), n.to_string()),
@@ -2324,7 +2345,11 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
                         let a = self.tmp();
                         let z = self.tmp();
                         self.emit(fs, &format!("int64_t {} = {}, {} = {};", a, lo, z, hi));
-                        self.emit(fs, &format!("if ({} < 0 || {} > {} || {} > {}) gojo_panic(\"slice bounds out of range\", {});", a, z, len, a, z, l));
+                        if self.bce_slice_ok(fs, base, lo_e, hi_e) {
+                            self.emit(fs, &format!("GOJO_SLICE_PROVEN({}, {}, {}, {});", a, z, len, l));
+                        } else {
+                            self.emit(fs, &format!("if ({} < 0 || {} > {} || {} > {}) gojo_panic(\"slice bounds out of range\", {});", a, z, len, a, z, l));
+                        }
                         format!("((gojo_slice){{ ({} *){} + {}, {} - {} }})", c, ptr, a, z, a)
                     }
                     _ => "?".into(),
@@ -3389,7 +3414,7 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
         let ret = fty.ret.clone();
         let rc = self.ret_cty(&ret);
         let mut ps = vec!["void *envp".to_string()];
-        let mut nfs = Fs { tf: fs.tf, subst: fs.subst.clone(), out: String::new(), ind: 1, scopes: vec![], repr: HashMap::new(), flagged: fs.flagged.clone(), flags: HashMap::new(), ret: ret.clone(), yields: false, err_mode: None, loop_labels: vec![], lb: None, line: (u32::MAX, 0), tscopes: HashMap::new() };
+        let mut nfs = Fs { tf: fs.tf, subst: fs.subst.clone(), out: String::new(), ind: 1, scopes: vec![], repr: HashMap::new(), flagged: fs.flagged.clone(), flags: HashMap::new(), ret: ret.clone(), yields: false, err_mode: None, loop_labels: vec![], lb: None, line: (u32::MAX, 0), tscopes: HashMap::new(), bce: vec![], bce_steady: HashMap::new() };
         if let (Some(lid), Some(_)) = (c.loop_body, &lbp) {
             // `return` / `try` in the body act on the enclosing function
             nfs.ret = fs.ret.clone();
