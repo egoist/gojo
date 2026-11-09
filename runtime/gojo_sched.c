@@ -2744,6 +2744,9 @@ void gojo_group_wait(gojo_group *grp) {
 static pthread_mutex_t s_timer_lock = PTHREAD_MUTEX_INITIALIZER;
 static gojo_timer **s_heap;
 static int s_heap_len, s_heap_cap;
+// when the poller wakes next at the latest (under s_timer_lock); before it
+// first sleeps, any timer wakes it
+static int64_t s_poller_at = INT64_MAX;
 
 static void heap_set(int i, gojo_timer *t) {
     s_heap[i] = t;
@@ -2798,9 +2801,12 @@ static void timer_add(gojo_timer *t) {
     s_heap[s_heap_len++] = t;
     t->idx = s_heap_len - 1;
     heap_up(t->idx);
-    bool earliest = t->idx == 0;
+    // the poller wakes by s_poller_at anyway (it never sleeps more than
+    // 100 ms) and then looks at the heap again: only a timer due before
+    // that needs to wake it now
+    bool wake = gojo_sim_on ? t->idx == 0 : t->when < s_poller_at;
     pthread_mutex_unlock(&s_timer_lock);
-    if (earliest) poller_wake();
+    if (wake) poller_wake();
 }
 
 static void timer_remove(gojo_timer *t) {
@@ -3106,19 +3112,21 @@ static void *poller_main(void *arg) {
     for (;;) {
         int64_t next = -1;
         check_shutdown();
+        int64_t at = 0;
         if (!gojo_sim_on) {
             int64_t now = gojo_time_now();
             timers_fire(now);
+            monitor_tick();
+            // while anything runs, tick for the monitor; when all is idle, only events matter
+            bool idle = GOJO_SC_LOAD(&s_nidle) == GOJO_SC_LOAD(&s_nstarted);
             pthread_mutex_lock(&s_timer_lock);
             if (s_heap_len > 0) next = s_heap[0]->when - now;
-            pthread_mutex_unlock(&s_timer_lock);
-            monitor_tick();
-        }
-        // while anything runs, tick for the monitor; when all is idle, only events matter
-        bool idle = GOJO_SC_LOAD(&s_nidle) == GOJO_SC_LOAD(&s_nstarted);
-        if (!gojo_sim_on) {
+            if (next < 0) next = s_heap_len > 0 ? 0 : -1;
             if (!idle && (next < 0 || next > 2000000)) next = 2000000;
             if (next < 0 || next > 100000000) next = 100000000;
+            at = now + next;
+            s_poller_at = at;
+            pthread_mutex_unlock(&s_timer_lock);
         }
 #if defined(__APPLE__)
         struct kevent evs[64];
@@ -3137,7 +3145,6 @@ static void *poller_main(void *arg) {
         int ms = -1;
         if (next >= 0) {
             // the earliest timer, to the nanosecond; the epoll timeout is only a backstop
-            int64_t at = gojo_time_now() + next;
             struct itimerspec its;
             memset(&its, 0, sizeof its);
             its.it_value.tv_sec = (time_t)(at / 1000000000);
