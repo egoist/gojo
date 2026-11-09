@@ -587,13 +587,19 @@ fn claims_command(args: &[String]) -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    let claims = match codegen::claims(&c.prog, &c.tfuncs, &c.sm) {
+    let (mut claims, errs) = match codegen::claims(&c.prog, &c.tfuncs, &c.sm) {
         Ok(cl) => cl,
         Err(e) => {
             eprintln!("error: {}", e);
             return ExitCode::from(1);
         }
     };
+    // a `checkfree` function with nothing to check says so too
+    for (i, fd) in c.prog.funcs.iter().enumerate() {
+        if fd.checkfree && !c.prog.packages[fd.pkg as usize].is_std {
+            claims.entry(i as gojo::types::FuncId).or_default();
+        }
+    }
     let mut fids: Vec<&gojo::types::FuncId> = claims.keys().filter(|f| !c.prog.packages[c.prog.func(**f).pkg as usize].is_std).collect();
     fids.sort_by_key(|f| (c.prog.func(**f).span.file, c.prog.func(**f).span.lo));
     let at = |sp: gojo::diag::Span| {
@@ -624,6 +630,11 @@ fn claims_command(args: &[String]) -> ExitCode {
     }
     if json {
         println!("{{\"functions\": [{}]}}", items.join(", "));
+    }
+    // the list first, then what breaks a `checkfree` claim
+    if !errs.is_empty() {
+        report(&c.sm, &errs);
+        return ExitCode::from(1);
     }
     ExitCode::SUCCESS
 }
@@ -997,9 +1008,16 @@ fn drive(cmd: &str, input: &str, opts: &Options, prog_args: &[String]) -> Result
         // some errors only show when generic code is instantiated (a type
         // `json.encode` can't handle, a generic type that grows without
         // end): generate the C of a program too, and throw it away
-        if prog.packages[prog.main_pkg as usize].items.contains_key("main") {
-            if let Err(e) = codegen::generate(&prog, &tfuncs, &sm, None, opts.release) {
+        // (every function of the program, so a library's are checked too)
+        let roots = codegen::all_roots(&prog);
+        match codegen::generate_diags(&prog, &tfuncs, &sm, Some(&roots), opts.release) {
+            Ok(_) => {}
+            Err(codegen::GenError::Msg(e)) => {
                 eprintln!("error: {}", e);
+                return Err(());
+            }
+            Err(codegen::GenError::Diags(ds)) => {
+                report(&sm, &ds);
                 return Err(());
             }
         }
@@ -1018,10 +1036,14 @@ fn drive(cmd: &str, input: &str, opts: &Options, prog_args: &[String]) -> Result
         eprintln!("no tests found");
         return Ok(ExitCode::SUCCESS);
     }
-    let c_src = match codegen::generate(&prog, &tfuncs, &sm, if is_test { Some(&tests) } else { None }, opts.release) {
+    let c_src = match codegen::generate_diags(&prog, &tfuncs, &sm, if is_test { Some(&tests) } else { None }, opts.release) {
         Ok(c) => c,
-        Err(e) => {
+        Err(codegen::GenError::Msg(e)) => {
             eprintln!("error: {}", e);
+            return Err(());
+        }
+        Err(codegen::GenError::Diags(ds)) => {
+            report(&sm, &ds);
             return Err(());
         }
     };

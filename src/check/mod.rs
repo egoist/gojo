@@ -5,6 +5,9 @@
 // functions' checking.
 
 pub mod body;
+
+/// The hidden loop-body parameter of a `gen fn` (spec 7.3): `yield e` calls it.
+pub const GEN_BODY: &str = "__body#";
 mod isolation;
 pub mod lazy;
 pub mod pattern;
@@ -777,9 +780,17 @@ impl Checker {
             if f.yields.is_some() || f.is_extern_c {
                 self.err(f.name_span, "a `gen fn` yields values to a `for`: it can't be a projection or `extern`");
             }
+            if f.ret.is_none() {
+                self.err(f.name_span, format!("a `gen fn` says what it yields: `gen fn {}(...) -> T`", f.name));
+            }
             let flow = self.prog.prelude_type("Flow").map(|d| Ty::Adt(d, Rc::new(vec![]))).unwrap_or(Ty::Error);
-            let elem = ret.clone();
-            params.push(FuncParam { name: "__body".into(), mode: Mode::Borrow, ty: Ty::Func(Rc::new(FuncTy { params: vec![(Mode::Borrow, elem.clone())], ret: flow, send: false })), span: f.name_span });
+            // what can't fail is the value itself
+            let elem = match &ret {
+                Ty::Result(t, e) if **e == Ty::Never => (**t).clone(),
+                _ => ret.clone(),
+            };
+            // a name no program can write, so nothing can take its place
+            params.push(FuncParam { name: GEN_BODY.into(), mode: Mode::Borrow, ty: Ty::Func(Rc::new(FuncTy { params: vec![(Mode::Borrow, elem.clone())], ret: flow, send: false })), span: f.name_span });
             ret = Ty::Unit;
             Some(elem)
         } else {

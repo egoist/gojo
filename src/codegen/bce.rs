@@ -581,6 +581,17 @@ impl<'a> Gen<'a> {
                         self.bce_bound_by(fs, r, l, true, true, false, out);
                         return;
                     }
+                    // `x != c` where `x` is at least `c` (`xs.len() != 0`):
+                    // `x` is at least `c + 1`
+                    BinOp::Ne => {
+                        for (x, c) in [(l, r), (r, l)] {
+                            let (Some(c), Some(subj)) = (self.bce_const(fs, c), self.bce_path(x)) else { continue };
+                            if self.bce_lower(fs, x) == Some(c) && c.abs() < LIMIT {
+                                out.push(Fact { subj, lo: Some(c + 1), hi: None, guard: true, dead: false });
+                            }
+                        }
+                        return;
+                    }
                     _ => return,
                 };
                 // a <= b - 1 (or b), and b >= a + 1 (or a)

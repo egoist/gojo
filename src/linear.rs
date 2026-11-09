@@ -105,7 +105,7 @@ pub fn check(prog: &Program, tfuncs: &[TFunc]) -> Vec<Diag> {
         }
     }
     for tf in tfuncs {
-        let mut l = Lin { prog, tf, diags: vec![], seen: &mut seen, scopes: vec![], loops: vec![], suppress: 0, exempt: None, cap_ref: HashSet::new(), lin_cache: HashMap::new(), memo: HashMap::new(), loop_nest: 0 };
+        let mut l = Lin { prog, tf, diags: vec![], seen: &mut seen, scopes: vec![], loops: vec![], suppress: 0, exempt: None, cap_ref: HashSet::new(), lin_cache: HashMap::new(), memo: HashMap::new(), loop_nest: 0, yields: gen_yields(tf) };
         l.wf_func();
         l.func();
         diags.extend(l.diags);
@@ -217,6 +217,28 @@ fn is_error_value(e: &TExpr) -> bool {
     }
 }
 
+/// The spans of the `return`s a `gen fn`'s `yield`s became: `if __body#(x)
+/// == Flow.Break { return }`.
+fn gen_yields(tf: &TFunc) -> HashSet<Span> {
+    let mut out = HashSet::new();
+    walk_block(&tf.body, &mut |n| {
+        let Node::Expr(e) = n else { return };
+        let TK::If { cond, then, .. } = &e.kind else { return };
+        let TK::Binary { l, .. } = &cond.kind else { return };
+        let TK::Call { callee: Callee::Value, args } = &l.kind else { return };
+        let Some(TK::Local(b)) = args.first().map(|a| &a.e.kind) else { return };
+        if tf.locals[*b as usize].name != crate::check::GEN_BODY {
+            return;
+        }
+        for st in &then.stmts {
+            if let TStmt::Return(None, sp) = st {
+                out.insert(*sp);
+            }
+        }
+    });
+    out
+}
+
 struct Lin<'a, 's> {
     prog: &'a Program,
     tf: &'a TFunc,
@@ -237,6 +259,8 @@ struct Lin<'a, 's> {
     memo: HashMap<(u32, Vec<(Path, bool)>), (St, Vec<(usize, bool, St)>)>,
     /// Loops being run around the current point.
     loop_nest: u32,
+    /// The `return`s that `yield x` became in a `gen fn` (spec 7.3), by span.
+    yields: HashSet<Span>,
 }
 
 impl<'a, 's> Lin<'a, 's> {
@@ -850,7 +874,9 @@ impl<'a, 's> Lin<'a, 's> {
                 if st.reachable {
                     let with_err = e.as_ref().map(is_error_value).unwrap_or(false);
                     self.run_defers(st, 0, with_err);
-                    self.exit(st, 0, *sp, "by this `return`", false);
+                    // in a `gen fn`, `yield x` returns when the loop stops
+                    let how = if e.is_none() && self.prog.func(self.tf.func).gen_of.is_some() && self.yields.contains(sp) { "if the loop over the generator stops at this `yield`" } else { "by this `return`" };
+                    self.exit(st, 0, *sp, how, false);
                 }
                 *st = St::unreachable();
             }
@@ -915,7 +941,9 @@ impl<'a, 's> Lin<'a, 's> {
                     let n = args.len();
                     for (i, a) in args.iter().enumerate() {
                         if i + 1 < n {
-                            self.expr(st, &a.e, Ctx::Borrowed);
+                            // (a generator's `sink` parameters take theirs)
+                            let ctx = if matches!(a.mode, ArgMode::Value) { Ctx::Consumed } else { Ctx::Borrowed };
+                            self.expr(st, &a.e, ctx);
                         }
                     }
                     if let Some(TArg { e: TExpr { kind: TK::Closure(c), .. }, .. }) = args.last() {

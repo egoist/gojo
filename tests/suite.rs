@@ -551,6 +551,38 @@ fn simulated_network() {
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
+/// `gojo claims`: what the compiler proved, for every function of a program,
+/// a library or a file of tests; a `checkfree` claim that fails is listed
+/// and then reported (as JSON lines by `check --json`).
+#[test]
+fn claims() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let out = Command::new(gojo()).arg("claims").arg("--json").arg(root.join("tests/run/contracts.gojo")).output().unwrap();
+    let j = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success() && j.contains("{\"function\": \"dot\"") && j.contains("\"checkfree\": true") && j.contains("\"kept\": []"), "{}{}", j, String::from_utf8_lossy(&out.stderr));
+    let dir = std::env::temp_dir().join(format!("gojo_claims_{}", std::process::id()));
+    let lib = dir.join("lib");
+    std::fs::create_dir_all(&lib).unwrap();
+    // a library: no `main`, and a function nothing calls
+    std::fs::write(lib.join("lib.gojo"), "pub checkfree fn sum(v: []int) -> int {\n    var s = 0\n    for i in 0..v.len() {\n        s += v[i]\n    }\n    return s\n}\n\npub checkfree fn none() -> int {\n    return 1\n}\n").unwrap();
+    let out = Command::new(gojo()).arg("claims").arg(&lib).output().unwrap();
+    let o = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success() && o.contains("sum (checkfree)") && o.contains("1 bounds check removed, 0 kept") && o.contains("none (checkfree)"), "{}{}", o, String::from_utf8_lossy(&out.stderr));
+    // tests only, with a claim that fails: the list, then the error
+    let t = dir.join("t.gojo");
+    std::fs::write(&t, "checkfree fn at(v: []int, i: int) -> int {\n    return v[i]\n}\n\ntest \"at\" {\n    assert(at([1], 0) == 1)\n}\n").unwrap();
+    let out = Command::new(gojo()).arg("claims").arg(&t).output().unwrap();
+    let (o, e) = (String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert!(out.status.code() == Some(1) && o.contains("at (checkfree)") && o.contains("0 bounds checks removed, 1 kept") && e.contains("`at` is `checkfree`, but this bounds check remains"), "{}{}", o, e);
+    let out = Command::new(gojo()).arg("check").arg("--json").arg(&t).output().unwrap();
+    let e = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.code() == Some(1) && e.lines().any(|l| l.starts_with("{\"severity\": \"error\", \"message\": \"`at` is `checkfree`") && l.contains("\"line\": 2")), "{}", e);
+    // `gojo check` covers a library's functions too
+    let out = Command::new(gojo()).arg("check").arg(&t).output().unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A box moved out of and a box of the same type made after it in the same
 /// block share one allocation; anything that may leave the block between
 /// them keeps them apart.

@@ -6,7 +6,7 @@
 
 use crate::ast::{Mode, YieldKind};
 use crate::check::bind_params;
-use crate::diag::{SourceMap, Span};
+use crate::diag::{Diag, SourceMap, Span};
 use crate::tir::*;
 use crate::types::*;
 use std::collections::{HashMap, HashSet};
@@ -98,19 +98,69 @@ pub struct Claims {
     pub kept: Vec<Span>,
 }
 
+/// Why code generation failed: a message, or errors at places in the source
+/// (a bounds check left in a `checkfree fn`).
+pub enum GenError {
+    Msg(String),
+    Diags(Vec<Diag>),
+}
+
+/// The functions to generate when every function counts, not only those
+/// `main` reaches (`gojo claims`, `gojo check`): the program's own functions
+/// that aren't generic, and its tests.
+pub fn all_roots(prog: &Program) -> Vec<(String, FuncId)> {
+    let mut v = vec![];
+    for (i, fd) in prog.funcs.iter().enumerate() {
+        if prog.packages[fd.pkg as usize].is_std || fd.ast.is_none() || !fd.tparams.is_empty() || !matches!(fd.kind, FuncKind::Normal | FuncKind::Test) {
+            continue;
+        }
+        v.push((fd.name.clone(), i as FuncId));
+    }
+    v
+}
+
 /// What `gojo claims` reports: the program's code is generated (and thrown
-/// away) to see which bounds checks the compiler removes.
-pub fn claims(prog: &Program, tfuncs: &[TFunc], sm: &SourceMap) -> Result<HashMap<FuncId, Claims>, String> {
+/// away) to see which bounds checks the compiler removes, in every function
+/// of the program that isn't generic and in the instances of generic ones
+/// that are used. Also the errors of `checkfree` functions.
+pub fn claims(prog: &Program, tfuncs: &[TFunc], sm: &SourceMap) -> Result<(HashMap<FuncId, Claims>, Vec<Diag>), String> {
     let mut out = HashMap::new();
-    generate_with(prog, tfuncs, sm, None, true, &mut |g| out = std::mem::take(&mut g.claims))?;
-    Ok(out)
+    let roots = all_roots(prog);
+    let errs = match generate_with(prog, tfuncs, sm, Some(&roots), true, &mut |g| out = std::mem::take(&mut g.claims)) {
+        Ok(_) => vec![],
+        Err(GenError::Diags(ds)) => ds,
+        Err(GenError::Msg(m)) => return Err(m),
+    };
+    // a check removed in one copy of the code and kept in another (a
+    // `defer` emitted at each exit) is kept
+    for c in out.values_mut() {
+        let kept = c.kept.clone();
+        c.removed.retain(|s| !kept.contains(s));
+    }
+    Ok((out, errs))
 }
 
 pub fn generate(prog: &Program, tfuncs: &[TFunc], sm: &SourceMap, tests: Option<&Vec<(String, FuncId)>>, release: bool) -> Result<String, String> {
+    generate_diags(prog, tfuncs, sm, tests, release).map_err(|e| match e {
+        GenError::Msg(m) => m,
+        GenError::Diags(ds) => ds
+            .iter()
+            .map(|d| {
+                let f = sm.file(d.span.file);
+                let (l, c) = f.line_col(d.span.lo);
+                format!("{}:{}:{}: {}", f.path, l, c, d.msg)
+            })
+            .collect::<Vec<_>>()
+            .join("\nerror: "),
+    })
+}
+
+/// `generate`, with errors in the source as diagnostics.
+pub fn generate_diags(prog: &Program, tfuncs: &[TFunc], sm: &SourceMap, tests: Option<&Vec<(String, FuncId)>>, release: bool) -> Result<String, GenError> {
     generate_with(prog, tfuncs, sm, tests, release, &mut |_| {})
 }
 
-fn generate_with(prog: &Program, tfuncs: &[TFunc], sm: &SourceMap, tests: Option<&Vec<(String, FuncId)>>, release: bool, done: &mut dyn FnMut(&mut Gen)) -> Result<String, String> {
+fn generate_with(prog: &Program, tfuncs: &[TFunc], sm: &SourceMap, tests: Option<&Vec<(String, FuncId)>>, release: bool, done: &mut dyn FnMut(&mut Gen)) -> Result<String, GenError> {
     let mut g = Gen::new(prog, tfuncs, sm, release);
     let mut entry = String::new();
     match tests {
@@ -146,21 +196,21 @@ fn generate_with(prog: &Program, tfuncs: &[TFunc], sm: &SourceMap, tests: Option
     g.drain();
     done(&mut g);
     if let Some(msg) = g.runaway.take() {
-        return Err(msg);
+        return Err(GenError::Msg(msg));
     }
     if let Some(msg) = g.static_err.take() {
-        return Err(msg);
+        return Err(GenError::Msg(msg));
     }
     if !g.checkfree_errs.is_empty() {
-        let mut v: Vec<String> = g.checkfree_errs.iter().map(|e| e.1.clone()).collect();
-        v.sort();
-        return Err(v.join("\nerror: "));
+        let mut v = std::mem::take(&mut g.checkfree_errs);
+        v.sort_by_key(|(sp, _)| (sp.file, sp.lo));
+        return Err(GenError::Diags(v.into_iter().map(|(sp, m)| Diag::new(sp, m)).collect()));
     }
     if let Some(msg) = g.json_err.take() {
-        return Err(msg);
+        return Err(GenError::Msg(msg));
     }
     if let Some(t) = g.too_large.first() {
-        return Err(format!("the type `{}` is too large: values can be at most {} bytes; use a `Vec` for large data", prog.show(t), MAX_VALUE_BYTES));
+        return Err(GenError::Msg(format!("the type `{}` is too large: values can be at most {} bytes; use a `Vec` for large data", prog.show(t), MAX_VALUE_BYTES)));
     }
     let mut out = String::new();
     out.push_str("// generated by the Gojo compiler\n#include <gojo_rt.h>\n#include <stdio.h>\n#include <stddef.h>\n\n");
@@ -1942,9 +1992,11 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
             }
         };
         self.push_scope(fs, SK::Stmt);
-        self.pending_lb = Some((format!("&{}", ctl), if has_ret { format!("&{}", retslot) } else { "NULL".into() }));
+        // (a loop inside the call's other arguments, in a closure generated
+        // meanwhile, has its own: this one's must survive it)
+        let outer = self.pending_lb.replace((format!("&{}", ctl), if has_ret { format!("&{}", retslot) } else { "NULL".into() }));
         let v = self.call_expr(fs, call);
-        self.pending_lb = None;
+        self.pending_lb = outer;
         let _ = v;
         self.pop_scope(fs);
         // dispatch on the control word
@@ -4799,9 +4851,7 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
             list.push(sp);
         }
         if !proven && self.prog.func(f).checkfree && !self.checkfree_errs.iter().any(|(s, _)| *s == sp) {
-            let file = self.sm.file(sp.file);
-            let (l, c) = file.line_col(sp.lo);
-            self.checkfree_errs.push((sp, format!("{}:{}:{}: `{}` is `checkfree`, but this bounds check remains: the compiler can't prove the index is in range here (state it with a guard, an `assert` or the function's `requires`, or loop over the indexes of what is indexed)", file.path, l, c, self.prog.func(f).name)));
+            self.checkfree_errs.push((sp, format!("`{}` is `checkfree`, but this bounds check remains: the compiler can't prove the index is in range here (state it with a guard, an `assert` or the function's `requires`, or loop over the indexes of what is indexed)", self.prog.func(f).name)));
         }
     }
 

@@ -1,0 +1,35 @@
+// A view of a loop element can't leave the function: a generator's element
+// (or one an `each` method passes) lives for one call of the loop body.
+gen fn tmp() -> str {
+    let s = "temporary".toString()
+    yield s.asStr()
+}
+
+fn pick() -> str {
+    for l in tmp() {
+        return l
+    }
+    return "none"
+}
+
+struct Lines {
+    text: String
+
+    fn each(self, body: fn(str) -> Flow) {
+        let own = self.text.clone()
+        _ = body(own.asStr())
+    }
+}
+
+fn first(t: Lines) -> str of t {
+    for l in t {
+        return l
+    }
+    return ""
+}
+
+fn main() {
+    println(pick())
+    println(first(Lines{text: "a"}))
+}
+// error: can't return a view of the loop element `l`

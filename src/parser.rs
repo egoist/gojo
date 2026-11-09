@@ -431,8 +431,8 @@ impl Parser {
             while !self.is_p("}") {
                 let mlo = self.span();
                 let is_pub = self.eat_kw(Kw::Pub);
-                let is_unsafe = self.is_kw(Kw::Unsafe) && matches!(self.peek_at(1), Tok::Kw(Kw::Func));
-                if is_unsafe {
+                let (n, is_gen, checkfree, is_unsafe) = self.fn_mods_at(0);
+                for _ in 0..n {
                     self.bump();
                 }
                 if !self.is_kw(Kw::Func) {
@@ -440,6 +440,8 @@ impl Parser {
                 }
                 let mut f = self.func_decl(Some(&owner))?;
                 f.is_unsafe = is_unsafe;
+                f.is_gen = is_gen;
+                f.checkfree = checkfree;
                 f.ext_tparams = ext.clone();
                 out.push(Item { kind: ItemKind::Func(f), is_pub, span: self.sp_from(mlo) });
                 self.skip_nl();
@@ -459,6 +461,8 @@ impl Parser {
         } else if self.is_kw(Kw::Unsafe) && matches!(self.peek_at(1), Tok::Kw(Kw::Func)) {
             self.bump();
             unsafe_fn = true;
+        } else if self.is_kw(Kw::Unsafe) && self.fn_mods_at(0).0 > 0 {
+            // `unsafe gen fn`, `unsafe checkfree fn`: below
         } else if self.is_kw(Kw::Unsafe) {
             self.bump();
             return self.err(format!("expected `fn` or `send` after `unsafe` (`unsafe fn name()` or `unsafe send struct T`), found {}", self.describe()));
@@ -491,16 +495,13 @@ impl Parser {
             self.bump();
             send_iface = true;
         }
-        // `checkfree fn dot(...)`: no bounds check may remain
-        let checkfree = matches!(self.peek(), Tok::Ident(g) if g == "checkfree") && matches!(self.peek_at(1), Tok::Kw(Kw::Func));
-        if checkfree {
+        // `checkfree fn dot(...)`: no bounds check may remain;
+        // `gen fn lines(s: str) -> str { ... yield ... }` (in either order)
+        let (n, is_gen, checkfree, also_unsafe) = self.fn_mods_at(0);
+        for _ in 0..n {
             self.bump();
         }
-        // `gen fn lines(s: str) -> str { ... yield ... }`
-        let is_gen = matches!(self.peek(), Tok::Ident(g) if g == "gen") && matches!(self.peek_at(1), Tok::Kw(Kw::Func));
-        if is_gen {
-            self.bump();
-        }
+        let unsafe_fn = unsafe_fn || also_unsafe;
         let kind = match self.peek().clone() {
             Tok::Kw(Kw::Func) => {
                 let mut f = self.func_decl(None)?;
@@ -695,19 +696,33 @@ impl Parser {
         TypeExpr { kind: TypeExprKind::Named { path: vec![name.to_string()], args }, span }
     }
 
+    /// `gen`, `checkfree` and `unsafe` before `fn`, in any order, from token
+    /// `at` on: how many there are (0 when they don't end at `fn`), and which.
+    fn fn_mods_at(&self, at: usize) -> (usize, bool, bool, bool) {
+        let (mut n, mut is_gen, mut free, mut uns) = (0, false, false, false);
+        loop {
+            match self.peek_at(at + n) {
+                Tok::Ident(g) if g == "gen" && !is_gen => is_gen = true,
+                Tok::Ident(g) if g == "checkfree" && !free => free = true,
+                Tok::Kw(Kw::Unsafe) if !uns => uns = true,
+                Tok::Kw(Kw::Func) => return (n, is_gen, free, uns),
+                _ => return (0, false, false, false),
+            }
+            n += 1;
+        }
+    }
+
     /// `[pub] func ...` inside a type body.
     fn body_method(&mut self, owner: &TypeExpr, methods: &mut Vec<Item>) -> PResult<bool> {
         let at = if self.is_kw(Kw::Pub) { 1 } else { 0 };
-        let is_unsafe = matches!(self.peek_at(at), Tok::Kw(Kw::Unsafe)) && matches!(self.peek_at(at + 1), Tok::Kw(Kw::Func));
-        let is_gen = matches!(self.peek_at(at), Tok::Ident(g) if g == "gen") && matches!(self.peek_at(at + 1), Tok::Kw(Kw::Func));
-        let checkfree = matches!(self.peek_at(at), Tok::Ident(g) if g == "checkfree") && matches!(self.peek_at(at + 1), Tok::Kw(Kw::Func));
-        let is_func = matches!(self.peek_at(at), Tok::Kw(Kw::Func)) || is_unsafe || is_gen || checkfree;
+        let (n, is_gen, checkfree, is_unsafe) = self.fn_mods_at(at);
+        let is_func = matches!(self.peek_at(at), Tok::Kw(Kw::Func)) || n > 0;
         if !is_func {
             return Ok(false);
         }
         let lo = self.span();
         let is_pub = self.eat_kw(Kw::Pub);
-        if is_unsafe || is_gen || checkfree {
+        for _ in 0..n {
             self.bump();
         }
         let mut f = self.func_decl(Some(owner))?;
@@ -1016,7 +1031,7 @@ impl Parser {
         if self.eat_p("->") {
             return Ok(Some(self.ty()?));
         }
-        if self.is_p("{") || matches!(self.peek(), Tok::Newline | Tok::Eof) || self.is_kw(Kw::Where) || self.is_p("}") || self.is_p(";") || self.is_p(")") || self.is_p(",") || self.is_p("=>") || self.is_p("]") || self.is_p("=") {
+        if self.is_p("{") || matches!(self.peek(), Tok::Newline | Tok::Eof) || matches!(self.peek(), Tok::Ident(s) if s == "requires") || self.is_kw(Kw::Where) || self.is_p("}") || self.is_p(";") || self.is_p(")") || self.is_p(",") || self.is_p("=>") || self.is_p("]") || self.is_p("=") {
             return Ok(None);
         }
         if self.type_starts() {

@@ -5,7 +5,7 @@ use crate::ast::{TypeExpr, TypeExprKind, self, Expr, ExprKind, Mode, Stmt, StmtK
 use crate::diag::{Diag, Span};
 use crate::tir::*;
 use crate::types::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 pub struct Frame {
@@ -15,6 +15,8 @@ pub struct Frame {
     saved_loops: Vec<(Option<String>, u32)>,
     saved_yields: Option<(YieldKind, bool)>,
     saved_gen: Option<Ty>,
+    /// The body of a `for` loop over a generator or a type's `each`.
+    loop_body: bool,
 }
 
 pub struct FnCx {
@@ -49,6 +51,12 @@ pub struct FnCx {
     pub call_owner: Option<Ty>,
     /// The next closure checked is the body of a push-style `for` loop.
     pub loop_body_next: Option<(u32, Option<String>)>,
+    /// The body (by address) of the closure that is that loop body: other
+    /// closures checked meanwhile (a generator's closure arguments) are not.
+    pub loop_body_of: usize,
+    /// The elements of loops over generators and `each` (their bodies'
+    /// parameters), for messages.
+    pub loop_elems: HashSet<LocalId>,
     /// Inside `defer` / `errdefer`: the deferred code can't leave the function.
     /// An ordinary closure starts over at 0; a loop body doesn't.
     pub defer_depth: u32,
@@ -154,6 +162,8 @@ impl FnCx {
             locked: vec![],
             call_owner: None,
             loop_body_next: None,
+            loop_body_of: 0,
+            loop_elems: HashSet::new(),
             lazy_loops: vec![],
             defer_depth: 0,
             shadow_ok: None,
@@ -215,12 +225,13 @@ impl Checker {
         for ci in 0..self.prog.consts.len() {
             self.ensure_const(ci, None);
         }
+        // package-level values (their types may be inferred), checked when
+        // first used, here or by the field defaults
+        self.global_state = vec![0; self.prog.globals.len()];
         // struct field defaults
         for d in 0..self.prog.types.len() {
             self.check_defaults(d as DefId);
         }
-        // package-level values (their types may be inferred)
-        self.global_state = vec![0; self.prog.globals.len()];
         for gi in 0..self.prog.globals.len() {
             self.ensure_global(gi, None);
         }
@@ -483,6 +494,11 @@ impl Checker {
         let req_block;
         let body = match decl.and_then(|d| d.requires.as_ref()) {
             Some(r) => {
+                // a condition that only reads: no `try`, `return`, `yield`,
+                // blocks, `&` borrows or tasks
+                if let Some(bad) = requires_bad(r) {
+                    self.diags.push(Diag::new(bad.span, "`requires` takes a condition that only reads: no `try`, `catch`, blocks, `if` or `match`, `&` borrows, closures or tasks").note(None, "it runs before the body, which may rely on it: write it with `&&`, `||`, `!`, comparisons and calls"));
+                }
                 let sp = r.span;
                 let not = Expr { kind: ExprKind::Unary("!", Box::new(r.clone())), span: sp };
                 let msg = Expr { kind: ExprKind::Str(format!("precondition of `{}` failed", fd.name)), span: sp };
@@ -833,6 +849,7 @@ impl Checker {
                 let (owned, mutable, what) = match l.kind {
                     LocalKind::Let => (true, false, "variable"),
                     LocalKind::Var => (true, true, "variable"),
+                    LocalKind::Param(Mode::Borrow) if cx.loop_elems.contains(id) => (false, false, "the loop element"),
                     LocalKind::Param(Mode::Borrow) => (false, false, "borrowed parameter"),
                     LocalKind::Param(Mode::Inout) => (false, true, "inout parameter"),
                     LocalKind::Param(Mode::Sink) => (true, true, "parameter"),
@@ -1478,7 +1495,7 @@ impl Checker {
                     return None;
                 };
                 let _ = body;
-                let call = Expr { kind: ExprKind::Call(Box::new(Expr { kind: ExprKind::Ident("__body".into()), span: sp }), vec![v.clone()]), span: sp };
+                let call = Expr { kind: ExprKind::Call(Box::new(Expr { kind: ExprKind::Ident(super::GEN_BODY.into()), span: sp }), vec![v.clone()]), span: sp };
                 let brk = Expr { kind: ExprKind::Field(Box::new(Expr { kind: ExprKind::Ident("Flow".into()), span: sp }), "Break".into(), sp), span: sp };
                 let cond = Expr { kind: ExprKind::Binary("==", Box::new(call), Box::new(brk)), span: sp };
                 let ret = Stmt { kind: StmtKind::Return(None), span: sp };
@@ -1981,9 +1998,14 @@ impl Checker {
                 params.push(ast::ClosureParam { name: s2.0.clone(), mode: Mode::Borrow, ty: None, span: s2.1 });
             }
             let closure = Expr { kind: ExprKind::Closure { params, ret: None, body: Box::new(Expr { kind: ExprKind::Block(body.clone()), span: body.span }) }, span: body.span };
+            // (a loop inside the call's other arguments has its own)
+            let saved = (cx.loop_body_next.take(), cx.loop_body_of);
             cx.loop_body_next = Some((id, label));
-            let call = self.method_call_on(cx, it, each, iter.span, None, &[closure], sp, None);
+            let closure = [closure];
+            cx.loop_body_of = closure_body_addr(&closure[0]);
+            let call = self.method_call_on(cx, it, each, iter.span, None, &closure, sp, None);
             let took = cx.loop_body_next.take().is_none();
+            (cx.loop_body_next, cx.loop_body_of) = saved;
             if let TK::Call { args, .. } = &call.kind {
                 let ok = took && matches!(args.last(), Some(TArg { e: TExpr { kind: TK::Closure(c), .. }, mode: ArgMode::Borrow }) if c.loop_body == Some(id));
                 if !ok {
@@ -2055,7 +2077,9 @@ impl Checker {
         let closure = Expr { kind: ExprKind::Closure { params, ret: None, body: Box::new(Expr { kind: ExprKind::Block(body.clone()), span: body.span }) }, span: body.span };
         let mut all = args.clone();
         all.push(closure);
+        let saved = (cx.loop_body_next.take(), cx.loop_body_of);
         cx.loop_body_next = Some((id, label));
+        cx.loop_body_of = all.last().map(closure_body_addr).unwrap_or(0);
         cx.gen_call_ok = true;
         let call = match g {
             G::Func(f, targs) => self.call_fn(cx, f, targs, None, &all, sp, None),
@@ -2065,7 +2089,7 @@ impl Checker {
             }
         };
         cx.gen_call_ok = false;
-        cx.loop_body_next = None;
+        (cx.loop_body_next, cx.loop_body_of) = saved;
         if !matches!(call.kind, TK::Call { .. }) {
             return Some(None);
         }
@@ -2777,6 +2801,10 @@ impl Checker {
         };
         if targs.len() != fd.tparams.len() {
             self.err(sp, format!("`{}` expects {} type argument(s)", fd.name, fd.tparams.len()));
+            return TExpr::error(sp);
+        }
+        if fd.gen_of.is_some() {
+            self.err(sp, format!("`{}` is a generator, which isn't a value: iterate over what it yields with `for x in {}(...)`", fd.name, fd.name));
             return TExpr::error(sp);
         }
         let s: HashMap<TParamId, Ty> = fd.tparams.iter().copied().zip(targs.iter().cloned()).collect();
@@ -3821,7 +3849,8 @@ impl Checker {
                 return TExpr::error(sp);
             }
         }
-        let loop_body = cx.loop_body_next.take();
+        // (only the loop body itself, not a closure checked while its call is)
+        let loop_body = if cx.loop_body_of == body as *const Expr as usize { cx.loop_body_next.take() } else { None };
         let saved_defer = cx.defer_depth;
         if loop_body.is_none() {
             cx.defer_depth = 0;
@@ -3839,12 +3868,12 @@ impl Checker {
         if let Some((lid, label)) = &loop_body {
             // a loop body: outer loops stay reachable and `return` / `try`
             // keep referring to the enclosing function
-            cx.frames.push(Frame { depth, captures: vec![], saved_ret, saved_loops: cx.loops.clone(), saved_yields: cx.yields, saved_gen: None });
+            cx.frames.push(Frame { depth, captures: vec![], saved_ret, saved_loops: cx.loops.clone(), saved_yields: cx.yields, saved_gen: None, loop_body: true });
             cx.loops.push((label.clone(), *lid));
         } else {
             // (a `yield` in an ordinary closure would yield from the closure)
             let g = cx.gen_elem.take().map(|g| g.0);
-            cx.frames.push(Frame { depth, captures: vec![], saved_ret, saved_loops: std::mem::take(&mut cx.loops), saved_yields: cx.yields, saved_gen: g });
+            cx.frames.push(Frame { depth, captures: vec![], saved_ret, saved_loops: std::mem::take(&mut cx.loops), saved_yields: cx.yields, saved_gen: g, loop_body: false });
             cx.ret = ret_ty.clone();
         }
         cx.yields = None;
@@ -3879,6 +3908,9 @@ impl Checker {
             };
             let mode = if let Some(f) = &ef { f.params[i].0 } else { mode };
             let id = self.declare(cx, &p.name, t.clone(), LocalKind::Param(mode), p.span, true);
+            if loop_body.is_some() {
+                cx.loop_elems.insert(id);
+            }
             ps.push(id);
             pty.push((mode, t));
         }
@@ -3940,7 +3972,7 @@ impl Checker {
         cx.loops = fr.saved_loops;
         cx.yields = fr.saved_yields;
         if let Some(g) = fr.saved_gen {
-            let body = cx.scopes.iter().flatten().find(|(n, _)| n == "__body").map(|(_, id)| *id);
+            let body = cx.scopes.iter().flatten().find(|(n, _)| n == super::GEN_BODY).map(|(_, id)| *id);
             if let Some(b) = body {
                 cx.gen_elem = Some((g, b));
             }
@@ -4947,7 +4979,12 @@ impl Checker {
     pub fn call_fn(&mut self, cx: &mut FnCx, fid: FuncId, explicit: Option<Vec<Ty>>, recv: Option<TExpr>, args: &[Expr], sp: Span, expect: Option<&Ty>) -> TExpr {
         let fd = self.prog.func(fid).clone();
         if fd.gen_of.is_some() && !std::mem::take(&mut cx.gen_call_ok) {
-            self.err(sp, format!("`{}` is a generator: iterate over what it yields with `for x in {}(...)`", fd.name, fd.name));
+            let d = if fd.recv.is_some() {
+                Diag::new(sp, format!("`{}` is a generator method: iterate over what it yields with `for x in v.{}(...)`, called on a variable", fd.name, fd.name)).note(None, "a `for` loop over a generator takes a call of a function or of a variable's method, without type arguments: bind the receiver to a variable first")
+            } else {
+                Diag::new(sp, format!("`{}` is a generator: iterate over what it yields with `for x in {}(...)`", fd.name, fd.name)).note(None, "a `for` loop over a generator takes the call itself, without type arguments (they are inferred)")
+            };
+            self.diags.push(d);
             return TExpr::error(sp);
         }
         if fd.kind == FuncKind::Test {
@@ -5538,7 +5575,12 @@ impl Checker {
             return TExpr::error(sp);
         };
         if ts.depth != cx.depth() {
-            self.diags.push(Diag::new(sp, "this `go` is inside a closure, but its `scope` is outside it").note(None, "start a `scope { }` inside the closure, or pass the scope in and call `s.go(() => ...)`"));
+            let d = if cx.frames.last().is_some_and(|f| f.loop_body) {
+                Diag::new(sp, "this `go` is in the body of a loop over a generator (or a type's `each`), which runs once per value as a function of its own, but its `scope` is outside the loop").note(None, "start a `scope { }` inside the loop body, or collect the values first and start the tasks in a plain `for`")
+            } else {
+                Diag::new(sp, "this `go` is inside a closure, but its `scope` is outside it").note(None, "start a `scope { }` inside the closure, or pass the scope in and call `s.go(() => ...)`")
+            };
+            self.diags.push(d);
             return TExpr::error(sp);
         }
         let Some((pre, closure)) = self.task_closure_ast(cx, inner) else {
@@ -6232,4 +6274,34 @@ fn error_only(fd: &FuncDef, p: TParamId) -> bool {
         ok = ok && walk(&r.ty, p, &mut seen);
     }
     ok && seen && !fd.ret_of.is_some()
+}
+
+/// The address of a closure expression's body, which identifies it while
+/// its AST is being checked.
+fn closure_body_addr(e: &Expr) -> usize {
+    match &e.kind {
+        ExprKind::Closure { body, .. } => &**body as *const Expr as usize,
+        _ => 0,
+    }
+}
+
+/// The first part of a `requires` clause that does more than read.
+fn requires_bad<'a>(e: &'a Expr) -> Option<&'a Expr> {
+    let ok = |x: &'a Expr| requires_bad(x);
+    match &e.kind {
+        ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Str(_) | ExprKind::Char(_) | ExprKind::Bool(_) | ExprKind::None | ExprKind::Ident(_) | ExprKind::DotVariant(_) | ExprKind::TypeExpr(_) => None,
+        ExprKind::Field(b, ..) | ExprKind::OptField(b, _) | ExprKind::TypeArgs(b, _) | ExprKind::Unary(_, b) => ok(b),
+        ExprKind::Index(b, xs) | ExprKind::Call(b, xs) => ok(b).or_else(|| xs.iter().find_map(ok)),
+        ExprKind::Slice(b, lo, hi) => ok(b).or_else(|| lo.as_deref().and_then(ok)).or_else(|| hi.as_deref().and_then(ok)),
+        ExprKind::Binary(_, l, r) | ExprKind::Coalesce(l, r) => ok(l).or_else(|| ok(r)),
+        ExprKind::Range { lo, hi, .. } => ok(lo).or_else(|| ok(hi)),
+        ExprKind::Interp(parts) => parts.iter().find_map(|p| match p {
+            ast::InterpPart::Expr(x, ..) => ok(x),
+            ast::InterpPart::Lit(_) => None,
+        }),
+        ExprKind::Tuple(xs) | ExprKind::VecLit(xs) => xs.iter().find_map(ok),
+        ExprKind::MapLit(kv) => kv.iter().find_map(|(k, v)| ok(k).or_else(|| ok(v))),
+        ExprKind::StructLit { ty, fields, positional, kv } => ok(ty).or_else(|| fields.iter().find_map(|f| ok(&f.2))).or_else(|| positional.iter().find_map(ok)).or_else(|| kv.iter().find_map(|(k, v)| ok(k).or_else(|| ok(v)))),
+        _ => Some(e),
+    }
 }

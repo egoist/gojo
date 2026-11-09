@@ -1417,7 +1417,7 @@ impl<'a> Bc<'a> {
         let name = l.name.clone();
         if self.in_closure && !self.decl_depth.contains_key(&v) {
             if !srcs.is_empty() && self.in_each_body {
-                self.err(Diag::new(sp, format!("`{}` can't keep a view of a loop element past the iteration", name)).note(None, "this loop runs through the type's `each` method, which may pass the body something that only lives for one call; store an owned copy (`.toString()` / `.clone()`), or iterate with `cursor` / `next`"));
+                self.err(Diag::new(sp, format!("`{}` can't keep a view of a loop element past the iteration", name)).note(None, "this loop runs through a generator or the type's `each` method, which may pass the body something that only lives for one call; store an owned copy (`.toString()` / `.clone()`)"));
             } else if !srcs.is_empty() {
                 self.err(Diag::new(sp, format!("a closure cannot store a borrowed view in the captured variable `{}`", name)).note(None, "the function that owns the variable couldn't see what it borrows; return the view instead, or store an owned copy"));
             }
@@ -1701,6 +1701,17 @@ impl<'a> Bc<'a> {
                 if let Some(e) = e {
                     self.expr(st, e);
                     if self.view_ret {
+                        // from the body of a loop run by `each` or a
+                        // generator: the element lives for one call of the
+                        // body, so a view of it can't leave the function
+                        if self.in_each_body {
+                            if let Ok(srcs) = self.view_sources(e) {
+                                if let Some((p, _)) = srcs.iter().find(|(p, _)| matches!(self.tf.locals[p.0 as usize].kind, LocalKind::Param(_)) && self.decl_depth.contains_key(&p.0)) {
+                                    let n = self.tf.locals[p.0 as usize].name.clone();
+                                    self.err(Diag::new(e.span, format!("can't return a view of the loop element `{}`", n)).note(None, "this loop runs through a generator or the type's `each` method, which may pass the body something that only lives for one call; return an owned copy (`.toString()` / `.clone()`)"));
+                                }
+                            }
+                        }
                         self.check_view_return(e, *sp);
                         self.note_returned(e);
                         // the returned view still points into its sources

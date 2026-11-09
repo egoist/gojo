@@ -1,0 +1,20 @@
+// Field defaults may use package-level values: each is computed where the
+// value is built.
+let T = [1, 2, 3]
+let N = 5
+let G = "gee".toString()
+
+struct S {
+    a: int = T[0]
+    m: int = N + 1
+    n: int = N
+    s: String = G.clone()
+    l: int = T.len() * N
+}
+
+fn main() {
+    let s = S{}
+    println(s.a, s.m, s.n, s.s, s.l)
+    let t = S{a: 9}
+    println(t.a, t.m)
+}

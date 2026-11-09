@@ -17,6 +17,37 @@ The sources are:
 
 "Status" lines say what the source says about how far each thing has got. Everything under **For Gojo** is a proposal, not a fact.
 
+## Status (Nov 10, 2026)
+
+What the round of work that followed this note did with each proposal, in the suggested order. Each language change got tests that try to get around it, and the borrow-checker ones got an adversarial review whose holes became `tests/errors/` cases.
+
+| Proposal | Status | Where |
+| --- | --- | --- |
+| P1 must-consume types | Done: `linear struct`/`linear enum`, `[T: any]`, guarded `defer` | spec 5.7, `src/linear.rs` |
+| P5 error return traces | Done (debug builds) | spec 8 |
+| P5 `check --json` with fixes, `gojo spec` | Done; `docs/brief.md` is the page `gojo spec` prints | README (tools) |
+| P6 error-polymorphic closures | Done: an unconstrained error type is `never`, `T ! never` is `T`; `task.tryMap` folded into `task.map` | spec 8 |
+| P6 mode-polymorphic projections | Not done: a receiver is written without `&`, so `ref self` would have to infer the mode from how the result is used, and a reader (or agent) could no longer tell from a call whether it writes | — |
+| P7 `restrict` on `inout` | Measured, not kept: the machine code of every benchmark was identical (after inlining the C compiler already knows) | — |
+| P7 task stack offsets | Measured, not kept: no change on the 100k-chain benchmark | — |
+| P2 view collections | Done, with two review rounds | spec 5.4 |
+| P3 field reflection | Done: `static for`, `x.[f]`, `static T{}`, `static if`. `json` stays compiler-generated: reflection has no enum variants yet, which a library encoder needs | spec 9.1 |
+| P4 generators | Done: `gen fn`, `yield` to a `for` loop (the frame stays on the stack, so a generator is consumed by a loop, not stored) | spec 7.3 |
+| P5 `requires`, `checkfree`, `gojo claims` | Done | spec 14 |
+| P7 SIMD | Done as a library: `std/simd` (`Simd[T, N]`, `Mask[N]`), lane-wise loops the C compiler vectorizes | spec 12 |
+| P9 `[authority]` | Done, checked against calls rather than imports (so `std/os` didn't need splitting); `gojo authority` reports the inferred set | spec 2.1 |
+| P10 simulated network and disk | Done: in-memory TCP/UDP under `gojo test`, `--faults` for resets, refused dials, lost datagrams and disk errors. Losing writes that weren't `fsync`ed is not modelled: there is no `fsync` yet | spec 10.8 |
+| P7 reuse on last-use frees | Done for boxes: a box emptied by a move and the next box of its type in the same block share an allocation (0.53 s → 0.39 s on a tree rewrite). `Rc` reset/reuse is not done | spec 14, `reuse_boxes` |
+| Inferred isolation at `go` | Done, within one function: a non-`send` value moved into a task is accepted when it is built from `send` values and nothing else takes a reference to it | spec 10.5, `src/check/isolation.rs` |
+| P8a branded ids | Not done: `g.Id` is a type that depends on a variable. Signatures (`fn bfs(g: Arena[Node], from: g.Id)`) and node types (`Vec[g.Id]` in a struct declared outside `g`'s scope) need path-dependent or rank-2 types, a type-system extension that reaches every signature. The measured gain elsewhere (1.08–1.17×) doesn't pay for that yet | — |
+| P8b region references | Not done: depends on (a), and is the least proven item on the list | — |
+| `inout` fields in view structs | Not done: view structs are copied, and a struct holding an exclusive borrow must not be. It needs move-only views and exclusive sources in the borrow checker, a change the size of view collections that should get its own review round | — |
+| Edits that keep a view's target in place | Not done: research only, as noted below | — |
+| Non-local `return` from closures | Rejected: `return` inside `x => { ... }` would mean the enclosing function for some calls and the closure for others, depending on whether the callee lets it escape, which a reader can't see at the call | — |
+| Building values where they end up | Not done: the C compilers already construct returned structs in the caller's slot (sret), and `v.push(f())` copies one value; nothing measured large enough to justify a guarantee | — |
+| A cheaper context switch | Not done: tasks park inside runtime functions (channel, lock and timer code), not at points in generated code, so the clobber-list trick has no live-register set to exploit there | — |
+| `SmallString`, `PackedSeq` | Not done: a `copy struct` can't lend a `str` of bytes it holds inline (spec 5.4), so a library `SmallString` would need a non-copy representation; `PackedSeq[E]` needs enum variants in reflection | — |
+
 ## Gojo's limits, by kind
 
 | # | Limit | By design? | Where it shows |
