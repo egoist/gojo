@@ -1002,6 +1002,8 @@ void *gojo_dlsym(const char *lib, const char *name) {
 
 // File I/O blocks its thread: give the CPU slot to another worker meanwhile.
 int64_t gojo_os___readFile(gojo_str path, gojo_vec *out) {
+    int f = gojo_sim_disk_fault(-1, false);
+    if (f) return f;
     gojo_blocking_enter();
     int64_t r = os_readFile_impl(path, out);
     gojo_ffi_exit();
@@ -1009,6 +1011,13 @@ int64_t gojo_os___readFile(gojo_str path, gojo_vec *out) {
 }
 
 int64_t gojo_os___writeFile(gojo_str path, gojo_slice data) {
+    int f = gojo_sim_disk_fault(-1, true);
+    if (f) {
+        // a failed write may leave part of the file
+        gojo_slice part = { data.ptr, gojo_sim_short_read(data.len + 1) - 1 };
+        os_writeFile_impl(path, part);
+        return f;
+    }
     gojo_blocking_enter();
     int64_t r = os_writeFile_impl(path, data);
     gojo_ffi_exit();

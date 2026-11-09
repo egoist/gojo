@@ -13,6 +13,10 @@ scope {
 }
 ```
 
+Under `gojo test` the network is simulated: sockets in memory, every
+address this machine, delays and short reads decided by the test's seed,
+and with `--faults` resets and refused dials too.
+
 **Types:** [`type Error`](#type-error), [`struct Listener`](#struct-listener), [`struct Conn`](#struct-conn), [`struct UdpSocket`](#struct-udpsocket)
 
 **Functions:** [`listen`](#listen), [`dial`](#dial), [`listenUdp`](#listenudp), [`dialUdp`](#dialudp), [`lookup`](#lookup)

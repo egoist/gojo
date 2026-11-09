@@ -718,6 +718,10 @@ static bool is_ip_literal(const char *h) {
 // certificate must be for (and the SNI); `ca`: a PEM file to trust instead of
 // the system's roots ("" for those); `verify` false: no checks at all.
 int64_t gojo_tls___client(int64_t fd, gojo_str name, gojo_str ca, bool verify, gojo_string *msg) {
+    if (gojo_simnet_fd(fd)) {
+        gojo_fmt_cstr(msg, "TLS doesn't run over the simulated network of `gojo test` (`--real` uses the real one)");
+        return 0;
+    }
     if (!ossl_ready(msg)) return 0;
     char host[256], cafile[4096];
     if (name.len >= (int64_t)sizeof host || ca.len >= (int64_t)sizeof cafile || (name.len && memchr(name.ptr, 0, (size_t)name.len)) || (ca.len && memchr(ca.ptr, 0, (size_t)ca.len))) {
@@ -823,6 +827,10 @@ void gojo_tls___freeCtx(int64_t ctx) {
 // A server connection over an accepted `fd`; the handshake happens on the
 // first read or write (or `handshake`).
 int64_t gojo_tls___server(int64_t ctx, int64_t fd, gojo_string *msg) {
+    if (gojo_simnet_fd(fd)) {
+        gojo_fmt_cstr(msg, "TLS doesn't run over the simulated network of `gojo test` (`--real` uses the real one)");
+        return 0;
+    }
     void *ssl = ossl.ssl_new((void *)(intptr_t)ctx);
     if (!ssl) {
         ossl_fail(msg, "cannot create a TLS connection");

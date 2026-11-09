@@ -868,6 +868,9 @@ Tests run on a simulated scheduler: one thread, a virtual clock, and an
 interleaving chosen by a seed, so a test does the same thing every time.
 `gojo test --explore 1000` tries a thousand interleavings and, if one
 fails, prints the seed that replays it: `gojo test --seed 966961`.
+The network is simulated as well (in memory, with delays and short reads
+from the seed), and `gojo test --faults` adds resets, refused connections
+and disk errors, so code that retries can be tested.
 
 ## Packages and the standard library
 

@@ -62,6 +62,11 @@ int64_t gojo_os___open(gojo_str path, int64_t mode) {
 
 int64_t gojo_os___read(int64_t fd, gojo_vec *buf, int64_t max) {
     if (max <= 0) return 0;
+    if (gojo_sim_faults) {
+        int f = gojo_sim_disk_fault(fd, false);
+        if (f) return -(int64_t)f;
+        if (fd > 2) max = gojo_sim_short_read(max);
+    }
     gojo_vec_reserve(buf, max, 1);
     int64_t r = file_io(false, (int)fd, (uint8_t *)buf->ptr + buf->len, (size_t)max);
     if (r != FILE_BLOCK) {
@@ -81,6 +86,10 @@ int64_t gojo_os___read(int64_t fd, gojo_vec *buf, int64_t max) {
 }
 
 int64_t gojo_os___write(int64_t fd, gojo_slice data) {
+    if (gojo_sim_faults) {
+        int f = gojo_sim_disk_fault(fd, true);
+        if (f) return -(int64_t)f;
+    }
     // the standard streams go through the same buffer as print, in order
     if (fd == 1 || fd == 2) {
         gojo_ffi_enter();

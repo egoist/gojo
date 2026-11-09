@@ -519,6 +519,38 @@ fn simulated_scheduler() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// `gojo test` simulates the network: in memory, delays and short reads from
+/// the seed; `--faults` adds resets, refused dials, lost datagrams and disk
+/// errors, and a failing seed replays.
+#[test]
+fn simulated_network() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/simnet");
+    let net = Command::new(gojo()).arg("test").arg("--explore").arg("100").arg(dir.join("net.gojo")).output().unwrap();
+    let e = String::from_utf8_lossy(&net.stderr);
+    assert!(net.status.success() && e.contains("7 passed, 0 failed") && e.contains("ok   http (100 schedules"), "{}", e);
+    let faults = Command::new(gojo()).arg("test").arg("--faults").arg("--explore").arg("200").arg(dir.join("faults.gojo")).output().unwrap();
+    let e = String::from_utf8_lossy(&faults.stderr);
+    assert!(e.contains("ok   retries survive faults (200 schedules") && e.contains("ok   disk retries (200 schedules") && e.contains("2 passed, 1 failed"), "{}", e);
+    let seed = e.split("FAIL naive client (seed ").nth(1).and_then(|r| r.split(';').next()).unwrap_or_else(|| panic!("no seed printed:\n{}", e)).to_string();
+    assert!(e.contains(&format!("rerun it with `gojo test --seed {} --faults`", seed)), "{}", e);
+    let again = Command::new(gojo()).arg("test").arg("--faults").arg("--seed").arg(&seed).arg(dir.join("faults.gojo")).output().unwrap();
+    assert!(String::from_utf8_lossy(&again.stderr).contains(&format!("FAIL naive client (seed {};", seed)), "{}", String::from_utf8_lossy(&again.stderr));
+    // without faults, the same seed passes
+    let calm = Command::new(gojo()).arg("test").arg("--seed").arg(&seed).arg(dir.join("faults.gojo")).output().unwrap();
+    assert!(calm.status.success(), "{}", String::from_utf8_lossy(&calm.stderr));
+    // two tasks reading from each other: a deadlock, reported
+    let tmp = std::env::temp_dir().join(format!("gojo_simnet_{}", std::process::id()));
+    std::fs::create_dir_all(&tmp).unwrap();
+    let f = tmp.join("deadlock.gojo");
+    std::fs::write(&f, "use std/{fmt, net}\n\ntest \"both read\" {\n    let ln = net.listen(\":0\") catch e { panic(e.message()) }\n    let c = net.dial(fmt.format(\":{}\", ln.port())) catch e { panic(e.message()) }\n    let s = ln.accept() catch e { panic(e.message()) }\n    scope {\n        go () => {\n            var b = Vec[byte]{}\n            _ = s.read(&b, 1)\n        }\n        var b = Vec[byte]{}\n        _ = c.read(&b, 1)\n    }\n}\n").unwrap();
+    let dl = Command::new(gojo()).arg("test").arg(&f).output().unwrap();
+    let e = String::from_utf8_lossy(&dl.stderr);
+    assert!(!dl.status.success() && e.contains("deadlock") && e.matches("waiting for the simulated network").count() == 2, "{}", e);
+    let run = Command::new(gojo()).arg("run").arg("--faults").arg(&f).output().unwrap();
+    assert_eq!(run.status.code(), Some(2));
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
 /// Parked stacks are put away and brought back at the same address, also
 /// while channels write values into them.
 #[test]
@@ -861,7 +893,7 @@ fn formatted() {
     }
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut paths = vec![];
-    for d in ["std", "examples", "bench/gojo", "tests/run", "tests/errors", "tests/panic", "tests/projects", "tests/packages", "tests/testblocks", "tests/unsafe", "tests/stdin", "tests/signals", "tests/ffi_pin", "tests/warnings", "tests/traces", "tests/json"] {
+    for d in ["std", "examples", "bench/gojo", "tests/run", "tests/errors", "tests/panic", "tests/projects", "tests/packages", "tests/testblocks", "tests/unsafe", "tests/stdin", "tests/signals", "tests/ffi_pin", "tests/warnings", "tests/traces", "tests/json", "tests/simnet"] {
         walk(&root.join(d), &mut paths);
     }
     let mut bad = vec![];

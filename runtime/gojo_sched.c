@@ -340,7 +340,7 @@ static void xsave_setup(void) {
 enum { WAIT_NONE = 0, WAIT_CANCELLABLE = 1, WAIT_DRAIN = 2 };
 enum { WAKE_NONE, WAKE_CANCEL, WAKE_CHAN, WAKE_TIMER, WAKE_IO, WAKE_TASK };
 enum { POST_NONE, POST_DEAD, POST_YIELD };
-enum { BLK_NONE, BLK_RECV, BLK_SEND, BLK_SELECT, BLK_LOCK, BLK_JOIN, BLK_SCOPE, BLK_SLEEP, BLK_IO, BLK_RWLOCK, BLK_FILE };
+enum { BLK_NONE, BLK_RECV, BLK_SEND, BLK_SELECT, BLK_LOCK, BLK_JOIN, BLK_SCOPE, BLK_SLEEP, BLK_IO, BLK_RWLOCK, BLK_FILE, BLK_SIMNET };
 
 typedef struct gojo_scope gojo_scope;
 
@@ -3664,7 +3664,459 @@ static int resolve(gojo_str addr, bool passive, struct addrinfo **out) {
     return resolve_as(addr, SOCK_STREAM, AF_UNSPEC, passive, out);
 }
 
+// ------------------------------------------------------------------ simulated network
+//
+// Under `gojo test`'s simulated scheduler, TCP and UDP don't reach the
+// operating system: sockets are in memory, every address is this machine,
+// and what happens is decided by the seed, like the interleaving of tasks.
+// Each write arrives after a random (virtual) delay, in order on its
+// connection; a read returns a random part of what has arrived, as TCP may;
+// datagrams may be reordered. With GOJO_FAULTS (`gojo test --faults`),
+// connections are also reset, dials refused and datagrams lost now and then.
+// A task waiting on a socket nobody will write to is part of a deadlock,
+// which the scheduler reports. Socket descriptors are SIMNET_FD and up.
+
+int gojo_simnet_on;
+int gojo_sim_faults;
+
+#define SIMNET_FD 0x40000000
+enum { SN_FREE, SN_LISTEN, SN_CONN, SN_UDP };
+
+typedef struct sn_seg {
+    struct sn_seg *next;
+    int64_t at;         // virtual time it arrives
+    int64_t len, off;
+    int from;           // udp: the sender's port
+    bool eof;           // conn: the peer won't write any more
+    uint8_t data[];
+} sn_seg;
+
+typedef struct sn_wait {
+    gojo_g *g;
+    uint64_t token;
+    struct sn_wait *next;
+} sn_wait;
+
+typedef struct {
+    int kind;
+    int port;
+    int peer;           // conn: the other end's index, -1 once it is gone
+    int dport;          // udp: the peer given to dialUdp
+    bool reset, wr_shut;
+    sn_seg *head, *tail;
+    sn_wait *waiters;
+} sn_sock;
+
+static sn_sock *s_sn;
+static int s_sn_len, s_sn_cap;
+static int s_sn_port = 40000;
+static int64_t s_sn_waiting;  // tasks parked on simulated sockets
+
+static bool sn_fd(int64_t fd) { return fd >= SIMNET_FD && fd < SIMNET_FD + s_sn_len && s_sn[fd - SIMNET_FD].kind != SN_FREE; }
+static sn_sock *sn_get(int64_t fd) { return &s_sn[fd - SIMNET_FD]; }
+
+// 1 in `n`, when faults are on.
+static bool sn_fault(int n) { return gojo_sim_faults && sim_rand() % (uint64_t)n == 0; }
+
+// A delay of up to 200 µs.
+static int64_t sn_delay(void) { return (int64_t)(sim_rand() % 200) * 1000; }
+
+static int sn_new(int kind, int port) {
+    int i = 0;
+    while (i < s_sn_len && s_sn[i].kind != SN_FREE) i++;
+    if (i == s_sn_len) {
+        if (s_sn_len == s_sn_cap) {
+            s_sn_cap = s_sn_cap ? s_sn_cap * 2 : 16;
+            s_sn = gojo_realloc(s_sn, (size_t)s_sn_cap * sizeof *s_sn);
+        }
+        s_sn_len++;
+    }
+    memset(&s_sn[i], 0, sizeof s_sn[i]);
+    s_sn[i].kind = kind;
+    s_sn[i].port = port;
+    s_sn[i].peer = -1;
+    return i;
+}
+
+// Whether a socket of `kind` (SN_FREE: any) has `port`.
+static bool sn_port_used(int kind, int port) {
+    for (int i = 0; i < s_sn_len; i++) {
+        if (s_sn[i].kind != SN_FREE && s_sn[i].port == port && (kind == SN_FREE || s_sn[i].kind == kind)) return true;
+    }
+    return false;
+}
+
+// A port no socket has, counting up from 40000.
+static int sn_free_port(void) {
+    for (;;) {
+        if (s_sn_port > 65535) s_sn_port = 40000;
+        int p = s_sn_port++;
+        if (!sn_port_used(SN_FREE, p)) return p;
+    }
+}
+
+static void sn_free_segs(sn_sock *s) {
+    for (sn_seg *seg = s->head; seg;) {
+        sn_seg *next = seg->next;
+        free(seg);
+        seg = next;
+    }
+    s->head = s->tail = NULL;
+}
+
+// The port of "host:port", when host is this machine: -EINVAL for a bad
+// address, -EHOSTUNREACH for another host (the simulated network has none).
+static int sn_parse(gojo_str addr, bool listening) {
+    char host[256], port[32];
+    if (!split_hostport(addr, host, sizeof host, port, sizeof port)) return -EINVAL;
+    bool local = !host[0] || strcmp(host, "localhost") == 0 || strncmp(host, "127.", 4) == 0 || strcmp(host, "::1") == 0 || strcmp(host, "::") == 0 || strcmp(host, "0.0.0.0") == 0;
+    if (!local) {
+        unsigned char b[16];
+        bool literal = inet_pton(AF_INET, host, b) == 1 || inet_pton(AF_INET6, host, b) == 1;
+        // listening on an address this machine doesn't have
+        return listening && literal ? -EADDRNOTAVAIL : -EHOSTUNREACH;
+    }
+    char *end;
+    long p = strtol(port, &end, 10);
+    if (!port[0] || *end || p < 0 || p > 65535) return -EINVAL;
+    return (int)p;
+}
+
+static void sn_push(sn_sock *s, sn_seg *seg, bool ordered) {
+    seg->next = NULL;
+    if (ordered) {
+        if (s->tail && seg->at < s->tail->at) seg->at = s->tail->at;
+        if (s->tail) s->tail->next = seg;
+        else s->head = seg;
+        s->tail = seg;
+        return;
+    }
+    // datagrams: by arrival time
+    sn_seg **p = &s->head;
+    while (*p && (*p)->at <= seg->at) p = &(*p)->next;
+    seg->next = *p;
+    *p = seg;
+    if (!seg->next) s->tail = seg;
+}
+
+static sn_seg *sn_seg_new(const void *data, int64_t len) {
+    sn_seg *seg = gojo_alloc(sizeof *seg + (size_t)len);
+    memset(seg, 0, sizeof *seg);
+    if (len) memcpy(seg->data, data, (size_t)len);
+    seg->len = len;
+    seg->at = gojo_sim_clock + sn_delay();
+    return seg;
+}
+
+static void sn_wake(sn_sock *s) {
+    while (s->waiters) {
+        sn_wait *w = s->waiters;
+        s->waiters = w->next;
+        if (wait_claim(w->g, w->token)) {
+            w->g->wake = WAKE_IO;
+            g_ready(w->g);
+        }
+    }
+}
+
+// Parks the task until the socket changes or something arrives. False:
+// cancelled.
+static bool sn_wait_on(int idx) {
+    gojo_g *g = cur_g();
+    if (scope_cancelled(g->scope)) return false;
+    sn_wait w;
+    w.g = g;
+    w.token = wait_begin(g);
+    w.next = s_sn[idx].waiters;
+    s_sn[idx].waiters = &w;
+    s_sn_waiting++;
+    blk(g, BLK_SIMNET, NULL);
+    wait_park(g, w.token);
+    unblk(g);
+    s_sn_waiting--;
+    // still listed when cancelled (the array may have moved meanwhile)
+    for (sn_wait **p = &s_sn[idx].waiters; *p; p = &(*p)->next) {
+        if (*p == &w) {
+            *p = w.next;
+            break;
+        }
+    }
+    return g->wake != WAKE_CANCEL;
+}
+
+// The time the next thing a parked task waits for arrives, or -1.
+static int64_t sn_next(void) {
+    int64_t next = -1;
+    if (!s_sn_waiting) return -1;
+    for (int i = 0; i < s_sn_len; i++) {
+        if (s_sn[i].waiters && s_sn[i].head && (next < 0 || s_sn[i].head->at < next)) next = s_sn[i].head->at;
+    }
+    return next;
+}
+
+// Wakes the tasks whose sockets have something by `now`.
+static void sn_tick(int64_t now) {
+    if (!s_sn_waiting) return;
+    for (int i = 0; i < s_sn_len; i++) {
+        if (s_sn[i].waiters && s_sn[i].head && s_sn[i].head->at <= now) sn_wake(&s_sn[i]);
+    }
+}
+
+static void sn_reset(int idx) {
+    sn_sock *s = &s_sn[idx];
+    s->reset = true;
+    sn_wake(s);
+    if (s->peer >= 0) {
+        s_sn[s->peer].reset = true;
+        sn_wake(&s_sn[s->peer]);
+    }
+}
+
+static int64_t sn_listen(gojo_str addr) {
+    int port = sn_parse(addr, true);
+    if (port < 0) return port;
+    if (port == 0) port = sn_free_port();
+    else if (sn_port_used(SN_LISTEN, port)) return -EADDRINUSE;
+    return SIMNET_FD + sn_new(SN_LISTEN, port);
+}
+
+static int64_t sn_connect(gojo_str addr) {
+    int port = sn_parse(addr, false);
+    if (port < 0) return port;
+    sim_point();
+    int l = -1;
+    for (int i = 0; i < s_sn_len; i++) {
+        if (s_sn[i].kind == SN_LISTEN && s_sn[i].port == port) l = i;
+    }
+    if (l < 0 || port == 0 || sn_fault(16)) return -ECONNREFUSED;
+    int c = sn_new(SN_CONN, sn_free_port());
+    int a = sn_new(SN_CONN, port);
+    s_sn[c].peer = a;
+    s_sn[a].peer = c;
+    // the listener's queue holds the accepted end, as a segment naming it
+    sn_seg *seg = sn_seg_new(NULL, 0);
+    seg->from = a;
+    sn_push(&s_sn[l], seg, true);
+    return SIMNET_FD + c;
+}
+
+static int64_t sn_accept(int64_t lfd) {
+    int l = (int)(lfd - SIMNET_FD);
+    for (;;) {
+        sn_sock *s = &s_sn[l];
+        if (s->kind != SN_LISTEN) return -EINVAL;
+        if (s->head && s->head->at <= gojo_sim_clock) {
+            sn_seg *seg = s->head;
+            s->head = seg->next;
+            if (!s->head) s->tail = NULL;
+            int a = seg->from;
+            free(seg);
+            return SIMNET_FD + a;
+        }
+        if (!sn_wait_on(l)) return -ECANCELED;
+    }
+}
+
+static int64_t sn_read(int64_t fd, gojo_vec *buf, int64_t max) {
+    int i = (int)(fd - SIMNET_FD);
+    if (max <= 0) return 0;
+    sim_point();
+    for (;;) {
+        sn_sock *s = &s_sn[i];
+        if (s->kind != SN_CONN) return -ENOTCONN;
+        if (s->reset) return -ECONNRESET;
+        if (s->head && s->head->at <= gojo_sim_clock) {
+            sn_seg *seg = s->head;
+            if (seg->eof) return 0;
+            if (sn_fault(64)) {
+                sn_reset(i);
+                return -ECONNRESET;
+            }
+            int64_t n = seg->len - seg->off;
+            if (n > max) n = max;
+            // part of it, as TCP may
+            if (n > 1 && sim_rand() % 2 == 0) n = 1 + (int64_t)(sim_rand() % (uint64_t)n);
+            gojo_vec_reserve(buf, n, 1);
+            memcpy((uint8_t *)buf->ptr + buf->len, seg->data + seg->off, (size_t)n);
+            buf->len += n;
+            seg->off += n;
+            if (seg->off == seg->len) {
+                s->head = seg->next;
+                if (!s->head) s->tail = NULL;
+                free(seg);
+            }
+            return n;
+        }
+        if (s->peer < 0 && !s->head) return 0;
+        if (!sn_wait_on(i)) return -ECANCELED;
+    }
+}
+
+static int64_t sn_write(int64_t fd, gojo_slice data) {
+    int i = (int)(fd - SIMNET_FD);
+    sim_point();
+    sn_sock *s = &s_sn[i];
+    if (s->kind != SN_CONN) return -ENOTCONN;
+    if (s->reset) return -ECONNRESET;
+    if (s->wr_shut || s->peer < 0) return -EPIPE;
+    if (sn_fault(64)) {
+        sn_reset(i);
+        return -ECONNRESET;
+    }
+    int64_t n = data.len;
+    // part of it, as a full socket buffer would
+    if (n > 1 && sim_rand() % 4 == 0) n = 1 + (int64_t)(sim_rand() % (uint64_t)n);
+    sn_push(&s_sn[s->peer], sn_seg_new(data.ptr, n), true);
+    return n;
+}
+
+static void sn_shutdown(int64_t fd) {
+    sn_sock *s = sn_get(fd);
+    if (s->kind != SN_CONN || s->wr_shut) return;
+    s->wr_shut = true;
+    if (s->peer >= 0) {
+        sn_seg *seg = sn_seg_new(NULL, 0);
+        seg->eof = true;
+        sn_push(&s_sn[s->peer], seg, true);
+    }
+}
+
+static void sn_close(int64_t fd) {
+    int i = (int)(fd - SIMNET_FD);
+    sn_sock *s = &s_sn[i];
+    if (s->kind == SN_CONN) {
+        sn_shutdown(fd);
+        if (s->peer >= 0) {
+            s_sn[s->peer].peer = -1;
+            sn_wake(&s_sn[s->peer]);
+        }
+    }
+    // connections nobody accepted: reset for whoever dialed them
+    for (sn_seg *seg = s->kind == SN_LISTEN ? s->head : NULL; seg; seg = seg->next) {
+        sn_sock *a = &s_sn[seg->from];
+        if (a->peer >= 0) {
+            s_sn[a->peer].reset = true;
+            s_sn[a->peer].peer = -1;
+            sn_wake(&s_sn[a->peer]);
+        }
+        sn_free_segs(a);
+        a->kind = SN_FREE;
+    }
+    sn_free_segs(s);
+    // (nobody waits on a socket being closed: closing is dropping it)
+    sn_wake(s);
+    s->kind = SN_FREE;
+}
+
+static int64_t sn_udp_open(gojo_str addr, bool dial) {
+    int port = sn_parse(addr, !dial);
+    if (port < 0) return port;
+    if (dial) {
+        if (port == 0) return -EINVAL;
+        int i = sn_new(SN_UDP, sn_free_port());
+        s_sn[i].dport = port;
+        return SIMNET_FD + i;
+    }
+    if (port == 0) port = sn_free_port();
+    else if (sn_port_used(SN_UDP, port)) return -EADDRINUSE;
+    return SIMNET_FD + sn_new(SN_UDP, port);
+}
+
+static int64_t sn_send_to(int64_t fd, gojo_slice data, gojo_str addr) {
+    sn_sock *s = sn_get(fd);
+    if (s->kind != SN_UDP) return -EINVAL;
+    int port = s->dport;
+    if (addr.len) port = sn_parse(addr, false);
+    else if (!port) return -EDESTADDRREQ;
+    if (port < 0) return port;
+    if (port == 0) return -EINVAL;
+    sim_point();
+    if (data.len > 65507) return -EMSGSIZE;
+    int from = s->port;
+    for (int i = 0; i < s_sn_len; i++) {
+        sn_sock *d = &s_sn[i];
+        if (d->kind != SN_UDP || d->port != port) continue;
+        // a dialed socket takes only its peer's datagrams
+        if (d->dport && d->dport != from) break;
+        if (sn_fault(16)) break;
+        sn_seg *seg = sn_seg_new(data.ptr, data.len);
+        seg->from = from;
+        sn_push(d, seg, false);
+        break;
+    }
+    return data.len;
+}
+
+static int64_t sn_recv_from(int64_t fd, gojo_vec *buf, int64_t max, gojo_string *from) {
+    int i = (int)(fd - SIMNET_FD);
+    if (max <= 0) max = 1;
+    sim_point();
+    for (;;) {
+        sn_sock *s = &s_sn[i];
+        if (s->kind != SN_UDP) return -EINVAL;
+        if (s->head && s->head->at <= gojo_sim_clock) {
+            sn_seg *seg = s->head;
+            s->head = seg->next;
+            if (!s->head) s->tail = NULL;
+            int64_t n = seg->len < max ? seg->len : max;
+            gojo_vec_reserve(buf, n, 1);
+            memcpy((uint8_t *)buf->ptr + buf->len, seg->data, (size_t)n);
+            buf->len += n;
+            if (from) {
+                char a[32];
+                int k = snprintf(a, sizeof a, "127.0.0.1:%d", seg->from);
+                gojo_str str = { (const uint8_t *)a, k };
+                gojo_string_drop(from);
+                *from = gojo_string_from(str);
+            }
+            free(seg);
+            return n;
+        }
+        if (!sn_wait_on(i)) return -ECANCELED;
+    }
+}
+
+// Names: this machine only.
+static int64_t sn_lookup(gojo_str host, gojo_vec *out) {
+    char h[256];
+    if (host.len == 0 || host.len >= (int64_t)sizeof h || memchr(host.ptr, 0, (size_t)host.len)) return 1;
+    memcpy(h, host.ptr, (size_t)host.len);
+    h[host.len] = 0;
+    unsigned char b[16];
+    const char *ips[2] = { NULL, NULL };
+    if (inet_pton(AF_INET, h, b) == 1 || inet_pton(AF_INET6, h, b) == 1) ips[0] = h;
+    else if (strcmp(h, "localhost") == 0) {
+        ips[0] = "127.0.0.1";
+        ips[1] = "::1";
+    } else return 1;
+    for (int k = 0; k < 2 && ips[k]; k++) {
+        gojo_str s = { (const uint8_t *)ips[k], (int64_t)strlen(ips[k]) };
+        gojo_vec_reserve(out, 1, sizeof(gojo_string));
+        ((gojo_string *)out->ptr)[out->len++] = gojo_string_from(s);
+    }
+    return 0;
+}
+
+// For tls: whether `fd` is a simulated socket, which it can't use.
+bool gojo_simnet_fd(int64_t fd) { return gojo_simnet_on && sn_fd(fd); }
+
+// Disk faults under `gojo test --faults`: an error for this read or write of
+// a file (EIO, or ENOSPC for a write), or 0. The standard streams are left alone.
+int gojo_sim_disk_fault(int64_t fd, bool write) {
+    if (!gojo_sim_faults || (fd >= 0 && fd <= 2)) return 0;
+    if (write) return sim_rand() % 32 == 0 ? (sim_rand() % 2 ? EIO : ENOSPC) : 0;
+    return sim_rand() % 64 == 0 ? EIO : 0;
+}
+
+// And a file read that returns less than it could: how many bytes of `n`.
+int64_t gojo_sim_short_read(int64_t n) {
+    if (!gojo_sim_faults || n <= 1 || sim_rand() % 8) return n;
+    return 1 + (int64_t)(sim_rand() % (uint64_t)n);
+}
+
+
 int64_t gojo_net___listen(gojo_str addr) {
+    if (gojo_simnet_on) return sn_listen(addr);
     struct addrinfo *ai;
     int r = resolve(addr, true, &ai);
     if (r) return -r;
@@ -3690,6 +4142,7 @@ int64_t gojo_net___listen(gojo_str addr) {
 }
 
 int64_t gojo_net___connect(gojo_str addr) {
+    if (gojo_simnet_on) return sn_connect(addr);
     struct addrinfo *ai;
     int r = resolve(addr, false, &ai);
     if (r) return -r;
@@ -3724,6 +4177,7 @@ int64_t gojo_net___connect(gojo_str addr) {
 }
 
 int64_t gojo_net___accept(int64_t lfd) {
+    if (gojo_simnet_on) return sn_fd(lfd) ? sn_accept(lfd) : -EBADF;
     for (;;) {
         int fd = accept((int)lfd, NULL, NULL);
         if (fd >= 0) {
@@ -3737,6 +4191,7 @@ int64_t gojo_net___accept(int64_t lfd) {
 }
 
 int64_t gojo_net___read(int64_t fd, gojo_vec *buf, int64_t max) {
+    if (gojo_simnet_on) return sn_fd(fd) ? sn_read(fd, buf, max) : -EBADF;
     if (max <= 0) return 0;
     gojo_vec_reserve(buf, max, 1);
     for (;;) {
@@ -3752,6 +4207,7 @@ int64_t gojo_net___read(int64_t fd, gojo_vec *buf, int64_t max) {
 }
 
 int64_t gojo_net___write(int64_t fd, gojo_slice data) {
+    if (gojo_simnet_on) return sn_fd(fd) ? sn_write(fd, data) : -EBADF;
 #if defined(MSG_NOSIGNAL)
     int flags = MSG_NOSIGNAL;
 #else
@@ -3766,11 +4222,24 @@ int64_t gojo_net___write(int64_t fd, gojo_slice data) {
     }
 }
 
-void gojo_net___close(int64_t fd) { close((int)fd); }
+void gojo_net___close(int64_t fd) {
+    if (gojo_simnet_on) {
+        if (sn_fd(fd)) sn_close(fd);
+        return;
+    }
+    close((int)fd);
+}
 
-void gojo_net___shutdownWrite(int64_t fd) { shutdown((int)fd, SHUT_WR); }
+void gojo_net___shutdownWrite(int64_t fd) {
+    if (gojo_simnet_on) {
+        if (sn_fd(fd)) sn_shutdown(fd);
+        return;
+    }
+    shutdown((int)fd, SHUT_WR);
+}
 
 int64_t gojo_net___port(int64_t fd) {
+    if (gojo_simnet_on) return sn_fd(fd) ? sn_get(fd)->port : -EBADF;
     struct sockaddr_storage ss;
     socklen_t len = sizeof ss;
     if (getsockname((int)fd, (struct sockaddr *)&ss, &len) != 0) return -errno;
@@ -3792,6 +4261,7 @@ static int udp_open(int family) {
 
 // Binds a datagram socket. ":port" is dual-stack where IPv6 is available.
 int64_t gojo_net___udpListen(gojo_str addr) {
+    if (gojo_simnet_on) return sn_udp_open(addr, false);
     char host[256], port[32];
     if (!split_hostport(addr, host, sizeof host, port, sizeof port)) return -EINVAL;
     struct addrinfo *ai;
@@ -3835,6 +4305,7 @@ int64_t gojo_net___udpListen(gojo_str addr) {
 
 // A datagram socket whose peer is fixed: `send` and `recv` talk to it alone.
 int64_t gojo_net___udpDial(gojo_str addr) {
+    if (gojo_simnet_on) return sn_udp_open(addr, true);
     struct addrinfo *ai;
     int r = resolve_as(addr, SOCK_DGRAM, AF_UNSPEC, false, &ai);
     if (r) return -r;
@@ -3911,6 +4382,7 @@ static int dest_addr(int fd, gojo_str addr, struct sockaddr_storage *ss, socklen
 
 // Sends one datagram; `addr` empty means the socket's fixed peer.
 int64_t gojo_net___sendTo(int64_t fd, gojo_slice data, gojo_str addr) {
+    if (gojo_simnet_on) return sn_fd(fd) ? sn_send_to(fd, data, addr) : -EBADF;
     struct sockaddr_storage ss;
     socklen_t len = 0;
     if (addr.len) {
@@ -3955,6 +4427,7 @@ static void format_addr(const struct sockaddr_storage *ss, gojo_string *out) {
 // Receives one datagram into `buf` (at most `max` bytes; the rest of a longer
 // one is dropped) and its sender into `from` when non-null.
 int64_t gojo_net___recvFrom(int64_t fd, gojo_vec *buf, int64_t max, gojo_string *from) {
+    if (gojo_simnet_on) return sn_fd(fd) ? sn_recv_from(fd, buf, max, from) : -EBADF;
     if (max <= 0) max = 1;
     gojo_vec_reserve(buf, max, 1);
     for (;;) {
@@ -3975,6 +4448,7 @@ int64_t gojo_net___recvFrom(int64_t fd, gojo_vec *buf, int64_t max, gojo_string 
 // The addresses of `host`, IPv4 first. Returns 0, or 1 when there is no such
 // host, 2 when the resolver failed for now, 3 for anything else.
 int64_t gojo_net___lookup(gojo_str host, gojo_vec *out) {
+    if (gojo_simnet_on) return sn_lookup(host, out);
     char h[256];
     if (host.len == 0 || host.len >= (int64_t)sizeof h || memchr(host.ptr, 0, (size_t)host.len)) return 1;
     memcpy(h, host.ptr, (size_t)host.len);
@@ -4056,6 +4530,7 @@ static void dump_task(FILE *f, gojo_g *g, int64_t now) {
     case BLK_SLEEP: fprintf(f, "sleeping"); break;
     case BLK_IO: fprintf(f, "waiting for the network"); break;
     case BLK_FILE: fprintf(f, "waiting for a file read or write"); break;
+    case BLK_SIMNET: fprintf(f, "waiting for the simulated network"); break;
     default: fprintf(f, "running or ready"); secs = -1; break;
     }
     if (secs >= 0) fprintf(f, " (%.3f s)", secs);
@@ -4216,9 +4691,13 @@ static bool sim_idle(gojo_worker *w) {
     int64_t next = s_heap_len > 0 ? s_heap[0]->when : -1;
     pthread_mutex_unlock(&s_timer_lock);
     int64_t io = GOJO_SC_LOAD(&s_io_waiters);
+    // the simulated network: what parked tasks wait for arrives like a timer
+    int64_t net = sn_next();
+    if (net >= 0 && (next < 0 || net < next)) next = net;
     if (next >= 0 && io == 0) {
         if (next > gojo_sim_clock) __atomic_store_n(&gojo_sim_clock, next, __ATOMIC_RELAXED);
         timers_fire(gojo_sim_clock);
+        sn_tick(gojo_sim_clock);
         return true;
     }
     if (io > 0) {
@@ -4248,6 +4727,7 @@ static bool sim_idle(gojo_worker *w) {
         __atomic_store_n(&gojo_sim_clock, gojo_sim_clock + (dt > 0 ? dt : 0), __ATOMIC_RELAXED);
         if (next >= 0 && gojo_sim_clock < next && s_simq_len == 0) __atomic_store_n(&gojo_sim_clock, next, __ATOMIC_RELAXED);
         timers_fire(gojo_sim_clock);
+        sn_tick(gojo_sim_clock);
         return true;
     }
     return false;
@@ -4284,6 +4764,7 @@ static gojo_g *sim_find_work(gojo_worker *w) {
     // so a task that computes until a deadline gets there
     __atomic_store_n(&gojo_sim_clock, gojo_sim_clock + 1000, __ATOMIC_RELAXED);
     if (GOJO_RELAXED(&s_heap_len) > 0) timers_fire(gojo_sim_clock);
+    sn_tick(gojo_sim_clock);
     for (;;) {
         pthread_mutex_lock(&s_lock);
         if (s_simq_len > 0) {
@@ -4306,7 +4787,13 @@ static bool run_test_once(void (*fn)(void), uint64_t seed) {
     fflush(stderr);
     pid_t pid = fork();
     if (pid == 0) {
-        if (seed) gojo_sim_setup(seed);
+        if (seed) {
+            gojo_sim_setup(seed);
+            // tests: the network is simulated too (`gojo run --seed` keeps the real one)
+            gojo_simnet_on = 1;
+            const char *f = getenv("GOJO_FAULTS");
+            gojo_sim_faults = f && *f && strcmp(f, "0") != 0;
+        }
         gojo_sched_main(fn);
     }
     int status = 0;
@@ -4374,7 +4861,9 @@ int gojo_run_test(void (*fn)(void), const char *name) {
         if (runs > 1) fprintf(stderr, "  ok   %s (%ld schedules, %.1f ms)\n", name, done, ms);
         else fprintf(stderr, "  ok   %s (%.1f ms)\n", name, ms);
     } else if (failed_seed) {
-        fprintf(stderr, "  FAIL %s (seed %llu; rerun it with `gojo test --seed %llu`)\n", name, (unsigned long long)failed_seed, (unsigned long long)failed_seed);
+        const char *f = getenv("GOJO_FAULTS");
+        bool faults = f && *f && strcmp(f, "0") != 0;
+        fprintf(stderr, "  FAIL %s (seed %llu; rerun it with `gojo test --seed %llu%s`)\n", name, (unsigned long long)failed_seed, (unsigned long long)failed_seed, faults ? " --faults" : "");
     } else {
         fprintf(stderr, "  FAIL %s (%.1f ms)\n", name, ms);
     }

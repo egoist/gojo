@@ -517,6 +517,12 @@ bool gojo_os___getenv(gojo_str name, gojo_string *out);
 int64_t gojo_time_now(void);
 extern int gojo_sim_on;
 extern int64_t gojo_sim_clock;
+// `gojo test`: the simulated network, and faults (GOJO_FAULTS).
+extern int gojo_simnet_on;
+extern int gojo_sim_faults;
+bool gojo_simnet_fd(int64_t fd);
+int gojo_sim_disk_fault(int64_t fd, bool write);
+int64_t gojo_sim_short_read(int64_t n);
 extern int gojo_debug_checks;
 // A package-level `let`: computed once, by the first task to use it.
 typedef struct { int state; void *owner; } gojo_once;

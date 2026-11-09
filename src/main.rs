@@ -17,6 +17,7 @@ struct Options {
     seed: Option<String>,
     explore: Option<String>,
     real: bool,
+    faults: bool,
     /// Keep the bounds checks the compiler proved unnecessary, and report one
     /// that fails as a compiler bug.
     verify_bce: bool,
@@ -65,7 +66,11 @@ options:
                    `test`; tests use a seed from their name by default)
   --explore <n>    `test`: run each test under n seeds, stop at the first
                    failure and print its seed
-  --real           `test`: use the real scheduler (threads, real time)
+  --real           `test`: use the real scheduler (threads, real time) and the
+                   real network
+  --faults         `test`: also inject faults the seed decides: connections
+                   reset, dials refused, datagrams lost, file reads and
+                   writes failing (EIO, ENOSPC) or reading short
   --verify-bce     keep the bounds checks the compiler removed because it proved
                    them unnecessary; one that fails is a compiler bug
 
@@ -132,7 +137,7 @@ fn main() -> ExitCode {
         return usage();
     }
     let cmd = args[1].as_str();
-    let mut opts = Options { release: false, output: None, verbose: false, cc: std::env::var("GOJO_CC").ok(), target: None, keep_c: false, seed: None, explore: None, real: false, verify_bce: false };
+    let mut opts = Options { release: false, output: None, verbose: false, cc: std::env::var("GOJO_CC").ok(), target: None, keep_c: false, seed: None, explore: None, real: false, faults: false, verify_bce: false };
     let mut input = None;
     let mut prog_args = vec![];
     let mut i = 2;
@@ -173,6 +178,7 @@ fn main() -> ExitCode {
                 }
             }
             "--real" => opts.real = true,
+            "--faults" => opts.faults = true,
             "--verify-bce" => opts.verify_bce = true,
             "--json" if cmd == "check" => gojo::JSON_DIAGS.store(true, std::sync::atomic::Ordering::Relaxed),
             _ if a.starts_with('-') && a.len() > 1 => {
@@ -186,6 +192,10 @@ fn main() -> ExitCode {
             _ => input = Some(a.clone()),
         }
         i += 1;
+    }
+    if opts.faults && (cmd != "test" || opts.real) {
+        eprintln!("error: `--faults` is for `gojo test` on the simulated scheduler (not with `--real`)");
+        return ExitCode::from(2);
     }
     let input = match input {
         Some(i) => i,
@@ -1232,6 +1242,9 @@ fn finish(cmd: &str, bin: &Path, opts: &Options, prog_args: &[String], stem: &st
     }
     if opts.real {
         c.env("GOJO_SCHED", "real");
+    }
+    if opts.faults {
+        c.env("GOJO_FAULTS", "1");
     }
     let status = c.status();
     match status {

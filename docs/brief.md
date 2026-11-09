@@ -157,4 +157,4 @@ fn main() {
 
 ## Tools
 
-`gojo run`, `build [--release]`, `check [--json]` (diagnostics as JSON lines with fixes), `test` (`test "name" { }` blocks, seeded scheduler, `--explore n`), `fmt`, `doc [module]` (API docs as Markdown), `unsafe` (lists unchecked code), `authority` (what each dependency does with files, environment, programs and network; `[authority] leftpad = []` in gojo.toml limits it). `unsafe { }` is needed to call `extern "C"` functions and dereference `*T`.
+`gojo run`, `build [--release]`, `check [--json]` (diagnostics as JSON lines with fixes), `test` (`test "name" { }` blocks, seeded scheduler and simulated network, `--explore n`, `--faults` for injected network and disk errors), `fmt`, `doc [module]` (API docs as Markdown), `unsafe` (lists unchecked code), `authority` (what each dependency does with files, environment, programs and network; `[authority] leftpad = []` in gojo.toml limits it). `unsafe { }` is needed to call `extern "C"` functions and dereference `*T`.
