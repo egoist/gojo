@@ -8,7 +8,7 @@ Gojo is a beta. The language, the compiler and the standard library work, are te
 
 | | Gojo | Rust | Go | Zig | Swift | C++ |
 | --- | --- | --- | --- | --- | --- | --- |
-| Memory | Ownership, freed when the owner goes out of scope | Ownership, with lifetime annotations | Tracing GC | Manual, with explicit allocators | Reference counting (ARC) for classes | Manual, with RAII and smart pointers |
+| Memory | Ownership: memory freed after its last use, other resources when the owner goes out of scope | Ownership, with lifetime annotations | Tracing GC | Manual, with explicit allocators | Reference counting (ARC) for classes | Manual, with RAII and smart pointers |
 | Use after free | Ruled out at compile time | Ruled out at compile time | Ruled out by the GC | Possible (debug allocators catch some) | Ruled out by ARC | Possible |
 | Null | Only `?T` can be empty | Only `Option<T>` | Pointers, maps, interfaces, channels and functions can be `nil` | Only `?T` | Only `Optional` | Any pointer |
 | Data races | Ruled out at compile time | Ruled out at compile time | Runtime detector (`-race`) | Not checked | Ruled out at compile time (Swift 6 mode) | Not checked |
@@ -39,7 +39,34 @@ fn longer(a: str, b: str) -> str {
 }
 ```
 
-The price is that a struct can't hold a borrowed `&str`. A tokenizer that Rust would write as `struct Tokens<'a> { words: Vec<&'a str> }` owns its input in Gojo, and stores ranges into it:
+The compiler works out from a function's `return`s which arguments its result points into, so a call borrows only those: a `pick(a, b)` that returns part of `a` leaves `b` free to change. `-> str of a` says the same in the signature, where callers can rely on it.
+
+A struct that holds borrowed data is a **view struct**: it is a view itself, so it lives only in variables, like `str`, under the same rules. What Rust writes as `struct Lexer<'a> { src: &'a str, pos: usize }`:
+
+```gojo
+view struct Lexer {
+    src: str // borrowed: the lexer is a view itself
+    pos: int
+
+    // the next word: a view into the input, not into the lexer
+    fn next(inout self) -> ?str {
+        let b = self.src.bytes()
+        while self.pos < b.len() && b[self.pos] == 32 {
+            self.pos += 1
+        }
+        let start = self.pos
+        while self.pos < b.len() && b[self.pos] != 32 {
+            self.pos += 1
+        }
+        if start == self.pos {
+            return none
+        }
+        return self.src[start..self.pos]
+    }
+}
+```
+
+The words it returns point into the input, so the lexer can move on while earlier words are in use. What a view can't do is go where the compiler stops tracking it: into a `Vec`, a long-lived struct or an escaping closure. A structure that keeps borrowed tokens in a list owns its input instead, and stores ranges into it:
 
 ```gojo
 struct Tokens {
@@ -58,17 +85,17 @@ Other differences:
 
 - **Interfaces instead of traits.** A type satisfies an interface by having its methods; there are no `impl` blocks, orphan rules or coherence puzzles. Generics are monomorphized, as in Rust, with built-in capability constraints (`copy`, `clone`, `send`, `hash`, …).
 - **No `async`.** Tasks are stackful, so any function can block on a channel or a socket without being marked, and there is one ecosystem instead of a sync one and an async one. A cancelled task stops at its next blocking call, not at an arbitrary `.await` with half its state dropped.
-- **Fast checks.** Type and borrow checking look at one function body and the signatures it calls, never across functions. The front end checks a 40,000-line program in about 66 ms. There are no macros, so nothing has to expand before checking starts.
+- **Fast checks.** Type and borrow checking look at one function body and the signatures it calls; the one thing carried across functions is which arguments a returned view points into, worked out once per function (or written with `of`). The front end checks a 40,000-line program in about 66 ms. There are no macros, so nothing has to expand before checking starts.
 - **Release builds keep overflow checks.** `+` panics on overflow in every build; `+%` wraps when you mean it.
 - **Panics abort.** There is no unwinding: a panic is a bug, and it ends the process with the source location.
 
-**Choose Rust** when you need what second-class references rule out (zero-copy structures that hold borrowed data, fine control over allocation), when you need Windows, embedded targets or WebAssembly today, or when you need its ecosystem.
+**Choose Rust** when you need what second-class references rule out (borrowed data kept in collections or long-lived structures, fine control over allocation), when you need Windows, embedded targets or WebAssembly today, or when you need its ecosystem.
 
 ## Compared with Go
 
 Gojo's syntax is not Go's, but its spirit is close: a directory is a package, interfaces are structural, `go`, channels and `select` are built in, and there is one formatter and one test runner. What changes is everything Go handles at run time:
 
-- **No garbage collector.** Memory, files, sockets and locks are released when their owner goes out of scope, deterministically, with no pauses. `defer f.Close()` is unnecessary; `defer` remains for restoring state.
+- **No garbage collector.** Memory is freed right after its last use, and files, sockets and locks are released when their owner goes out of scope, deterministically, with no pauses. `defer f.Close()` is unnecessary; `defer` remains for restoring state.
 - **No nil.** Only `?T` can be empty, and it must be unwrapped before use. An interface value is never a "typed nil", and a map is never nil.
 - **Errors must be handled.** `T ! E` replaces `(T, error)`, `try` replaces `if err != nil { return err }`, and a result you forget to look at is a compile error.
 
@@ -137,7 +164,7 @@ Gojo compiles to C, so it runs wherever its runtime does (macOS and Linux today)
 Most Gojo code is expected to be written with a coding agent, and the language is designed for that, as well as for the person reviewing the diff:
 
 - **Syntax you can read without context.** Types follow `:`, results follow `->`, `&` at a call site marks the arguments that change, and no token's meaning depends on the spaces around it. There is one way to write each thing, and `gojo fmt` decides layout.
-- **Errors you can fix locally.** Every check looks at one function body and the signatures it calls, so every error is about code in front of you. Errors say what to do next: the data race above ends with "give each task its own data, collect results with `let t = go f()` and `t.join()`, or share it through a `Mutex`".
+- **Errors you can fix locally.** Every check looks at one function body and the signatures it calls, so every error is about code in front of you. Where a call borrows only some of its arguments, the error says which and why (`` `pick` returns a view of only `a` ``). Errors say what to do next: the data race above ends with "give each task its own data, collect results with `let t = go f()` and `t.join()`, or share it through a `Mutex`".
 - **No lifetimes to juggle, and no clones to hide behind.** Agents tend to `.clone()` whatever the borrow checker complains about; Gojo warns about a clone of a value nothing uses afterwards and says to move it instead.
 - **Concurrency bugs you can replay.** `gojo test` runs tasks on a seeded scheduler with a virtual clock; `--explore n` tries n interleavings and prints the seed of the one that fails, so a flaky test becomes a reproducible one.
 - **A short loop.** The front end takes milliseconds, and an unchanged program reruns from the cache in about 10 ms.
@@ -165,7 +192,7 @@ Concurrency is where Go is still ahead: 100,000 suspended tasks passing a value 
 - **You need Windows, WebAssembly, or a bare-metal target.** Gojo runs on macOS and Linux (x86-64 and arm64); [WebAssembly](wasm.md) is a proposal.
 - **You need a mature ecosystem.** There is no package registry yet (dependencies are local paths), no language server, and the standard library is the main source of libraries.
 - **Your data is a web of shared, mutable, cyclic objects.** `Rc`, `Weak` and arenas handle it, but a garbage-collected language may be simpler.
-- **You need references stored inside structs**, as in zero-copy parsers that keep borrowed tokens. Gojo's answer (owned data plus `Span` ranges) works, but Rust expresses it directly.
+- **You need borrowed data kept in collections**, as in a parser that keeps a list of borrowed tokens. A view struct holds views while it sits in a variable, but a `Vec` of them isn't allowed: such a parser owns its input and stores `Span` ranges, where Rust stores the references directly.
 - **You need compile-time code generation.** Gojo has no macros and no `comptime`, on purpose.
 - **You need the language to be finished.** Gojo is a beta, and it still changes: see the [known limits](tour.md#known-limits-of-the-beta).
 

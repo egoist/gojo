@@ -506,6 +506,9 @@ struct Bc<'a> {
     /// `match` bindings (references) into a variable holding a view: the
     /// variable's place. Assigning the binding assigns the variable.
     bind_into: HashMap<LocalId, Path>,
+    /// Borrows (by where they start) that come from a call whose result
+    /// views only some of its arguments: why, for the error that names them.
+    why_borrow: HashMap<Span, String>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -542,7 +545,7 @@ fn place_path(e: &TExpr) -> Option<Path> {
 
 impl<'a> Bc<'a> {
     fn new(prog: &'a Program, tf: &'a TFunc, proj: &'a HashMap<FuncId, Vec<usize>>, rsrc: &'a HashMap<FuncId, Vec<usize>>, view_ret: bool) -> Bc<'a> {
-        Bc { prog, tf, proj, diags: vec![], loans: vec![], holders: HashMap::new(), depth: 0, suppress: 0, loops: vec![], view_ret, defers: vec![vec![]], decl_depth: HashMap::new(), escaped: vec![], locked: vec![], in_closure: false, in_each_body: false, via_parents: HashMap::new(), tscopes: vec![], spawn_depth: None, as_move: None, as_move_seen: false, rsrc, ret_params: vec![], src_unknown: Cell::new(false), storage: vec![], bind_into: HashMap::new() }
+        Bc { prog, tf, proj, diags: vec![], loans: vec![], holders: HashMap::new(), depth: 0, suppress: 0, loops: vec![], view_ret, defers: vec![vec![]], decl_depth: HashMap::new(), escaped: vec![], locked: vec![], in_closure: false, in_each_body: false, via_parents: HashMap::new(), tscopes: vec![], spawn_depth: None, as_move: None, as_move_seen: false, rsrc, ret_params: vec![], src_unknown: Cell::new(false), storage: vec![], bind_into: HashMap::new(), why_borrow: HashMap::new() }
     }
 
     fn err(&mut self, d: Diag) {
@@ -774,7 +777,11 @@ impl<'a> Bc<'a> {
                 (Acc::Mut, true) => format!("cannot modify `{}` while it is mutably borrowed{}", n, by),
                 (Acc::Read, _) => format!("cannot use `{}` while it is mutably borrowed{}", n, by),
             };
-            self.err(Diag::new(sp, msg).note(Some(l.span), "the borrow starts here and lasts until the end of its block"));
+            let mut d = Diag::new(sp, msg).note(Some(l.span), "the borrow starts here and lasts until the end of its block");
+            if let Some(w) = self.why_borrow.get(&l.span) {
+                d = d.note(None, w.clone());
+            }
+            self.err(d);
         }
     }
 
@@ -1096,6 +1103,9 @@ impl<'a> Bc<'a> {
     /// `holder` (declared at `depth`) now views `srcs`: they must live at least
     /// as long as it, and stay borrowed while it is in use.
     fn bind_view(&mut self, holder: LocalId, depth: usize, srcs: Vec<(Path, bool)>, mutable: bool, sp: Span, st: &St, from: &TExpr) {
+        if let Some(w) = self.why_call_borrows(from) {
+            self.why_borrow.insert(sp, w);
+        }
         self.check_locked(&srcs, sp, Some(depth));
         for (p, _) in &srcs {
             let od = self.decl_depth.get(&p.0).copied().unwrap_or(0);
@@ -1153,6 +1163,32 @@ impl<'a> Bc<'a> {
                 }
             }
         }
+    }
+
+    /// For a call whose result views only some of its arguments: which
+    /// ones, and where that comes from (the function's `of`, or its body).
+    fn why_call_borrows(&self, e: &TExpr) -> Option<String> {
+        let mut e = e;
+        while let TK::Move(x) | TK::Copy(x) | TK::SomeLit(x) | TK::OkLit(x) | TK::Try { e: x, .. } = &e.kind {
+            e = x;
+        }
+        let TK::Call { callee: Callee::Func(f, _), args } = &e.kind else { return None };
+        let only = self.rsrc.get(f)?;
+        let fd = self.prog.func(*f);
+        let params: Vec<&str> = fd.recv.iter().chain(fd.params.iter()).map(|p| p.name.as_str()).collect();
+        if params.len() != args.len() || only.len() >= params.len() {
+            return None;
+        }
+        let names: Vec<String> = only.iter().filter_map(|&i| params.get(i)).map(|n| format!("`{}`", n)).collect();
+        let what = if names.is_empty() { "none of its arguments".to_string() } else { format!("only {}", names.join(" and ")) };
+        Some(match &fd.ret_of {
+            Some(_) => format!("`{}` returns a view of {} (its signature says so with `of`)", fd.name, what),
+            None if !names.is_empty() => {
+                let plain: Vec<&str> = only.iter().filter_map(|&i| params.get(i).copied()).collect();
+                format!("`{}` returns a view of {}, as its `return`s show (`-> {} of {}` would say so in its signature)", fd.name, what, self.prog.show(&fd.ret), plain.join(", "))
+            }
+            None => format!("`{}` returns a view of {}, as its `return`s show", fd.name, what),
+        })
     }
 
     /// `v = value` for a view variable `v`.
@@ -2120,7 +2156,7 @@ impl<'a> Bc<'a> {
         }
         // the body is checked on its own
         // (`return` in a loop body run through `each` returns from this function)
-        let mut inner = Bc { prog: self.prog, tf: self.tf, proj: self.proj, diags: vec![], loans: vec![], holders: self.holders.clone(), depth: 0, suppress: self.suppress, loops: vec![], view_ret: self.view_ret && c.loop_body.is_some(), defers: vec![vec![]], decl_depth: c.params.iter().map(|p| (*p, 0)).collect(), escaped: vec![], locked: self.locked.iter().map(|(_, ps, sp, n)| (0, ps.clone(), *sp, n.clone())).collect(), in_closure: true, in_each_body: c.loop_body.is_some(), via_parents: self.via_parents.clone(), tscopes: vec![], spawn_depth: None, as_move: None, as_move_seen: false, rsrc: self.rsrc, ret_params: vec![], src_unknown: Cell::new(false), storage: self.storage.iter().map(|(p, sp, _, w)| (p.clone(), *sp, 0, *w)).collect(), bind_into: self.bind_into.clone() };
+        let mut inner = Bc { prog: self.prog, tf: self.tf, proj: self.proj, diags: vec![], loans: vec![], holders: self.holders.clone(), depth: 0, suppress: self.suppress, loops: vec![], view_ret: self.view_ret && c.loop_body.is_some(), defers: vec![vec![]], decl_depth: c.params.iter().map(|p| (*p, 0)).collect(), escaped: vec![], locked: self.locked.iter().map(|(_, ps, sp, n)| (0, ps.clone(), *sp, n.clone())).collect(), in_closure: true, in_each_body: c.loop_body.is_some(), via_parents: self.via_parents.clone(), tscopes: vec![], spawn_depth: None, as_move: None, as_move_seen: false, rsrc: self.rsrc, ret_params: vec![], src_unknown: Cell::new(false), storage: self.storage.iter().map(|(p, sp, _, w)| (p.clone(), *sp, 0, *w)).collect(), bind_into: self.bind_into.clone(), why_borrow: HashMap::new() };
         let mut s = St::new();
         inner.block(&mut s, &c.body);
         inner.end_scope_defers(&mut s);

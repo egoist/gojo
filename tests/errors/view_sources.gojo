@@ -36,6 +36,7 @@ fn leftKeepsFirst() {
     let l = left(x.asStr(), y.asStr())
     grow(&x)
     // error: cannot modify `x` while it is borrowed by `l`
+    // error: `left` returns a view of only `a`, as its `return`s show (`-> str of a` would say so in its signature)
     println(l)
 }
 
