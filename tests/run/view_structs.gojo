@@ -1,0 +1,144 @@
+// View structs and enums (spec 5.4): types that hold views and are one,
+// living only in variables, like `str`. A lexer whose tokens point into the
+// input, not into the lexer, so earlier tokens stay usable while it moves
+// on; then the rest: printing, equality, nesting, a view of owned strings,
+// a generic view struct, view enums, and view-returning functions.
+
+enum Kind {
+    Word
+    Number
+    Punct
+}
+
+view struct Token {
+    kind: Kind
+    text: str
+}
+
+view struct Lexer {
+    src: str
+    pos: int
+
+    fn next(inout self) -> ?Token {
+        let b = self.src.bytes()
+        while self.pos < b.len() && b[self.pos] == 32 {
+            self.pos += 1
+        }
+        if self.pos >= b.len() {
+            return none
+        }
+        let start = self.pos
+        let c = b[self.pos]
+        var kind = Kind.Punct
+        if c >= 48 && c <= 57 {
+            kind = Kind.Number
+            while self.pos < b.len() && b[self.pos] >= 48 && b[self.pos] <= 57 {
+                self.pos += 1
+            }
+        } else if (c >= 97 && c <= 122) || (c >= 65 && c <= 90) {
+            kind = Kind.Word
+            while self.pos < b.len() && ((b[self.pos] >= 97 && b[self.pos] <= 122) || (b[self.pos] >= 65 && b[self.pos] <= 90)) {
+                self.pos += 1
+            }
+        } else {
+            self.pos += 1
+        }
+        return Token{kind: kind, text: self.src[start..self.pos]}
+    }
+}
+
+fn lexing() {
+    let input: String = "let x = 42 + y"
+    var lx = Lexer{src: input.asStr(), pos: 0}
+    let first = lx.next() ?? Token{kind: Kind.Punct, text: ""}
+    var n = 0
+    loop {
+        let t = lx.next() ?? break
+        println(t.kind, t.text)
+        n += 1
+    }
+    println("first", first.text, "and", n, "more")
+}
+
+view struct Lexeme {
+    text: str
+    line: int
+}
+
+view struct Span2 {
+    first: Lexeme
+    last: Lexeme
+}
+
+view struct Window {
+    items: []String
+    at: int
+
+    fn current(self) -> ?str {
+        if self.at >= self.items.len() {
+            return none
+        }
+        return self.items[self.at].asStr()
+    }
+
+    fn advance(inout self) {
+        self.at += 1
+    }
+}
+
+view struct Pair[T: copy] {
+    key: str
+    value: T
+}
+
+view enum Piece {
+    Text(str)
+    Count(int)
+    Both(str, int)
+}
+
+fn textOf(t: Lexeme) -> str {
+    return t.text
+}
+
+fn describe(p: Piece) -> String {
+    return match p {
+        Text(s) => "text ${s}"
+        Count(n) => "count ${n}"
+        Both(s, n) => "both ${s} ${n}"
+    }
+}
+
+fn features() {
+    let src: String = "alpha beta"
+    let a = Lexeme{text: src[0..5], line: 1}
+    let b = Lexeme{text: src[6..10], line: 1}
+    println(a, a == b, a == Lexeme{text: "alpha", line: 1})
+    let sp = Span2{first: a, last: b}
+    println(sp.first.text, sp.last.text, textOf(sp.last))
+    let names = ["ann".toString(), "bob".toString()]
+    var w = Window{items: names, at: 0}
+    loop {
+        let cur = w.current() ?? break
+        println("at", w.at, cur)
+        w.advance()
+    }
+    let p = Pair[int]{key: src[0..2], value: 7}
+    println(p.key, p.value)
+    println(describe(Piece.Text(src[0..1])), describe(Piece.Count(3)), describe(Piece.Both(src[2..4], 9)))
+    if let t = pick(true, a, b) {
+        println("picked", t.text)
+    }
+}
+
+fn pick(c: bool, x: Lexeme, y: Lexeme) -> ?Lexeme {
+    if c {
+        return x
+    }
+    return none
+}
+
+fn main() {
+    lexing()
+    features()
+}

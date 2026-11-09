@@ -1,0 +1,18 @@
+// A plain `go` task's error becomes its scope's, used after the scope's body
+// is gone: a view in it can't point into anything from that body. (Failing
+// with a literal, or a view of something declared before the scope, is fine.)
+fn inner(b: str) -> int ! str {
+    return err(b)
+}
+
+fn main() {
+    let x: String = "x"
+    let y: String = "y"
+    let r = scope {
+        let ys = y.asStr()
+        go inner(ys)
+        // error: this task's error (`str`) may view `ys`, which is gone when the scope gives the error back
+        x.asStr()
+    }
+    println(r.isOk())
+}

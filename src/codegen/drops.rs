@@ -7,11 +7,17 @@
 // drop is emitted plainly or not at all, and a flag nobody needs to test is
 // never declared.
 //
-// It also moves some drops earlier ("join drops"): when a value is moved on
-// only some branches of an `if` or `match`, the compiler already rejects any
-// use of it after the branches. If dropping it can't be observed (it only
-// frees memory: `String`, `Vec[int]`, ...), it is dropped at the end of the
-// branches that didn't move it, and after them it is moved on every path.
+// It also moves drops whose only effect is freeing memory (`String`,
+// `Vec[int]`, ...: `Program::drop_silent`) earlier, which no program can
+// observe (spec 5.3):
+//
+// - "Join drops": when such a value is moved on only some branches of an `if`
+//   or `match`, it is dropped at the end of the branches that didn't move it
+//   (the compiler already rejects any use of it after the branches), and
+//   after them it is moved on every path.
+// - "Last-use frees": it is freed right after the last statement of its
+//   block that mentions it, or anything that may borrow it, instead of where
+//   the block ends (docs/drops.md).
 //
 // Soundness: every state recorded here must hold on every path that reaches
 // its site. Where the pass can't tell, it records nothing and codegen falls
@@ -99,6 +105,9 @@ pub struct DropInfo {
     /// (address of an `if` / `match`, branch index) -> locals to drop at the
     /// end of that branch. An `if` without `else` has branch 1 all the same.
     pub join_drops: HashMap<(usize, usize), Vec<LocalId>>,
+    /// (address of a block, statement index) -> locals to free right after
+    /// that statement: their last use.
+    pub after_stmt: HashMap<(usize, usize), Vec<LocalId>>,
 }
 
 impl DropInfo {
@@ -160,7 +169,7 @@ pub fn analyze(body: &TBlock, flagged: &HashSet<Path>, facts: &[LocalFact], para
     for (l, p) in flagged {
         by_local.entry(*l).or_default().push(p.clone());
     }
-    let mut a = An { by_local, facts, may_borrow, untracked: HashSet::new(), pinned: HashSet::new(), borrowers: HashMap::new(), info: DropInfo::default(), suppress: 0, loop_depth: 0, decl: HashMap::new(), frames: vec![], loops: vec![] };
+    let mut a = An { by_local, facts, may_borrow, untracked: HashSet::new(), pinned: HashSet::new(), borrowers: HashMap::new(), info: DropInfo::default(), suppress: 0, loop_depth: 0, decl: HashMap::new(), frames: vec![], loops: vec![], params: params.to_vec(), freed: HashSet::new() };
     a.prepare(body);
     let mut st = St { reachable: true, m: HashMap::new() };
     for &l in params {
@@ -178,7 +187,7 @@ struct An<'a> {
     /// middle of a block's cleanups.
     untracked: HashSet<LocalId>,
     /// Never dropped early: something may still reach them that the pass
-    /// can't see (a closure or task, a `defer`, unsafe code).
+    /// can't see (a closure or task, a `defer`, unsafe code, a raw pointer).
     pinned: HashSet<LocalId>,
     /// Locals that may hold a borrow of a local (directly or through others).
     borrowers: HashMap<LocalId, HashSet<LocalId>>,
@@ -194,6 +203,10 @@ struct An<'a> {
     /// The loops around the current point: (id, what `break` leaves with,
     /// what `continue` goes round with).
     loops: Vec<(u32, St, St)>,
+    /// The owned parameters: the body's own values, like its `let`s.
+    params: Vec<LocalId>,
+    /// Locals freed at their last use already.
+    freed: HashSet<LocalId>,
 }
 
 fn forget(st: &mut St, ls: &HashSet<LocalId>) {
@@ -361,6 +374,9 @@ impl<'a> An<'a> {
                 }
                 _ => {}
             },
+            // a raw pointer made from a value (`v.ptr()`) may be used, by
+            // unsafe code or by C, after the value's last mention
+            Node::Expr(e) if matches!(e.ty, Ty::Ptr(_)) => mentions_expr(e, &mut pinned),
             Node::Expr(e) => match &e.kind {
                 TK::Closure(c) => pinned.extend(c.captures.iter().map(|c| c.0)),
                 TK::Unsafe(b) => mentions_block(b, &mut pinned),
@@ -473,11 +489,16 @@ impl<'a> An<'a> {
     fn block(&mut self, st: &mut St, b: &'a TBlock, top: bool) {
         self.frames.push((b, 0));
         let mut declared = vec![];
+        // (the function's owned parameters belong to its body)
+        let owned: Vec<LocalId> = if self.frames.len() == 1 { self.params.clone() } else { vec![] };
         for (i, s) in b.stmts.iter().enumerate() {
             self.frames.last_mut().unwrap().1 = i;
             self.stmt(st, s, top);
             if let TStmt::Let { local, .. } = s {
                 declared.push(*local);
+            }
+            if self.suppress == 0 && st.reachable {
+                self.free_after(st, b, i, owned.iter().chain(&declared).copied());
             }
         }
         self.frames.last_mut().unwrap().1 = usize::MAX;
@@ -489,6 +510,53 @@ impl<'a> An<'a> {
             self.undeclare(st, l);
         }
         self.frames.pop();
+    }
+
+    /// Free the memory of the block's own values that statement `i` used
+    /// last: those whose drop only frees memory, held on every path, that no
+    /// later statement (or the block's value) mentions, and that nothing
+    /// pinned could reach (see `pinned`). The same goes for any variable that
+    /// may borrow them.
+    fn free_after(&mut self, st: &mut St, b: &'a TBlock, i: usize, ls: impl Iterator<Item = LocalId>) {
+        let ls: Vec<LocalId> = ls.filter(|l| !self.freed.contains(l)).collect();
+        if ls.is_empty() {
+            return;
+        }
+        let mut rest = HashSet::new();
+        for s in &b.stmts[i + 1..] {
+            mentions_stmt(s, &mut rest);
+        }
+        if let Some(v) = &b.value {
+            mentions_expr(v, &mut rest);
+        }
+        for l in ls {
+            let Some(f) = self.facts.get(l as usize) else { continue };
+            if !f.silent || !f.needs_drop || self.untracked.contains(&l) {
+                continue;
+            }
+            let mut watch: HashSet<LocalId> = HashSet::new();
+            watch.insert(l);
+            if let Some(bs) = self.borrowers.get(&l) {
+                watch.extend(bs.iter().copied());
+            }
+            if watch.iter().any(|x| self.pinned.contains(x) || rest.contains(x)) || self.dropped_with_code(l, &watch) {
+                continue;
+            }
+            // held on every path: never moved, or known to be there now
+            match self.by_local.get(&l) {
+                None => {}
+                Some(ps) if ps.len() == 1 && ps[0].is_empty() => {
+                    if st.m.get(&(l, vec![])) != Some(&M::Live) {
+                        continue;
+                    }
+                    st.m.insert((l, vec![]), M::Moved);
+                }
+                // (parts moved separately)
+                Some(_) => continue,
+            }
+            self.freed.insert(l);
+            self.info.after_stmt.entry((b as *const TBlock as usize, i)).or_default().push(l);
+        }
     }
 
     /// Sub-expressions evaluated one after another. Codegen visits them in
@@ -865,6 +933,13 @@ impl<'a> An<'a> {
         found
     }
 
+    /// Whether something that may borrow `l` has a drop that runs code (a
+    /// `drop` method that may reach `l` through a raw pointer): that drop, at
+    /// the end of its scope, uses `l`.
+    fn dropped_with_code(&self, l: LocalId, watch: &HashSet<LocalId>) -> bool {
+        watch.iter().any(|&x| x != l && self.facts.get(x as usize).is_none_or(|f| f.needs_drop && !f.silent))
+    }
+
     /// Whether `l`, moved on some branches just joined and live on the
     /// others, can be dropped at the end of those others.
     fn can_drop_early(&self, l: LocalId) -> bool {
@@ -886,7 +961,7 @@ impl<'a> An<'a> {
         if let Some(bs) = self.borrowers.get(&l) {
             watch.extend(bs.iter().copied());
         }
-        if watch.iter().any(|x| self.pinned.contains(x)) {
+        if watch.iter().any(|x| self.pinned.contains(x)) || self.dropped_with_code(l, &watch) {
             return false;
         }
         // Nothing after the branches, up to the end of `l`'s scope, may

@@ -1,9 +1,11 @@
 // Drops of values moved on some paths: where the compiler knows statically
-// whether a value is still there, and the values freed early, at the end of
-// a branch that didn't move them (codegen/drops.rs). Values with a `drop`
-// method print it, so their drops must happen exactly where they did with
-// flags: at the end of the scope, in reverse order. The others only free
-// memory; AddressSanitizer and the leak check run this file too.
+// whether a value is still there; values freed early, at the end of a branch
+// that didn't move them; and values freed right after their last use
+// (codegen/drops.rs). Values with a `drop` method print it, so their drops
+// must happen exactly where they did with flags: at the end of the scope, in
+// reverse order. The others only free memory, and each case below would read
+// freed memory if one were freed too early: AddressSanitizer and the leak
+// check run this file too.
 
 struct Noisy {
     name: String
@@ -201,6 +203,100 @@ fn tasks(c: bool) -> int {
     return n
 }
 
+// freed after its last use, before the next one is allocated
+fn phases() -> int {
+    let a = longText(1)
+    let n = a.len()
+    let b = longText(2)
+    return n + b.len()
+}
+
+fn longText(k: int) -> String {
+    var s: String = ""
+    for _ in 0..1000 {
+        s.push("${k}")
+    }
+    return s
+}
+
+// a view of it is used later: it stays
+fn viewedLater() -> int {
+    let s = longText(3)
+    let v = s.asStr()
+    let other = longText(4)
+    return v.len() + other.len()
+}
+
+// a raw pointer to it is read later: it stays
+fn pointedTo() -> u8 {
+    let s = longText(5)
+    let p = s.ptr()
+    let other = longText(6)
+    _ = other.len()
+    return unsafe { *p }
+}
+
+// an owned parameter is freed after its last use too
+fn sunk(s: sink String) -> int {
+    let n = s.len()
+    let other = longText(7)
+    return n + other.len()
+}
+
+// inside a loop body, every iteration
+fn perIteration(n: int) -> int {
+    var total = 0
+    for i in 0..n {
+        let s = longText(i)
+        total += s.len()
+        let t = longText(i + 1)
+        total += t.len()
+    }
+    return total
+}
+
+// a task borrows it: it stays until the scope has waited for the task
+fn borrowedByTask() -> int {
+    let s = longText(8)
+    var n = 0
+    scope {
+        go () => {
+            n = s.len()
+        }
+    }
+    let other = longText(9)
+    return n + other.len()
+}
+
+// something with a `drop` method may reach it through a raw pointer: that
+// drop, at the end of the scope, uses it
+struct Peek {
+    p: *u8
+
+    fn drop(inout self) {
+        println("peek", unsafe { *self.p })
+    }
+}
+
+fn peekAt(v: str) -> Peek {
+    return Peek{p: v.ptr()}
+}
+
+fn pinnedByDrop() -> int {
+    let s = longText(3)
+    let _p = peekAt(s.asStr())
+    let other = longText(4)
+    return other.len()
+}
+
+// a `defer` uses it at the end of the block: it stays
+fn deferred() -> int {
+    let s = longText(1)
+    defer println("deferred", s.len())
+    let other = longText(2)
+    return other.len()
+}
+
 fn main() {
     observable(true)
     observable(false)
@@ -217,4 +313,7 @@ fn main() {
     println(consumes(some("abc")), consumes(none))
     println(viewKept(true), viewKept(false))
     println(tasks(true), tasks(false))
+    println(phases(), viewedLater(), pointedTo(), sunk(longText(1)), perIteration(3))
+    println(borrowedByTask(), deferred())
+    println(pinnedByDrop())
 }

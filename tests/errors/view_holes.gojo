@@ -1,0 +1,188 @@
+// Ways a view could outlive what it points into, each closed (found by an
+// adversarial review of view sources and view types).
+
+fn grow(s: inout String) {
+    s.push(" and more text, long enough to move the buffer elsewhere")
+}
+
+// an error passed up by `try` is returned too
+fn inner(b: str) -> int ! str {
+    return err(b)
+}
+
+fn viaTry(a: str, b: str) -> str ! str {
+    let _n = try inner(b)
+    return ok(a)
+}
+
+fn tryCaller() {
+    var x: String = "x"
+    var y: String = "y"
+    let l = viaTry(x.asStr(), y.asStr())
+    grow(&y)
+    // error: cannot modify `y` while it is borrowed by `l`
+    println(l.isOk())
+}
+
+fn localViaTry() -> str ! str {
+    let s: String = "local"
+    var r: int ! str = err(s.asStr())
+    _ = try r
+    // error: returns a view of `s`, which is dropped when the function returns
+    return ok("")
+}
+
+// a `return` in a loop body run through `each` returns from the function
+struct Count {
+    n: int
+
+    fn each(self, body: fn(int) -> Flow) -> Flow {
+        var i = 0
+        while i < self.n {
+            let f = body(i)
+            if f != Flow.Continue {
+                return f
+            }
+            i += 1
+        }
+        return Flow.Continue
+    }
+}
+
+fn viaEach(a: str, b: str) -> str {
+    let c = Count{n: 3}
+    for i in c {
+        if i == 1 {
+            return b
+        }
+    }
+    return a
+}
+
+fn eachCaller() {
+    var x: String = "x"
+    var y: String = "y"
+    let l = viaEach(x.asStr(), y.asStr())
+    grow(&y)
+    // error: cannot modify `y` while it is borrowed by `l`
+    println(l)
+}
+
+// a copy is passed by value: a view into it points into the call
+copy struct P {
+    arr: [4]int
+
+    fn part(self) -> []int {
+        return self.arr[0..2]
+        // error: returns a view into `self`, which this function got as a copy
+    }
+}
+
+fn firstTwo(a: [4]int) -> []int {
+    return a[0..2]
+    // error: returns a view into `a`, which this function got as a copy
+}
+
+// data a view variable holds inline is in the variable
+view struct V {
+    s: str
+    arr: [4]int
+}
+
+fn inlineData(input: str) -> int {
+    let zero = [0]
+    var keep: []int = zero[0..0]
+    {
+        let v = V{s: input, arr: [1, 2, 3, 4]}
+        keep = v.arr[0..2]
+        // error: `v` does not live long enough: `keep` would still view it after it is dropped
+    }
+    return keep.len()
+}
+
+fn inlinePayload(input: str) -> int {
+    let zero = [0]
+    var keep: []int = zero[0..0]
+    {
+        var r: str ! [4]int = ok(input)
+        r = err([1, 2, 3, 4])
+        match r {
+            ok(_) => {}
+            err(a) => {
+                keep = a[0..2]
+                // error: `r` does not live long enough: `keep` would still view it after it is dropped
+            }
+        }
+    }
+    return keep.len()
+}
+
+fn inlineChanged(input: str) -> int {
+    var v = V{s: input, arr: [1, 2, 3, 4]}
+    let k = v.arr[0..2]
+    v = V{s: input, arr: [9, 9, 9, 9]}
+    // error: cannot modify `v` while it is borrowed by `k`
+    return k[0]
+}
+
+// assigning a `match` binding assigns the variable it points into
+fn bindingStores(o: inout ?str, t: str) {
+    if let w = o {
+        w = t
+        // error: cannot store a view of `t` in the `inout` parameter `o`
+    }
+}
+
+fn bindingOutlives() {
+    let x: String = "x"
+    var o: ?str = x.asStr()
+    {
+        let y: String = "a string that dies at the end of this block"
+        if let w = o {
+            w = y.asStr()
+            // error: `y` does not live long enough: `o` would still view it after it is dropped
+        }
+    }
+    println(o)
+}
+
+// `swap` of views exchanges what they view
+fn swapped() {
+    let x: String = "x"
+    var h = x.asStr()
+    {
+        let y: String = "a string that dies at the end of this block"
+        var o = y.asStr()
+        swap(&h, &o)
+        // error: `y` does not live long enough: `h` would still view it after it is dropped
+    }
+    println(h)
+}
+
+// a task reading a view variable in place
+fn taskReads() {
+    let s: String = "hello"
+    var r: str ! (int, int) = ok(s.asStr())
+    scope {
+        go () => {
+            if let w = r {
+                println(w)
+            }
+        }
+        r = err((1, 2))
+        // error: cannot change `r` while a task uses it
+    }
+}
+
+fn main() {
+    tryCaller()
+    println(localViaTry() catch { "" })
+    eachCaller()
+    println(P{arr: [1, 2, 3, 4]}.part().len(), firstTwo([1, 2, 3, 4]).len())
+    println(inlineData("a"), inlinePayload("b"), inlineChanged("c"))
+    var o: ?str = "a"
+    bindingStores(&o, "b")
+    bindingOutlives()
+    swapped()
+    taskReads()
+}

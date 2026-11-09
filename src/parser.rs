@@ -467,6 +467,15 @@ impl Parser {
             self.bump();
             is_copy = true;
         }
+        // `view struct Token { text: str }`: a struct that may hold views
+        let mut is_view = false;
+        if matches!(self.peek(), Tok::Ident(s) if s == "view") && matches!(self.peek_at(1), Tok::Kw(Kw::Struct | Kw::Enum)) {
+            if is_copy || unsafe_send {
+                return self.err(format!("a `view` type is always copy and never `send`: write just `view {}`", if matches!(self.peek_at(1), Tok::Kw(Kw::Enum)) { "enum" } else { "struct" }));
+            }
+            self.bump();
+            is_view = true;
+        }
         // `send interface Handler { ... }`
         let mut send_iface = false;
         if matches!(self.peek(), Tok::Ident(s) if s == "send") && matches!(self.peek_at(1), Tok::Kw(Kw::Interface)) {
@@ -485,7 +494,7 @@ impl Parser {
                 let tparams = self.tparams_opt()?;
                 let owner = Self::owner_type(&name, &tparams, nsp);
                 let fields = self.struct_fields(&owner, &mut methods)?;
-                ItemKind::Struct(StructDecl { name, tparams, fields, is_copy, unsafe_send })
+                ItemKind::Struct(StructDecl { name, tparams, fields, is_copy, unsafe_send, is_view })
             }
             Tok::Kw(Kw::Enum) => {
                 self.bump();
@@ -493,7 +502,7 @@ impl Parser {
                 let tparams = self.tparams_opt()?;
                 let owner = Self::owner_type(&name, &tparams, nsp);
                 let variants = self.enum_variants(&owner, &mut methods)?;
-                ItemKind::Enum(EnumDecl { name, tparams, variants, is_copy })
+                ItemKind::Enum(EnumDecl { name, tparams, variants, is_copy, is_view })
             }
             Tok::Kw(Kw::Interface) => {
                 self.bump();
@@ -833,6 +842,17 @@ impl Parser {
         } else {
             self.ret_type()?
         };
+        // `-> str of a, b`: what the returned view points into
+        let mut ret_of = vec![];
+        if ret.is_some() && yields.is_none() && matches!(self.peek(), Tok::Ident(s) if s == "of") {
+            self.bump();
+            loop {
+                ret_of.push(self.ident()?);
+                if !self.eat_p(",") {
+                    break;
+                }
+            }
+        }
         let mut wheres = vec![];
         if self.eat_kw(Kw::Where) {
             loop {
@@ -853,6 +873,7 @@ impl Parser {
             tparams,
             params,
             ret,
+            ret_of,
             yields,
             yield_opt,
             wheres,

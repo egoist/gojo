@@ -1,0 +1,6 @@
+copy view struct Token {
+    // error: a `view` type is always copy and never `send`: write just `view struct`
+    text: str
+}
+
+fn main() {}

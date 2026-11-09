@@ -1,0 +1,81 @@
+// A call borrows only the arguments its returned view may point into: what
+// the function's `of` says, or else what its body returns (spec 5.4).
+
+// a view of `a` only
+fn left(a: str, b: str) -> str {
+    return a[0..a.len()]
+}
+
+// through another function, swapped
+fn right(a: str, b: str) -> str {
+    return left(b, a)
+}
+
+// either one, through recursion
+fn either(a: str, b: str, n: int) -> str {
+    if n <= 0 {
+        return a
+    }
+    return either(b, a, n - 1)
+}
+
+// a view of the list's element, or of the default
+fn firstOr(xs: []String, d: str) -> str {
+    if xs.len() == 0 {
+        return d
+    }
+    return xs[0].asStr()
+}
+
+// said by the signature: callers rely on it, not on the body
+fn keyOf(line: str, sep: str) -> str of line {
+    let i = line.find(sep) ?? line.len()
+    return line[0..i]
+}
+
+struct Doc {
+    title: String
+    body: String
+
+    // a view of `self` only: `skip` is just compared
+    fn titleUnless(self, skip: str) -> str {
+        if self.title.asStr() == skip {
+            return self.body.asStr()
+        }
+        return self.title.asStr()
+    }
+}
+
+// the returned view stays valid: what it points into isn't changed
+fn grown(s: inout String) {
+    s.push(" and more text, long enough to move the buffer elsewhere")
+}
+
+fn main() {
+    var x: String = "hello"
+    var y: String = "world"
+    let l = left(x.asStr(), y.asStr())
+    grown(&y)
+    println(l)
+    let r = right(x.asStr(), y.asStr())
+    grown(&x)
+    println(r)
+    var names = ["ann".toString()]
+    var fallback: String = "nobody"
+    let f = firstOr(names, fallback.asStr())
+    // `f` may view either: neither may change while it is in use
+    println(f)
+    names.push("bob".toString())
+    grown(&fallback)
+    var sep: String = "="
+    let k = keyOf("key=value", sep.asStr())
+    grown(&sep)
+    println(k)
+    var d = Doc{title: "title", body: "body"}
+    var other: String = "untitled"
+    let t = d.titleUnless(other.asStr())
+    grown(&other)
+    println(t, either(x.asStr(), y.asStr(), 3).len())
+    d.body = "changed"
+    println(d.body)
+}

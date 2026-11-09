@@ -1,0 +1,24 @@
+// `of` names parameters a returned view can point into.
+fn notView(a: str, b: str) -> int of a {
+    // error: `of` says what a returned view points into, but `int` is not a view
+    return 1
+}
+
+fn unknownName(a: str) -> str of z {
+    // error: `z` is not a parameter of `unknownName`
+    return a
+}
+
+fn sunk(a: sink String, b: str) -> str of a {
+    // error: `a` is a `sink` parameter
+    return b
+}
+
+fn byValue(n: int, b: str) -> str of n {
+    // error: `n` is a `int`, passed by value
+    return b
+}
+
+fn main() {
+    println(notView("a", "b"), unknownName("q"), sunk("s".toString(), "t"), byValue(1, "b"))
+}

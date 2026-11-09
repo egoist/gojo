@@ -176,12 +176,12 @@ impl Checker {
             let pkg = self.file_cx[fi].pkg;
             for ii in 0..self.files[fi].items.len() {
                 let item = &self.files[fi].items[ii];
-                let (name, kind, tps, is_copy, unsafe_send) = match &item.kind {
-                    ast::ItemKind::Struct(s) => (s.name.clone(), TypeDefKind::Struct { fields: vec![] }, s.tparams.clone(), s.is_copy, s.unsafe_send),
-                    ast::ItemKind::Enum(e) => (e.name.clone(), TypeDefKind::Enum { variants: vec![] }, e.tparams.clone(), e.is_copy, false),
+                let (name, kind, tps, is_copy, unsafe_send, view) = match &item.kind {
+                    ast::ItemKind::Struct(s) => (s.name.clone(), TypeDefKind::Struct { fields: vec![] }, s.tparams.clone(), s.is_copy || s.is_view, s.unsafe_send, s.is_view),
+                    ast::ItemKind::Enum(e) => (e.name.clone(), TypeDefKind::Enum { variants: vec![] }, e.tparams.clone(), e.is_copy || e.is_view, false, e.is_view),
                     // (for interfaces, `unsafe_send` records `send interface`)
-                    ast::ItemKind::Interface(i) => (i.name.clone(), TypeDefKind::Iface { methods: vec![], type_set: None }, i.tparams.clone(), false, i.is_send),
-                    ast::ItemKind::TypeAlias { newtype: true, name, tparams, .. } => (name.clone(), TypeDefKind::Struct { fields: vec![] }, tparams.clone(), false, false),
+                    ast::ItemKind::Interface(i) => (i.name.clone(), TypeDefKind::Iface { methods: vec![], type_set: None }, i.tparams.clone(), false, i.is_send, false),
+                    ast::ItemKind::TypeAlias { newtype: true, name, tparams, .. } => (name.clone(), TypeDefKind::Struct { fields: vec![] }, tparams.clone(), false, false, false),
                     ast::ItemKind::TypeAlias { .. } => {
                         alias_items.push((fi, ii));
                         continue;
@@ -197,7 +197,7 @@ impl Checker {
                     tparams.push(self.new_tparam(&tp.name, tp.is_int));
                 }
                 let tuple = self.prog.packages[pkg as usize].is_std && self.prog.packages[pkg as usize].name == "prelude" && name.starts_with("Tuple");
-                self.prog.types.push(TypeDef { name: name.clone(), pkg, tparams, kind, is_copy, is_pub, unsafe_send, newtype, span, has_drop: false, tuple });
+                self.prog.types.push(TypeDef { name: name.clone(), pkg, tparams, kind, is_copy, is_pub, unsafe_send, newtype, span, has_drop: false, tuple, view });
                 if self.prog.packages[pkg as usize].items.insert(name.clone(), Sym::Type(id)).is_some() {
                     self.err(span, format!("`{}` is declared twice", name));
                 }
@@ -247,9 +247,7 @@ impl Checker {
                             self.err(f.span, format!("duplicate field `{}`", f.name));
                         }
                         let ty = self.resolve_type(&f.ty, &env);
-                        if ty.is_view() {
-                            self.err(f.ty.span, format!("field `{}` has borrowed view type `{}`; fields must own their data (use `String` / `Vec[T]`)", f.name, self.prog.show(&ty)));
-                        }
+                        self.check_field_view(id, &ty, f.ty.span, &f.name);
                         fields.push(FieldInfo { name: f.name.clone(), ty, default: None, is_pub: f.is_pub || self.prog.packages[self.prog.def(id).pkg as usize].is_std, embedded: f.embedded, span: f.span });
                     }
                     self.prog.types[id as usize].kind = TypeDefKind::Struct { fields };
@@ -274,9 +272,7 @@ impl Checker {
                                 self.err(t.span, format!("variant `{}` has two values named `{}`", v.name, n));
                             }
                             let ty = self.resolve_type(t, &env);
-                            if ty.is_view() {
-                                self.err(t.span, "enum payloads must own their data; borrowed views are not allowed here");
-                            }
+                            self.check_field_view(id, &ty, t.span, n);
                             fs.push((n.clone(), ty));
                         }
                         variants.push(VariantInfo { name: v.name.clone(), fields: fs, span: v.span });
@@ -359,6 +355,7 @@ impl Checker {
                             tparams: vec![],
                             params: vec![],
                             ret: Ty::Unit,
+                            ret_of: None,
                             yields: None,
                             yield_opt: false,
                             is_pub: false,
@@ -386,6 +383,7 @@ impl Checker {
                             tparams: vec![],
                             params: vec![],
                             ret: t.clone(),
+                            ret_of: None,
                             yields: None,
                             yield_opt: false,
                             is_pub: false,
@@ -492,11 +490,19 @@ impl Checker {
                 for t in tys {
                     if !self.is_copy(&t) {
                         let s = self.prog.show(&t);
-                        self.err(def.span, format!("`{}` is declared `copy` but contains `{}`, which is not copy", def.name, s));
+                        if def.view {
+                            self.diags.push(Diag::new(def.span, format!("`{}` is a view type, so it can only hold views and copy values, and `{}` is neither", def.name, s)).note(None, "a view type is copied like `str` and never dropped: keep owned data (`String`, `Vec[T]`) in an ordinary variable or struct beside it"));
+                        } else {
+                            self.err(def.span, format!("`{}` is declared `copy` but contains `{}`, which is not copy", def.name, s));
+                        }
                     }
                 }
                 if def.has_drop {
-                    self.err(def.span, format!("`{}` is declared `copy` but has a `drop` method", def.name));
+                    if def.view {
+                        self.err(def.span, format!("`{}` is a view type, which is never dropped: it can't have a `drop` method", def.name));
+                    } else {
+                        self.err(def.span, format!("`{}` is declared `copy` but has a `drop` method", def.name));
+                    }
                 }
             }
             if self.is_infinite(id, &mut vec![]) {
@@ -711,7 +717,7 @@ impl Checker {
                 self.err(p.span, format!("duplicate parameter `{}`", p.name));
             }
             let ty = self.resolve_type(&p.ty, &env);
-            if p.mode == Mode::Sink && ty.is_view() {
+            if p.mode == Mode::Sink && self.prog.is_view(&ty) {
                 self.err(p.ty.span, "`sink` cannot take a borrowed view; take an owned type (String / Vec[T]) instead");
             }
             params.push(FuncParam { name: p.name.clone(), mode: p.mode, ty, span: p.span });
@@ -739,6 +745,7 @@ impl Checker {
                 self.err(sp, format!("`{}` has no C representation; `extern \"C\"` functions return numbers, `bool`, raw pointers and structs of those", s));
             }
         }
+        let ret_of = self.ret_of(f, recv.as_ref(), &params, &ret);
         let id = self.prog.funcs.len() as FuncId;
         self.prog.funcs.push(FuncDef {
             name: f.name.clone(),
@@ -748,6 +755,7 @@ impl Checker {
             tparams,
             params,
             ret,
+            ret_of,
             yields: f.yields,
             yield_opt: f.yield_opt,
             is_pub,
@@ -935,7 +943,7 @@ impl Checker {
             TypeExprKind::Result(a, b) => Ty::result(self.resolve_type(a, env), self.resolve_type(b, env)),
             TypeExprKind::Tuple(ts) => {
                 let args: Vec<Ty> = ts.iter().map(|t| self.resolve_type(t, env)).collect();
-                if args.iter().any(|a| a.contains_view()) {
+                if args.iter().any(|a| self.prog.contains_view(&a)) {
                     self.err(te.span, "a tuple cannot hold a borrowed view; use an owned type (String / Vec[T])");
                 }
                 match self.tuple_def(args.len()) {
@@ -951,7 +959,7 @@ impl Checker {
             // `chan T`: both ends, `Chan[T] { tx Sender[T], rx Receiver[T] }`
             TypeExprKind::Chan(a) => {
                 let t = self.resolve_type(a, env);
-                if t.contains_view() {
+                if self.prog.contains_view(&t) {
                     self.err(te.span, "channels cannot carry borrowed views; send owned values");
                 }
                 match self.prog.prelude_type("Chan") {
@@ -1197,14 +1205,14 @@ impl Checker {
                     return Ty::Error;
                 }
                 let a = Rc::new(targs[0].clone());
-                if a.contains_view() {
+                if self.prog.contains_view(&a) {
                     self.err(span, format!("`{}` cannot hold the borrowed view `{}`; use an owned type", name, self.prog.show(&a)));
                 }
                 return match name.as_str() {
                     "Vec" => Ty::Vec(a),
                     "Map" => {
                         let v = Rc::new(targs[1].clone());
-                        if v.contains_view() {
+                        if self.prog.contains_view(&v) {
                             self.err(span, "`Map` values cannot be borrowed views");
                         }
                         Ty::Map(a, v)
@@ -1262,7 +1270,7 @@ impl Checker {
         match sym {
             Sym::Type(d) => {
                 self.check_targ_kinds(d, &targs, span);
-                if targs.iter().any(|t| t.contains_view()) && !matches!(self.prog.def(d).kind, TypeDefKind::Iface { .. }) {
+                if targs.iter().any(|t| self.prog.contains_view(&t)) && !matches!(self.prog.def(d).kind, TypeDefKind::Iface { .. }) {
                     self.err(span, format!("`{}` cannot be instantiated with a borrowed view type; use an owned type (String / Vec[T])", name));
                 }
                 let def = self.prog.def(d);
@@ -1332,6 +1340,67 @@ impl Checker {
     }
 
     /// Can this type cross a C call as it is?
+    /// A field or enum payload `name` of type `ty` in type `owner`. Only a
+    /// `view` type may hold views, and only views that can sit in a variable
+    /// (not task handles, scopes or lock guards, which their blocks track).
+    fn check_field_view(&mut self, owner: DefId, ty: &Ty, sp: Span, name: &str) {
+        if !self.prog.is_view(ty) {
+            return;
+        }
+        let def = self.prog.def(owner);
+        let (tn, view, kind) = (def.name.clone(), def.view, if def.is_struct() { "struct" } else { "enum" });
+        let shown = self.prog.show(ty);
+        if !view {
+            let what = if kind == "struct" { format!("field `{}`", name) } else { format!("payload `{}`", name) };
+            self.diags.push(
+                Diag::new(sp, format!("{} has borrowed view type `{}`; fields must own their data", what, shown))
+                    .note(None, format!("store an owned `String` / `Vec[T]`, or make `{}` a view itself (`view {} {}`), which then lives only in variables, like `str`", tn, kind, tn)),
+            );
+            return;
+        }
+        if self.prog.reaches(ty, &|t| matches!(t, Ty::Task(_) | Ty::Scope | Ty::MutexRef(_))) {
+            self.err(sp, format!("`{}` can't hold `{}`: task handles, scopes and lock guards live only in the variables their blocks track", tn, shown));
+        }
+    }
+
+    /// `-> str of a, b`: the parameters (receiver first, as indices) the
+    /// returned view may point into. Checked against the body by the borrow
+    /// checker; callers rely on it.
+    fn ret_of(&mut self, f: &ast::FuncDecl, recv: Option<&FuncParam>, params: &[FuncParam], ret: &Ty) -> Option<Vec<usize>> {
+        if f.ret_of.is_empty() {
+            return None;
+        }
+        let sp = f.ret_of[0].1;
+        if !self.prog.is_view(&ret) {
+            let s = self.prog.show(ret);
+            self.err(sp, format!("`of` says what a returned view points into, but `{}` is not a view", s));
+            return None;
+        }
+        let all: Vec<&FuncParam> = recv.into_iter().chain(params.iter()).collect();
+        let mut out = vec![];
+        for (n, nsp) in &f.ret_of {
+            let Some(i) = all.iter().position(|p| &p.name == n) else {
+                self.err(*nsp, format!("`{}` is not a parameter of `{}`", n, f.name));
+                continue;
+            };
+            let p = all[i];
+            if p.mode == Mode::Sink {
+                self.err(*nsp, format!("`{}` is a `sink` parameter: it is dropped when the function returns, so the returned view can't point into it", n));
+                continue;
+            }
+            if matches!(p.ty, Ty::Bool | Ty::Int(_) | Ty::F32 | Ty::F64 | Ty::Unit) {
+                let s = self.prog.show(&p.ty);
+                self.err(*nsp, format!("`{}` is a `{}`, passed by value: a view can't point into it", n, s));
+                continue;
+            }
+            if !out.contains(&i) {
+                out.push(i);
+            }
+        }
+        out.sort_unstable();
+        Some(out)
+    }
+
     fn ffi_safe(&self, t: &Ty, depth: u32) -> bool {
         match t {
             Ty::Unit | Ty::Never | Ty::Bool | Ty::Int(_) | Ty::F32 | Ty::F64 | Ty::Ptr(_) | Ty::Error => true,

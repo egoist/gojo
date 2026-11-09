@@ -1,0 +1,35 @@
+// Only a `view` type may hold views, and it may only hold views and copy
+// values; and like `str`, a view type lives only in variables.
+view struct Token {
+    text: str
+    n: int
+}
+
+struct Holder {
+    t: Token
+    // error: field `t` has borrowed view type `Token`; fields must own their data
+}
+
+view struct Owns {
+    // error: `Owns` is a view type, so it can only hold views and copy values, and `String` is neither
+    name: String
+}
+
+view struct Dropped {
+    // error: `Dropped` is a view type, which is never dropped: it can't have a `drop` method
+    s: str
+
+    fn drop(inout self) {}
+}
+
+view struct WithScope {
+    s: Scope
+    // error: `WithScope` can't hold `Scope`
+}
+
+enum Plain {
+    Word(str)
+    // error: payload `_0` has borrowed view type `str`; fields must own their data
+}
+
+fn main() {}
