@@ -1,0 +1,55 @@
+// A rewrite that takes a tree and returns a new one: each node's box is
+// moved out of and a box of the same type is made right after, so the
+// compiler hands the old block to the new box (no allocation).
+enum Expr {
+    Num(n: int)
+    Add(l: Box[Expr], r: Box[Expr])
+    Neg(x: Box[Expr])
+}
+
+fn build(d: int) -> Expr {
+    if d == 0 {
+        return .Num(1)
+    }
+    if d % 3 == 0 {
+        return .Neg(Box(build(d - 1)))
+    }
+    return .Add(Box(build(d - 1)), Box(build(d - 1)))
+}
+
+fn bump(e: sink Expr) -> Expr {
+    return match e {
+        Num(n) => .Num(n + 1)
+        Add(l, r) => .Add(Box(bump(*l)), Box(bump(*r)))
+        // two negations cancel: the box isn't rebuilt on that path
+        Neg(x) => negBump(*x)
+    }
+}
+
+// `-e`, bumped
+fn negBump(e: sink Expr) -> Expr {
+    return match e {
+        // two negations cancel: the box is freed, nothing rebuilt
+        Neg(y) => bump(*y)
+        Num(n) => .Neg(Box(.Num(n + 1)))
+        // reused, reused, then a new box for the negation
+        Add(l, r) => .Neg(Box(.Add(Box(bump(*l)), Box(bump(*r)))))
+    }
+}
+
+fn eval(e: Expr) -> int {
+    return match e {
+        Num(n) => n
+        Add(l, r) => eval(*l) + eval(*r)
+        Neg(x) => -eval(*x)
+    }
+}
+
+fn main() {
+    var t = build(12)
+    println(eval(t))
+    for _ in 0..5 {
+        t = bump(t)
+    }
+    println(eval(t))
+}

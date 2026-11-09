@@ -1110,7 +1110,7 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
             let missing = info.join_drops.keys().filter(|k| !fs.jd_done.contains(k)).count() + info.after_stmt.keys().filter(|k| !fs.fd_done.contains(k)).count();
             assert!(missing == 0, "internal error: {} drops at the ends of branches or at last uses were not emitted in {}", missing, fd.name);
         }
-        let out = resolve_flags(&fs.out, &fs.used_flags);
+        let out = reuse_boxes(&resolve_flags(&fs.out, &fs.used_flags));
         let _ = writeln!(self.bodies, "{} {{\n{}{}}}\n{}", sig, fs.decls, out, C_LINE_MARK);
     }
 
@@ -3173,7 +3173,7 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
                     Ty::Box(inner) => {
                         let ic = self.cty(inner);
                         let r = self.tmp();
-                        self.emit(fs, &format!("{} *{} = gojo_box_alloc(sizeof({})); *{} = {};", ic, r, ic, r, v));
+                        self.emit(fs, &format!("{} *{} = GOJO_BOX_NEW_R({}); *{} = {};", ic, r, ic, r, v));
                         r
                     }
                     Ty::Rc(inner) | Ty::Arc(inner) => {
@@ -3220,7 +3220,8 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
                 let c = self.cty(&t);
                 let bp = self.tmp();
                 let r = self.tmp();
-                self.emit(fs, &format!("{} *{} = {}; {} {} = *{}; gojo_box_free({}, sizeof({}));", c, bp, b, c, r, bp, bp, c));
+                // (reuse_boxes may hand the block to a `Box(...)` that follows)
+                self.emit(fs, &format!("{} *{} = {}; {} {} = *{}; GOJO_BOX_FREE_R({}, {});", c, bp, b, c, r, bp, bp, c));
                 r
             }
             TK::Error => "0".into(),
@@ -3357,7 +3358,7 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
                     let v = self.expr(fs, x);
                     let c = self.cty(&xt);
                     let b = self.tmp();
-                    self.emit(fs, &format!("{} *{} = gojo_box_alloc(sizeof({})); *{} = {};", c, b, c, b, v));
+                    self.emit(fs, &format!("{} *{} = GOJO_BOX_NEW_R({}); *{} = {};", c, b, c, b, v));
                     format!("((gojo_iface){{ {}, &{} }})", b, vt)
                 } else {
                     let p = self.addr(fs, x);
@@ -4009,7 +4010,7 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
                 assert!(missing == 0, "internal error: {} drops at the ends of branches or at last uses were not emitted in a closure", missing);
             }
         }
-        let nout = resolve_flags(&nfs.out, &nfs.used_flags);
+        let nout = reuse_boxes(&resolve_flags(&nfs.out, &nfs.used_flags));
         let _ = writeln!(self.bodies, "{} {{\n{}{}}}\n{}", sig, nfs.decls, nout, C_LINE_MARK);
         // environment value
         if let Some((ctlp, retp)) = &lbp {
@@ -7383,7 +7384,7 @@ impl<'a> Gen<'a> {
         self.emit(&mut nfs, &format!("{} {} = {};", c, r, v));
         self.cleanup_to(&mut nfs, 0);
         self.emit(&mut nfs, &format!("return {};", r));
-        let nout = resolve_flags(&nfs.out, &nfs.used_flags);
+        let nout = reuse_boxes(&resolve_flags(&nfs.out, &nfs.used_flags));
         let _ = writeln!(self.bodies, "{} {{\n{}{}}}\n{}", sig, nfs.decls, nout, C_LINE_MARK);
         name
     }
@@ -7478,6 +7479,92 @@ fn local_path(e: &TExpr) -> Option<(LocalId, Vec<usize>)> {
 /// drop tests and removes the others.
 fn flag_mark(flag: &str) -> String {
     format!("/*?{}*/", flag)
+}
+
+/// Reuse on last-use frees (the static half of Perceus): a box emptied by a
+/// move out of it (`*b`, `GOJO_BOX_FREE_R`) and a box of the same type made
+/// later in the same C block (`GOJO_BOX_NEW_R`) are one block, when nothing
+/// in between can leave or enter the block: no `return`, `goto`, `break`,
+/// `continue`, label or `case`, and no `}` closing it. Then every path from
+/// the free reaches the allocation, so the free can be dropped and the old
+/// block written instead. A match arm that rebuilds a node (`Add(l, r) =>
+/// .Add(Box(f(*l)), Box(f(*r)))`) allocates nothing.
+fn reuse_boxes(out: &str) -> String {
+    if !out.contains("GOJO_BOX_FREE_R(") || !out.contains("GOJO_BOX_NEW_R(") {
+        return out.to_string();
+    }
+    let mut lines: Vec<String> = out.split_inclusive('\n').map(|l| l.to_string()).collect();
+    // braces outside string and character literals: (opened, closed below 0)
+    fn braces(line: &str, depth: &mut i64) -> bool {
+        let b = line.as_bytes();
+        let mut i = 0;
+        while i < b.len() {
+            match b[i] {
+                q @ (b'"' | b'\'') => {
+                    i += 1;
+                    while i < b.len() && b[i] != q {
+                        if b[i] == b'\\' {
+                            i += 1;
+                        }
+                        i += 1;
+                    }
+                }
+                b'/' if b.get(i + 1) == Some(&b'*') => {
+                    i += 2;
+                    while i + 1 < b.len() && !(b[i] == b'*' && b[i + 1] == b'/') {
+                        i += 1;
+                    }
+                    i += 1;
+                }
+                b'{' => *depth += 1,
+                b'}' => {
+                    *depth -= 1;
+                    if *depth < 0 {
+                        return false;
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        true
+    }
+    fn word(line: &str, w: &str) -> bool {
+        let ident = |c: Option<char>| c.is_some_and(|c| c.is_ascii_alphanumeric() || c == '_');
+        line.match_indices(w).any(|(i, _)| !ident(line[..i].chars().next_back()) && !ident(line[i + w.len()..].chars().next()))
+    }
+    fn jumps(line: &str) -> bool {
+        let t = line.trim_start();
+        if t.starts_with('#') {
+            return false;
+        }
+        // a label (`L4:;`, `done:`) can be jumped to from elsewhere
+        let label = t.split_once(':').is_some_and(|(l, rest)| !l.is_empty() && l.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') && !rest.starts_with(':'));
+        label || word(t, "return") || word(t, "goto") || word(t, "break") || word(t, "continue") || word(t, "case") || word(t, "default") || word(t, "longjmp")
+    }
+    for i in 0..lines.len() {
+        let Some(at) = lines[i].find("GOJO_BOX_FREE_R(") else { continue };
+        let rest = &lines[i][at + "GOJO_BOX_FREE_R(".len()..];
+        let Some(close) = rest.find(");") else { continue };
+        let Some((ptr, ty)) = rest[..close].split_once(", ") else { continue };
+        let (ptr, ty) = (ptr.to_string(), ty.to_string());
+        let call = format!("GOJO_BOX_FREE_R({}, {});", ptr, ty);
+        let want = format!("{} *", ty);
+        let new = format!("GOJO_BOX_NEW_R({})", ty);
+        let mut depth = 0i64;
+        for j in i + 1..lines.len() {
+            let l = &lines[j];
+            if depth == 0 && l.trim_start().starts_with(&want) && l.contains(&new) {
+                lines[j] = l.replacen(&new, &ptr, 1);
+                lines[i] = lines[i].replacen(&call, "/* reused below */", 1);
+                break;
+            }
+            if jumps(l) || !braces(l, &mut depth) {
+                break;
+            }
+        }
+    }
+    lines.concat()
 }
 
 fn resolve_flags(out: &str, used: &HashSet<String>) -> String {

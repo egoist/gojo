@@ -551,6 +551,30 @@ fn simulated_network() {
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
+/// A box moved out of and a box of the same type made after it in the same
+/// block share one allocation; anything that may leave the block between
+/// them keeps them apart.
+#[test]
+fn box_reuse() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let c = Command::new(gojo()).arg("emit-c").arg(root.join("tests/run/box_reuse.gojo")).output().unwrap();
+    let c = String::from_utf8_lossy(&c.stdout);
+    assert_eq!(c.matches("/* reused below */").count(), 4, "{}", c);
+    assert_eq!(c.matches("GOJO_BOX_FREE_R(").count(), 2, "{}", c);
+    let dir = std::env::temp_dir().join(format!("gojo_reuse_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let f = dir.join("apart.gojo");
+    // a return and a loop exit between the free and the new box
+    std::fs::write(&f, "fn id(s: sink String) -> String {\n    return s\n}\n\nfn a(b: sink Box[String], stop: bool) -> Box[String] {\n    let v = id(*b)\n    if stop {\n        return Box(\"stop\")\n    }\n    return Box(v + \"!\")\n}\n\nfn c(b: sink Box[String], xs: []String) -> ?Box[String] {\n    let v = id(*b)\n    for x in xs {\n        if x == v {\n            break\n        }\n    }\n    return Box(v)\n}\n\nfn d(b: sink Box[String]) -> Box[String] {\n    let v = id(*b)\n    return Box(v + \"?\")\n}\n\nfn main() {\n    println(*a(Box(\"a\"), false), *a(Box(\"b\"), true))\n    println(c(Box(\"x\"), [\"w\", \"x\"]) != none, *d(Box(\"d\")))\n}\n").unwrap();
+    let out = Command::new(gojo()).arg("emit-c").arg(&f).output().unwrap();
+    let c = String::from_utf8_lossy(&out.stdout);
+    // (only `d` has nothing between them)
+    assert!(out.status.success() && c.matches("reused below").count() == 1 && c.matches("GOJO_BOX_FREE_R(").count() == 2, "{}{}", c, String::from_utf8_lossy(&out.stderr));
+    let run = Command::new(gojo()).arg("run").arg(&f).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&run.stdout), "a! stop\ntrue d?\n");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Parked stacks are put away and brought back at the same address, also
 /// while channels write values into them.
 #[test]

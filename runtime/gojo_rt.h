@@ -201,6 +201,11 @@ static inline void gojo_box_free(void *p, size_t n) {
     lists[cls] = (gojo_box_node *)p;
 }
 
+// A box emptied by a move out of it, and a new box: the compiler pairs them
+// up where one can take the other's block (codegen.rs `reuse_boxes`).
+#define GOJO_BOX_FREE_R(p, T) gojo_box_free((p), sizeof(T))
+#define GOJO_BOX_NEW_R(T) gojo_box_alloc(sizeof(T))
+
 // ---- strings
 static inline gojo_str gojo_str_lit(const char *s, int64_t n) { gojo_str r = { (const uint8_t *)s, n }; return r; }
 static inline gojo_str gojo_string_view(const gojo_string *s) { gojo_str r = { s->ptr, s->len }; return r; }
