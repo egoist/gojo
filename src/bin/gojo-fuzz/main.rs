@@ -534,6 +534,65 @@ fn toml_mode(n: usize, seed: u64, out: &Path) {
     }
 }
 
+/// `gojo-fuzz data [N]`: std/yaml and std/toml, through a Gojo program
+/// (data.gojo) built with AddressSanitizer and UBSan. It generates trees,
+/// checks that they come back the same from YAML and TOML, and reads
+/// mutations of the text; N iterations in runs of 5000, each run with its
+/// own seed. A failing run's last text goes to `data-findings`.
+fn data_mode(n: usize, seed: u64, out: &Path, time: Option<Duration>) {
+    let work = out.join("data-work");
+    let _ = std::fs::create_dir_all(&work);
+    let src = work.join("data.gojo");
+    std::fs::write(&src, include_str!("data.gojo")).expect("write data.gojo");
+    let bin = work.join("data");
+    let mut build = Command::new(gojo_bin());
+    build.arg("build").arg("--cc").arg("cc -fsanitize=address,undefined -fno-sanitize-recover=undefined -g -O1").arg(&src).arg("-o").arg(&bin);
+    match build.output() {
+        Ok(o) if o.status.success() => {}
+        Ok(o) => {
+            eprintln!("gojo-fuzz data: building data.gojo failed:\n{}", String::from_utf8_lossy(&o.stderr));
+            std::process::exit(1);
+        }
+        Err(e) => {
+            eprintln!("gojo-fuzz data: running {}: {}", gojo_bin().display(), e);
+            std::process::exit(1);
+        }
+    }
+    let start = Instant::now();
+    let (mut runs, mut found, mut done) = (0, 0, 0);
+    let mut s = seed;
+    while done < n && time.is_none_or(|t| start.elapsed() < t) {
+        let k = (n - done).min(5000);
+        let cur = work.join(format!("cur-{}.txt", s));
+        let mut cmd = Command::new(&bin);
+        cmd.arg(s.to_string()).arg(k.to_string()).arg(&cur).env("ASAN_OPTIONS", asan_options("detect_leaks=0"));
+        let r = run_limited(&mut cmd, Duration::from_secs(600));
+        runs += 1;
+        let ok = matches!(&r, Some(o) if o.status.success() && String::from_utf8_lossy(&o.stdout).trim_end().ends_with("done"));
+        if !ok {
+            found += 1;
+            let text = std::fs::read(&cur).unwrap_or_default();
+            let dir = out.join("data-findings");
+            let _ = std::fs::create_dir_all(&dir);
+            let name = format!("{:016x}", hash(&String::from_utf8_lossy(&text)));
+            let _ = std::fs::write(dir.join(format!("{}.txt", name)), &text);
+            let log = match &r {
+                Some(o) => format!("seed {} ({} iterations)\n{}\n{}", s, k, String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr)),
+                None => format!("seed {} ({} iterations): timed out", s, k),
+            };
+            let _ = std::fs::write(dir.join(format!("{}.log", name)), log);
+            eprintln!("*** data finding: {}", dir.join(format!("{}.txt", name)).display());
+        }
+        let _ = std::fs::remove_file(&cur);
+        done += k;
+        s = s.wrapping_add(1);
+    }
+    eprintln!("gojo-fuzz data: {} iterations in {} runs, {} problems", done, runs, found);
+    if found > 0 {
+        std::process::exit(1);
+    }
+}
+
 fn walk_files(d: &Path) -> Vec<PathBuf> {
     let mut out = vec![];
     for e in std::fs::read_dir(d).into_iter().flatten().filter_map(|e| e.ok()) {
@@ -1384,6 +1443,10 @@ fn main() {
             let n: usize = rest.get(1).and_then(|x| x.parse().ok()).unwrap_or(100000);
             toml_mode(n, seed, &out);
         }
+        Some("data") => {
+            let n: usize = rest.get(1).and_then(|x| x.parse().ok()).unwrap_or(100000);
+            data_mode(n, seed, &out, time);
+        }
         Some("fmt") => {
             let n: usize = rest.get(1).and_then(|x| x.parse().ok()).unwrap_or(2000);
             gojo::with_compiler_stack(move || fmt_mode(n, seed, &out));
@@ -1401,7 +1464,7 @@ fn main() {
             supervise(jobs, time, &out, seed, exec_rate, limit);
         }
         _ => {
-            eprintln!("usage: gojo-fuzz [--jobs N] [--time SECS] [--out DIR] [--seed N] [--exec-rate N] [--limit SECS]\n       gojo-fuzz check <file>\n       gojo-fuzz reduce <file> [-o out]\n       gojo-fuzz fmt [N]\n       gojo-fuzz toml [N]");
+            eprintln!("usage: gojo-fuzz [--jobs N] [--time SECS] [--out DIR] [--seed N] [--exec-rate N] [--limit SECS]\n       gojo-fuzz check <file>\n       gojo-fuzz reduce <file> [-o out]\n       gojo-fuzz fmt [N]\n       gojo-fuzz toml [N]\n       gojo-fuzz data [N]");
             std::process::exit(2);
         }
     }

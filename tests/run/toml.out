@@ -1,0 +1,108 @@
+API "v2" Debug some("1979-05-27T07:32:00Z") {"a", "b"} localhost 8080 true {"requests": 1000, "burst": 16}
+some("postgres://localhost/app\n") some(5) some(2.5)
+backup 24h ["--full", "--compress"]
+vacuum 1h []
+title = "API \"v2\""
+level = "Debug"
+started = "1979-05-27T07:32:00Z"
+tags = ["a", "b"]
+
+[server]
+host = "localhost"
+port = 8080
+tls = true
+
+[db]
+url = '''
+postgres://localhost/app
+'''
+pool = 5
+timeout = 2.5
+
+[limits]
+requests = 1000
+burst = 16
+
+[[jobs]]
+name = "backup"
+every = "24h"
+args = ["--full", "--compress"]
+
+[[jobs]]
+name = "vacuum"
+every = "1h"
+args = []
+true
+title: API "v2"
+level: Debug
+started: "1979-05-27T07:32:00Z"
+tags:
+  - a
+  - b
+server:
+  host: localhost
+  port: 8080
+  tls: true
+db:
+  url: |
+    postgres://localhost/app
+  pool: 5
+  timeout: 2.5
+jobs:
+  - name: backup
+    every: 24h
+    args:
+      - --full
+      - --compress
+  - name: vacuum
+    every: 1h
+    args: []
+limits:
+  requests: 1000
+  burst: 16
+Obj({"ints": Arr([Int(99), Int(-17), Int(0), Int(1000), Int(3735928559), Int(493), Int(13)]), "floats": Arr([Num(1), Num(3.1415), Num(-0.01), Num(5e+22), Num(1000000), Num(-0.02), Num(6.626e-34), Num(+Inf), Num(-Inf), Num(NaN)]), "strings": Arr([Str("tab\there"), Str("C:\\path"), Str("multi line"), Str("raw ''lines''\n")]), "dates": Arr([Str("1979-05-27"), Str("07:32:00"), Str("1979-05-27T07:32:00"), Str("1979-05-27T07:32:00.999-07:00"), Str("07:32:00")]), "dotted": Obj({"a": Obj({"b": Int(1)})}), "quoted key": Obj({"inline": Bool(true), "x": Obj({"y": Int(2)})})})
+Server{host: "h", port: 1, tls: false}
+Server{host: "localhost", port: 1, tls: false}
+toml: the keys "Port" and "PORT" both mean the field `port` (keys match fields ignoring case, `-` and `_`) at line 2, column 1
+Config{title: "t", level: Warn, started: none, tags: {}, server: Server{host: "localhost", port: 80, tls: false}, db: none, jobs: [], limits: {}}
+toml: expected a string, found an integer (in .title) at line 1, column 9
+toml: the number 70000 doesn't fit in u16 (in .server.port) at line 3, column 8
+toml: missing field `every` of `Job` (in .jobs[0]) at line 4, column 1
+toml: unknown variant "Loud" (a `Level`: one of Debug, Info, Warn) (in .level) at line 2, column 9
+toml: expected an integer, found a string (in .server.port) at line 4, column 8
+toml: the key `a` is defined twice at line 2, column 1
+toml: the table [a] is defined twice at line 3, column 1
+toml: the key `a` already has a value at line 2, column 1
+toml: the table [t.a] was already defined by dotted keys at line 3, column 1
+toml: a number can't have leading zeros at line 1, column 5
+toml: invalid number at line 1, column 5
+toml: the integer doesn't fit in 64 bits at line 1, column 5
+toml: the date doesn't exist at line 1, column 5
+toml: a string has no closing quote at line 1, column 5
+toml: an unknown escape in a string at line 1, column 6
+toml: a `[` has no closing `]` at line 1, column 10
+toml: expected a value (strings are quoted) at line 1, column 5
+toml: expected `=` after the key at line 1, column 3
+toml: expected a key at line 1, column 1
+toml: TOML has no null (leave the key out, or use a value) (in .list[1])
+toml: a TOML document is a table: encode a struct or a map, not an integer
+toml: the integer doesn't fit in TOML's 64-bit integers (in .n)
+a:
+  b:
+    - 1
+    - 2.5
+    - three
+  c:
+    d: true
+{"a":{"b":[1,2.5,"three"],"c":{"d":true}}}
+[x]
+y = [1, 2]
+
+[x.z]
+w = "v"
+
+[[list]]
+a = 1
+
+[[list]]
+a = 2

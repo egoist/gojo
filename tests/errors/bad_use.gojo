@@ -1,11 +1,11 @@
 use std/fmtt
 use os
-use yaml
+use markdown
 use ./nowhere
 
 fn main() {
     // error: there is no standard module `fmtt`
     // error: standard modules are written with `std/`: `use std/os`
-    // error: unknown package `yaml`: a package in this project is written `use ./yaml`
+    // error: unknown package `markdown`: a package in this project is written `use ./markdown`
     // error: cannot find package `./nowhere`
 }

@@ -36,6 +36,7 @@ app on :8080, proxy: none
 
 - `let` is immutable, `var` mutable; no shadowing in one function; unused variables and imports are errors (prefix `_` to keep one).
 - `use std/os`, `use std/{fmt, os}`, `use ./geom`, `use ../util as u`, `use ./geom.{Vec2}`. `pub` exports.
+- Data formats: `json.decode[T](text)`, `yaml.decode[T]`, `toml.decode[T]` read text straight into your own types (`T ! json.Error`...; an error gives the path, line and column; a missing field takes its default; in YAML and TOML, keys match fields ignoring case, `-` and `_`). `json.encode(v)`, `yaml.encode(v)` and `toml.encode(v)` (a result: TOML has no null) write them; `parse` gives a tree, `json.Value` (`yaml.Value` and `toml.Value` are the same type).
 - Scalars: `bool int i8..i64 uint u8..u64 f32 f64 byte rune`. `String` owns text, `str` borrows it; `Vec[T]` owns, `[]T` borrows; `[N]T` arrays; `Map[K, V]`, `Set[T]` (insertion order); tuples `(A, B)`, `t.0`; `?T`; `T ! E`.
 - Literals: `[1, 2]`, `["k": v]`, `[:]`, `"x = ${x}"`, `"${f:.2}"`. `[a, if c { b }, for x in xs { f(x) }, ..rest]` builds lists.
 - Functions: `fn f(a: int, b: str) -> int { a + 1 }` (the last expression is the value). Closures: `x => x * 2`, `(a, b) => { ... }`.

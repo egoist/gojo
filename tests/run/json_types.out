@@ -24,4 +24,5 @@ ok([18446744073709551615, 0, 0]) err(json: the number -129 doesn't fit in i8 at 
 ok("aé😀\n\\é😀") err(json: lone surrogate in \u escape at line 1, column 3) "é😀\u0001\t" [0.30000000000000004,null,-0,1e+300,5e-324]
 err(json: a `,` before `]` at line 1, column 4) err(json: a `,` before `}` at line 1, column 8) err(json: a string has no closing quote at line 1, column 3) err(json: expected an integer, found the end of the text at line 1, column 1) ok({"a": 2})
 err(json: values are nested more than 500 deep at line 1, column 501)
+ok(Address{city: "x", zip: none}) err(json: missing field `city` of `Address` at line 1, column 14)
 {"city":"Oslo","zip":"0150"} ok(Address{city: "Oslo", zip: some("0150")}) err(json: expected an object, found a number at line 1, column 1)

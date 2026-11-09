@@ -25,7 +25,7 @@ version = "0.3.0"
 edition = "2026"
 
 [dependencies]
-yaml = "1.4"                                     # @gojo/yaml from the registry, ^1.4
+markdown = "1.4"                                 # @gojo/markdown from the registry, ^1.4
 uuid = { package = "@carol/uuid", version = "0.3" }
 store = { path = "../store" }                    # a local package
 parse = { git = "https://github.com/bob/gojo-parse", tag = "v2.0.1" }
@@ -33,13 +33,13 @@ parse = { git = "https://github.com/bob/gojo-parse", tag = "v2.0.1" }
 
 ```gojo
 use std/{fmt, os}                  // the standard library
-use yaml, uuid                     // dependencies, by their names in gojo.toml
-use yaml/schema                    // a subpackage the dependency exports
+use markdown, uuid                 // dependencies, by their names in gojo.toml
+use markdown/html                  // a subpackage the dependency exports
 use ./cli                          // a package inside this one
 ```
 
 ```sh
-gojo add yaml                      # resolves, locks, downloads
+gojo add markdown                  # resolves, locks, downloads
 gojo add @carol/uuid
 gojo update                        # newest versions the ranges allow
 gojo tree                          # what is in the build, and why
@@ -54,8 +54,8 @@ gojo publish                       # checks the semver bump against the API diff
   no `gojo.toml`.
 - **Registry names are scoped:** `@scope/name`, like JSR and npm's scoped
   packages. A scope belongs to a verified account or organisation, so nobody
-  can squat `yaml`. The standard project's scope is `@gojo`, and `@gojo/*`
-  packages may be written without the scope (`yaml = "1.4"` above).
+  can squat `markdown`. The standard project's scope is `@gojo`, and `@gojo/*`
+  packages may be written without the scope (`markdown = "1.4"` above).
 - **In source, dependencies have short names**, the keys of
   `[dependencies]`. That is the lesson of Deno's URL imports: the manifest is
   the one place that says where code comes from, and imports stay short.
@@ -79,13 +79,13 @@ gojo publish                       # checks the semver bump against the API diff
   also allowed.
 - **A PubGrub solver,** as in uv, Dart and Gleam. It picks the newest
   versions that satisfy every range. When that is impossible, it explains why
-  in plain steps: "`@ann/notes` needs `yaml ^2`, `uuid 0.3.1` needs `yaml
+  in plain steps: "`@ann/notes` needs `markdown ^2`, `uuid 0.3.1` needs `markdown
   ^1.2`, so no version of `uuid 0.3` works; try `uuid 0.4`". That message is
   written for the agent that has to fix it.
-- **Incompatible major versions can coexist** (Cargo): `yaml 1.x` and `yaml
+- **Incompatible major versions can coexist** (Cargo): `markdown 1.x` and `markdown
   2.x` may both be in a build, and get different internal names. When values
-  of the two meet, the type error names the versions ("`yaml.Doc` from yaml
-  1.9.0 is not `yaml.Doc` from yaml 2.1.0").
+  of the two meet, the type error names the versions ("`markdown.Doc` from markdown
+  1.9.0 is not `markdown.Doc` from markdown 2.1.0").
 - **`gojo.lock`** records every package with its exact version, source and
   content hash. It is written by `gojo add`, `update` and `remove`, and
   committed for applications and libraries alike (as Cargo now recommends).
@@ -233,10 +233,10 @@ leftpad = []              # pure: none of it
 
 ## For coding agents
 
-- Every error says which command fixes it, for example `` `yaml` is not a
-  dependency: run `gojo add yaml` ``.
+- Every error says which command fixes it, for example `` `markdown` is not a
+  dependency: run `gojo add markdown` ``.
 - `gojo add`, `tree`, `update`, `publish --dry-run` and `doc` take `--json`.
-- `gojo doc yaml` and `gojo doc yaml/schema` work on any dependency.
+- `gojo doc markdown` and `gojo doc markdown/html` work on any dependency.
 - Resolution failures are explained (PubGrub), not just reported.
 - One command fixes the manifest after editing imports: `gojo add` with no
   arguments adds what is imported but missing, and `gojo remove --unused`

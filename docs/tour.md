@@ -941,16 +941,72 @@ that name:
 name = "notes"
 
 [dependencies]
-yaml = { path = "../yaml" }
+markdown = { path = "../markdown" }
 ```
 
-`use yaml` then imports the package in `../yaml`, and `gojo doc yaml` shows
-its API. For now dependencies are local directories; versions from git and a
+`use markdown` then imports the package in `../markdown`, and `gojo doc
+markdown` shows its API. For now dependencies are local directories; versions from git and a
 registry are coming (see [packages.md](packages.md)).
 
 The standard library has files and processes (`os`), streams (`io`, `bufio`),
-TCP (`net`), an HTTP/1.1 server and client (`http`), `json`, `time` and dates,
-and formatting (`fmt`). See [docs/std](std/README.md), or `gojo doc <module>`.
+TCP (`net`), an HTTP/1.1 server and client (`http`), `json`, `yaml` and
+`toml`, `time` and dates, and formatting (`fmt`). See [docs/std](std/README.md),
+or `gojo doc <module>`.
+
+`json`, `yaml` and `toml` read text straight into your own types and write
+them back. A struct is an object (a mapping, a table) with its fields' names
+as keys; a field left out takes its default, and an error says where:
+
+```gojo
+use std/{toml, yaml}
+
+struct Server {
+    host: String = "localhost"
+    port: int
+}
+
+struct Config {
+    name: String
+    servers: Vec[Server]
+}
+
+fn main() {
+    let text = `
+name = "edge"
+
+[[servers]]
+port = 8080
+
+[[servers]]
+host = "10.0.0.2"
+port = 9090
+`
+    let cfg = toml.decode[Config](text) catch e {
+        println(e.message())
+        return
+    }
+    for s in cfg.servers {
+        println("${s.host}:${s.port}")
+    }
+    print(yaml.encode(cfg))
+    match yaml.decode[Server]("host: example.org\nport: high\n") {
+        ok(s) => println(s.port)
+        err(e) => println(e.message())
+    }
+}
+```
+
+```text
+localhost:8080
+10.0.0.2:9090
+name: edge
+servers:
+  - host: localhost
+    port: 8080
+  - host: "10.0.0.2"
+    port: 9090
+yaml: expected an integer, found a string (in .port) at line 2, column 7
+```
 
 ## Tests
 

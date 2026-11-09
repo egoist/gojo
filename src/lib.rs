@@ -32,6 +32,8 @@ pub const STD: &[(&str, &str)] = &[
     ("io", include_str!("../std/io.gojo")),
     ("bufio", include_str!("../std/bufio.gojo")),
     ("json", include_str!("../std/json.gojo")),
+    ("yaml", include_str!("../std/yaml.gojo")),
+    ("toml", include_str!("../std/toml.gojo")),
     ("http", include_str!("../std/http.gojo")),
     ("strings", include_str!("../std/strings.gojo")),
     ("rand", include_str!("../std/rand.gojo")),
@@ -52,7 +54,7 @@ pub const STD: &[(&str, &str)] = &[
 ];
 
 pub const RUNTIME_H: &str = include_str!("../runtime/gojo_rt.h");
-pub const RUNTIME_C: &str = concat!(include_str!("../runtime/gojo_rt.c"), include_str!("../runtime/gojo_sched.c"), include_str!("../runtime/gojo_os.c"), include_str!("../runtime/gojo_unicode.c"), include_str!("../runtime/gojo_text.c"), include_str!("../runtime/gojo_lib.c"));
+pub const RUNTIME_C: &str = concat!(include_str!("../runtime/gojo_rt.c"), include_str!("../runtime/gojo_sched.c"), include_str!("../runtime/gojo_os.c"), include_str!("../runtime/gojo_unicode.c"), include_str!("../runtime/gojo_text.c"), include_str!("../runtime/gojo_lib.c"), include_str!("../runtime/gojo_data.c"));
 
 /// `gojo check --json`: diagnostics go to stdout as JSON lines instead.
 pub static JSON_DIAGS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);

@@ -1,0 +1,7 @@
+// A TOML document is a table: other types are an error at the call.
+use std/toml
+
+fn main() {
+    println(toml.encode([1, 2, 3]))
+    // error: `toml.encode` can't handle `Vec[int]`: a TOML document is a table (use a struct or a `Map`)
+}

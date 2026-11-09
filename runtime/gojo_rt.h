@@ -542,7 +542,9 @@ void gojo_etrace_origin(const char *at);
 void gojo_etrace_push(const char *at);
 void gojo_etrace_print(void);
 
-// ---- json (runtime/gojo_lib.c)
+// ---- json, yaml and toml (runtime/gojo_lib.c, runtime/gojo_data.c)
+enum { GOJO_FMT_JSON, GOJO_FMT_YAML, GOJO_FMT_TOML };
+typedef struct gojo_dtree gojo_dtree;
 typedef struct {
     const uint8_t *s;
     int64_t len, pos;
@@ -550,9 +552,15 @@ typedef struct {
     // -1 while there is no error
     int64_t errpos;
     gojo_string err, path, buf, kbuf;
+    // YAML and TOML: the tree the values are read from, and the node to
+    // read next (-1 when there is none)
+    gojo_dtree *t;
+    int32_t cur;
+    // the error is about nesting: its path would only repeat it
+    bool nopath;
 } gojo_jdec;
 void gojo_jenc_str(gojo_string *b, gojo_str s);
-void gojo_jenc_f64(gojo_string *b, double v);
+void gojo_jenc_f64(gojo_string *b, double v, int ext);
 void gojo_json___indent(gojo_str s, int64_t indent, gojo_string *out);
 void gojo_json___quote(gojo_string *b, gojo_str s);
 void gojo_jdec_init(gojo_jdec *d, gojo_str s);
@@ -578,6 +586,31 @@ void gojo_jdec_at_key(gojo_jdec *d, const uint8_t *k, int64_t n);
 void gojo_jdec_at_index(gojo_jdec *d, int64_t i);
 int64_t gojo_jdec_result(gojo_jdec *d, gojo_string *msg);
 void gojo_jdec_linecol(gojo_str s, int64_t pos, int64_t *line, int64_t *col);
+int gojo_jdec_kind(gojo_jdec *d);
+bool gojo_jdec_loose(gojo_str key, const char *norm, int64_t n);
+bool gojo_jdec_num(gojo_jdec *d, double *out);
+bool gojo_jdec_fail_variant(gojo_jdec *d, const char *variant, const char *type);
+bool gojo_tdec_init(gojo_jdec *d, gojo_str s, int fmt, bool all);
+void gojo_dtree_free(gojo_dtree *t);
+bool gojo_yaml_emit(gojo_str json, gojo_string *out);
+bool gojo_toml_emit(gojo_str json, gojo_string *out, gojo_string *err);
+const char *gojo_td_found(gojo_jdec *d);
+void gojo_td_words(gojo_jdec *d, gojo_string *out, const char *msg);
+int gojo_td_peek(gojo_jdec *d);
+int gojo_td_kind(gojo_jdec *d);
+bool gojo_td_null(gojo_jdec *d);
+bool gojo_td_bool(gojo_jdec *d, bool *out);
+bool gojo_td_i64(gojo_jdec *d, int64_t *out, int64_t lo, int64_t hi, const char *ty);
+bool gojo_td_u64(gojo_jdec *d, uint64_t *out, uint64_t hi, const char *ty);
+bool gojo_td_f64(gojo_jdec *d, double *out);
+bool gojo_td_f32(gojo_jdec *d, float *out);
+bool gojo_td_strview(gojo_jdec *d, gojo_str *out);
+bool gojo_td_open(gojo_jdec *d, uint8_t c);
+int gojo_td_item(gojo_jdec *d);
+int gojo_td_key(gojo_jdec *d, gojo_str *key);
+bool gojo_td_skip(gojo_jdec *d);
+int gojo_td_loose(gojo_jdec *d, const char *name, int64_t n, const char *norm, int64_t nn);
+gojo_str gojo_jdec_intkey(gojo_jdec *d, gojo_str s, gojo_string *buf);
 
 // ---- processes and signals (runtime/gojo_lib.c)
 int64_t gojo_os___signalCode(int64_t signo);
