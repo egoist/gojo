@@ -1,0 +1,239 @@
+// Fixed-width vectors of numbers, for code that works on several values at
+// once: `Simd[f32, 8]` holds 8 lanes. The operations go lane by lane over
+// a fixed-size array, which the C compiler turns into vector instructions
+// (SSE/AVX, NEON) in release builds; the API is the same on every target.
+//
+//   use std/simd.{Simd}
+//   let a = Simd[f32, 4].load(xs, 0)
+//   let b = Simd[f32, 4].splat(2.0)
+//   println(a.mul(b).sum())
+//
+// Arithmetic is methods (`a.add(b)`), not operators: Gojo keeps `+` for
+// numbers. Comparisons give a `Mask`, used with `select`.
+
+// `N` lanes of `T`.
+pub copy struct Simd[T: Number, N: int] {
+    pub lanes: [N]T
+
+    // Every lane `x`.
+    pub fn splat(x: T) -> Simd[T, N] {
+        var l: [N]T
+        for i in 0..N {
+            l[i] = x
+        }
+        return Simd[T, N]{lanes: l}
+    }
+
+    // Lanes `xs[at]`, `xs[at + 1]`... `xs[at + N - 1]`; panics when they
+    // aren't all in `xs`.
+    pub fn load(xs: []T, at: int) -> Simd[T, N] {
+        if at < 0 || at > xs.len() - N {
+            panic("simd.load: lanes out of range")
+        }
+        var l: [N]T
+        for i in 0..N {
+            l[i] = xs[at + i]
+        }
+        return Simd[T, N]{lanes: l}
+    }
+
+    // Writes the lanes to `xs[at..at + N]`; panics when they don't fit.
+    pub fn store(self, xs: inout []T, at: int) {
+        if at < 0 || at > xs.len() - N {
+            panic("simd.store: lanes out of range")
+        }
+        for i in 0..N {
+            xs[at + i] = self.lanes[i]
+        }
+    }
+
+    // The number of lanes.
+    pub fn len(self) -> int {
+        return N
+    }
+
+    // Lane `i`.
+    pub fn get(self, i: int) -> T {
+        return self.lanes[i]
+    }
+
+    // Sets lane `i`.
+    pub fn set(inout self, i: int, x: T) {
+        self.lanes[i] = x
+    }
+
+    // Lane-wise `+`, `-`, `*`, `/` (integer lanes: `/` panics on a zero
+    // lane, and every lane is checked for overflow).
+    pub fn add(self, o: Simd[T, N]) -> Simd[T, N] {
+        var l: [N]T
+        for i in 0..N {
+            l[i] = self.lanes[i] + o.lanes[i]
+        }
+        return Simd[T, N]{lanes: l}
+    }
+
+    pub fn sub(self, o: Simd[T, N]) -> Simd[T, N] {
+        var l: [N]T
+        for i in 0..N {
+            l[i] = self.lanes[i] - o.lanes[i]
+        }
+        return Simd[T, N]{lanes: l}
+    }
+
+    pub fn mul(self, o: Simd[T, N]) -> Simd[T, N] {
+        var l: [N]T
+        for i in 0..N {
+            l[i] = self.lanes[i] * o.lanes[i]
+        }
+        return Simd[T, N]{lanes: l}
+    }
+
+    pub fn div(self, o: Simd[T, N]) -> Simd[T, N] {
+        var l: [N]T
+        for i in 0..N {
+            l[i] = self.lanes[i] / o.lanes[i]
+        }
+        return Simd[T, N]{lanes: l}
+    }
+
+    // Lane-wise smaller and larger.
+    pub fn min(self, o: Simd[T, N]) -> Simd[T, N] {
+        var l: [N]T
+        for i in 0..N {
+            l[i] = if self.lanes[i] < o.lanes[i] { self.lanes[i] } else { o.lanes[i] }
+        }
+        return Simd[T, N]{lanes: l}
+    }
+
+    pub fn max(self, o: Simd[T, N]) -> Simd[T, N] {
+        var l: [N]T
+        for i in 0..N {
+            l[i] = if self.lanes[i] > o.lanes[i] { self.lanes[i] } else { o.lanes[i] }
+        }
+        return Simd[T, N]{lanes: l}
+    }
+
+    // `self * a + b`, lane by lane.
+    pub fn mulAdd(self, a: Simd[T, N], b: Simd[T, N]) -> Simd[T, N] {
+        var l: [N]T
+        for i in 0..N {
+            l[i] = self.lanes[i] * a.lanes[i] + b.lanes[i]
+        }
+        return Simd[T, N]{lanes: l}
+    }
+
+    // The sum of the lanes.
+    pub fn sum(self) -> T {
+        var s = self.lanes[0]
+        for i in 1..N {
+            s += self.lanes[i]
+        }
+        return s
+    }
+
+    // The smallest and largest lane.
+    pub fn hmin(self) -> T {
+        var m = self.lanes[0]
+        for i in 1..N {
+            if self.lanes[i] < m {
+                m = self.lanes[i]
+            }
+        }
+        return m
+    }
+
+    pub fn hmax(self) -> T {
+        var m = self.lanes[0]
+        for i in 1..N {
+            if self.lanes[i] > m {
+                m = self.lanes[i]
+            }
+        }
+        return m
+    }
+
+    // The sum of the lane-wise products.
+    pub fn dot(self, o: Simd[T, N]) -> T {
+        return self.mul(o).sum()
+    }
+
+    // Lane-wise comparisons.
+    pub fn lt(self, o: Simd[T, N]) -> Mask[N] {
+        var m: [N]bool
+        for i in 0..N {
+            m[i] = self.lanes[i] < o.lanes[i]
+        }
+        return Mask[N]{lanes: m}
+    }
+
+    pub fn le(self, o: Simd[T, N]) -> Mask[N] {
+        var m: [N]bool
+        for i in 0..N {
+            m[i] = self.lanes[i] <= o.lanes[i]
+        }
+        return Mask[N]{lanes: m}
+    }
+
+    pub fn eq(self, o: Simd[T, N]) -> Mask[N] {
+        var m: [N]bool
+        for i in 0..N {
+            m[i] = self.lanes[i] == o.lanes[i]
+        }
+        return Mask[N]{lanes: m}
+    }
+
+    // `a`'s lane where the mask is set, `b`'s where it isn't.
+    pub fn select(m: Mask[N], a: Simd[T, N], b: Simd[T, N]) -> Simd[T, N] {
+        var l: [N]T
+        for i in 0..N {
+            l[i] = if m.lanes[i] { a.lanes[i] } else { b.lanes[i] }
+        }
+        return Simd[T, N]{lanes: l}
+    }
+}
+
+// `N` yes/no lanes: what lane-wise comparisons give.
+pub copy struct Mask[N: int] {
+    pub lanes: [N]bool
+
+    // Whether any lane, every lane is set.
+    pub fn any(self) -> bool {
+        for i in 0..N {
+            if self.lanes[i] {
+                return true
+            }
+        }
+        return false
+    }
+
+    pub fn all(self) -> bool {
+        for i in 0..N {
+            if !self.lanes[i] {
+                return false
+            }
+        }
+        return true
+    }
+
+    // The number of lanes set.
+    pub fn count(self) -> int {
+        var n = 0
+        for i in 0..N {
+            if self.lanes[i] {
+                n += 1
+            }
+        }
+        return n
+    }
+
+    // The lanes as bits: lane 0 is the lowest. `N` must be at most 64.
+    pub fn bits(self) -> u64 {
+        var b: u64 = 0
+        for i in 0..N {
+            if self.lanes[i] {
+                b = b | (u64(1) << u64(i))
+            }
+        }
+        return b
+    }
+}

@@ -47,6 +47,7 @@ pub const STD: &[(&str, &str)] = &[
     ("regex", include_str!("../std/regex.gojo")),
     ("flag", include_str!("../std/flag.gojo")),
     ("log", include_str!("../std/log.gojo")),
+    ("simd", include_str!("../std/simd.gojo")),
 ];
 
 pub const RUNTIME_H: &str = include_str!("../runtime/gojo_rt.h");
