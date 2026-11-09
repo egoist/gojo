@@ -527,6 +527,9 @@ void gojo_sim_point(void);
 void gojo_task_dump(void);
 void *gojo_dlsym(const char *lib, const char *name);
 int gojo_run_test(void (*fn)(void), const char *name);
+void gojo_etrace_origin(const char *at);
+void gojo_etrace_push(const char *at);
+void gojo_etrace_print(void);
 
 // ---- json (runtime/gojo_lib.c)
 typedef struct {

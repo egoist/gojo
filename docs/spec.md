@@ -388,9 +388,11 @@ Tests: `run/lazy`, `errors/lazy`, `errors/iter_mutation`.
 - In a function that returns `?T ! E`, `return none` is a successful `none` (wrapped as ok). When the expected type of a `.Variant` shorthand is `E ! Err` or `?E`, it resolves against `E`.
 - **Error types**: each module uses its own concrete error type, and they all satisfy the built-in interface `error` (`fn message(self) -> String`), so a function written with `! error` can `try` errors from any module. Errors from the operating system, files, processes and the network are all `io.Error`: `kind` (an `io.ErrorKind`: `NotFound`, `PermissionDenied`, `AlreadyExists`, `Cancelled`, etc., independent of the platform), `message()`, `code` (the system error number). `os.Error` and `net.Error` are aliases of it. Errors of other modules carry their own information, such as the line and column of `json.Error`, or `time.ParseError`.
 
+**Error return traces**: in a debug build, an error that leaves `main` prints, after the error itself, where it was made (the `err(...)`) and each `try` that passed it up, in order. The trace belongs to the task that made the error; making a new error starts a new trace. Release builds don't keep it.
+
 A **panic** signals a bug in the program. A panic prints a message and a source location (pointing into user code, not the standard library) and terminates the whole process with exit code 2. It does not unwind the stack and does not run defers. There is no `recover`.
 
-Tests: `run/errors`, `run/errdefer`, `run/patterns`, `run/never_errors`, `errors/try_error_mismatch`, `errors/try_outside_result`, `errors/unhandled_result`, `panic/unwrap_err`, `panic/unwrap_none`, `panic/no_defer`, `testblocks/blocks`.
+Tests: `run/errors`, `run/errdefer`, `run/patterns`, `run/never_errors`, `errors/try_error_mismatch`, `errors/try_outside_result`, `errors/unhandled_result`, `panic/unwrap_err`, `panic/unwrap_none`, `panic/no_defer`, `testblocks/blocks`, `traces/basic`.
 
 ## 9. Generics
 

@@ -1,0 +1,32 @@
+struct NotFound {
+    name: String
+}
+
+fn find(name: str) -> int ! NotFound {
+    if name == "x" {
+        return 1
+    }
+    return err(NotFound{name: name.toString()})
+}
+
+fn lookup(name: str) -> int ! NotFound {
+    let n = try find(name)
+    return n + 1
+}
+
+fn run() -> int ! NotFound {
+    let a = try lookup("x")
+    let b = lookup("y") catch _e { 0 }
+    let c = try lookup("z")
+    return a + b + c
+}
+
+fn main() ! NotFound {
+    println(try run())
+}
+// stderr: error: NotFound{name: "z"}
+// stderr: error return trace:
+// stderr:   made at tests/traces/basic.gojo:9:12
+// stderr:   passed up at tests/traces/basic.gojo:13:17
+// stderr:   passed up at tests/traces/basic.gojo:20:17
+// stderr:   passed up at tests/traces/basic.gojo:25:17

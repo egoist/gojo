@@ -145,6 +145,32 @@ fn compile_warnings() {
     }
 }
 
+/// An error that leaves `main` in a debug build prints where it was made and
+/// each `try` that passed it up (spec 8); release builds print only the error.
+#[test]
+fn error_return_traces() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut failures = vec![];
+    for f in files("tests/traces") {
+        let rel = f.strip_prefix(root).unwrap();
+        let src = std::fs::read_to_string(&f).unwrap();
+        let want: Vec<&str> = src.lines().filter_map(|l| l.strip_prefix("// stderr: ")).collect();
+        let out = Command::new(gojo()).arg("run").arg(rel).current_dir(root).output().unwrap();
+        let got = String::from_utf8_lossy(&out.stderr);
+        if out.status.code() != Some(1) || got.lines().collect::<Vec<_>>() != want {
+            failures.push(format!("{}: exit {:?}\n--- expected\n{}\n--- got\n{}", f.display(), out.status.code(), want.join("\n"), got));
+        }
+        let rel_out = Command::new(gojo()).arg("run").arg("--release").arg(rel).current_dir(root).output().unwrap();
+        let got = String::from_utf8_lossy(&rel_out.stderr);
+        if got.lines().collect::<Vec<_>>() != want[..1] {
+            failures.push(format!("{} --release: expected only `{}`, got\n{}", f.display(), want[0], got));
+        }
+    }
+    if !failures.is_empty() {
+        panic!("{} trace test(s) failed:\n{}", failures.len(), failures.join("\n"));
+    }
+}
+
 /// Every program in tests/panic panics as its `// panic:` lines say, as built
 /// and with `--verify-bce` (see `run_programs`).
 #[test]
@@ -821,7 +847,7 @@ fn formatted() {
     }
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut paths = vec![];
-    for d in ["std", "examples", "bench/gojo", "tests/run", "tests/errors", "tests/panic", "tests/projects", "tests/packages", "tests/testblocks", "tests/unsafe", "tests/stdin", "tests/signals", "tests/ffi_pin", "tests/warnings"] {
+    for d in ["std", "examples", "bench/gojo", "tests/run", "tests/errors", "tests/panic", "tests/projects", "tests/packages", "tests/testblocks", "tests/unsafe", "tests/stdin", "tests/signals", "tests/ffi_pin", "tests/warnings", "tests/traces"] {
         walk(&root.join(d), &mut paths);
     }
     let mut bad = vec![];

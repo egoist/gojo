@@ -355,8 +355,14 @@ typedef struct gojo_timer {
 // Wait records live in the goroutine's descriptor (or on the heap), never on
 // its stack: a parked stack may be put away (see "hibernation"), and others
 // mustn't read it then.
+#define GOJO_ETRACE_N 32
+
 typedef struct gojo_g {
     void *sp;
+    // error return trace (debug builds): where the error being passed up
+    // was made, then each `try` that passed it on
+    const char *etrace[GOJO_ETRACE_N];
+    int etrace_n;
     int on_cpu;             // the goroutine is still on its stack; don't resume it yet
     uint32_t epoch;
     uint64_t wait;          // epoch << 2 | wait kind; claimed by CAS back to WAIT_NONE
@@ -4312,6 +4318,33 @@ static bool run_test_once(void (*fn)(void), uint64_t seed) {
 // simulated (see "simulation") with a seed taken from the test's name, so a
 // test does the same thing every run; GOJO_SEED picks another seed,
 // GOJO_EXPLORE=n tries n seeds, GOJO_SCHED=real uses the real scheduler.
+// Error return traces (debug builds; spec 8). Per task: an error passed up
+// stays in the task that made it.
+void gojo_etrace_origin(const char *at) {
+    gojo_worker *w = t_worker;
+    if (!w || !w->cur) return;
+    w->cur->etrace_n = 0;
+    gojo_etrace_push(at);
+}
+
+void gojo_etrace_push(const char *at) {
+    gojo_worker *w = t_worker;
+    if (!w || !w->cur) return;
+    gojo_g *g = w->cur;
+    if (g->etrace_n < GOJO_ETRACE_N) g->etrace[g->etrace_n] = at;
+    g->etrace_n++;
+}
+
+void gojo_etrace_print(void) {
+    gojo_worker *w = t_worker;
+    if (!w || !w->cur || !w->cur->etrace_n) return;
+    gojo_g *g = w->cur;
+    int n = g->etrace_n < GOJO_ETRACE_N ? g->etrace_n : GOJO_ETRACE_N;
+    fprintf(stderr, "error return trace:\n");
+    for (int i = 0; i < n; i++) fprintf(stderr, "  %s %s\n", i == 0 ? "made at" : "passed up at", g->etrace[i]);
+    if (g->etrace_n > n) fprintf(stderr, "  ... and %d more\n", g->etrace_n - n);
+}
+
 int gojo_run_test(void (*fn)(void), const char *name) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);

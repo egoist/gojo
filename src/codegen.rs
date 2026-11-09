@@ -115,7 +115,8 @@ pub fn generate(prog: &Program, tfuncs: &[TFunc], sm: &SourceMap, tests: Option<
                 let rt = g.cty(&ret);
                 let et = (**e).clone();
                 let fe = g.fmt_fn(&et);
-                let _ = writeln!(entry, "    {} r = {}();\n    if (!r.ok) {{\n        gojo_string b = {{0}};\n        gojo_fmt_cstr(&b, \"error: \");\n        {}(&b, &r.u.err, 0);\n        gojo_fmt_cstr(&b, \"\\n\");\n        gojo_write(2, &b);\n        fflush(stdout);\n        exit(1);\n    }}", rt, n, fe);
+                let trace = if release { "" } else { "\n        gojo_etrace_print();" };
+                let _ = writeln!(entry, "    {} r = {}();\n    if (!r.ok) {{\n        gojo_string b = {{0}};\n        gojo_fmt_cstr(&b, \"error: \");\n        {}(&b, &r.u.err, 0);\n        gojo_fmt_cstr(&b, \"\\n\");\n        gojo_write(2, &b);{}\n        fflush(stdout);\n        exit(1);\n    }}", rt, n, fe, trace);
             } else {
                 let _ = writeln!(entry, "    {}();", n);
             }
@@ -317,10 +318,13 @@ struct Gen<'a> {
     json_site: (Span, &'static str),
     json_ctx: Vec<String>,
     size_memo: HashMap<Ty, u128>,
+    /// Debug builds record where errors are made and passed up by `try`
+    /// (error return traces), printed when one leaves `main`.
+    etrace: bool,
 }
 
 impl<'a> Gen<'a> {
-    fn new(prog: &'a Program, tfuncs: &'a [TFunc], sm: &'a SourceMap, _release: bool) -> Gen<'a> {
+    fn new(prog: &'a Program, tfuncs: &'a [TFunc], sm: &'a SourceMap, release: bool) -> Gen<'a> {
         let recursive = may_recurse(tfuncs);
         Gen {
             prog,
@@ -350,6 +354,7 @@ impl<'a> Gen<'a> {
             json_site: (Span::default(), "encode"),
             json_ctx: vec![],
             size_memo: HashMap::new(),
+            etrace: !release,
         }
     }
 
@@ -2693,6 +2698,10 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
             }
             TK::ErrLit(x) => {
                 let v = self.expr(fs, x);
+                if self.etrace {
+                    let l = self.loc(e.span);
+                    self.emit(fs, &format!("gojo_etrace_origin({});", l));
+                }
                 let c = self.cty(&t);
                 let n = self.tmp();
                 self.emit(fs, &format!("{} {} = {{ .ok = 0, .u.err = {} }};", c, n, v));
@@ -4175,6 +4184,10 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
                 let e1 = (**e1).clone();
                 self.emit(fs, &format!("if (!{}.ok) {{", tv));
                 fs.ind += 1;
+                if self.etrace {
+                    let l = self.loc(x.span);
+                    self.emit(fs, &format!("gojo_etrace_push({});", l));
+                }
                 let errv = match wrap {
                     None => format!("{}.u.err", tv),
                     Some(TryWrap::ToError) => {
