@@ -2,7 +2,11 @@
 """Build and run the Gojo vs idiomatic-Rust real-application suite.
 
 Batch jobs (jsonpipe, logscan) use hyperfine wall-clock + peak RSS.
-HTTP uses a mixed-workload HTTP/1.1 loadgen against each server.
+HTTP uses a mixed-workload HTTP/1.1 loadgen against each server: both servers
+run at once, and the trials alternate between them (Gojo, Rust, then Rust,
+Gojo, ...) so host noise falls on both. Each trial records the CPU time the
+server and the load generator used, and the host's idle share, to show which
+side was saturated. `--server-cpus` / `--client-cpus` pin them with taskset.
 
 Does not modify the Gojo compiler. Does not enable extra Rust LTO / native CPU
 flags. Fixtures are generated, not committed.
@@ -16,6 +20,7 @@ import json
 import os
 import shlex
 import re
+import resource
 import shutil
 import signal
 import statistics
@@ -54,7 +59,7 @@ def capture(cmd, **kw) -> str:
     return r.stdout.strip()
 
 
-def env_info() -> dict:
+def env_info(gojo: str) -> dict:
     uname = capture(["uname", "-a"])
     cpu = ""
     try:
@@ -73,7 +78,6 @@ def env_info() -> dict:
     except OSError:
         pass
     nproc = os.cpu_count()
-    gojo = which_or("gojo", "/workspace/target/release/gojo")
     rustc = which_or("rustc")
     cargo = which_or("cargo")
     cc = which_or("cc")
@@ -91,6 +95,7 @@ def env_info() -> dict:
         "python": sys.version.split()[0],
         "cwd": str(ROOT),
         "git_head": capture(["git", "rev-parse", "HEAD"], cwd=str(ROOT.parents[1])),
+        "git_dirty": capture(["git", "status", "--porcelain", "--untracked-files=no"], cwd=str(ROOT.parents[1])) != "",
         "notes": {
             "gojo_release": "gojo build --release → cc -O2; overflow and bounds checks on (compiler default)",
             "rust_release": "cargo build --release; profile defaults (opt-level=3, no extra LTO, no target-cpu=native)",
@@ -237,9 +242,27 @@ def read_vmhwm(pid: int) -> int | None:
     return None
 
 
-def start_server(bin_path: str, products: Path) -> tuple[subprocess.Popen, str, int]:
+def pinned(cmd: list[str], cpus: str | None) -> list[str]:
+    return ["taskset", "-c", cpus, *cmd] if cpus else cmd
+
+
+def cpu_count(cpus: str) -> int:
+    n = 0
+    for part in cpus.split(","):
+        lo, _, hi = part.partition("-")
+        n += int(hi or lo) - int(lo) + 1
+    return n
+
+
+def start_server(bin_path: str, products: Path, cpus: str | None = None) -> tuple[subprocess.Popen, str, int]:
+    env = dict(os.environ)
+    if cpus and Path(bin_path).name.startswith("gojo-"):
+        # the Gojo scheduler sizes itself from the online CPUs, tokio from the
+        # affinity mask: give both the same number of workers
+        env["GOJO_MAXPROCS"] = str(cpu_count(cpus))
     proc = subprocess.Popen(
-        [bin_path, str(products), "127.0.0.1:0"],
+        pinned([bin_path, str(products), "127.0.0.1:0"], cpus),
+        env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
@@ -338,63 +361,104 @@ def check_http(url: str, products: list[dict]) -> dict:
     return {"health": health, "stats": stats, "product": got, "query": out}
 
 
-def loadgen_run(loadgen: str, url: str, concurrency: int, seconds: float, warmup: float, products: int, seed: int) -> dict:
-    r = subprocess.run(
-        [
-            loadgen,
-            "--url",
-            url,
-            "--seconds",
-            str(seconds),
-            "--warmup",
-            str(warmup),
-            "--concurrency",
-            str(concurrency),
-            "--products",
-            str(products),
-            "--seed",
-            str(seed),
-        ],
-        check=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
-    if r.stderr.strip():
-        print(r.stderr, file=sys.stderr)
-    line = r.stdout.strip().splitlines()[-1]
-    return json.loads(line)
+def proc_cpu_s(pid: int) -> float:
+    """utime + stime of a live process, in seconds."""
+    fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+    return (int(fields[11]) + int(fields[12])) / os.sysconf("SC_CLK_TCK")
 
 
-def measure_http(server_bin: str, loadgen: str, products_path: Path, products: list[dict], concs: list[int], seconds: float, warmup: float, seed: int) -> dict:
-    proc, url, port = start_server(server_bin, products_path)
-    rss_peak = 0
+def host_cpu() -> tuple[int, int]:
+    """(idle, total) jiffies of all CPUs."""
+    v = [int(x) for x in Path("/proc/stat").read_text().splitlines()[0].split()[1:]]
+    return v[3] + v[4], sum(v[:8])
+
+
+def loadgen_run(loadgen: str, url: str, concurrency: int, seconds: float, warmup: float, products: int, seed: int, server_pid: int, cpus: str | None) -> dict:
+    cmd = [
+        loadgen,
+        "--url",
+        url,
+        "--seconds",
+        str(seconds),
+        "--warmup",
+        str(warmup),
+        "--concurrency",
+        str(concurrency),
+        "--products",
+        str(products),
+        "--seed",
+        str(seed),
+    ]
+    u0 = resource.getrusage(resource.RUSAGE_CHILDREN)
+    s0, (i0, t0), w0 = proc_cpu_s(server_pid), host_cpu(), time.perf_counter()
+    p = subprocess.Popen(pinned(cmd, cpus), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    out, errout = p.communicate()
+    wall = time.perf_counter() - w0
+    s1, (i1, t1) = proc_cpu_s(server_pid), host_cpu()
+    u1 = resource.getrusage(resource.RUSAGE_CHILDREN)
+    if p.returncode != 0:
+        raise SystemExit(f"loadgen failed ({p.returncode}): {errout}")
+    if errout.strip():
+        print(errout, file=sys.stderr)
+    row = json.loads(out.strip().splitlines()[-1])
+    # over the whole loadgen run (warmup included); cores = CPU seconds / wall seconds
+    row["server_cpu_cores"] = (s1 - s0) / wall
+    row["loadgen_cpu_cores"] = (u1.ru_utime + u1.ru_stime - u0.ru_utime - u0.ru_stime) / wall
+    row["host_idle_frac"] = (i1 - i0) / max(1, t1 - t0)
+    return row
+
+
+def summarize_trials(trials: list[dict]) -> dict:
+    rps = [t["rps"] for t in trials]
+    med = median(rps)
+    out = {
+        "concurrency": trials[0]["concurrency"],
+        "trials": len(trials),
+        "rps": med,
+        "rps_min": min(rps),
+        "rps_max": max(rps),
+        "rps_mad": mad(rps, med),
+        "ok": sum(t["ok"] for t in trials),
+        "err": sum(t["err"] for t in trials),
+    }
+    for k in ("p50_ms", "p95_ms", "p99_ms", "server_cpu_cores", "loadgen_cpu_cores", "host_idle_frac", "server_rss_bytes"):
+        out[k] = median([t[k] for t in trials])
+    out["p99_ms_max"] = max(t["p99_ms"] for t in trials)
+    return out
+
+
+def measure_http(servers: dict[str, str], loadgen: str, products_path: Path, products: list[dict], concs: list[int], seconds: float, warmup: float, seed: int, trials: int, server_cpus: str | None, client_cpus: str | None) -> dict:
+    started = {}
     try:
+        for lang, bin_path in servers.items():
+            proc, url, port = start_server(bin_path, products_path, server_cpus)
+            started[lang] = (proc, url, port)
         time.sleep(0.2)
-        correct = check_http(url, products)
-        rows = []
-        for c in concs:
-            before = read_vmhwm(proc.pid) or 0
-            row = loadgen_run(loadgen, url, c, seconds, warmup, len(products), seed)
-            after = read_vmhwm(proc.pid) or 0
-            rss_peak = max(rss_peak, before, after)
-            row["server_rss_bytes"] = after
-            rows.append(row)
-            print(
-                f"  {Path(server_bin).name} c={c}: rps={row['rps']:.1f} p50={row['p50_ms']:.3f}ms "
-                f"p99={row['p99_ms']:.3f}ms err={row['err']}",
-                flush=True,
-            )
-        rss_peak = max(rss_peak, read_vmhwm(proc.pid) or 0)
-        return {
-            "url": url,
-            "port": port,
-            "correctness": correct,
-            "concurrency": rows,
-            "server_rss_peak_bytes": rss_peak,
-        }
+        res = {lang: {"url": url, "port": port, "correctness": check_http(url, products), "raw": []} for lang, (proc, url, port) in started.items()}
+        langs = list(servers)
+        for t in range(trials):
+            for c in concs:
+                # alternate which server goes first
+                for lang in langs if t % 2 == 0 else langs[::-1]:
+                    proc, url, _ = started[lang]
+                    row = loadgen_run(loadgen, url, c, seconds, warmup, len(products), seed, proc.pid, client_cpus)
+                    row["trial"] = t
+                    row["server_rss_bytes"] = read_vmhwm(proc.pid) or 0
+                    res[lang]["raw"].append(row)
+                    print(
+                        f"  trial {t + 1}/{trials} {lang} c={c}: rps={row['rps']:.1f} p50={row['p50_ms']:.3f}ms "
+                        f"p99={row['p99_ms']:.3f}ms err={row['err']} server={row['server_cpu_cores']:.2f} "
+                        f"loadgen={row['loadgen_cpu_cores']:.2f} idle={row['host_idle_frac']:.0%}",
+                        flush=True,
+                    )
+        for lang, (proc, _, _) in started.items():
+            r = res[lang]
+            r["concurrency"] = [summarize_trials([x for x in r["raw"] if x["concurrency"] == c]) for c in concs]
+            r["server_rss_peak_bytes"] = read_vmhwm(proc.pid) or 0
+        return res
     finally:
-        stop_server(proc)
+        for proc, _, _ in started.values():
+            stop_server(proc)
 
 
 def write_chart(doc: dict, path: Path) -> None:
@@ -529,13 +593,21 @@ def write_markdown(doc: dict, path: Path) -> None:
     a("")
     a("Read-mostly in-memory catalog. Mix: 70% `GET /products/:id`, 20% `POST /query` (full scan, first 50 ids), 8% `GET /stats`, 2% `GET /health`. HTTP/1.1 keep-alive. Same loadgen for both servers. Warmup is discarded; the table is the measuring window only. Latency is client-side.")
     a("")
-    a("| Lang | conc. | req/s | p50 | p95 | p99 | ok | err |")
-    a("| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |")
+    pin = f"servers pinned to CPUs `{doc['server_cpus']}`, load generator to `{doc['client_cpus']}`" if doc.get("server_cpus") else "no CPU pinning"
+    a(
+        f"{doc['http_trials']} trials of {doc['http_seconds']:g} s (after {doc['http_warmup']:g} s warmup) per server and concurrency, "
+        f"interleaved between the servers; {pin}. req/s is the median of the trials, with min–max; latencies are medians of the per-trial "
+        "percentiles. CPU columns are cores busy (CPU seconds / wall seconds) over each loadgen run; idle is the host's idle share."
+    )
+    a("")
+    a("| Lang | conc. | req/s (median) | min–max | p50 | p95 | p99 | server CPU | loadgen CPU | host idle | ok | err |")
+    a("| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |")
     for lang, key in (("Gojo", "gojo"), ("Rust", "rust")):
         for row in doc["http"][key]["concurrency"]:
             a(
-                f"| {lang} | {row['concurrency']} | {fmt_rps(row['rps'])} | "
+                f"| {lang} | {row['concurrency']} | {fmt_rps(row['rps'])} | {fmt_rps(row['rps_min'])}–{fmt_rps(row['rps_max'])} | "
                 f"{row['p50_ms']:.3f} ms | {row['p95_ms']:.3f} ms | {row['p99_ms']:.3f} ms | "
+                f"{row['server_cpu_cores']:.2f} | {row['loadgen_cpu_cores']:.2f} | {row['host_idle_frac']:.0%} | "
                 f"{row['ok']:,} | {row['err']:,} |"
             )
     a("")
@@ -553,6 +625,7 @@ def write_markdown(doc: dict, path: Path) -> None:
     a("- **Sharing.** Rust holds the catalog in `Arc<Vec<Item>>` with no lock. Gojo’s `http.serve` borrows the handler for the life of the server, so the catalog is also read-only with no mutex. That is the idiomatic form on each side for a read-mostly map.")
     a("- **No strawman, no shortcuts.** Overflow/bounds checks stay on in Gojo. Rust is not a debug build, and was not given LTO/`target-cpu=native` that Gojo does not get. Integers for money; UTF-8 substring search, not Unicode case-folding.")
     a("- **4-CPU KVM guest.** Absolute req/s will not match a metal box. Ratios on this machine are the result.")
+    a("- **Shared host.** Load generator and servers share the machine. When neither server CPU nor loadgen CPU is near its CPU budget and the host still has idle time, throughput is bound by round-trip latency, not by server capacity.")
     a("- **PR #2** (MoonBit / Go / Gojo microbenchmarks) is untouched.")
     a("")
     a("## How to rerun")
@@ -561,30 +634,34 @@ def write_markdown(doc: dict, path: Path) -> None:
     a("python3 bench/realworld/run_realworld.py")
     a("```")
     a("")
-    a("Artifacts: `results/RESULTS.md`, `results/results.json`, `results/results.csv`, `results/chart.png`.")
+    a(f"Arguments of this run: `{' '.join(env.get('argv', [])) or '(defaults)'}`.")
+    a("")
+    a("Artifacts: `RESULTS.md`, `results.json` (with every HTTP trial under `http.<lang>.raw`), `results.csv`, `chart.png`, `hyperfine/`.")
     a("")
     path.write_text("\n".join(lines) + "\n")
 
 
 def write_csv(doc: dict, path: Path) -> None:
-    rows = ["kind,lang,name,concurrency,median_s,mad_s,rps,p50_ms,p95_ms,p99_ms,ok,err,rss_bytes"]
+    rows = ["kind,lang,name,concurrency,trial,median_s,mad_s,rps,p50_ms,p95_ms,p99_ms,ok,err,rss_bytes,server_cpu_cores,loadgen_cpu_cores,host_idle_frac"]
     for name in ("jsonpipe", "logscan"):
         for lang in ("gojo", "rust"):
             b = doc["batch"][name][lang]
             rows.append(
-                f"batch,{lang},{name},,{b['median_s']:.6f},{b['mad_s']:.6f},,,,,,,"
-                f"{int(b['rss_median_bytes'])}"
+                f"batch,{lang},{name},,,{b['median_s']:.6f},{b['mad_s']:.6f},,,,,,,"
+                f"{int(b['rss_median_bytes'])},,,"
             )
     for lang in ("gojo", "rust"):
-        for r in doc["http"][lang]["concurrency"]:
+        for r in doc["http"][lang]["raw"]:
             rows.append(
-                f"http,{lang},httpserver,{r['concurrency']},,,{r['rps']:.3f},{r['p50_ms']:.4f},"
-                f"{r['p95_ms']:.4f},{r['p99_ms']:.4f},{r['ok']},{r['err']},{r.get('server_rss_bytes', '')}"
+                f"http,{lang},httpserver,{r['concurrency']},{r['trial']},,,{r['rps']:.3f},{r['p50_ms']:.4f},"
+                f"{r['p95_ms']:.4f},{r['p99_ms']:.4f},{r['ok']},{r['err']},{r['server_rss_bytes']},"
+                f"{r['server_cpu_cores']:.3f},{r['loadgen_cpu_cores']:.3f},{r['host_idle_frac']:.3f}"
             )
     path.write_text("\n".join(rows) + "\n")
 
 
 def main() -> None:
+    global RESULTS, BIN
     p = argparse.ArgumentParser()
     p.add_argument("--events", type=int, default=300_000)
     p.add_argument("--logs", type=int, default=600_000)
@@ -592,15 +669,23 @@ def main() -> None:
     p.add_argument("--seed", type=int, default=20261109)
     p.add_argument("--runs", type=int, default=7)
     p.add_argument("--warmup", type=int, default=2)
-    p.add_argument("--http-seconds", type=float, default=5.0)
+    p.add_argument("--http-seconds", type=float, default=10.0)
     p.add_argument("--http-warmup", type=float, default=1.0)
+    p.add_argument("--http-trials", type=int, default=5, help="measuring windows per server and concurrency")
     p.add_argument("--concurrency", default="1,4,8,16")
+    p.add_argument("--server-cpus", help="taskset CPU list for the servers, e.g. 0-2")
+    p.add_argument("--client-cpus", help="taskset CPU list for the load generator, e.g. 3")
+    p.add_argument("--gojo", help="the gojo compiler (default: gojo on PATH)")
+    p.add_argument("--results", type=Path, default=RESULTS, help="where to write the results")
+    p.add_argument("--bin", type=Path, default=BIN, help="where to put the built binaries")
     p.add_argument("--skip-build", action="store_true")
     args = p.parse_args()
     concs = [int(x) for x in args.concurrency.split(",") if x.strip()]
+    RESULTS, BIN = args.results.resolve(), args.bin.resolve()
 
     RESULTS.mkdir(parents=True, exist_ok=True)
-    env = env_info()
+    env = env_info(str(Path(args.gojo).resolve()) if args.gojo else which_or("gojo", "/workspace/target/release/gojo"))
+    env["argv"] = sys.argv[1:]
     print(json.dumps({k: env[k] for k in ("gojo_version", "rustc", "cpu", "nproc")}, indent=2), flush=True)
 
     fx = generate_fixtures(args.events, args.logs, args.products, args.seed)
@@ -677,12 +762,12 @@ def main() -> None:
             )
             # drop bulky raw nested copy from the summary file later
             raw_path = hf_dir / f"{lang}-{name}.json"
-            batch[name][lang]["hyperfine_json"] = str(raw_path.relative_to(ROOT))
+            batch[name][lang]["hyperfine_json"] = str(raw_path.relative_to(RESULTS))
             batch[name][lang].pop("raw", None)
 
-    print("--- HTTP Gojo ---", flush=True)
-    http_g = measure_http(
-        bins["gojo-httpserver"],
+    print("--- HTTP (Gojo and Rust, interleaved) ---", flush=True)
+    http = measure_http(
+        {"gojo": bins["gojo-httpserver"], "rust": bins["rust-httpserver"]},
         bins["rust-loadgen"],
         products_path,
         products,
@@ -690,31 +775,18 @@ def main() -> None:
         args.http_seconds,
         args.http_warmup,
         args.seed,
+        args.http_trials,
+        args.server_cpus,
+        args.client_cpus,
     )
-    print("--- HTTP Rust ---", flush=True)
-    http_r = measure_http(
-        bins["rust-httpserver"],
-        bins["rust-loadgen"],
-        products_path,
-        products,
-        concs,
-        args.http_seconds,
-        args.http_warmup,
-        args.seed,
-    )
-    # correctness payloads are large (stats cents); keep hashes of the checked fields
-    http_g["correctness"] = {
-        "stats_n": http_g["correctness"]["stats"]["n"],
-        "stats_cents": http_g["correctness"]["stats"]["cents"],
-        "query_n": http_g["correctness"]["query"]["n"],
-        "query_ids": http_g["correctness"]["query"]["ids"][:5],
-    }
-    http_r["correctness"] = {
-        "stats_n": http_r["correctness"]["stats"]["n"],
-        "stats_cents": http_r["correctness"]["stats"]["cents"],
-        "query_n": http_r["correctness"]["query"]["n"],
-        "query_ids": http_r["correctness"]["query"]["ids"][:5],
-    }
+    # correctness payloads are large (stats cents); keep the checked fields
+    for r in http.values():
+        r["correctness"] = {
+            "stats_n": r["correctness"]["stats"]["n"],
+            "stats_cents": r["correctness"]["stats"]["cents"],
+            "query_n": r["correctness"]["query"]["n"],
+            "query_ids": r["correctness"]["query"]["ids"][:5],
+        }
 
     doc = {
         "env": env,
@@ -724,7 +796,12 @@ def main() -> None:
         "hyperfine_warmup": args.warmup,
         "correctness": correctness,
         "batch": batch,
-        "http": {"gojo": http_g, "rust": http_r},
+        "http": http,
+        "http_seconds": args.http_seconds,
+        "http_warmup": args.http_warmup,
+        "http_trials": args.http_trials,
+        "server_cpus": args.server_cpus,
+        "client_cpus": args.client_cpus,
     }
     (RESULTS / "results.json").write_text(json.dumps(doc, indent=2) + "\n")
     write_csv(doc, RESULTS / "results.csv")
