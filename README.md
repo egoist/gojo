@@ -191,8 +191,8 @@ Concurrency (see [bench/README.md](bench/README.md#goroutine)): 100,000 simultan
 
 ## Not yet implemented
 
-- Windows; a language server (LSP); a package manager (for now a program is the directories it uses). The debugger can set breakpoints on Gojo lines and show the call stack, but variable names are the names in the generated C (`p_x`, `l0_total`).
-- Networking has only TCP and plain-text HTTP/1.1 (one request per connection); no UDP, Unix sockets or TLS. JSON cannot yet be converted to and from structs automatically.
+- Windows; a language server (LSP); a package registry and version resolution (for now `gojo.toml` dependencies are local paths, and workspaces share one manifest). The debugger can set breakpoints on Gojo lines and show the call stack, but variable names are the names in the generated C (`p_x`, `l0_total`).
+- Networking has TCP, UDP and DNS; HTTP/1.1 over TCP or TLS, with keep-alive on both sides. No HTTP/2 or HTTP/3, and no Unix-socket listeners.
 - On Linux kernels before 6.13, each task uses two memory mappings. The default `vm.max_map_count` (262144) supports about 130,000 live tasks; beyond that you get an error suggesting you raise it.
 - `#specialize`, PGO.
 - `saturatingAdd`, pointer arithmetic, `unsafe.cast` and `unsafe.forget` from the design notes, and passing Gojo functions to C as callbacks (`extern "C" fn` can currently only be exported and called directly).

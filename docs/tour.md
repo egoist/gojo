@@ -997,13 +997,14 @@ free of it.
 
 ### Known limits of the beta
 
-- macOS and Linux only; no Windows.
-- No package manager yet: a program is the directories it uses.
+- macOS and Linux only (x86-64 and arm64); no Windows.
+- No package registry or version resolution yet: a `gojo.toml` names
+  dependencies by local path, and a workspace ties several packages together.
 - No language server. Debuggers (lldb, gdb) know Gojo source lines, so
   breakpoints and backtraces work, but they show variables by their names in
   the generated C (`p_x` for a parameter `x`).
-- HTTP is HTTP/1.1 without TLS, one request per connection; no UDP.
-- JSON doesn't convert to and from structs automatically.
+- HTTP is HTTP/1.1 only; no HTTP/2 or HTTP/3. `net` has TCP, UDP and DNS, but
+  no Unix sockets.
 - Gojo functions can't yet be passed to C as callbacks.
 - Only `send interface`s and `send fn`s cross tasks among interface and
   function values.
