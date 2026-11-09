@@ -947,6 +947,79 @@ extend str {
     // `["a", "b", "c"]`.
     pub fn fields(self) -> Vec[String]
 
+    // Like `split`, without copies: the pieces are views of this string, in a
+    // vector that lives in a variable (spec 5.4) and keeps the string
+    // borrowed while it is in use.
+    pub fn splitViews(self, sep: str) -> Vec[str] {
+        var out: Vec[str] = []
+        if sep.len() == 0 {
+            var i = 0
+            while i < self.len() {
+                let (_, n) = self.runeAt(i)
+                out.push(self[i..i + n])
+                i += n
+            }
+            return out
+        }
+        var start = 0
+        loop {
+            let at = self.findFrom(sep, start) else {
+                break
+            }
+            out.push(self[start..at])
+            start = at + sep.len()
+        }
+        out.push(self[start..])
+        return out
+    }
+
+    // Like `lines`, without copies: the lines as views of this string.
+    pub fn lineViews(self) -> Vec[str] {
+        var out: Vec[str] = []
+        let b = self.bytes()
+        var start = 0
+        var i = 0
+        while i < b.len() {
+            if b[i] == 10 {
+                var end = i
+                if end > start && b[end - 1] == 13 {
+                    end -= 1
+                }
+                out.push(self[start..end])
+                start = i + 1
+            }
+            i += 1
+        }
+        if start < b.len() {
+            var end = b.len()
+            if b[end - 1] == 13 {
+                end -= 1
+            }
+            out.push(self[start..end])
+        }
+        return out
+    }
+
+    // Like `fields`, without copies: the words as views of this string.
+    pub fn fieldViews(self) -> Vec[str] {
+        var out: Vec[str] = []
+        let b = self.bytes()
+        var i = 0
+        while i < b.len() {
+            while i < b.len() && (b[i] == 32 || (b[i] >= 9 && b[i] <= 13)) {
+                i += 1
+            }
+            let start = i
+            while i < b.len() && !(b[i] == 32 || (b[i] >= 9 && b[i] <= 13)) {
+                i += 1
+            }
+            if i > start {
+                out.push(self[start..i])
+            }
+        }
+        return out
+    }
+
     // A copy in upper case, by Unicode simple case mapping (one character to
     // one: `"straße"` becomes `"STRAßE"`).
     pub fn toUpper(self) -> String

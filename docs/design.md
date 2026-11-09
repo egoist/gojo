@@ -190,7 +190,7 @@ with e = counts.entry(word) {   // with binds a projection to a block
 }
 ```
 
-**Views live only in variables.** Without lifetime annotations, the borrow checker can track only views held in local variables. So no value that would store a view elsewhere may exist: collections, `Box`, `Rc`, interface values, generic types, whether the type is written out or inferred (`[s]`, `Rc(s)`). When a view is assigned to an outer variable, the borrowed value must live at least as long. A view of data inside a lock cannot leave the `with` block, because the lock is released when the block ends. If a generic function keeps a value of `T` after the call returns (an escaping closure, a task started through a `Scope` value), `T` cannot be a view at the call. These rules were added during M2 while systematically constructing bypass cases; see `tests/errors/view_*`, `stored_views`, `generic_keeps_view`.
+**Views live only in variables.** Without lifetime annotations, the borrow checker can track only views held in local variables. So no value that would store a view elsewhere may exist: `Box`, `Rc`, interface values, struct fields, generic types, whether the type is written out or inferred (`Rc(s)`). A `Vec` or `Map` of views is a view itself (a *view collection*, after Goose's root sets and Mojo's `List[StringSpan[origin]]`): it lives in a variable, owns its buffer, and borrows the union of what its elements view, which grows as views are pushed in. A function that pushes views of one parameter into an `inout` one has that worked out like a returned view's sources, so `tokenize(src, &toks)` leaves `toks` borrowing `src`. When a view is assigned to an outer variable, the borrowed value must live at least as long. A view of data inside a lock cannot leave the `with` block, because the lock is released when the block ends. If a generic function keeps a value of `T` after the call returns (an escaping closure, a task started through a `Scope` value), `T` cannot be a view at the call. These rules were added during M2 while systematically constructing bypass cases; see `tests/errors/view_*`, `stored_views`, `generic_keeps_view`.
 
 ### 4.4 Release and defer
 
@@ -211,7 +211,7 @@ with e = counts.entry(word) {   // with binds a projection to a block
 
 `Vec[T]` owns its data; `[]T` is only a borrowed view. `v.push(x)` requires an `inout` borrow, so the Vec cannot grow while any view exists. The Go problem of "two slices unexpectedly sharing a backing array after append" therefore cannot happen. `String` and `str` relate the same way.
 
-A list of string literals, `["a", "b"]`, is a `Vec[String]`, not a `Vec[str]`: views never end up inside collections.
+A list of string literals, `["a", "b"]`, is a `Vec[String]`, not a `Vec[str]`. A `Vec[str]` is a view collection: it lives in a variable and keeps what its elements view borrowed.
 
 ### 4.7 Closure capture
 

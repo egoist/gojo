@@ -66,7 +66,7 @@ view struct Lexer {
 }
 ```
 
-The words it returns point into the input, so the lexer can move on while earlier words are in use. What a view can't do is go where the compiler stops tracking it: into a `Vec`, a long-lived struct or an escaping closure. A structure that keeps borrowed tokens in a list owns its input instead, and stores ranges into it:
+The words it returns point into the input, so the lexer can move on while earlier words are in use. Views can also be collected, as long as the collection sits in a variable too: a `Vec[str]` or `Vec[Token]` is a view itself, borrowing what its elements view, so a tokenizer can return its tokens (`fn tokenize(src: str) -> Vec[Token]`) or push them into a vector its caller passes `inout`. What a view can't do is go where the compiler stops tracking it: into a long-lived struct, a `Box` or an escaping closure. A structure that keeps borrowed tokens beyond the variables of one call tree owns its input instead, and stores ranges into it:
 
 ```gojo
 struct Tokens {
@@ -89,7 +89,7 @@ Other differences:
 - **Release builds keep overflow checks.** `+` panics on overflow in every build; `+%` wraps when you mean it.
 - **Panics abort.** There is no unwinding: a panic is a bug, and it ends the process with the source location.
 
-**Choose Rust** when you need what second-class references rule out (borrowed data kept in collections or long-lived structures, fine control over allocation), when you need Windows, embedded targets or WebAssembly today, or when you need its ecosystem.
+**Choose Rust** when you need what second-class references rule out (borrowed data kept in long-lived structures, fine control over allocation), when you need Windows, embedded targets or WebAssembly today, or when you need its ecosystem.
 
 ## Compared with Go
 
@@ -192,7 +192,7 @@ Concurrency is where Go is still ahead: 100,000 suspended tasks passing a value 
 - **You need Windows, WebAssembly, or a bare-metal target.** Gojo runs on macOS and Linux (x86-64 and arm64); [WebAssembly](wasm.md) is a proposal.
 - **You need a mature ecosystem.** There is no package registry yet (dependencies are local paths), no language server, and the standard library is the main source of libraries.
 - **Your data is a web of shared, mutable, cyclic objects.** `Rc`, `Weak` and arenas handle it, but a garbage-collected language may be simpler.
-- **You need borrowed data kept in collections**, as in a parser that keeps a list of borrowed tokens. A view struct holds views while it sits in a variable, but a `Vec` of them isn't allowed: such a parser owns its input and stores `Span` ranges, where Rust stores the references directly.
+- **You need borrowed data kept in long-lived structures**, as in a cache of borrowed tokens kept in a struct. Views, and vectors and maps of them, live in variables: a parser that returns its tokens to the function that owns the input works, but one stored in a struct field owns its input and keeps `Span` ranges, where Rust stores the references directly.
 - **You need compile-time code generation.** Gojo has no macros and no `comptime`, on purpose.
 - **You need the language to be finished.** Gojo is a beta, and it still changes: see the [known limits](tour.md#known-limits-of-the-beta).
 

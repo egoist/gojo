@@ -1,0 +1,74 @@
+fn probe1() {
+    var src = "a bb ccc".toString()
+    var ws: Vec[str] = []
+    ws.push(src[0..1])
+    let w2 = src[2..4]
+    ws.push(w2)
+    println(ws)
+    // 1: a slice of the vector, then push: the buffer may move
+    let part = ws[0..1]
+    ws.push(src[5..8])
+    println(part)
+}
+
+fn probe2() {
+    var src = "a bb ccc".toString()
+    var ws: Vec[str] = []
+    ws.push(src[0..1])
+    let first = ws[0]
+    // 2: modify src while a view from ws is alive
+    src.push("x")
+    println(first)
+}
+
+fn probe3() {
+    var src = "a bb ccc".toString()
+    var ws: Vec[str] = []
+    ws.push(src[0..1])
+    var keep = ""
+    for w in ws {
+        keep = w
+    }
+    // 3: ws's last use is above; keep still views src
+    src.push("x")
+    println(keep)
+}
+
+fn probe4() {
+    var src = "a bb ccc".toString()
+    var ws: Vec[str] = []
+    ws.push(src[0..1])
+    if let r = ws.get(0) {
+        // 4: push while a reference into the buffer is alive
+        ws.push(src[2..4])
+        println(r)
+    }
+}
+
+fn probe5() {
+    var src = "a bb ccc".toString()
+    var ws: Vec[str] = []
+    ws.push(src[0..1])
+    // 5: modify src while ws views it
+    src.push("x")
+    println(ws)
+}
+
+fn probe6() {
+    var src = "a bb ccc".toString()
+    var ws: Vec[str] = []
+    ws.push(src[0..1])
+    let ws2 = ws
+    // 6: moved collection keeps viewing src
+    src.push("x")
+    println(ws2)
+}
+
+fn main() {
+}
+// error: cannot modify `ws` while it is borrowed by `part`
+// error: cannot modify `src` while it is borrowed by `first`
+// error: cannot modify `src` while it is borrowed by `keep`
+// error: cannot change `ws` while a `match` binding points into it
+// error: cannot modify `src` while it is borrowed by `ws`
+// error: cannot modify `src` while it is borrowed by `ws2`

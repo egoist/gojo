@@ -12,7 +12,5 @@ fn main() {
     _ = v
     _ = st
     _ = w
-    // error: a list cannot hold borrowed views
     // error: `Stack` cannot be instantiated with a borrowed view type
-    // error: calling `wrap` here would store a borrowed view inside `Vec[str]`
 }

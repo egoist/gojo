@@ -1224,14 +1224,21 @@ impl Checker {
                     return Ty::Error;
                 }
                 let a = Rc::new(targs[0].clone());
-                if self.prog.contains_view(&a) {
+                // `Vec[str]`, `Map[str, int]`: view collections, which live
+                // in variables like the views they hold
+                let coll = match name.as_str() {
+                    "Vec" => self.prog.is_view(&Ty::Vec(a.clone())),
+                    "Map" => targs.len() == 2 && self.prog.is_view(&Ty::Map(a.clone(), Rc::new(targs[1].clone()))),
+                    _ => false,
+                };
+                if self.prog.contains_view(&a) && !coll {
                     self.err(span, format!("`{}` cannot hold the borrowed view `{}`; use an owned type", name, self.prog.show(&a)));
                 }
                 return match name.as_str() {
                     "Vec" => Ty::Vec(a),
                     "Map" => {
                         let v = Rc::new(targs[1].clone());
-                        if self.prog.contains_view(&v) {
+                        if self.prog.contains_view(&v) && !coll {
                             self.err(span, "`Map` values cannot be borrowed views");
                         }
                         Ty::Map(a, v)

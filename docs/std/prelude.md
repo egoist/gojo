@@ -1541,6 +1541,32 @@ pub fn fields(self) -> Vec[String]
 The words between runs of ASCII whitespace: `"  a b\tc ".fields()` is
 `["a", "b", "c"]`.
 
+#### str.splitViews
+
+```gojo
+pub fn splitViews(self, sep: str) -> Vec[str]
+```
+
+Like `split`, without copies: the pieces are views of this string, in a
+vector that lives in a variable (spec 5.4) and keeps the string
+borrowed while it is in use.
+
+#### str.lineViews
+
+```gojo
+pub fn lineViews(self) -> Vec[str]
+```
+
+Like `lines`, without copies: the lines as views of this string.
+
+#### str.fieldViews
+
+```gojo
+pub fn fieldViews(self) -> Vec[str]
+```
+
+Like `fields`, without copies: the words as views of this string.
+
 #### str.toUpper
 
 ```gojo

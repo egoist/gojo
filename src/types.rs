@@ -574,6 +574,34 @@ impl Program {
             Ty::Adt(d, _) => self.def(*d).view,
             Ty::Option(t) | Ty::Array(t, _) | Ty::ArrayT(t, _) => self.is_view(t),
             Ty::Result(a, b) => self.is_view(a) || self.is_view(b),
+            // a view collection: owns its buffer, borrows what its elements
+            // view, and lives only in variables like any view (spec 5.4)
+            Ty::Vec(a) => self.is_coll_elem_view(a),
+            Ty::Map(k, v) => (self.is_coll_elem_view(k) || self.is_coll_elem_view(v)) && !(self.contains_view(k) && !self.is_coll_elem_view(k)) && !(self.contains_view(v) && !self.is_coll_elem_view(v)),
+            _ => false,
+        }
+    }
+
+    /// A view that a `Vec` or `Map` may hold: a plain view (`str`, `[]T`, a
+    /// view struct), or a view collection in turn. Not task handles, scopes
+    /// or lock guards, which their blocks track.
+    fn is_coll_elem_view(&self, t: &Ty) -> bool {
+        match t {
+            Ty::Str | Ty::Slice(_) => true,
+            Ty::Adt(d, _) => self.def(*d).view,
+            Ty::Option(a) => self.is_coll_elem_view(a),
+            Ty::Vec(_) | Ty::Map(..) => self.is_view(t),
+            _ => false,
+        }
+    }
+
+    /// A view that owns memory: a view collection (`Vec[str]`). References
+    /// into it point into its buffer, as well as into what it views.
+    pub fn owning_view(&self, t: &Ty) -> bool {
+        match t {
+            Ty::Vec(_) | Ty::Map(..) => self.is_view(t),
+            Ty::Option(a) => self.owning_view(a),
+            Ty::Result(a, b) => self.owning_view(a) || self.owning_view(b),
             _ => false,
         }
     }
@@ -596,6 +624,7 @@ impl Program {
     pub fn has_nested_view(&self, t: &Ty) -> bool {
         match t {
             Ty::Str | Ty::Slice(_) | Ty::Scope => false,
+            Ty::Vec(_) | Ty::Map(..) if self.is_view(t) => false,
             Ty::Adt(d, args) if self.def(*d).view => args.iter().any(|a| self.contains_view(a)),
             Ty::Task(a) => self.contains_view(a),
             Ty::Option(a) => self.has_nested_view(a),

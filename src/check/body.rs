@@ -3478,7 +3478,7 @@ impl Checker {
             self.err(sp, "cannot infer the element type of this list; give it a type: `let xs: Vec[T] = [...]`");
             return TExpr::error(sp);
         }
-        if self.prog.contains_view(&elem) {
+        if self.prog.contains_view(&elem) && !self.prog.is_view(&Ty::vec(elem.clone())) {
             let s = self.prog.show(&elem);
             self.err(sp, format!("a list cannot hold borrowed views (`{}`); use owned values such as String", s));
             return TExpr::error(sp);
@@ -3520,7 +3520,7 @@ impl Checker {
             out.push(self.coerce(cx, e, &r, Use::Value));
         }
         let elem = self.resolve(cx, &elem);
-        if self.prog.contains_view(&elem) && !is_array {
+        if self.prog.contains_view(&elem) && !is_array && !self.prog.is_view(&Ty::vec(elem.clone())) {
             let s = self.prog.show(&elem);
             self.err(sp, format!("a list cannot hold borrowed views (`{}`); use owned values such as String", s));
             return TExpr::error(sp);

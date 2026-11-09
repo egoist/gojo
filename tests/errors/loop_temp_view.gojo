@@ -1,0 +1,22 @@
+// A view of an element of a loop's temporary can't outlive the loop: the
+// temporary is dropped when the loop ends.
+fn main() {
+    let text = "the quick brown fox".toString()
+    var best = ""
+    for w in text.split(" ") {
+        if w.len() > best.len() {
+            best = w
+        }
+    }
+    println(best)
+    let parts = text.split(" ")
+    var longest = ""
+    for w in parts {
+        if w.len() > longest.len() {
+            longest = w
+        }
+    }
+    println(longest)
+}
+// error: `w` does not live long enough: `best` would still view it after it is dropped
+// error: `w` points into this temporary, which is dropped when the loop ends

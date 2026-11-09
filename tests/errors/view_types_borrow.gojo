@@ -19,10 +19,12 @@ fn returnsLocal() -> Token {
 }
 
 fn inVec() -> int {
-    let s: String = "hello"
     var v = Vec[Token]{}
-    // error: `v` has type `Vec[Token]`, which would store a borrowed view
-    v.push(Token{text: s.asStr(), n: 1})
+    {
+        let s: String = "hello"
+        v.push(Token{text: s.asStr(), n: 1})
+        // error: `s` does not live long enough: `v` would still view it after it is dropped
+    }
     return v.len()
 }
 

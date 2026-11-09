@@ -346,6 +346,15 @@ impl<'a> An<'a> {
                     d.extend(index.iter().copied());
                     edges.push((m, d));
                 }
+                // `m[k] = v` on a map of views
+                TStmt::MapInsert { map, key, value } => {
+                    if let Some((d, _)) = local_path(map).filter(|p| borrows(p.0)) {
+                        let mut m = HashSet::new();
+                        mentions_expr(key, &mut m);
+                        mentions_expr(value, &mut m);
+                        edges.push((m, vec![d]));
+                    }
+                }
                 TStmt::With { local, place, .. } => {
                     let mut m = HashSet::new();
                     mentions_expr(place, &mut m);
@@ -389,6 +398,24 @@ impl<'a> An<'a> {
                     let mut m = HashSet::new();
                     mentions_expr(x, &mut m);
                     edges.push((m, vec![*b]));
+                }
+                // a variable passed `inout` may be left viewing the other
+                // arguments (`ws.push(s)`, `tokenize(src, &toks)`)
+                TK::Call { args, .. } | TK::Intrinsic { args, .. } if args.iter().any(|a| a.mode == ArgMode::Inout) => {
+                    for (i, a) in args.iter().enumerate() {
+                        if a.mode != ArgMode::Inout {
+                            continue;
+                        }
+                        if let Some((d, _)) = local_path(&a.e).filter(|p| borrows(p.0)) {
+                            let mut m = HashSet::new();
+                            for (j, b) in args.iter().enumerate() {
+                                if j != i {
+                                    mentions_expr(&b.e, &mut m);
+                                }
+                            }
+                            edges.push((m, vec![d]));
+                        }
+                    }
                 }
                 TK::Try { e: x, wrap: Some(TryWrap::Call(h, _)) } => {
                     let mut m = HashSet::new();
