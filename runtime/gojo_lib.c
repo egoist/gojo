@@ -53,6 +53,31 @@ int64_t gojo_rand___secureFill(gojo_vec *v, int64_t n) {
     return 0;
 }
 
+// ------------------------------------------------------------------ bufio
+
+// the index of the first `c` in `s`, or -1 (memchr: a vectorized scan)
+int64_t gojo_bufio___indexByte(gojo_slice s, uint8_t c) {
+    if (s.len <= 0) return -1;
+    const uint8_t *p = memchr(s.ptr, c, (size_t)s.len);
+    return p ? (int64_t)(p - (const uint8_t *)s.ptr) : -1;
+}
+
+// appends the bytes of `s` to `v`, with one reservation and one copy
+void gojo_bufio___append(gojo_vec *v, gojo_slice s) {
+    if (s.len <= 0) return;
+    gojo_vec_reserve(v, s.len, 1);
+    memcpy((uint8_t *)v->ptr + v->len, s.ptr, (size_t)s.len);
+    v->len += s.len;
+}
+
+// removes the first `n` bytes of `v` (0 <= n <= len), keeping its buffer
+void gojo_bufio___dropFront(gojo_vec *v, int64_t n) {
+    if (n <= 0) return;
+    if (n > v->len) gojo_panic_index(n, v->len, "<std>/bufio.gojo");
+    memmove(v->ptr, (uint8_t *)v->ptr + n, (size_t)(v->len - n));
+    v->len -= n;
+}
+
 // ------------------------------------------------------------------ encodings
 
 static const char hex_lower[] = "0123456789abcdef", hex_upper[] = "0123456789ABCDEF";
