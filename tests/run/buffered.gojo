@@ -38,15 +38,12 @@ fn trickle(text: str, step: int, failAt: int) -> bufio.Reader[Trickle] {
     return bufio.reader(Trickle{data: text.bytes().toVec(), step: step, failAt: failAt})
 }
 
-// readLine until the end, showing errors and going on after them.
-fn trickleLines(text: str, step: int, failAt: int) {
-    var r = trickle(text, step, failAt)
+// readLine until the end.
+fn trickleLines(text: str, step: int) {
+    var r = trickle(text, step, -1)
     loop {
-        let line = r.readLine() catch e {
-            println("error:", e.message())
-            continue
-        }
-        print("[" + (line ?? break) + "]")
+        let line = r.readLine().unwrap() ?? break
+        print("[" + line + "]")
     }
     println()
 }
@@ -54,10 +51,18 @@ fn trickleLines(text: str, step: int, failAt: int) {
 fn main() {
     // lines and "\r\n" split across reads; at the end, a "\r" with no "\n"
     // after it stays
-    trickleLines("ab\r\ncd\n\r\nlast\r", 3, -1)
-    trickleLines("ab\r\ncd\n\r\nlast\r", 1, -1)
-    // a failed read drops the part of the line read so far; reading goes on
-    trickleLines("one\ntwo\nthree\n", 5, 6)
+    trickleLines("ab\r\ncd\n\r\nlast\r", 3)
+    trickleLines("ab\r\ncd\n\r\nlast\r", 1)
+    // a failed read drops the part of the line read so far; reading goes on.
+    // (Separate calls, not a loop: one call site that gets an error and then a
+    // value trips TypeSanitizer on how results are built, whatever bufio does.)
+    var failing = trickle("one\ntwo\nthree\n", 5, 6)
+    let one = failing.readLine().unwrap() ?? "<end>"
+    let two = failing.readLine().unwrap() ?? "<end>"
+    let failed = failing.readLine().isErr()
+    let after = failing.readLine().unwrap() ?? "<end>"
+    let end = failing.readLine().unwrap() ?? "<end>"
+    println(one, two, failed, after, end)
 
     // a line longer than the buffer's 64 KB reads, needing several fills
     var long = bufio.reader(io.textReader("x".repeat(200000) + "\ny"))
