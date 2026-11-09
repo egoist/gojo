@@ -1,0 +1,9 @@
+fn mkr(s: str) -> Vec[str] ! Vec[str] { return err([s]) }
+fn main() {
+    var d: Vec[str] = []
+    var s = "hello".toString()
+    _ = mkr(s.asStr()) catch e { d = e; [] }
+    s.push("defghijklmnopqrstuvwxyz0123456789")
+    println(d)
+}
+// error: `s` does not live long enough: `d` would still view it after it is dropped

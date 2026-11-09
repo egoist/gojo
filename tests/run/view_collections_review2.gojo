@@ -1,0 +1,219 @@
+// View collections: programs a second review found mishandled (memory
+// freed early, or wrongly rejected).
+
+// l/l15
+fn main_l_l15() {
+    let s = "hello world".toString()
+    var ws: Vec[str] = ["a"]
+    ws[0] = s.asStr()
+    let junk = "XXXXXXXXXXXXXXXXXXXXXXX".toString()
+    println(ws, junk)
+}
+
+// l/l6
+fn main_l_l6() {
+    let s = "hello world".toString()
+    var vv: Vec[Vec[str]] = [[]]
+    vv[0].push(s.asStr())
+    let junk = "XXXXXXXXXXXXXXXXXXXXXXX".toString()
+    println(vv, junk)
+}
+
+// l/l14
+fn main_l_l14() {
+    let s = "hello world".toString()
+    var m: Map[int, Vec[str]] = [:]
+    m[1] = []
+    m[1].push(s.asStr())
+    let junk = "XXXXXXXXXXXXXXXXXXXXXXX".toString()
+    println(m, junk)
+}
+
+// l/l7
+view struct Tok_l_l7 { text: str }
+fn main_l_l7() {
+    let s = "hello world".toString()
+    var ts: Vec[Tok_l_l7] = [Tok_l_l7{text: "a"}]
+    ts[0].text = s.asStr()
+    let junk = "XXXXXXXXXXXXXXXXXXXXXXX".toString()
+    println(ts[0].text, junk)
+}
+
+// l/l2
+fn main_l_l2() {
+    let s = "hello world".toString()
+    var ws: Vec[str] = ["a"]
+    for x in &ws { x = s.asStr() }
+    let junk = "XXXXXXXXXXXXXXXXXXXXXXX".toString()
+    println(ws, junk)
+}
+
+// l/l9
+fn main_l_l9() {
+    let s = "hello world".toString()
+    var vv: Vec[Vec[str]] = [[]]
+    for x in &vv { x.push(s.asStr()) }
+    let junk = "XXXXXXXXXXXXXXXXXXXXXXX".toString()
+    println(vv, junk)
+}
+
+// l/l1
+fn main_l_l1() {
+    let s = "hello world".toString()
+    var m: Map[String, Vec[str]] = [:]
+    with e = m.entry("k".toString()) { e.push(s.asStr()) }
+    let junk = "XXXXXXXXXXXXXXXXXXXXXXX".toString()
+    println(m, junk)
+}
+
+// l/l8
+fn main_l_l8() {
+    let s = "hello world".toString()
+    var m: Map[String, str] = [:]
+    with e = m.entry("k".toString()) { e = s.asStr() }
+    let junk = "XXXXXXXXXXXXXXXXXXXXXXX".toString()
+    println(m, junk)
+}
+
+// l/l3
+fn main_l_l3() {
+    let s = "hello world".toString()
+    var vv: Vec[Vec[str]] = [[]]
+    var inner = vv[0]
+    inner.push(s.asStr())
+    let junk = "XXXXXXXXXXXXXXXXXXXXXXX".toString()
+    println(vv, junk)
+}
+
+// l/l4
+fn main_l_l4() {
+    let s = "hello world".toString()
+    var o: ?Vec[str] = Vec[str]{}
+    if let v = o { v.push(s.asStr()) }
+    let junk = "XXXXXXXXXXXXXXXXXXXXXXX".toString()
+    println(o, junk)
+}
+
+// l/l10
+fn main_l_l10() {
+    let s = "hello world".toString()
+    var m: Map[str, Vec[str]] = [:]
+    m["k"] = []
+    if let v = m.getMut("k") { v.push(s.asStr()) }
+    let junk = "XXXXXXXXXXXXXXXXXXXXXXX".toString()
+    println(m, junk)
+}
+
+// l/l5
+fn main_l_l5() {
+    let s = "hello world".toString()
+    var ws: Vec[str] = []
+    let mu = Mutex(&ws)
+    with g = mu.lock() { g.push(s.asStr()) }
+    let junk = "XXXXXXXXXXXXXXXXXXXXXXX".toString()
+    println(ws, junk)
+}
+
+// fp/b2
+fn main_fp_b2() {
+    let text = "a b c".toString()
+    var a = text.splitViews(" ")
+    let x = a[0]
+    a.clear()
+    println(x)
+}
+
+// fp/a7
+fn main_fp_a7() {
+    let text = "a b c".toString()
+    var a = text.splitViews(" ")
+    var b: Vec[str] = []
+    b.push(a[0])
+    a.clear()
+    println(b)
+}
+
+// fp/a4
+fn main_fp_a4() {
+    let text = "a b c".toString()
+    var ws = text.splitViews(" ")
+    let last = ws.pop() ?? ""
+    ws.clear()
+    println(last)
+}
+
+// fp/a2
+fn main_fp_a2() {
+    let text = "b a c".toString()
+    var ws = text.splitViews(" ")
+    let b = ws.clone()
+    ws.clear()
+    println(b, ws)
+}
+
+// fp/b5
+fn main_fp_b5() {
+    let text = "apple avocado".toString()
+    var m: Map[str, Vec[str]] = [:]
+    let w = text.asStr()
+    with e = m.entry(w) { e.push(w) }
+    println(m)
+}
+
+// fp/a3
+fn group_fp_a3(text: str) -> Map[str, Vec[str]] {
+    var m: Map[str, Vec[str]] = [:]
+    for w in text.fieldViews() {
+        with e = m.entry(w[0..1]) { e.push(w) }
+    }
+    return m
+}
+fn main_fp_a3() {
+    let text = "apple avocado banana blueberry cherry".toString()
+    let g = group_fp_a3(text)
+    println(g)
+}
+
+// fp/a5
+fn main_fp_a5() {
+    let text = "a b c".toString()
+    var ws = text.splitViews(" ")
+    var out: Vec[str] = []
+    if let x = ws.pop() { out.push(x) }
+    println(out)
+}
+
+// fp/a6
+fn main_fp_a6() {
+    let text = "a b c".toString()
+    var stack: Vec[Vec[str]] = [text.splitViews(" ")]
+    var out: Vec[str] = []
+    while stack.len() > 0 {
+        let top = stack.pop() ?? []
+        for w in top { out.push(w) }
+    }
+    println(out)
+}
+
+fn main() {
+    main_l_l15()
+    main_l_l6()
+    main_l_l14()
+    main_l_l7()
+    main_l_l2()
+    main_l_l9()
+    main_l_l1()
+    main_l_l8()
+    main_l_l3()
+    main_l_l4()
+    main_l_l10()
+    main_l_l5()
+    main_fp_b2()
+    main_fp_a7()
+    main_fp_a4()
+    main_fp_a2()
+    main_fp_b5()
+    main_fp_a3()
+    main_fp_a5()
+    main_fp_a6()
+}

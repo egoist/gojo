@@ -1,0 +1,15 @@
+struct Gen { n: int }
+extend Gen {
+    fn each(self, body: fn(str) -> Flow) -> Flow {
+        let t = "hello world".toString()
+        return body(t.asStr())
+    }
+}
+fn main() {
+    var ws: Vec[str] = []
+    let g = Gen{n: 1}
+    for x in g { ws.push(x) }
+    let junk = "XXXXXXXXXXXXXXXXXXXXXXX".toString()
+    println(ws, junk)
+}
+// error: this closure stores a view of its own `x` in `ws`, which it captures: the view could outlive what it points into

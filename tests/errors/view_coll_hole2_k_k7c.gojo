@@ -1,0 +1,8 @@
+fn apply(f: fn(str)) { let t = "hello world".toString(); f(t.asStr()) }
+fn main() {
+    var ws: Vec[str] = []
+    apply((x: str) => { ws.push(x) })
+    let junk = "XXXXXXXXXXXXXXXXXXXXXXX".toString()
+    println(ws, junk)
+}
+// error: this closure stores a view of its own `x` in `ws`, which it captures: the view could outlive what it points into

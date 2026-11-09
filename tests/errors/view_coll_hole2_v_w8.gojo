@@ -1,0 +1,12 @@
+fn f() -> Vec[str] {
+    let t = "hello world".toString()
+    let o: ?Vec[str] = [t.asStr()]
+    if let y = o { return y }
+    return []
+}
+fn main() {
+    let ws = f()
+    let junk = "XXXXXXXXXXXXXXXXXXXXXXX".toString()
+    println(ws, junk)
+}
+// error: returns a view of `t`, which is dropped when the function returns

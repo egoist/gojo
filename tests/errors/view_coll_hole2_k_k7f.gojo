@@ -1,0 +1,9 @@
+fn apply(f: fn(str), x: str) { f(x) }
+fn main() {
+    var m: Map[str, int] = [:]
+    var s = "hello".toString()
+    apply((x: str) => { m[x] = 1 }, s.asStr())
+    s.push("defghijklmnopqrstuvwxyz0123456789")
+    println(m)
+}
+// error: this closure stores a view of its own `x` in `m`, which it captures: the view could outlive what it points into
