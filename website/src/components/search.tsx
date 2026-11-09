@@ -2,7 +2,7 @@ import { useNavigate } from "@tanstack/solid-router"
 import FileTextIcon from "lucide-solid/icons/file-text"
 import HashIcon from "lucide-solid/icons/hash"
 import SearchIcon from "lucide-solid/icons/search"
-import { For, Show, createEffect, createMemo, createResource, createSignal, onCleanup, onMount } from "solid-js"
+import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount } from "solid-js"
 
 import { docHref, type SearchEntry } from "@/lib/docs"
 
@@ -67,11 +67,14 @@ export function Search() {
   let input!: HTMLInputElement
   let list!: HTMLUListElement
   const navigate = useNavigate()
-  const [open, setOpen] = createSignal(false)
   const [mac, setMac] = createSignal(true)
   const [query, setQuery] = createSignal("")
   const [selected, setSelected] = createSignal(0)
-  const [entries] = createResource(open, () => loadIndex())
+  // A plain signal rather than a resource: reading a pending resource would
+  // suspend the root <Suspense>, which detaches the page, and so closes the
+  // dialog the first time it opens.
+  const [entries, setEntries] = createSignal<SearchEntry[]>()
+  const [failed, setFailed] = createSignal(false)
 
   const terms = createMemo(() => query().toLowerCase().split(/\s+/).filter(Boolean))
   const results = createMemo(() => {
@@ -81,7 +84,10 @@ export function Search() {
   })
 
   function show() {
-    setOpen(true)
+    if (!entries()) {
+      setFailed(false)
+      loadIndex().then(setEntries, () => setFailed(true))
+    }
     dialog.showModal()
     input.select()
   }
@@ -169,7 +175,7 @@ export function Search() {
         </div>
         <ul ref={list} id="search-results" role="listbox" class="max-h-[min(60vh,26rem)] overflow-y-auto p-1.5">
           <Show
-            when={!entries.error}
+            when={!failed()}
             fallback={<li class="py-10 text-center text-sm text-muted-foreground">The search index could not be loaded.</li>}
           >
             <Show when={entries()} fallback={<li class="py-10 text-center text-sm text-muted-foreground">Loading…</li>}>
