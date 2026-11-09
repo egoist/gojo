@@ -610,6 +610,8 @@ fn place_path(e: &TExpr) -> Option<Path> {
             _ => None,
         },
         TK::ProjUnwrap { proj, .. } => place_path(proj),
+        // which field depends on the instance: the whole value
+        TK::StaticField { base, .. } => place_path(base),
         _ => None,
     }
 }

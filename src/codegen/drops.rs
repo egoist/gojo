@@ -775,8 +775,8 @@ impl<'a> An<'a> {
 
     fn expr(&mut self, st: &mut St, e: &'a TExpr, top: bool) {
         match &e.kind {
-            TK::Unit | TK::Int(_) | TK::Float(_) | TK::Bool(_) | TK::Str(_) | TK::NoneLit | TK::Local(_) | TK::Const(_) | TK::Global(_) | TK::ConstParam(_) | TK::FuncRef(..) | TK::DefaultOf | TK::Error => {}
-            TK::Field { base: x, .. } | TK::Deref(x) | TK::Copy(x) | TK::OptField { base: x, .. } | TK::Unary { e: x, .. } | TK::Cast(x) | TK::SomeLit(x) | TK::OkLit(x) | TK::ErrLit(x) | TK::Coerce(_, x) | TK::Recv(x) | TK::Wrap(x) | TK::MakeChan(x) | TK::Unbox(x) | TK::MutexRef(x) | TK::Proj { call: x, .. } => self.expr(st, x, false),
+            TK::Unit | TK::Int(_) | TK::Float(_) | TK::Bool(_) | TK::Str(_) | TK::NoneLit | TK::Local(_) | TK::Const(_) | TK::Global(_) | TK::ConstParam(_) | TK::FuncRef(..) | TK::DefaultOf | TK::Error | TK::StaticFieldName(_) => {}
+            TK::StaticField { base: x, .. } | TK::Field { base: x, .. } | TK::Deref(x) | TK::Copy(x) | TK::OptField { base: x, .. } | TK::Unary { e: x, .. } | TK::Cast(x) | TK::SomeLit(x) | TK::OkLit(x) | TK::ErrLit(x) | TK::Coerce(_, x) | TK::Recv(x) | TK::Wrap(x) | TK::MakeChan(x) | TK::Unbox(x) | TK::MutexRef(x) | TK::Proj { call: x, .. } => self.expr(st, x, false),
             TK::Move(x) => {
                 if let Some(p) = local_path(x) {
                     self.mv(st, &p);

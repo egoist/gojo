@@ -1,0 +1,4 @@
+{name="app" port=8080 tags=["a", "b"] origin={x=1 y=2.5} proxy=- debug=yes color=Green}
+42 [1, 2] {x=-3 y=0.5}
+app 8080 true ["a", "b", "c"] none
+error: `port`: `eighty` isn't a number

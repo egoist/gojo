@@ -226,6 +226,25 @@ pub enum StmtKind {
     Discard(Expr),
     Yield(Option<Expr>),
     Select(Vec<SelectArm>),
+    /// `static for f in fields(T) { }`: the body once per field of `T`,
+    /// `f` naming the field (spec 9.1).
+    StaticFor { name: String, name_span: Span, ty: TypeExpr, body: Block },
+    /// `static if T: bound { } else static if let v: Vec[_] = x { } else { }`:
+    /// the first arm whose condition the type satisfies, chosen per instance.
+    StaticIf { arms: Vec<(StaticCond, Block)>, else_: Option<Block> },
+}
+
+/// A condition of `static if`.
+#[derive(Clone, Debug)]
+pub enum StaticCond {
+    /// `T: bound`: a capability, an interface, `struct` or `enum`.
+    Bound(TypeExpr, TypeExpr),
+    /// `let v: Pattern = x`: `x`'s type has the pattern's shape (`_` matches
+    /// any type); `v` is `x` seen as that type.
+    Let(String, Span, TypeExpr, Expr),
+    /// `T is P`: the type parameter `T` has the pattern's shape; in the arm
+    /// it is that type (`_` and names that aren't types match any type).
+    Is(TypeExpr, TypeExpr),
 }
 
 #[derive(Clone, Debug)]
@@ -317,6 +336,10 @@ pub struct ClosureParam {
 
 #[derive(Clone, Debug)]
 pub enum ExprKind {
+    /// `x.[f]`: the field `f` of a `static for` (spec 9.1).
+    StaticField(Box<Expr>, String, Span),
+    /// `static T { f => value }`: a `T` built field by field.
+    StaticBuild { ty: TypeExpr, name: String, name_span: Span, value: Box<Expr> },
     Int(u128),
     Float(f64),
     Str(String),

@@ -1158,12 +1158,12 @@ impl<'a, 's> Lin<'a, 's> {
             return;
         }
         match &e.kind {
-            TK::Local(_) | TK::Global(_) | TK::Const(_) | TK::ConstParam(_) | TK::FuncRef(..) | TK::Unit | TK::Int(_) | TK::Float(_) | TK::Bool(_) | TK::Str(_) | TK::NoneLit | TK::DefaultOf | TK::Error => {
+            TK::Local(_) | TK::Global(_) | TK::Const(_) | TK::ConstParam(_) | TK::FuncRef(..) | TK::Unit | TK::Int(_) | TK::Float(_) | TK::Bool(_) | TK::Str(_) | TK::NoneLit | TK::DefaultOf | TK::Error | TK::StaticFieldName(_) => {
                 if !e.is_place() {
                     self.rvalue(e, ctx);
                 }
             }
-            TK::Field { base, .. } | TK::OptField { base, .. } => {
+            TK::Field { base, .. } | TK::OptField { base, .. } | TK::StaticField { base, .. } => {
                 if base.is_place() {
                     self.place_subexprs(st, base);
                 } else {

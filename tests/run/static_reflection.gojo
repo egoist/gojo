@@ -1,0 +1,143 @@
+// Static reflection (spec 9.1): generic code over a type's fields, checked
+// once and unrolled per instance.
+
+// A tiny `key=value` encoder written with static reflection.
+fn put[T](x: T, out: inout String) {
+    static if T: Integer {
+        out.push("${x}")
+    } else static if T: Float {
+        out.push("${x}")
+    } else static if let b: bool = x {
+        out.push(if b { "yes" } else { "no" })
+    } else static if let s: String = x {
+        out.push("\"${s}\"")
+    } else static if let s: str = x {
+        out.push("\"${s}\"")
+    } else static if let xs: Vec[_] = x {
+        out.push("[")
+        for i, e in xs {
+            if i > 0 {
+                out.push(", ")
+            }
+            put(e, &out)
+        }
+        out.push("]")
+    } else static if let o: ?_ = x {
+        if let v = o {
+            put(v, &out)
+        } else {
+            out.push("-")
+        }
+    } else static if T: struct {
+        out.push("{")
+        var first = true
+        static for f in fields(T) {
+            if !first {
+                out.push(" ")
+            }
+            first = false
+            out.push(f.name)
+            out.push("=")
+            put(x.[f], &out)
+        }
+        out.push("}")
+    } else {
+        out.push("${x}")
+    }
+}
+
+fn encode[T](x: T) -> String {
+    var out: String = ""
+    put(x, &out)
+    return out
+}
+
+struct Point {
+    x: int
+    y: f64
+}
+
+enum Color { Red, Green }
+
+struct Config {
+    name: String
+    port: u16
+    tags: Vec[String]
+    origin: Point
+    proxy: ?String
+    debug: bool
+    color: Color
+}
+
+fn mainEncode() {
+    let c = Config{name: "app", port: 8080, tags: ["a", "b"], origin: Point{x: 1, y: 2.5}, proxy: none, debug: true, color: .Green}
+    println(encode(c))
+    println(encode(42), encode([1, 2]), encode(Point{x: -3, y: 0.5}))
+}
+
+// A decoder from `key=value` lines, written with static reflection.
+fn value[F](text: ?str, name: str) -> F ! String {
+    static if F is ?E {
+        if let t = text {
+            return some(try value[E](t, name))
+        }
+        return none
+    }
+    let s = text else {
+        return err("missing `${name}`")
+    }
+    static if F is String {
+        return s.toString()
+    } else static if F is bool {
+        return s == "true"
+    } else static if F: Integer {
+        let n = s.parseInt() else {
+            return err("`${name}`: `${s}` isn't a number")
+        }
+        return F(n)
+    } else static if F is Vec[E] {
+        var out: Vec[E] = []
+        for part in s.splitViews(",") {
+            out.push(try value[E](part, name))
+        }
+        return out
+    } else {
+        return err("`${name}`: can't read this type")
+    }
+}
+
+fn decode[T](text: str) -> T ! String {
+    var m: Map[str, str] = [:]
+    for line in text.lineViews() {
+        if let i = line.find("=") {
+            m[line[0..i]] = line[i + 1..]
+        }
+    }
+    return static T{f => try value(m.get(f.name), f.name)}
+}
+
+struct Settings {
+    name: String
+    port: u16
+    debug: bool
+    tags: Vec[String]
+    proxy: ?String
+}
+
+fn mainDecode() {
+    let c = decode[Settings]("name=app\nport=8080\ndebug=true\ntags=a,b,c") catch e {
+        println("error:", e)
+        return
+    }
+    println(c.name, c.port, c.debug, c.tags, c.proxy)
+    let bad = decode[Settings]("name=x\nport=eighty") catch e {
+        println("error:", e)
+        return
+    }
+    println(bad.port)
+}
+
+fn main() {
+    mainEncode()
+    mainDecode()
+}

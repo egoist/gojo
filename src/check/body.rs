@@ -1,7 +1,7 @@
 // Type checking of function bodies into the typed IR.
 
 use super::{bind_params, builtin_type, is_generic_builtin, Checker, TyEnv};
-use crate::ast::{self, Expr, ExprKind, Mode, Stmt, StmtKind, YieldKind};
+use crate::ast::{TypeExpr, TypeExprKind, self, Expr, ExprKind, Mode, Stmt, StmtKind, YieldKind};
 use crate::diag::{Diag, Span};
 use crate::tir::*;
 use crate::types::*;
@@ -56,6 +56,11 @@ pub struct FnCx {
     pub shadow_ok: Option<String>,
     /// The value expected from the `with` body being checked (`let n = with ...`).
     pub with_value: Option<Expect>,
+    /// The fields named by enclosing `static for`s and `static T { f => }`:
+    /// (name, the field's type parameter, the type whose field it is).
+    pub static_fields: Vec<(String, TParamId, Ty)>,
+    /// In a `static if T is P` arm: `T` is `P` there (spec 9.1).
+    pub type_eqs: Vec<(TParamId, Ty)>,
     /// Lazy chains with `flatMap` being checked (lazy.rs): the labels of
     /// their innermost and outermost loops, and the user's label. A `break`
     /// in the body leaves the outermost; `continue label`, the innermost.
@@ -147,6 +152,8 @@ impl FnCx {
             defer_depth: 0,
             shadow_ok: None,
             with_value: None,
+            static_fields: vec![],
+            type_eqs: vec![],
         }
     }
     pub fn depth(&self) -> u32 {
@@ -606,7 +613,7 @@ impl Checker {
     }
 
     pub fn resolve(&self, cx: &FnCx, t: &Ty) -> Ty {
-        if !t.has_vars() {
+        if !t.has_vars() && cx.type_eqs.is_empty() {
             return t.clone();
         }
         t.map(&mut |x| match x {
@@ -614,16 +621,24 @@ impl Checker {
                 Some(b) => self.resolve(cx, b),
                 None => x.clone(),
             }),
+            Ty::Param(p) => cx.type_eqs.iter().rev().find(|(q, _)| q == p).map(|(_, e)| self.resolve(cx, e)),
             _ => None,
         })
     }
 
     fn shallow(&self, cx: &FnCx, t: &Ty) -> Ty {
         let mut t = t.clone();
-        while let Ty::Var(v) = t {
-            match &cx.vars[v as usize] {
-                Some(b) => t = b.clone(),
-                None => break,
+        for _ in 0..64 {
+            match t {
+                Ty::Var(v) => match &cx.vars[v as usize] {
+                    Some(b) => t = b.clone(),
+                    None => break,
+                },
+                Ty::Param(p) => match cx.type_eqs.iter().rev().find(|(q, _)| *q == p) {
+                    Some((_, e)) => t = e.clone(),
+                    None => break,
+                },
+                _ => break,
             }
         }
         t
@@ -1523,6 +1538,11 @@ impl Checker {
                 self.pop_scope(cx);
                 TStmt::Defer(TBlock { stmts: t.into_iter().collect(), value: None, span: inner.span })
             }
+            StmtKind::StaticFor { name, name_span, ty, body } => return self.static_for(cx, name, *name_span, ty, body, sp),
+            StmtKind::StaticIf { arms, else_ } => {
+                let e = self.static_if(cx, arms, else_.as_ref(), sp);
+                TStmt::Expr(e)
+            }
             StmtKind::For(f, label) => {
                 if let Some((l, lsp)) = label {
                     if cx.loops.iter().any(|(n, _)| n.as_deref() == Some(l.as_str())) {
@@ -2093,6 +2113,21 @@ impl Checker {
         let sp = e.span;
         let expect = ex.ty().cloned();
         match &e.kind {
+            ExprKind::StaticField(base, name, nsp) => {
+                let Some((fp, owner)) = cx.static_fields.iter().rev().find(|f| f.0 == *name).map(|f| (f.1, f.2.clone())) else {
+                    self.err(*nsp, format!("`{}` doesn't name a field here: `x.[f]` reads the field `f` of a `static for f in fields(T)`", name));
+                    return TExpr::error(sp);
+                };
+                let b = self.expr(cx, base, None);
+                let bt = self.resolve(cx, &b.ty);
+                if !self.unify(cx, &bt, &owner) {
+                    let (x, y) = (self.prog.show(&bt), self.prog.show(&owner));
+                    self.err(sp, format!("`{}` names a field of `{}`, not of `{}`", name, y, x));
+                    return TExpr::error(sp);
+                }
+                return TExpr::new(TK::StaticField { base: Box::new(b), fparam: fp }, Ty::Param(fp), sp);
+            }
+            ExprKind::StaticBuild { ty, name, name_span, value } => return self.static_build(cx, ty, name, *name_span, value, sp),
             ExprKind::Int(n) => match self.literal_value(*n, false, sp) {
                 Some(v) => self.int_lit(cx, v, expect.as_ref(), sp),
                 None => TExpr::error(sp),
@@ -2789,6 +2824,18 @@ impl Checker {
 
     fn field(&mut self, cx: &mut FnCx, whole: &Expr, base: &Expr, name: &str, nsp: Span, expect: Option<&Ty>) -> TExpr {
         let sp = whole.span;
+        // `f.name` of a `static for` field
+        if let ExprKind::Ident(n) = &base.kind {
+            if let Some(&(_, fp, _)) = cx.static_fields.iter().rev().find(|f| f.0 == *n) {
+                if !cx.scopes.iter().any(|sc| sc.iter().any(|(m, _)| m == n)) {
+                    if name == "name" {
+                        return TExpr::new(TK::StaticFieldName(fp), Ty::Str, sp);
+                    }
+                    self.err(nsp, format!("a `static for` field has a `name` (`{}.name`); its value is `x.[{}]`", n, n));
+                    return TExpr::error(sp);
+                }
+            }
+        }
         // paths: package members, enum variants, constants
         if !matches!(self.resolve_path(cx, base), Some(PathRes::Value) | Some(PathRes::Global(_)) | None) {
             match self.resolve_path(cx, whole) {
@@ -4254,7 +4301,7 @@ impl Checker {
                 };
                 return TExpr::new(TK::MakeChan(Box::new(n)), t.clone(), sp);
             }
-            Ty::Int(_) | Ty::F32 | Ty::F64 => {
+            Ty::Int(_) | Ty::F32 | Ty::F64 | Ty::Param(_) if t.is_numeric() || self.param_numeric(&t) => {
                 if args.len() != 1 {
                     self.err(sp, "conversion takes one value");
                     return TExpr::error(sp);
@@ -4399,6 +4446,252 @@ impl Checker {
                 TArg { mode: ArgMode::Value, e }
             }
         }
+    }
+
+    /// `static for f in fields(T) { body }` (spec 9.1): an ordinary `for` in
+    /// the IR, so every check treats the body as running any number of
+    /// times; codegen unrolls it, once per field of the instance's `T`.
+    fn static_for(&mut self, cx: &mut FnCx, name: &str, name_span: Span, ty: &TypeExpr, body: &ast::Block, sp: Span) -> Option<TStmt> {
+        let env = cx.env.clone();
+        let t = self.resolve_type(ty, &env);
+        if !self.static_struct_ok(&t, ty.span, "static for") {
+            return None;
+        }
+        let fp = self.new_tparam(&format!("{}'s type", name), false);
+        // not a loop for `break` / `continue`, which leave enclosing loops
+        let id = cx.next_loop;
+        cx.next_loop += 1;
+        let elem = self.declare(cx, &format!("__sf{}", id), Ty::Unit, LocalKind::Let, name_span, false);
+        cx.used[elem as usize] = true;
+        cx.static_fields.push((name.to_string(), fp, t.clone()));
+        let b = self.block(cx, body, Expect::NoValue);
+        cx.static_fields.pop();
+        Some(TStmt::For { id, kind: IterKind::StaticFields, iter: TExpr::new(TK::Unit, t, sp), hi: Some(TExpr::new(TK::ConstParam(fp), Ty::Param(fp), sp)), elem, index: None, mutable: false, body: b, span: sp })
+    }
+
+    /// A type whose fields `static for` / `static T { }` can go over: a
+    /// struct, or a type parameter (checked per instance).
+    fn static_struct_ok(&mut self, t: &Ty, sp: Span, what: &str) -> bool {
+        match t {
+            Ty::Param(_) => true,
+            Ty::Adt(d, _) if self.prog.def(*d).is_struct() => true,
+            Ty::Error => false,
+            _ => {
+                let s = self.prog.show(t);
+                self.err(sp, format!("`{}` goes over the fields of a struct (or a type parameter that is one), not `{}`", what, s));
+                false
+            }
+        }
+    }
+
+    /// `static if T: bound { } else static if let v: P = x { } else { }`:
+    /// an `if` whose condition codegen decides per instance (spec 9.1). Each
+    /// arm is checked as if its condition held: with the bound on `T`, or with
+    /// `v` of the pattern's type; only the arm that holds is generated.
+    fn static_if(&mut self, cx: &mut FnCx, arms: &[(ast::StaticCond, ast::Block)], else_: Option<&ast::Block>, sp: Span) -> TExpr {
+        let Some(((cond, body), rest)) = arms.split_first() else {
+            return match else_ {
+                Some(b) => {
+                    let tb = self.block(cx, b, Expect::NoValue);
+                    let t = if always_leaves(&tb) { Ty::Never } else { Ty::Unit };
+                    TExpr::new(TK::Block(tb), t, sp)
+                }
+                None => TExpr::unit(sp),
+            };
+        };
+        let env = cx.env.clone();
+        let (cond_e, then) = match cond {
+            ast::StaticCond::Bound(te, be) => {
+                let t = self.resolve_type(te, &env);
+                let kind = match &be.kind {
+                    TypeExprKind::Named { path, args } if path.len() == 1 && args.is_empty() && (path[0] == "struct" || path[0] == "enum") => Some(path[0].clone()),
+                    _ => None,
+                };
+                let (name, targs, pushed) = match kind {
+                    Some(k) => (format!("static_if:kind:{}", k), vec![t.clone()], None),
+                    None => match self.resolve_bound(be, &env) {
+                        Some(Bound::Iface(d, args)) if matches!(&self.prog.def(d).kind, TypeDefKind::Iface { type_set: Some(_), methods, .. } if methods.is_empty()) => {
+                            let mut ta = vec![t.clone()];
+                            ta.extend(args.iter().cloned());
+                            // checked with the bound, where `T` is a parameter
+                            let pushed = if let Ty::Param(p) = &t {
+                                self.prog.tparams[*p as usize].bounds.push(Bound::Iface(d, args.clone()));
+                                Some(*p)
+                            } else {
+                                None
+                            };
+                            (format!("static_if:iface:{}", d), ta, pushed)
+                        }
+                        Some(_) => {
+                            self.err(be.span, "`static if T: ...` takes `struct`, `enum`, or an interface with a type set and no methods (`Integer`, `Float`, `Number`); for other types, match their shape: `static if let v: Vec[_] = x`");
+                            (String::new(), vec![], None)
+                        }
+                        None => (String::new(), vec![], None),
+                    },
+                };
+                let tb = self.block(cx, body, Expect::NoValue);
+                if let Some(p) = pushed {
+                    self.prog.tparams[p as usize].bounds.pop();
+                }
+                if name.is_empty() {
+                    return TExpr::error(sp);
+                }
+                (TExpr::new(TK::Intrinsic { name, targs, args: vec![] }, Ty::Bool, sp), tb)
+            }
+            ast::StaticCond::Is(te, pat) => {
+                let t = self.resolve_type(te, &env);
+                let Ty::Param(p) = t else {
+                    let s = self.prog.show(&t);
+                    self.err(te.span, format!("`static if ... is` asks about a type parameter, not `{}`", s));
+                    return TExpr::error(sp);
+                };
+                let (pt, binders) = self.static_pattern_binders(pat, &env);
+                // in the arm, `T` is the pattern's type, and its names are types
+                cx.type_eqs.push((p, pt.clone()));
+                let saved = cx.env.tparams.clone();
+                for (n, b) in binders {
+                    cx.env.tparams.insert(n, b);
+                }
+                let tb = self.block(cx, body, Expect::NoValue);
+                cx.env.tparams = saved;
+                cx.type_eqs.pop();
+                (TExpr::new(TK::Intrinsic { name: "static_if_let".into(), targs: vec![Ty::Param(p), pt], args: vec![] }, Ty::Bool, sp), tb)
+            }
+            ast::StaticCond::Let(vname, vsp, pat, x) => {
+                let pt = self.static_pattern_type(pat, &env);
+                let xe = self.expr(cx, x, None);
+                if !xe.is_place() {
+                    self.err(x.span, "`static if let` looks at a variable or a field: bind the value first (`let v = ...`)");
+                    return TExpr::error(sp);
+                }
+                let xt = self.resolve(cx, &xe.ty);
+                let cond_e = TExpr::new(TK::Intrinsic { name: "static_if_let".into(), targs: vec![xt.clone(), pt.clone()], args: vec![] }, Ty::Bool, sp);
+                // `v` is `x` seen as the pattern's type
+                self.push_scope(cx);
+                let v = self.declare(cx, vname, pt.clone(), LocalKind::Ref { mutable: false }, *vsp, false);
+                let place = TExpr { kind: xe.kind.clone(), ty: pt, span: xe.span };
+                let mut tb = self.block(cx, body, Expect::NoValue);
+                self.pop_scope(cx);
+                tb.stmts.insert(0, TStmt::LetRef { local: v, place });
+                (cond_e, tb)
+            }
+        };
+        let else_b = if rest.is_empty() && else_.is_none() {
+            None
+        } else {
+            let e = self.static_if(cx, rest, else_, sp);
+            Some(TBlock { stmts: vec![TStmt::Expr(e)], value: None, span: sp })
+        };
+        // (every arm leaving makes the whole leave, as for `if`)
+        let diverges = else_b.as_ref().is_some_and(|e| always_leaves(e)) && always_leaves(&then);
+        TExpr::new(TK::If { cond: Box::new(cond_e), then, else_: else_b }, if diverges { Ty::Never } else { Ty::Unit }, sp)
+    }
+
+    /// The type of a `static if let` pattern: `_` stands for any type (a type
+    /// parameter of its own, bound per instance).
+    /// A `static if T is P` pattern: like `static_pattern_type`, where a name
+    /// that isn't a type (`Vec[E]`) also stands for any type, and names it in
+    /// the arm.
+    fn static_pattern_binders(&mut self, te: &TypeExpr, env: &TyEnv) -> (Ty, Vec<(String, Ty)>) {
+        fn collect(c: &mut Checker, te: &TypeExpr, env: &TyEnv, out: &mut Vec<(String, Ty)>) {
+            if let TypeExprKind::Named { path, args } = &te.kind {
+                if path.len() == 1 && args.is_empty() && path[0] != "_" && !env.tparams.contains_key(&path[0]) && builtin_type(&path[0]).is_none() && path[0].chars().next().is_some_and(|ch| ch.is_uppercase()) && c.lookup_unqualified(env.file, env.pkg, &path[0]).is_none() && !out.iter().any(|(n, _)| *n == path[0]) {
+                    let id = c.new_tparam(&path[0], false);
+                    out.push((path[0].clone(), Ty::Param(id)));
+                }
+                for a in args {
+                    collect(c, a, env, out);
+                }
+            }
+            match &te.kind {
+                TypeExprKind::Option(a) | TypeExprKind::Slice(a) | TypeExprKind::Ptr(a) | TypeExprKind::Array(_, a) => collect(c, a, env, out),
+                TypeExprKind::Result(a, b) => {
+                    collect(c, a, env, out);
+                    collect(c, b, env, out);
+                }
+                TypeExprKind::Tuple(ts) => {
+                    for t in ts {
+                        collect(c, t, env, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut binders = vec![];
+        collect(self, te, env, &mut binders);
+        let mut env2 = env.clone();
+        for (n, t) in &binders {
+            env2.tparams.insert(n.clone(), t.clone());
+        }
+        (self.static_pattern_type(te, &env2), binders)
+    }
+
+    fn static_pattern_type(&mut self, te: &TypeExpr, env: &TyEnv) -> Ty {
+        fn rewrite(c: &mut Checker, te: &TypeExpr, env: &mut TyEnv) -> TypeExpr {
+            let mut te = te.clone();
+            if let TypeExprKind::Named { path, args } = &mut te.kind {
+                if path.len() == 1 && path[0] == "_" && args.is_empty() {
+                    let n = format!("__any{}", c.prog.tparams.len());
+                    let id = c.new_tparam("_", false);
+                    env.tparams.insert(n.clone(), Ty::Param(id));
+                    path[0] = n;
+                    return te;
+                }
+                for a in args.iter_mut() {
+                    *a = rewrite(c, a, env);
+                }
+            }
+            match &mut te.kind {
+                TypeExprKind::Option(a) | TypeExprKind::Slice(a) | TypeExprKind::Ptr(a) => **a = rewrite(c, a, env),
+                TypeExprKind::Result(a, b) => {
+                    **a = rewrite(c, a, env);
+                    **b = rewrite(c, b, env);
+                }
+                TypeExprKind::Tuple(ts) => {
+                    for t in ts.iter_mut() {
+                        *t = rewrite(c, t, env);
+                    }
+                }
+                TypeExprKind::Array(_, a) => **a = rewrite(c, a, env),
+                _ => {}
+            }
+            te
+        }
+        let mut env2 = env.clone();
+        let te2 = rewrite(self, te, &mut env2);
+        self.resolve_type(&te2, &env2)
+    }
+
+    /// `static T { f => value }`: a `T` with each field's value computed by
+    /// `value`, once per field (codegen unrolls it). `value` can't move what
+    /// is declared outside it: it runs once for each field.
+    fn static_build(&mut self, cx: &mut FnCx, ty: &TypeExpr, name: &str, name_span: Span, value: &Expr, sp: Span) -> TExpr {
+        let env = cx.env.clone();
+        let t = self.resolve_type(ty, &env);
+        if !self.static_struct_ok(&t, ty.span, "static T { }") {
+            return TExpr::error(sp);
+        }
+        let _ = name_span;
+        let fp = self.new_tparam(&format!("{}'s type", name), false);
+        cx.static_fields.push((name.to_string(), fp, t.clone()));
+        let first_local = cx.locals.len() as LocalId;
+        let v = self.expr(cx, value, Some(&Ty::Param(fp)));
+        let v = self.coerce(cx, v, &Ty::Param(fp), Use::Value);
+        cx.static_fields.pop();
+        let mut moved = None;
+        visit_expr(&v, &mut |x| {
+            if let TK::Move(p) = &x.kind {
+                if let Some(l) = crate::tir::root_local(p) {
+                    if l < first_local {
+                        moved.get_or_insert(x.span);
+                    }
+                }
+            }
+        });
+        if let Some(msp) = moved {
+            self.err(msp, "a `static T { }` value runs once for each field, so it can't move a value declared outside it");
+        }
+        TExpr::new(TK::Intrinsic { name: "static_build".into(), targs: vec![t.clone(), Ty::Param(fp)], args: vec![TArg { mode: ArgMode::Value, e: v }] }, t, sp)
     }
 
     /// A function that can't fail, passed where one returning `R ! E` is
@@ -5316,6 +5609,27 @@ pub fn lock_kind(prog: &Program, e: &TExpr) -> Option<bool> {
         }
     }
     None
+}
+
+/// Whether every path through the block leaves it (`return`, `break`...),
+/// looking into `if`, `match` and blocks whose every branch does.
+pub fn always_leaves(b: &TBlock) -> bool {
+    fn expr(e: &TExpr) -> bool {
+        e.ty == Ty::Never
+            || match &e.kind {
+                TK::Block(b) | TK::Unsafe(b) => always_leaves(b),
+                TK::If { then, else_: Some(el), .. } => always_leaves(then) && always_leaves(el),
+                TK::Match { arms, .. } => !arms.is_empty() && arms.iter().all(|a| expr(&a.body)),
+                _ => false,
+            }
+    }
+    if block_diverges(b) {
+        return true;
+    }
+    if let Some(v) = &b.value {
+        return expr(v);
+    }
+    matches!(b.stmts.last(), Some(TStmt::Expr(e)) if expr(e))
 }
 
 pub fn block_diverges(b: &TBlock) -> bool {

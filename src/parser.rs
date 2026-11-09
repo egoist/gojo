@@ -1251,6 +1251,82 @@ impl Parser {
                 }
                 StmtKind::Let { name, name_span, ty, init, mutable }
             }
+            // `static for f in fields(T) { }`
+            Tok::Ident(st) if st == "static" && matches!(self.peek_at(1), Tok::Kw(Kw::For)) => {
+                self.bump();
+                self.bump();
+                let (name, name_span) = self.ident()?;
+                self.expect_kw(Kw::In)?;
+                match self.peek().clone() {
+                    Tok::Ident(f) if f == "fields" => {
+                        self.bump();
+                    }
+                    _ => return self.err(format!("`static for` goes over the fields of a type: `static for f in fields(T) {{ }}`, found {}", self.describe())),
+                }
+                self.expect_p("(")?;
+                let ty = self.ty()?;
+                self.expect_p(")")?;
+                let body = self.block()?;
+                StmtKind::StaticFor { name, name_span, ty, body }
+            }
+            // `static if T: bound { } else static if let v: Vec[_] = x { } else { }`
+            Tok::Ident(st) if st == "static" && matches!(self.peek_at(1), Tok::Kw(Kw::If)) => {
+                let mut arms = vec![];
+                let mut else_ = None;
+                loop {
+                    self.bump(); // static
+                    self.bump(); // if
+                    let cond = if self.eat_kw(Kw::Let) {
+                        let (n, nsp) = self.ident()?;
+                        self.colon("", &n)?;
+                        let t = self.ty()?;
+                        self.expect_p("=")?;
+                        let save = self.allow_struct;
+                        self.allow_struct = false;
+                        let e = self.expr();
+                        self.allow_struct = save;
+                        StaticCond::Let(n, nsp, t, e?)
+                    } else {
+                        let t = self.ty()?;
+                        if matches!(self.peek(), Tok::Ident(w) if w == "is") {
+                            self.bump();
+                            let pat = self.ty()?;
+                            let body = self.block()?;
+                            arms.push((StaticCond::Is(t, pat), body));
+                            if !self.is_kw(Kw::Else) {
+                                break;
+                            }
+                            self.bump();
+                            if matches!(self.peek(), Tok::Ident(st) if st == "static") && matches!(self.peek_at(1), Tok::Kw(Kw::If)) {
+                                continue;
+                            }
+                            else_ = Some(self.block()?);
+                            break;
+                        }
+                        self.expect_p(":")?;
+                        let b = if self.is_kw(Kw::Struct) || self.is_kw(Kw::Enum) {
+                            let k = if self.is_kw(Kw::Struct) { "struct" } else { "enum" };
+                            let sp = self.bump().span;
+                            TypeExpr { kind: TypeExprKind::Named { path: vec![k.into()], args: vec![] }, span: sp }
+                        } else {
+                            self.bound()?
+                        };
+                        StaticCond::Bound(t, b)
+                    };
+                    let body = self.block()?;
+                    arms.push((cond, body));
+                    if !self.is_kw(Kw::Else) {
+                        break;
+                    }
+                    self.bump();
+                    if matches!(self.peek(), Tok::Ident(st) if st == "static") && matches!(self.peek_at(1), Tok::Kw(Kw::If)) {
+                        continue;
+                    }
+                    else_ = Some(self.block()?);
+                    break;
+                }
+                StmtKind::StaticIf { arms, else_ }
+            }
             Tok::Kw(Kw::Return) => {
                 self.bump();
                 if matches!(self.peek(), Tok::Newline | Tok::Eof) || self.is_p("}") || self.is_p(";") {
@@ -1638,7 +1714,14 @@ impl Parser {
                 self.bump();
             }
             let nl = self.toks[self.pos].nl_before;
-            if self.is_p(".") {
+            if self.is_p(".") && matches!(self.peek_at(1), Tok::P("[")) {
+                // `x.[f]`: a field named by a `static for`
+                self.bump();
+                self.bump();
+                let (name, nsp) = self.ident()?;
+                self.expect_p("]")?;
+                e = Expr { kind: ExprKind::StaticField(Box::new(e), name, nsp), span: self.sp_from(lo) };
+            } else if self.is_p(".") {
                 self.bump();
                 let (name, nsp) = self.member_name()?;
                 e = Expr { kind: ExprKind::Field(Box::new(e), name, nsp), span: self.sp_from(lo) };
@@ -1798,6 +1881,19 @@ impl Parser {
 
     fn primary(&mut self) -> PResult<Expr> {
         let lo = self.span();
+        // `static T { f => value }`
+        if matches!(self.peek(), Tok::Ident(st) if st == "static") && matches!(self.peek_at(1), Tok::Ident(_)) {
+            self.bump();
+            let ty = self.ty()?;
+            self.expect_p("{")?;
+            self.skip_nl();
+            let (name, name_span) = self.ident()?;
+            self.expect_p("=>")?;
+            let value = self.expr()?;
+            self.skip_nl();
+            self.expect_p("}")?;
+            return Ok(Expr { kind: ExprKind::StaticBuild { ty, name, name_span, value: Box::new(value) }, span: self.sp_from(lo) });
+        }
         let kind = match self.peek().clone() {
             Tok::Int(n) => {
                 self.bump();

@@ -18,7 +18,7 @@ Gojo (a code name; it may change) is a small, fast-compiling systems language wi
 
 - Gojo does not aim for all of Rust's expressive power. Code that stores references in structs (zero-copy parsers and the like) is left to `unsafe` or to dedicated view types.
 - Gojo is not compatible with Go source and cannot call Go code directly: Go's GC heap and Gojo's ownership model cannot be mixed safely.
-- No macros, compile-time evaluation, higher-kinded types or specialization.
+- No macros, compile-time evaluation, higher-kinded types or specialization. (Static reflection over a type's fields, checked once, covers what derive macros are mostly used for: spec 9.1.)
 
 **Kept because they work**: the package (a directory) as the unit of code, acyclic imports, structural implicit interfaces (no orphan rules, separate compilation stays possible), `go`, channels and `select` (inside structured scopes), composition instead of inheritance, struct embedding, one built-in format, a single static binary, built-in testing and toolchain. Several of these came from Go; none is kept *because* Go has it.
 
@@ -567,7 +567,7 @@ Gojo is not a dialect of Go, but many readers know Go, so this table maps the fa
 | Classes and inheritance | Composition and structural interfaces are enough |
 | Trait-style explicit implementations | They bring orphan rules and overlap problems and break separate compilation |
 | Higher-kinded types, specialization, variadic generics | Type checking would turn into a solving problem |
-| Macros and compile-time evaluation | Slower compilation, and tools struggle to understand the code; code generation is left to external tools |
+| Macros and compile-time evaluation | Slower compilation, and tools struggle to understand the code. What derive macros are mostly for (serializers, printers, decoders) is covered by static reflection instead: `static for f in fields(T)`, `static if T is P`, `static T{f => ...}`, checked once like other generic code and unrolled per instance, with no evaluator (spec 9.1) |
 | General operator overloading | Only `==`, comparison and hashing are open |
 | Exceptions and `recover` | Errors go through `T ! E`; panic signals only bugs |
 | async / await | Goroutines have no "function coloring" problem |

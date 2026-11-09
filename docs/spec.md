@@ -20,7 +20,7 @@ The fuzzing tool is `gojo-fuzz` (section 15).
 - Source files are UTF-8. Comments are `// line comments` and `/* block comments */`; block comments can span lines.
 - **Automatic semicolons**: a statement terminator is inserted when the last token on a line is an identifier, a literal, `true`, `false`, `none`, `)`, `]`, `}`, `return`, `break` or `continue`. So a line that ends with an operator continues on the next line. Newlines inside parentheses and brackets do not end a statement. `;` puts several statements on one line.
 - **Leading-dot lines**: a line that starts with `.name` continues the expression on the line before (a method chain written one step per line), unless it is a `match` arm, that is, it has a `=>` outside brackets (`.Circle(r) => ...`). Comments and blank lines may sit between the steps. A block whose last line is a bare `.Variant` after another expression statement therefore needs the variant's type: `Color.Red`.
-- Keywords: `use extend pub fn struct enum interface type copy let var if else for in match return break continue defer errdefer go try catch with yield unsafe extern none true false inout sink where test const select scope isolate`. `self`, `as` and `lib` are contextual keywords, and so are `view` and `linear` before `struct` or `enum` and `of` after a function's result type.
+- Keywords: `use extend pub fn struct enum interface type copy let var if else for in match return break continue defer errdefer go try catch with yield unsafe extern none true false inout sink where test const select scope isolate`. `self`, `as` and `lib` are contextual keywords, and so are `view` and `linear` before `struct` or `enum`, `of` after a function's result type, `static` before `for`, `if` or a type, and `is` in `static if T is P`.
 - Integer literals: decimal, `0x`, `0b`, `0o`, optionally separated with `_`. Floats: `1.5`, `2.5e3`, `1e-3`.
 - Strings `"..."` support `\n \t \\ \" \$ \xNN \u{...}`. Backquoted strings are raw and process no escapes (and no interpolation).
 - **Interpolation**: `"x = ${expr}"` embeds the value of `expr`, shown as `print` shows it; `${expr:spec}` formats it with a `fmt.format` spec (`${n:>8}`, `${f:.2}`, `${b:08b}`), checked at compile time. A string with an interpolation is a new `String`; one without stays a literal. The expression stays on the string's line, and `\${` is a literal `${`. A character literal `'é'` is a `rune` (an `i32` code point); when the expected type is `u8` it is converted to a byte.
@@ -410,6 +410,55 @@ Tests: `run/errors`, `run/errdefer`, `run/patterns`, `run/never_errors`, `errors
 - Implementations are monomorphized per type argument.
 
 Tests: `run/generics`, `run/constgen`, `run/constraints`, `errors/constgen`, `errors/constraints`, `errors/unordered_sort`.
+
+### 9.1 Static reflection
+
+Generic code can go over a type's fields and branch on a type's shape. It is checked once, like any generic code, and each instance keeps only what applies to its types: there is no compile-time evaluation and no code is written as text.
+
+```gojo
+fn put[T](x: T, out: inout String) {
+    static if T: Integer {
+        out.push("${x}")
+    } else static if let s: String = x {
+        out.push("\"${s}\"")
+    } else static if let xs: Vec[_] = x {
+        for e in xs {
+            put(e, &out)
+        }
+    } else static if T: struct {
+        static for f in fields(T) {
+            out.push(f.name)
+            put(x.[f], &out)
+        }
+    }
+}
+
+fn read[T](m: Map[str, str]) -> T ! String {
+    return static T{f => try parse(m.get(f.name), f.name)}
+}
+
+fn parse[F](text: ?str, name: str) -> F ! String {
+    let s = text else { return err("missing ${name}") }
+    static if F is String {
+        return s.toString()
+    } else static if F: Integer {
+        return F(s.parseInt() ?? 0)
+    } else {
+        return err("${name}: unsupported")
+    }
+}
+```
+
+- **`static for f in fields(T) { }`** runs its body once for each field of `T` (a struct, or a type parameter that each instance makes a struct), in order. `f.name` is the field's name (a `str`), and `x.[f]` is that field of `x` (a place: borrow it, read it, pass it on; it can't be moved out). In the body the field's type is a type parameter of its own, so the body is checked once for every field; generic functions called with `x.[f]` are instantiated per field. `break` and `continue` in it belong to the loops around it.
+- **`static T{f => value}`** builds a `T` field by field: `value` is computed once per field, with `f` naming it, and must have that field's type (usually through a generic call: `try parse(m.get(f.name), f.name)`). It can't move anything declared outside it, since it runs once per field. When a field's `try` fails, the fields already built are dropped.
+- **`static if`** chooses between arms by type; each instance keeps only the first arm whose condition holds, and checks every arm as if its condition held:
+  - `T: struct`, `T: enum`; `T: I` for an interface with a type set and no methods (`Integer`, `Float`, `Number`): in that arm `T` has the bound, so `x + 1` and `F(n)` (a conversion) work.
+  - `static if let v: P = x`: `x` (a variable or a field) has the shape of the type pattern `P`, where `_` matches any type (`Vec[_]`, `?_`, `Map[_, _]`, `String`, `bool`); `v` is `x` seen as that type.
+  - `static if T is P`: the type parameter `T` has the shape `P`, and in the arm `T` *is* `P`: a `String` can be returned as a `T`. A name in `P` that isn't a type (`Vec[E]`, `?E`) stands for any type and names it in the arm.
+  - `else static if ...` chains, and a final `else`. A chain where every arm leaves (returns) leaves.
+- A `static for` or `static T{}` whose type isn't a struct in some instance is an error where that instance is built; guard such code with `static if T: struct`.
+
+Tests: `run/static_reflection`, `errors/static_reflection`.
 
 ## 10. Concurrency
 

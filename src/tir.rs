@@ -57,6 +57,9 @@ pub enum IterKind {
     Str,
     Chan,
     Range { inclusive: bool },
+    /// `static for f in fields(T)`: `iter` is a unit value of type `T`, `hi`
+    /// the field's type parameter (`TK::ConstParam`); unrolled per field.
+    StaticFields,
 }
 
 #[derive(Clone, Debug)]
@@ -350,6 +353,10 @@ pub enum TK {
     Spawn { target: SpawnTarget, task: Box<TExpr>, handle: bool },
     /// `isolate { body }`: the body's value, as an `Iso[T]`.
     Isolate(TBlock),
+    /// `x.[f]`: the field of a `static for` (`fparam` is its type), a place.
+    StaticField { base: Box<TExpr>, fparam: TParamId },
+    /// `f.name`: the name of a `static for`'s field.
+    StaticFieldName(TParamId),
     Error,
 }
 
@@ -382,7 +389,7 @@ impl TExpr {
     pub fn is_place(&self) -> bool {
         match &self.kind {
             TK::Local(_) | TK::Global(_) | TK::Deref(_) | TK::Index { .. } | TK::MapIndex { .. } | TK::Proj { opt: false, .. } | TK::ProjUnwrap { .. } => true,
-            TK::Field { base, .. } => base.is_place(),
+            TK::Field { base, .. } | TK::StaticField { base, .. } => base.is_place(),
             _ => false,
         }
     }
@@ -499,7 +506,7 @@ pub fn walk_expr(e: &TExpr, f: &mut dyn FnMut(Node)) {
     f(Node::Expr(e));
     let mut g = |x: &TExpr| walk_expr(x, f);
     match &e.kind {
-        TK::Field { base, .. } | TK::Deref(base) | TK::OptField { base, .. } => g(base),
+        TK::Field { base, .. } | TK::Deref(base) | TK::OptField { base, .. } | TK::StaticField { base, .. } => g(base),
         TK::Index { base, index } | TK::StrIndex { base, index } => {
             g(base);
             g(index)
@@ -577,6 +584,15 @@ pub fn walk_expr(e: &TExpr, f: &mut dyn FnMut(Node)) {
             walk_block(handler, f)
         }
         _ => {}
+    }
+}
+
+/// The local a place starts from, through fields.
+pub fn root_local(e: &TExpr) -> Option<LocalId> {
+    match &e.kind {
+        TK::Local(l) => Some(*l),
+        TK::Field { base, .. } | TK::StaticField { base, .. } => root_local(base),
+        _ => None,
     }
 }
 

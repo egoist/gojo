@@ -15,7 +15,7 @@ Gojo is a beta. The language, the compiler and the standard library work, are te
 | Errors | `T ! E` and `try`; an unhandled error doesn't compile | `Result` and `?` | `(T, error)` and `if err != nil` | Error unions and `try` | `throws` and `try` | Exceptions, `std::expected` |
 | Concurrency | Structured tasks: `scope`, `go`, channels, `select`; no `async` | `async`/`await` or threads | Goroutines (unstructured), channels | Threads, `std.Io` | `async`/`await`, actors | Threads, coroutines |
 | Integer overflow (release) | Panics | Wraps | Wraps | Undefined (ReleaseFast) or panics (ReleaseSafe) | Traps | Undefined for signed integers |
-| Compile-time code | None | Macros, procedural macros | `go generate` | `comptime` | Macros | Templates, `constexpr`, macros |
+| Compile-time code | Static reflection over fields and type shapes; no macros | Macros, procedural macros | `go generate` | `comptime` | Macros | Templates, `constexpr`, macros |
 | Platforms | macOS, Linux | Nearly everything | Nearly everything | Nearly everything | Apple platforms, Linux, Windows | Everything |
 | Maturity | Beta (2026) | Stable since 2015 | Stable since 2012 | Before 1.0 | Stable since 2014 | Stable since 1985 |
 
@@ -193,7 +193,7 @@ Concurrency is where Go is still ahead: 100,000 suspended tasks passing a value 
 - **You need a mature ecosystem.** There is no package registry yet (dependencies are local paths), no language server, and the standard library is the main source of libraries.
 - **Your data is a web of shared, mutable, cyclic objects.** `Rc`, `Weak` and arenas handle it, but a garbage-collected language may be simpler.
 - **You need borrowed data kept in long-lived structures**, as in a cache of borrowed tokens kept in a struct. Views, and vectors and maps of them, live in variables: a parser that returns its tokens to the function that owns the input works, but one stored in a struct field owns its input and keeps `Span` ranges, where Rust stores the references directly.
-- **You need compile-time code generation.** Gojo has no macros and no `comptime`, on purpose.
+- **You need compile-time code generation.** Gojo has no macros and no `comptime`, on purpose. Static reflection (`static for f in fields(T)`) covers serializers and decoders, but not arbitrary generated code.
 - **You need the language to be finished.** Gojo is a beta, and it still changes: see the [known limits](tour.md#known-limits-of-the-beta).
 
 Otherwise, [take the tour](tour.md): it shows the whole language by example, and every program in it is compiled and run by the test suite.

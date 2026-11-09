@@ -127,6 +127,9 @@ pub fn generate(prog: &Program, tfuncs: &[TFunc], sm: &SourceMap, tests: Option<
     if let Some(msg) = g.runaway.take() {
         return Err(msg);
     }
+    if let Some(msg) = g.static_err.take() {
+        return Err(msg);
+    }
     if let Some(msg) = g.json_err.take() {
         return Err(msg);
     }
@@ -258,6 +261,9 @@ struct Fs<'a> {
     /// Last-use frees emitted (each must be: a value moved elsewhere would
     /// leak otherwise).
     fd_done: HashSet<(usize, usize)>,
+    /// The field each enclosing `static for` (or `static T { }`) is at, by
+    /// its type parameter.
+    static_cur: HashMap<TParamId, String>,
 }
 
 /// The body of `for x in t` over a type with `each`, compiled as a closure.
@@ -318,6 +324,8 @@ struct Gen<'a> {
     json_site: (Span, &'static str),
     json_ctx: Vec<String>,
     size_memo: HashMap<Ty, u128>,
+    /// A `static for` or `static T { }` over a type that isn't a struct.
+    static_err: Option<String>,
     /// Debug builds record where errors are made and passed up by `try`
     /// (error return traces), printed when one leaves `main`.
     etrace: bool,
@@ -355,6 +363,7 @@ impl<'a> Gen<'a> {
             json_ctx: vec![],
             size_memo: HashMap::new(),
             etrace: !release,
+            static_err: None,
         }
     }
 
@@ -1027,7 +1036,7 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
         let (sig, ps) = self.fn_signature(f, &subst, &name);
         let _ = writeln!(self.protos, "{};", sig);
         let ret = if fd.yields.is_some() { fd.ret.subst(&subst) } else { fd.ret.subst(&subst) };
-        let mut fs = Fs { tf, subst, out: String::new(), decls: String::new(), ind: 1, scopes: vec![], repr: HashMap::new(), flagged: HashSet::new(), flags: HashMap::new(), ret, yields: fd.yields.is_some(), err_mode: None, loop_labels: vec![], lb: None, line: (u32::MAX, 0), tscopes: HashMap::new(), bce: vec![], bce_steady: HashMap::new(), bce_floor: Default::default(), dinfo: None, site: None, used_flags: HashSet::new(), jd_done: HashSet::new(), fd_done: HashSet::new() };
+        let mut fs = Fs { tf, subst, out: String::new(), decls: String::new(), ind: 1, scopes: vec![], repr: HashMap::new(), flagged: HashSet::new(), flags: HashMap::new(), ret, yields: fd.yields.is_some(), err_mode: None, loop_labels: vec![], lb: None, line: (u32::MAX, 0), tscopes: HashMap::new(), bce: vec![], bce_steady: HashMap::new(), bce_floor: Default::default(), dinfo: None, site: None, used_flags: HashSet::new(), jd_done: HashSet::new(), fd_done: HashSet::new(), static_cur: HashMap::new() };
         collect_moves_block(&tf.body, &mut fs.flagged, tf);
         fs.scopes.push(Scope { kind: SK::Func, items: vec![], wait: None });
         let mut lids = vec![];
@@ -2068,6 +2077,44 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
     }
 
     fn for_loop(&mut self, fs: &mut Fs, id: u32, kind: IterKind, iter: &TExpr, hi: Option<&TExpr>, elem: LocalId, index: Option<LocalId>, body: &TBlock, span: Span) {
+        if kind == IterKind::StaticFields {
+            // `static for f in fields(T)`: the body once per field of this
+            // instance's `T`, with `f`'s type parameter bound to the field's type
+            let owner = self.sub(fs, &iter.ty);
+            let Some(TExpr { kind: TK::ConstParam(fp), .. }) = hi else { unreachable!() };
+            let fp = *fp;
+            let fields = match &owner {
+                Ty::Adt(d, args) if self.prog.def(*d).is_struct() => self.prog.field_tys(*d, args),
+                _ => {
+                    if self.static_err.is_none() {
+                        let l = self.sm.file(span.file).line_col(span.lo);
+                        self.static_err = Some(format!("{}:{}:{}: `static for` over `{}`, which isn't a struct: guard it with `static if T: struct`", self.sm.file(span.file).path, l.0, l.1, self.prog.show(&owner)));
+                    }
+                    vec![]
+                }
+            };
+            let saved = (fs.subst.get(&fp).cloned(), fs.static_cur.get(&fp).cloned());
+            for (fname, fty) in fields {
+                fs.subst.insert(fp, fty);
+                fs.static_cur.insert(fp, fname);
+                self.emit(fs, "{");
+                fs.ind += 1;
+                self.push_scope(fs, SK::Block);
+                self.block_stmts(fs, body);
+                self.pop_scope(fs);
+                fs.ind -= 1;
+                self.emit(fs, "}");
+            }
+            match saved.0 {
+                Some(t) => fs.subst.insert(fp, t),
+                None => fs.subst.remove(&fp),
+            };
+            match saved.1 {
+                Some(n) => fs.static_cur.insert(fp, n),
+                None => fs.static_cur.remove(&fp),
+            };
+            return;
+        }
         let n = fs.bce.len();
         if let Some(f) = self.bce_loop_fact(fs, kind, iter, hi, elem, index, body) {
             fs.bce.push(f);
@@ -2198,6 +2245,8 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
                 self.emit(fs, &format!("int32_t {} = gojo_utf8_decode({}, &{});", en, st, i));
                 fs.repr.insert(elem, Repr::Val(en));
             }
+            // (unrolled by `for_loop`)
+            IterKind::StaticFields => unreachable!(),
             IterKind::Chan => {
                 let c = self.expr(fs, iter);
                 let ch = self.tmp();
@@ -2371,6 +2420,11 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
                 let f = self.global_get(*g);
                 format!("(*{}())", f)
             }
+            TK::StaticField { base, fparam } => {
+                let fname = fs.static_cur.get(fparam).cloned().unwrap_or_else(|| "?".into());
+                let b = if base.is_place() { self.place(fs, base) } else { self.lval(fs, base) };
+                format!("{}.f_{}", b, fname)
+            }
             TK::Field { base, index } => {
                 let bt = self.sub(fs, &base.ty);
                 let fname = match &bt {
@@ -2505,7 +2559,11 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
             TK::Bool(b) => if *b { "true".into() } else { "false".into() },
             TK::Str(s) => format!("gojo_str_lit({}, {})", c_string(s), s.len()),
             TK::NoneLit => self.zero(&t),
-            TK::Local(_) | TK::Global(_) | TK::Field { .. } | TK::Deref(_) | TK::Index { .. } | TK::MapIndex { .. } | TK::ProjUnwrap { .. } => {
+            TK::StaticFieldName(fp) => {
+                let n = fs.static_cur.get(fp).cloned().unwrap_or_default();
+                format!("gojo_str_lit({}, {})", c_string(&n), n.len())
+            }
+            TK::Local(_) | TK::Global(_) | TK::Field { .. } | TK::StaticField { .. } | TK::Deref(_) | TK::Index { .. } | TK::MapIndex { .. } | TK::ProjUnwrap { .. } => {
                 if let TK::Field { base, index } = &e.kind {
                     if !base.is_place() {
                         return self.rvalue_field(fs, base, *index, &t);
@@ -2652,10 +2710,22 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
                 let c = self.cty(&t);
                 let ftys = self.prog.field_tys(*def, &targs);
                 let mut parts = vec![];
+                let mut held = vec![];
                 for (i, f) in fields.iter().enumerate() {
                     let v = if matches!(f.kind, TK::DefaultOf) { self.field_default(fs, *def, &targs, i) } else { self.expr(fs, f) };
                     let v = if f.ty == Ty::Never { self.zero(&ftys[i].1) } else { v };
+                    // a later field's `try` may leave before the struct is built
+                    let v = if fields[i + 1..].iter().any(may_leave) {
+                        let (v, flag) = self.hold(fs, &v, &ftys[i].1);
+                        held.extend(flag);
+                        v
+                    } else {
+                        v
+                    };
                     parts.push(format!(".f_{} = {}", ftys[i].0, v));
+                }
+                for f in held {
+                    self.emit(fs, &format!("{} = 0;", f));
                 }
                 if parts.is_empty() {
                     return format!("(({}){{0}})", c);
@@ -2672,9 +2742,20 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
                     return format!("(({}){{ .tag = {} }})", c, variant);
                 }
                 let mut parts = vec![];
+                let mut held = vec![];
                 for (i, a) in args.iter().enumerate() {
                     let v = self.expr(fs, a);
+                    let v = if args[i + 1..].iter().any(may_leave) {
+                        let (v, flag) = self.hold(fs, &v, &ftys[i].1);
+                        held.extend(flag);
+                        v
+                    } else {
+                        v
+                    };
                     parts.push(format!(".f_{} = {}", ftys[i].0, v));
+                }
+                for f in held {
+                    self.emit(fs, &format!("{} = 0;", f));
                 }
                 let n = self.tmp();
                 self.emit(fs, &format!("{} {} = {{ .tag = {}, .u.v{} = {{ {} }} }};", c, n, variant, variant, parts.join(", ")));
@@ -2714,8 +2795,20 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
                 };
                 let ec = self.cty(&el);
                 let mut vals = vec![];
-                for x in xs {
-                    vals.push(self.expr(fs, x));
+                let mut held = vec![];
+                for (i, x) in xs.iter().enumerate() {
+                    let v = self.expr(fs, x);
+                    let v = if xs[i + 1..].iter().any(may_leave) {
+                        let (v, flag) = self.hold(fs, &v, &el);
+                        held.extend(flag);
+                        v
+                    } else {
+                        v
+                    };
+                    vals.push(v);
+                }
+                for f in held {
+                    self.emit(fs, &format!("{} = 0;", f));
                 }
                 let n = self.tmp();
                 self.emit(fs, &format!("gojo_vec {} = {{0}};", n));
@@ -2755,6 +2848,33 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
                 n
             }
             TK::Closure(c) => self.closure(fs, c, &t),
+            TK::If { cond, then, else_ } if matches!(&cond.kind, TK::Intrinsic { name, .. } if name.starts_with("static_if")) => {
+                // decided for this instance: only the arm that holds is generated
+                let TK::Intrinsic { name, targs, .. } = &cond.kind else { unreachable!() };
+                let mut binds: Vec<(TParamId, Ty)> = vec![];
+                let holds = self.static_cond(fs, name, targs, &mut binds);
+                let b = if holds { Some(then) } else { else_.as_ref() };
+                if let Some(b) = b {
+                    let saved: Vec<(TParamId, Option<Ty>)> = binds.iter().map(|(p, _)| (*p, fs.subst.get(p).cloned())).collect();
+                    for (p, t) in binds {
+                        fs.subst.insert(p, t);
+                    }
+                    self.emit(fs, "{");
+                    fs.ind += 1;
+                    self.push_scope(fs, SK::Block);
+                    self.block_stmts(fs, b);
+                    self.pop_scope(fs);
+                    fs.ind -= 1;
+                    self.emit(fs, "}");
+                    for (p, old) in saved {
+                        match old {
+                            Some(t) => fs.subst.insert(p, t),
+                            None => fs.subst.remove(&p),
+                        };
+                    }
+                }
+                "0".into()
+            }
             TK::If { cond, then, else_ } => {
                 let cv = self.expr(fs, cond);
                 let has_val = !matches!(t, Ty::Unit | Ty::Never);
@@ -3471,6 +3591,7 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
     /// Evaluate arguments left to right into C expressions.
     fn args(&mut self, fs: &mut Fs, args: &[TArg], modes: &[Mode], tys: &[Ty]) -> Vec<String> {
         let mut out = vec![];
+        let mut held: Vec<String> = vec![];
         for (i, a) in args.iter().enumerate() {
             let later_effects = args[i + 1..].iter().any(|x| has_effects(&x.e));
             let pt = tys.get(i).cloned().unwrap_or_else(|| self.sub(fs, &a.e.ty));
@@ -3478,8 +3599,13 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
             let s = match a.mode {
                 ArgMode::Value => {
                     let v = self.expr(fs, &a.e);
-                    if later_effects && !is_simple_c(&v) {
-                        let t = self.sub(fs, &a.e.ty);
+                    let t = self.sub(fs, &a.e.ty);
+                    if args[i + 1..].iter().any(|x| may_leave(&x.e)) {
+                        // held until the call: a later argument's `try` may leave first
+                        let (v, flag) = self.hold(fs, &v, &t);
+                        held.extend(flag);
+                        v
+                    } else if later_effects && !is_simple_c(&v) {
                         self.materialize(fs, &v, &t, false)
                     } else {
                         v
@@ -3500,6 +3626,9 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
                 ArgMode::Inout => self.addr(fs, &a.e),
             };
             out.push(s);
+        }
+        for f in held {
+            self.emit(fs, &format!("{} = 0;", f));
         }
         out
     }
@@ -3727,7 +3856,7 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
         let ret = fty.ret.clone();
         let rc = self.ret_cty(&ret);
         let mut ps = vec!["void *envp".to_string()];
-        let mut nfs = Fs { tf: fs.tf, subst: fs.subst.clone(), out: String::new(), decls: String::new(), ind: 1, scopes: vec![], repr: HashMap::new(), flagged: fs.flagged.clone(), flags: HashMap::new(), ret: ret.clone(), yields: false, err_mode: None, loop_labels: vec![], lb: None, line: (u32::MAX, 0), tscopes: HashMap::new(), bce: vec![], bce_steady: HashMap::new(), bce_floor: Default::default(), dinfo: None, site: None, used_flags: HashSet::new(), jd_done: HashSet::new(), fd_done: HashSet::new() };
+        let mut nfs = Fs { tf: fs.tf, subst: fs.subst.clone(), out: String::new(), decls: String::new(), ind: 1, scopes: vec![], repr: HashMap::new(), flagged: fs.flagged.clone(), flags: HashMap::new(), ret: ret.clone(), yields: false, err_mode: None, loop_labels: vec![], lb: None, line: (u32::MAX, 0), tscopes: HashMap::new(), bce: vec![], bce_steady: HashMap::new(), bce_floor: Default::default(), dinfo: None, site: None, used_flags: HashSet::new(), jd_done: HashSet::new(), fd_done: HashSet::new(), static_cur: fs.static_cur.clone() };
         // (the floors are about the whole function, closures included)
         nfs.bce_floor = fs.bce_floor.clone();
         if let (Some(lid), Some(_)) = (c.loop_body, &lbp) {
@@ -4582,8 +4711,108 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
         self.args(fs, args, &modes, &tys)
     }
 
+    /// Keeps an owned value in a temporary that is dropped if the code leaves
+    /// before it is used (a later `try` returning an error): the temporary,
+    /// and the flag to clear once the value has been taken.
+    fn hold(&mut self, fs: &mut Fs, v: &str, t: &Ty) -> (String, Option<String>) {
+        if !self.needs_drop(t) {
+            return (v.to_string(), None);
+        }
+        let c = self.cty(t);
+        let n = self.tmp();
+        let flag = format!("{}_held", n);
+        self.emit(fs, &format!("{} {} = {}; bool {} = 1;", c, n, v, flag));
+        self.register(fs, Cl::DropFlag(n.clone(), t.clone(), flag.clone()));
+        (n, Some(flag))
+    }
+
+    /// Whether a `static if` condition holds for this instance; a type
+    /// pattern's `_`s are bound in `binds`.
+    fn static_cond(&mut self, fs: &mut Fs, name: &str, targs: &[Ty], binds: &mut Vec<(TParamId, Ty)>) -> bool {
+        let t = self.sub(fs, &targs[0]);
+        if let Some(k) = name.strip_prefix("static_if:kind:") {
+            return match &t {
+                Ty::Adt(d, _) => if k == "struct" { self.prog.def(*d).is_struct() } else { matches!(self.prog.def(*d).kind, TypeDefKind::Enum { .. }) },
+                _ => false,
+            };
+        }
+        if let Some(d) = name.strip_prefix("static_if:iface:") {
+            let d: DefId = d.parse().unwrap_or(0);
+            let TypeDefKind::Iface { type_set: Some(ts), .. } = &self.prog.def(d).kind else { return false };
+            return ts.iter().any(|(approx, et)| {
+                *et == t || (*approx && matches!(&t, Ty::Adt(td, _) if self.prog.def(*td).newtype && self.prog.def(*td).fields().first().map(|f| &f.ty) == Some(et)))
+            });
+        }
+        // `static if let v: P = x`
+        let p = self.sub(fs, &targs[1]);
+        fn bind(p: &Ty, t: &Ty, fs: &Fs, binds: &mut Vec<(TParamId, Ty)>) -> bool {
+            match (p, t) {
+                (Ty::Param(q), _) if !fs.subst.contains_key(q) => match binds.iter().find(|b| b.0 == *q) {
+                    Some((_, b)) => b == t,
+                    None => {
+                        binds.push((*q, t.clone()));
+                        true
+                    }
+                },
+                (Ty::Vec(a), Ty::Vec(b)) | (Ty::Slice(a), Ty::Slice(b)) | (Ty::Option(a), Ty::Option(b)) | (Ty::Box(a), Ty::Box(b)) | (Ty::Rc(a), Ty::Rc(b)) | (Ty::Arc(a), Ty::Arc(b)) | (Ty::Cell(a), Ty::Cell(b)) | (Ty::Ptr(a), Ty::Ptr(b)) => bind(a, b, fs, binds),
+                (Ty::Array(a, n), Ty::Array(b, m)) => n == m && bind(a, b, fs, binds),
+                (Ty::Map(a, b), Ty::Map(c, d)) | (Ty::Result(a, b), Ty::Result(c, d)) => bind(a, c, fs, binds) && bind(b, d, fs, binds),
+                (Ty::Adt(d1, a1), Ty::Adt(d2, a2)) => d1 == d2 && a1.len() == a2.len() && a1.iter().zip(a2.iter()).all(|(x, y)| bind(x, y, fs, binds)),
+                _ => p == t,
+            }
+        }
+        bind(&p, &t, fs, binds)
+    }
+
     fn magic(&mut self, fs: &mut Fs, name: &str, _targs: &[Ty], args: &[TArg], _t: &Ty, _sp: Span) -> String {
         match name {
+            // `static T { f => value }`: one value per field of this instance's `T`
+            "static_build" => {
+                let t = self.sub(fs, &_targs[0]);
+                let Ty::Param(fp) = &_targs[1] else { unreachable!() };
+                let fp = *fp;
+                let fields = match &t {
+                    Ty::Adt(d, a) if self.prog.def(*d).is_struct() => self.prog.field_tys(*d, a),
+                    _ => {
+                        if self.static_err.is_none() {
+                            let l = self.sm.file(_sp.file).line_col(_sp.lo);
+                            self.static_err = Some(format!("{}:{}:{}: `static {} {{ }}` builds a struct, and `{}` isn't one: guard it with `static if T: struct`", self.sm.file(_sp.file).path, l.0, l.1, self.prog.show(&t), self.prog.show(&t)));
+                        }
+                        return self.zero(&t);
+                    }
+                };
+                let saved = (fs.subst.get(&fp).cloned(), fs.static_cur.get(&fp).cloned());
+                let mut parts = vec![];
+                let mut flags = vec![];
+                for (fname, fty) in &fields {
+                    fs.subst.insert(fp, fty.clone());
+                    fs.static_cur.insert(fp, fname.clone());
+                    let v = self.expr(fs, &args[0].e);
+                    // held until the struct is built: a later field's `try`
+                    // may leave first
+                    let (v, flag) = self.hold(fs, &v, fty);
+                    flags.extend(flag);
+                    parts.push(format!(".f_{} = {}", fname, v));
+                }
+                match saved.0 {
+                    Some(x) => fs.subst.insert(fp, x),
+                    None => fs.subst.remove(&fp),
+                };
+                match saved.1 {
+                    Some(n) => fs.static_cur.insert(fp, n),
+                    None => fs.static_cur.remove(&fp),
+                };
+                for f in flags {
+                    self.emit(fs, &format!("{} = 0;", f));
+                }
+                let c = self.cty(&t);
+                if parts.is_empty() {
+                    return format!("(({}){{0}})", c);
+                }
+                let n = self.tmp();
+                self.emit(fs, &format!("{} {} = {{ {} }};", c, n, parts.join(", ")));
+                n
+            }
             // `T ! never`: always ok
             "never_ok" => {
                 let r = self.expr(fs, &args[0].e);
@@ -7032,7 +7261,7 @@ impl<'a> Gen<'a> {
         if !self.helper_header(&name, &sig) {
             return name;
         }
-        let mut nfs = Fs { tf, subst: HashMap::new(), out: String::new(), decls: String::new(), ind: 1, scopes: vec![], repr: HashMap::new(), flagged: HashSet::new(), flags: HashMap::new(), ret: ft.clone(), yields: false, err_mode: None, loop_labels: vec![], lb: None, line: (u32::MAX, 0), tscopes: HashMap::new(), bce: vec![], bce_steady: HashMap::new(), bce_floor: Default::default(), dinfo: None, site: None, used_flags: HashSet::new(), jd_done: HashSet::new(), fd_done: HashSet::new() };
+        let mut nfs = Fs { tf, subst: HashMap::new(), out: String::new(), decls: String::new(), ind: 1, scopes: vec![], repr: HashMap::new(), flagged: HashSet::new(), flags: HashMap::new(), ret: ft.clone(), yields: false, err_mode: None, loop_labels: vec![], lb: None, line: (u32::MAX, 0), tscopes: HashMap::new(), bce: vec![], bce_steady: HashMap::new(), bce_floor: Default::default(), dinfo: None, site: None, used_flags: HashSet::new(), jd_done: HashSet::new(), fd_done: HashSet::new(), static_cur: HashMap::new() };
         nfs.scopes.push(Scope { kind: SK::Func, items: vec![], wait: None });
         self.push_scope(&mut nfs, SK::Block);
         let v = self.field_default(&mut nfs, d, args.as_slice(), i);
@@ -7154,6 +7383,26 @@ fn resolve_flags(out: &str, used: &HashSet<String>) -> String {
         r.push_str(line);
     }
     r
+}
+
+/// Whether evaluating `e` may leave the enclosing code early: a `try`, or a
+/// `return`, `break` or `continue` in a block inside it. A value computed
+/// before it must not leak then.
+fn may_leave(e: &TExpr) -> bool {
+    let mut found = false;
+    walk_expr(e, &mut |n| match n {
+        Node::Expr(x) => {
+            if matches!(x.kind, TK::Try { .. }) {
+                found = true;
+            }
+        }
+        Node::Stmt(st) => {
+            if matches!(st, TStmt::Return(..) | TStmt::Break(..) | TStmt::Continue(..)) {
+                found = true;
+            }
+        }
+    });
+    found
 }
 
 fn has_effects(e: &TExpr) -> bool {
