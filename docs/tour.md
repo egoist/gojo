@@ -2,8 +2,8 @@
 
 Gojo is a compiled systems language with Go's simplicity, no garbage
 collector and no nil. Memory is managed by ownership, like Rust, but there are
-no lifetime annotations: references can't be stored, only used, so the
-compiler checks them without help. Concurrency is Go's `go`, channels and
+no lifetime annotations: references live in variables, not in long-lived
+data structures, so the compiler checks them without help. Concurrency is Go's `go`, channels and
 `select`, made structured: every task belongs to a `scope` that waits for it.
 
 This tour shows the language by example. Every program here is compiled and
@@ -434,9 +434,9 @@ writing, never both at once.
 ## Views
 
 `str` and `[]T` are *views*: borrowed slices of a `String` or a `Vec`.
-Views can't be stored in structs or collections, or outlive what they borrow,
-and while one exists the owner can't change. That is the whole lifetime
-system: no annotations, and no dangling references.
+Views live in variables and can't outlive what they borrow, and while one
+exists the owner can't change. That is the whole lifetime system: no
+annotations, and no dangling references.
 
 ```gojo
 fn firstWord(s: str) -> str {
@@ -462,6 +462,36 @@ fn main() {
 hello 5
 hello brave new world!
 [3, 8] 2
+```
+
+A vector of views is a view too: `"a b".splitViews(" ")` is a `Vec[str]`
+pointing into the text, with nothing copied. To keep views beyond the
+variables of one function, keep them with what they view: a field declared
+`of` another holds views into it, and that field can't change afterwards. The
+struct is then an ordinary value that can be returned and stored anywhere:
+
+```gojo
+struct Doc {
+    text: String
+    words: Vec[str] of text
+}
+
+fn load(text: sink String) -> Doc {
+    return Doc{text, words: text.splitViews(" ")}
+}
+
+fn main() {
+    let d = load("to be or not to be".toString())
+    println(d.words.len(), d.words[3])
+    var docs = Vec[Doc]{}
+    docs.push(d)
+    println(docs[0].words)
+}
+```
+
+```text
+6 not
+["to", "be", "or", "not", "to", "be"]
 ```
 
 Containers lend their elements through *projections*: `m.get(k)` and

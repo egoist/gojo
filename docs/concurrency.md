@@ -93,9 +93,11 @@ struct Conn {
     fn drop(inout self) { _ = self.writeText("bye\n") }   // runs shielded (1 s)
 }
 
-// A graph of `Rc` nodes, built from nothing shared, crosses tasks as a whole.
-let tree = isolate { buildTree(src) }         // Iso[Tree]
-go index(tree)                                  // index(t: sink Iso[Tree]) { let tr = t.take() ... }
+// A graph of `Rc` nodes, built from nothing shared, crosses tasks as a whole:
+// moved in when nothing else reaches it (inferred), or sealed with `isolate`.
+let tree = buildTree(src)
+go index(tree)                                  // index(t: sink Tree)
+let sealed = isolate { buildTree(src) }       // Iso[Tree], for what inference can't see
 ```
 
 Tests run on a simulated scheduler: `gojo test --explore 1000` tries a thousand interleavings and prints the seed of a failing one, which `--seed` replays exactly.
@@ -140,7 +142,7 @@ Measured on an Apple M5 (16 KB pages): 100,000 tasks parked on a channel use 1.7
 
 ## 8. Tools
 
-- **Simulated scheduler** for `gojo test` (and `gojo run --seed n`): one thread, a seeded choice of the next task and of yields at every channel operation, lock, spawn, join and atomic, a virtual clock (1 µs per step; jumps to the next timer when all wait). Because Gojo has no data races, tasks affect each other only through these operations, so the seed fixes the interleaving: no need to instrument memory accesses as Loom and Shuttle do. `--explore n` runs n seeds. Programs that use the network are not fully repeatable: network events happen in real time.
+- **Simulated scheduler** for `gojo test` (and `gojo run --seed n`): one thread, a seeded choice of the next task and of yields at every channel operation, lock, spawn, join and atomic, a virtual clock (1 µs per step; jumps to the next timer when all wait). Because Gojo has no data races, tasks affect each other only through these operations, so the seed fixes the interleaving: no need to instrument memory accesses as Loom and Shuttle do. `--explore n` runs n seeds. Under `gojo test` the network is simulated too (in memory, with seeded delays and short reads; `--faults` adds resets, refused dials, lost datagrams and disk errors), so tests that use it are repeatable; `gojo run --seed n` keeps the real network.
 - **Deadlock reports** list every task, where it was started, what it waits for (channel, mutex, scope or task, and where that was made), which task holds the mutex, and say when tasks wait for each other's locks. `task.dump()` and SIGQUIT print the same.
 - **Debug builds** warn when two mutexes (classed by where they were made) are taken in opposite orders anywhere (Linux's lockdep), and note a scope that has waited 10 s for its tasks.
 

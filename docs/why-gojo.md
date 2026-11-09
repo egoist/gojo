@@ -21,7 +21,7 @@ Gojo is a beta. The language, the compiler and the standard library work, are te
 
 ## Compared with Rust
 
-Gojo takes ownership from Rust: every value has one owner, assignment moves, and a value is freed when its owner goes out of scope. What it leaves out is the part that makes Rust hard to learn: **references are second-class**. A reference can be a parameter, or lent for a block by a projection, but it can't be stored in a struct, a collection or an escaping closure. So the compiler never needs to know how long a reference lives beyond the function it is in, and there is nothing to annotate.
+Gojo takes ownership from Rust: every value has one owner, assignment moves, and a value is freed when its owner goes out of scope. What it leaves out is the part that makes Rust hard to learn: **references are second-class**. A reference can be a parameter, a returned view of one, or lent for a block by a projection, and it can sit in variables (with structs and vectors of views that sit in variables too), but it can't be stored in an ordinary struct, a box or an escaping closure, except as a view of another field of the same struct. So the compiler never needs to know how long a reference lives beyond the function it is in, and there is nothing to annotate.
 
 A function that returns one of two strings needs a lifetime in Rust:
 
@@ -45,39 +45,55 @@ A struct that holds borrowed data is a **view struct**: it is a view itself, so 
 
 ```gojo
 view struct Lexer {
-    src: str // borrowed: the lexer is a view itself
-    pos: int
+    rest: str // borrowed: the lexer is a view itself
 
     // the next word: a view into the input, not into the lexer
     fn next(inout self) -> ?str {
-        let b = self.src.bytes()
-        while self.pos < b.len() && b[self.pos] == 32 {
-            self.pos += 1
-        }
-        let start = self.pos
-        while self.pos < b.len() && b[self.pos] != 32 {
-            self.pos += 1
-        }
-        if start == self.pos {
+        self.rest = self.rest.trimStart()
+        if self.rest.isEmpty() {
             return none
         }
-        return self.src[start..self.pos]
+        let n = self.rest.find(" ") ?? self.rest.len()
+        let word = self.rest[..n]
+        self.rest = self.rest[n..]
+        return word
     }
 }
 ```
 
-The words it returns point into the input, so the lexer can move on while earlier words are in use. Views can also be collected, as long as the collection sits in a variable too: a `Vec[str]` or `Vec[Token]` is a view itself, borrowing what its elements view, so a tokenizer can return its tokens (`fn tokenize(src: str) -> Vec[Token]`) or push them into a vector its caller passes `inout`. What a view can't do is go where the compiler stops tracking it: into a long-lived struct, a `Box` or an escaping closure. A structure that keeps borrowed tokens beyond the variables of one call tree owns its input instead, and stores ranges into it:
+The words it returns point into the input, so the lexer can move on while earlier words are in use. There is no position to keep: the lexer re-slices what it views. Often no struct is needed at all: a generator yields the words to a `for` loop, and `src.fieldViews()` gives them all at once, as views.
 
 ```gojo
-struct Tokens {
-    src: String        // owns the input
-    spans: Vec[Span]   // ranges into it, not references
-
-    fn get(self, i: int) -> str {
-        return self.spans[i].of(self.src)
+gen fn words(src: str) -> str {
+    var rest = src.trimStart()
+    while !rest.isEmpty() {
+        let n = rest.find(" ") ?? rest.len()
+        yield rest[..n]
+        rest = rest[n..].trimStart()
     }
 }
 ```
+
+Views can also be collected, as long as the collection sits in a variable too: a `Vec[str]` or `Vec[Token]` is a view itself, borrowing what its elements view, so a tokenizer can return its tokens (`fn tokenize(src: str) -> Vec[Token]`) or push them into a vector its caller passes `inout`. A view struct may hold such collections and owned data alongside its views.
+
+To keep views longer, keep them with what they view. A struct can hold views of one of its own fields, which then can't change; the struct is an ordinary value that can be returned, stored in other structs and maps, and sent to tasks:
+
+```gojo
+struct Doc {
+    text: String // owns the input
+    words: Vec[str] of text // views into it, which move with it
+
+    fn word(self, i: int) -> str {
+        return self.words[i]
+    }
+}
+
+fn load(text: sink String) -> Doc {
+    return Doc{text, words: text.splitViews(" ")}
+}
+```
+
+What a view still can't do is point into data owned by some *other* long-lived value: there are no lifetime names to say which. A structure like that stores ranges (`Span`) into its input instead.
 
 Graphs, trees and ASTs use an `Arena[T]` and `Id[T]` handles (an `Id` carries a generation, so a stale one gives `none` instead of a dangling pointer), or `Rc` and `Weak`.
 
@@ -89,7 +105,7 @@ Other differences:
 - **Release builds keep overflow checks.** `+` panics on overflow in every build; `+%` wraps when you mean it.
 - **Panics abort.** There is no unwinding: a panic is a bug, and it ends the process with the source location.
 
-**Choose Rust** when you need what second-class references rule out (borrowed data kept in long-lived structures, fine control over allocation), when you need Windows, embedded targets or WebAssembly today, or when you need its ecosystem.
+**Choose Rust** when you need what second-class references rule out (long-lived structures that borrow from each other, fine control over allocation), when you need Windows, embedded targets or WebAssembly today, or when you need its ecosystem.
 
 ## Compared with Go
 
@@ -192,7 +208,7 @@ Concurrency is where Go is still ahead: 100,000 suspended tasks passing a value 
 - **You need Windows, WebAssembly, or a bare-metal target.** Gojo runs on macOS and Linux (x86-64 and arm64); [WebAssembly](wasm.md) is a proposal.
 - **You need a mature ecosystem.** There is no package registry yet (dependencies are local paths), no language server, and the standard library is the main source of libraries.
 - **Your data is a web of shared, mutable, cyclic objects.** `Rc`, `Weak` and arenas handle it, but a garbage-collected language may be simpler.
-- **You need borrowed data kept in long-lived structures**, as in a cache of borrowed tokens kept in a struct. Views, and vectors and maps of them, live in variables: a parser that returns its tokens to the function that owns the input works, but one stored in a struct field owns its input and keeps `Span` ranges, where Rust stores the references directly.
+- **You need long-lived structures that borrow from each other**, as in a cache of tokens that point into documents owned elsewhere. Views, and vectors and maps of them, live in variables, and a struct can keep views of its own data (`words: Vec[str] of text`), but one that points into data another long-lived value owns keeps `Span` ranges, where Rust stores the references with lifetimes.
 - **You need compile-time code generation.** Gojo has no macros and no `comptime`, on purpose. Static reflection (`static for f in fields(T)`) covers serializers and decoders, but not arbitrary generated code.
 - **You need the language to be finished.** Gojo is a beta, and it still changes: see the [known limits](tour.md#known-limits-of-the-beta).
 

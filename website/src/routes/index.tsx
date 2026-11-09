@@ -24,7 +24,7 @@ const facts = [
 const features = [
   {
     title: "Ownership without lifetimes",
-    text: "Memory is freed by ownership, as in Rust, but references can't be stored, only used, so the compiler checks them without annotations.",
+    text: "Memory is freed by ownership, as in Rust, but references live in variables, not in long-lived data, so the compiler checks them without annotations.",
     href: "/docs/tour#ownership",
   },
   {
