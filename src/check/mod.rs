@@ -367,6 +367,7 @@ impl Checker {
                             is_unsafe: false,
                             owner_ty: None,
                             gen_of: None,
+                            checkfree: false,
                         });
                         if pkg == self.prog.main_pkg {
                             self.tests.push((name.clone(), id));
@@ -396,6 +397,7 @@ impl Checker {
                             is_unsafe: false,
                             owner_ty: None,
                             gen_of: None,
+                            checkfree: false,
                         });
                         let id = self.prog.globals.len() as u32;
                         self.prog.globals.push(GlobalDef { name: name.clone(), ty: t, pkg, is_pub: item.is_pub, span: item.span, init: fid });
@@ -803,6 +805,7 @@ impl Checker {
             is_unsafe: f.is_unsafe,
             owner_ty: owner_ty.clone(),
             gen_of,
+            checkfree: f.checkfree,
         });
         if owner_ty.is_some() {
             let keys: Vec<TyKey> = if ext_keys.is_empty() { recv_key.into_iter().collect() } else { ext_keys };

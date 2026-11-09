@@ -1,0 +1,17 @@
+// A failed `requires` panics where the clause is.
+fn window(v: []int, i: int, n: int) -> int
+    requires 0 <= i && n >= 0 && i <= v.len() - n
+{
+    var s = 0
+    for k in i..i + n {
+        s += v[k]
+    }
+    return s
+}
+
+fn main() {
+    let v = [1, 2, 3, 4, 5]
+    println(window(v, 1, 3))
+    println(window(v, 3, 3))
+}
+// panic: precondition of `window` failed

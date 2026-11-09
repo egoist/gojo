@@ -43,6 +43,8 @@ usage:
                                           blocks, `unsafe fn`, `unsafe send`, `extern`),
                                           package by package, and whether gojo.toml's
                                           [unsafe] table allows it; fails when it doesn't
+  gojo claims [file.gojo|dir] [--json]    what the compiler proved about each function:
+                                          the bounds checks it removed, and where they stay
   gojo spec                               the whole language on one page, for coding
                                           agents (docs/brief.md)
   gojo version                            print the version
@@ -98,6 +100,10 @@ fn main() -> ExitCode {
         Some("unsafe") => {
             let rest = args[2..].to_vec();
             return gojo::with_compiler_stack(move || unsafe_command(&rest));
+        }
+        Some("claims") => {
+            let rest = args[2..].to_vec();
+            return gojo::with_compiler_stack(move || claims_command(&rest));
         }
         Some("spec") => {
             // the one-page summary of the language (docs/brief.md)
@@ -424,6 +430,71 @@ fn shown_path(p: &str) -> String {
         Some(r) if r.split('/').filter(|c| *c == "..").count() <= 3 => r,
         _ => abs.display().to_string(),
     }
+}
+
+/// `gojo claims [file|dir] [--json]`: what the compiler proved about each
+/// function: the bounds checks it removed and the ones that stay, and
+/// whether the function is `checkfree` or has a `requires`.
+fn claims_command(args: &[String]) -> ExitCode {
+    let mut json = false;
+    let mut input: Option<String> = None;
+    for a in args {
+        match a.as_str() {
+            "--json" => json = true,
+            _ if a.starts_with('-') => {
+                eprintln!("error: unknown option `{}` (`gojo claims [file.gojo|dir] [--json]`)", a);
+                return ExitCode::from(2);
+            }
+            _ => input = Some(a.clone()),
+        }
+    }
+    let input = input.unwrap_or_else(|| ".".into());
+    let c = match gojo::frontend(&input, None) {
+        Ok(c) => c,
+        Err((sm, diags)) => {
+            report(&sm, &diags);
+            return ExitCode::from(1);
+        }
+    };
+    let claims = match codegen::claims(&c.prog, &c.tfuncs, &c.sm) {
+        Ok(cl) => cl,
+        Err(e) => {
+            eprintln!("error: {}", e);
+            return ExitCode::from(1);
+        }
+    };
+    let mut fids: Vec<&gojo::types::FuncId> = claims.keys().filter(|f| !c.prog.packages[c.prog.func(**f).pkg as usize].is_std).collect();
+    fids.sort_by_key(|f| (c.prog.func(**f).span.file, c.prog.func(**f).span.lo));
+    let at = |sp: gojo::diag::Span| {
+        let f = c.sm.file(sp.file);
+        let (l, col) = f.line_col(sp.lo);
+        (f.path.clone(), l, col)
+    };
+    let mut items = vec![];
+    for f in fids {
+        let fd = c.prog.func(*f);
+        let cl = &claims[f];
+        let (path, line, _) = at(fd.span);
+        let name = match fd.recv_key {
+            Some(_) => format!("{}.{}", fd.recv.as_ref().map(|r| c.prog.show(&r.ty)).unwrap_or_default(), fd.name),
+            None => fd.name.clone(),
+        };
+        if json {
+            let spans = |v: &Vec<gojo::diag::Span>| v.iter().map(|s| { let (p, l, col) = at(*s); format!("{{\"file\": {}, \"line\": {}, \"column\": {}}}", json_str(&p), l, col) }).collect::<Vec<_>>().join(", ");
+            items.push(format!("{{\"function\": {}, \"file\": {}, \"line\": {}, \"checkfree\": {}, \"removed\": [{}], \"kept\": [{}]}}", json_str(&name), json_str(&path), line, fd.checkfree, spans(&cl.removed), spans(&cl.kept)));
+        } else {
+            let tag = if fd.checkfree { " (checkfree)" } else { "" };
+            println!("{}{} at {}:{}: {} bounds check{} removed, {} kept", name, tag, path, line, cl.removed.len(), if cl.removed.len() == 1 { "" } else { "s" }, cl.kept.len());
+            for s in &cl.kept {
+                let (p, l, col) = at(*s);
+                println!("  kept    {}:{}:{}", p, l, col);
+            }
+        }
+    }
+    if json {
+        println!("{{\"functions\": [{}]}}", items.join(", "));
+    }
+    ExitCode::SUCCESS
 }
 
 fn json_str(s: &str) -> String {

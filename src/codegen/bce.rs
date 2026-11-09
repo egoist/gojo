@@ -336,7 +336,17 @@ impl<'a> Gen<'a> {
     fn bce_within(&self, fs: &Fs, base: &TExpr, u: &Upper, m: i128) -> bool {
         match (self.sub(fs, &base.ty), u) {
             (Ty::Array(_, n), Upper::Const(c)) => *c <= n as i128 - m,
-            (Ty::Vec(_) | Ty::Slice(_) | Ty::Str | Ty::String, Upper::Len(p, k)) => *k >= m && self.bce_path(base).as_ref() == Some(p),
+            (Ty::Vec(_) | Ty::Slice(_) | Ty::Str | Ty::String, Upper::Len(p, k)) => {
+                let bp = self.bce_path(base);
+                (*k >= m && bp.as_ref() == Some(p)) || {
+                    // a bound by another place's length, and a fact relating
+                    // the lengths (`a.len() == b.len()`, from a guard or a
+                    // `requires`): `x <= a.len - k <= b.len - k2 - k`
+                    let mut lp = p.clone();
+                    lp.steps.push(Step::Len);
+                    fs.bce.iter().any(|f| !f.dead && f.subj == lp && matches!(&f.hi, Some(Upper::Len(q, k2)) if Some(q) == bp.as_ref() && k.checked_add(*k2).is_some_and(|t| t >= m)))
+                }
+            }
             // `if parts.len() >= 7 { parts[5] }`
             (Ty::Vec(_) | Ty::Slice(_) | Ty::Str | Ty::String, Upper::Const(c)) => self.bce_len_floor(fs, base).is_some_and(|n| *c <= n - m),
             _ => false,

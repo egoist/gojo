@@ -90,7 +90,27 @@ fn stmt_span(s: &TStmt) -> Option<Span> {
     })
 }
 
+/// The bounds checks of one function: where the compiler removed them, and
+/// where they stay.
+#[derive(Default, Clone, Debug)]
+pub struct Claims {
+    pub removed: Vec<Span>,
+    pub kept: Vec<Span>,
+}
+
+/// What `gojo claims` reports: the program's code is generated (and thrown
+/// away) to see which bounds checks the compiler removes.
+pub fn claims(prog: &Program, tfuncs: &[TFunc], sm: &SourceMap) -> Result<HashMap<FuncId, Claims>, String> {
+    let mut out = HashMap::new();
+    generate_with(prog, tfuncs, sm, None, true, &mut |g| out = std::mem::take(&mut g.claims))?;
+    Ok(out)
+}
+
 pub fn generate(prog: &Program, tfuncs: &[TFunc], sm: &SourceMap, tests: Option<&Vec<(String, FuncId)>>, release: bool) -> Result<String, String> {
+    generate_with(prog, tfuncs, sm, tests, release, &mut |_| {})
+}
+
+fn generate_with(prog: &Program, tfuncs: &[TFunc], sm: &SourceMap, tests: Option<&Vec<(String, FuncId)>>, release: bool, done: &mut dyn FnMut(&mut Gen)) -> Result<String, String> {
     let mut g = Gen::new(prog, tfuncs, sm, release);
     let mut entry = String::new();
     match tests {
@@ -124,11 +144,17 @@ pub fn generate(prog: &Program, tfuncs: &[TFunc], sm: &SourceMap, tests: Option<
         }
     }
     g.drain();
+    done(&mut g);
     if let Some(msg) = g.runaway.take() {
         return Err(msg);
     }
     if let Some(msg) = g.static_err.take() {
         return Err(msg);
+    }
+    if !g.checkfree_errs.is_empty() {
+        let mut v: Vec<String> = g.checkfree_errs.iter().map(|e| e.1.clone()).collect();
+        v.sort();
+        return Err(v.join("\nerror: "));
     }
     if let Some(msg) = g.json_err.take() {
         return Err(msg);
@@ -326,6 +352,10 @@ struct Gen<'a> {
     size_memo: HashMap<Ty, u128>,
     /// A `static for` or `static T { }` over a type that isn't a struct.
     static_err: Option<String>,
+    /// Bounds checks, by function: `gojo claims`.
+    pub claims: HashMap<FuncId, Claims>,
+    /// Checks left in `checkfree` functions.
+    checkfree_errs: Vec<(Span, String)>,
     /// Debug builds record where errors are made and passed up by `try`
     /// (error return traces), printed when one leaves `main`.
     etrace: bool,
@@ -364,6 +394,8 @@ impl<'a> Gen<'a> {
             size_memo: HashMap::new(),
             etrace: !release,
             static_err: None,
+            claims: HashMap::new(),
+            checkfree_errs: vec![],
         }
     }
 
@@ -2469,7 +2501,9 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
                 let b = self.lval(fs, base);
                 let i = self.expr(fs, index);
                 let l = self.loc(e.span);
-                let check = if self.bce_index_ok(fs, base, index) { "GOJO_IDX_PROVEN" } else { "gojo_idx" };
+                let proven = self.bce_index_ok(fs, base, index);
+                self.note_check(fs, e.span, proven);
+                let check = if proven { "GOJO_IDX_PROVEN" } else { "gojo_idx" };
                 match &bt {
                     Ty::Vec(t) | Ty::Slice(t) => {
                         let c = self.cty(t);
@@ -2596,7 +2630,9 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
                 let st = self.tmp();
                 let l = self.loc(e.span);
                 self.emit(fs, &format!("gojo_str {} = {};", st, sv));
-                let check = if self.bce_index_ok(fs, base, index) { "GOJO_IDX_PROVEN" } else { "gojo_idx" };
+                let proven = self.bce_index_ok(fs, base, index);
+                self.note_check(fs, e.span, proven);
+                let check = if proven { "GOJO_IDX_PROVEN" } else { "gojo_idx" };
                 format!("{}.ptr[{}({}, {}.len, {})]", st, check, i, st, l)
             }
             TK::SliceOf { base, lo, hi } => {
@@ -2643,7 +2679,9 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
                         let a = self.tmp();
                         let z = self.tmp();
                         self.emit(fs, &format!("int64_t {} = {}, {} = {};", a, lo, z, hi));
-                        if self.bce_slice_ok(fs, base, lo_e, hi_e) {
+                        let proven = self.bce_slice_ok(fs, base, lo_e, hi_e);
+                        self.note_check(fs, e.span, proven);
+                        if proven {
                             self.emit(fs, &format!("GOJO_SLICE_PROVEN({}, {}, {}, {});", a, z, len, l));
                         } else {
                             self.emit(fs, &format!("if ({} < 0 || {} > {} || {} > {}) gojo_panic(\"slice bounds out of range\", {});", a, z, len, a, z, l));
@@ -4709,6 +4747,22 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
             ArgMode::Value => Mode::Sink,
         }).collect();
         self.args(fs, args, &modes, &tys)
+    }
+
+    /// A bounds check at `sp`, removed (`proven`) or kept: for `gojo claims`,
+    /// and an error in a `checkfree fn`.
+    fn note_check(&mut self, fs: &Fs, sp: Span, proven: bool) {
+        let f = fs.tf.func;
+        let e = self.claims.entry(f).or_default();
+        let list = if proven { &mut e.removed } else { &mut e.kept };
+        if !list.contains(&sp) {
+            list.push(sp);
+        }
+        if !proven && self.prog.func(f).checkfree && !self.checkfree_errs.iter().any(|(s, _)| *s == sp) {
+            let file = self.sm.file(sp.file);
+            let (l, c) = file.line_col(sp.lo);
+            self.checkfree_errs.push((sp, format!("{}:{}:{}: `{}` is `checkfree`, but this bounds check remains: the compiler can't prove the index is in range here (state it with a guard, an `assert` or the function's `requires`, or loop over the indexes of what is indexed)", file.path, l, c, self.prog.func(f).name)));
+        }
     }
 
     /// Keeps an owned value in a temporary that is dropped if the code leaves

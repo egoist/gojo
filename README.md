@@ -109,6 +109,7 @@ cargo build --release
 | `gojo doc [module-or-path] [--out dir]` | API docs in Markdown: the standard library index, one standard library module, or one package; `--out` writes the whole standard library to a directory (that is, [`docs/std`](docs/std/README.md)) |
 | `gojo emit-c <file-or-dir>` | Print the generated C code |
 | `gojo init [name]` | Write a `gojo.toml` (package manifest, see [`docs/packages.md`](docs/packages.md)) in the current directory |
+| `gojo claims <file-or-dir> [--json]` | What the compiler proved, function by function: the bounds checks it removed and the ones that stay (`checkfree fn` makes any that stay an error; `requires` adds facts) |
 | `gojo spec` | The whole language on one page ([`docs/brief.md`](docs/brief.md)), sized for a coding agent's context |
 | `gojo version` | Version, commit and target platform |
 

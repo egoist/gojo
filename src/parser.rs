@@ -491,6 +491,11 @@ impl Parser {
             self.bump();
             send_iface = true;
         }
+        // `checkfree fn dot(...)`: no bounds check may remain
+        let checkfree = matches!(self.peek(), Tok::Ident(g) if g == "checkfree") && matches!(self.peek_at(1), Tok::Kw(Kw::Func));
+        if checkfree {
+            self.bump();
+        }
         // `gen fn lines(s: str) -> str { ... yield ... }`
         let is_gen = matches!(self.peek(), Tok::Ident(g) if g == "gen") && matches!(self.peek_at(1), Tok::Kw(Kw::Func));
         if is_gen {
@@ -501,6 +506,7 @@ impl Parser {
                 let mut f = self.func_decl(None)?;
                 f.is_unsafe = unsafe_fn;
                 f.is_gen = is_gen;
+                f.checkfree = checkfree;
                 ItemKind::Func(f)
             }
             Tok::Kw(Kw::Struct) => {
@@ -694,18 +700,20 @@ impl Parser {
         let at = if self.is_kw(Kw::Pub) { 1 } else { 0 };
         let is_unsafe = matches!(self.peek_at(at), Tok::Kw(Kw::Unsafe)) && matches!(self.peek_at(at + 1), Tok::Kw(Kw::Func));
         let is_gen = matches!(self.peek_at(at), Tok::Ident(g) if g == "gen") && matches!(self.peek_at(at + 1), Tok::Kw(Kw::Func));
-        let is_func = matches!(self.peek_at(at), Tok::Kw(Kw::Func)) || is_unsafe || is_gen;
+        let checkfree = matches!(self.peek_at(at), Tok::Ident(g) if g == "checkfree") && matches!(self.peek_at(at + 1), Tok::Kw(Kw::Func));
+        let is_func = matches!(self.peek_at(at), Tok::Kw(Kw::Func)) || is_unsafe || is_gen || checkfree;
         if !is_func {
             return Ok(false);
         }
         let lo = self.span();
         let is_pub = self.eat_kw(Kw::Pub);
-        if is_unsafe || is_gen {
+        if is_unsafe || is_gen || checkfree {
             self.bump();
         }
         let mut f = self.func_decl(Some(owner))?;
         f.is_unsafe = is_unsafe;
         f.is_gen = is_gen;
+        f.checkfree = checkfree;
         methods.push(Item { kind: ItemKind::Func(f), is_pub, span: self.sp_from(lo) });
         self.skip_nl();
         Ok(true)
@@ -882,9 +890,36 @@ impl Parser {
                 }
             }
         }
+        // `requires 0 <= i && i < xs.len()`, on the signature's line or the
+        // next (the body's `{` may then follow on a line of its own)
+        let before = self.pos;
+        self.skip_nl();
+        let requires = if matches!(self.peek(), Tok::Ident(s) if s == "requires") {
+            self.bump();
+            let save = self.allow_struct;
+            self.allow_struct = false;
+            let e = self.expr();
+            self.allow_struct = save;
+            let e = e?;
+            if matches!(self.peek(), Tok::Newline) && {
+                let mut k = 0;
+                while matches!(self.peek_at(k), Tok::Newline) {
+                    k += 1;
+                }
+                matches!(self.peek_at(k), Tok::P("{"))
+            } {
+                self.skip_nl();
+            }
+            Some(e)
+        } else {
+            self.pos = before;
+            None
+        };
         let body = if self.is_p("{") { Some(self.block()?) } else { None };
         Ok(FuncDecl {
             is_gen: false,
+            requires,
+            checkfree: false,
             name,
             name_span,
             recv,

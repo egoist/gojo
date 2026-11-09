@@ -105,6 +105,11 @@ pub struct FuncDecl {
     pub ext_tparams: Vec<TParam>,
     /// `gen fn`: a generator; its result type is what it yields (spec 7.3).
     pub is_gen: bool,
+    /// `requires cond`: checked when the function is called; a fact for
+    /// bounds-check elimination in the body (spec 14).
+    pub requires: Option<Expr>,
+    /// `checkfree fn`: no bounds check may remain in the body (spec 14).
+    pub checkfree: bool,
     pub span: Span,
 }
 

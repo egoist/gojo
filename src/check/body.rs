@@ -478,7 +478,24 @@ impl Checker {
             cx.used[b as usize] = true;
             cx.gen_elem = Some((g, b));
         }
-        let _ = decl;
+        // `requires cond`: checked first thing, so the body (and the
+        // bounds-check pass) may rely on it
+        let req_block;
+        let body = match decl.and_then(|d| d.requires.as_ref()) {
+            Some(r) => {
+                let sp = r.span;
+                let not = Expr { kind: ExprKind::Unary("!", Box::new(r.clone())), span: sp };
+                let msg = Expr { kind: ExprKind::Str(format!("precondition of `{}` failed", fd.name)), span: sp };
+                let call = Expr { kind: ExprKind::Call(Box::new(Expr { kind: ExprKind::Ident("panic".into()), span: sp }), vec![msg]), span: sp };
+                let fail = Stmt { kind: StmtKind::Expr(call), span: sp };
+                let guard = Expr { kind: ExprKind::If { cond: Box::new(not), then: ast::Block { stmts: vec![fail], span: sp }, else_: None }, span: sp };
+                let mut b = body.clone();
+                b.stmts.insert(0, Stmt { kind: StmtKind::Expr(guard), span: sp });
+                req_block = b;
+                &req_block
+            }
+            None => body,
+        };
         let unit_result = matches!(&fd.ret, Ty::Result(t, _) if **t == Ty::Unit);
         let expect = if fd.yields.is_some() || fd.ret == Ty::Unit || fd.ret == Ty::Never || unit_result { Expect::NoValue } else { Expect::Ty(fd.ret.clone()) };
         // `main` and test bodies are scopes: `go` works there directly

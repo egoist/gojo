@@ -437,6 +437,8 @@ pub struct FuncDef {
     /// `gen fn`: what it yields. Its last parameter is then the hidden loop
     /// body (`fn(T) -> Flow`) a `for` passes it, and it returns nothing.
     pub gen_of: Option<Ty>,
+    /// `checkfree fn`: codegen reports any bounds check left in it.
+    pub checkfree: bool,
 }
 
 impl FuncDef {

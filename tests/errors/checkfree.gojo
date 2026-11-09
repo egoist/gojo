@@ -1,0 +1,12 @@
+checkfree fn window(v: []int, i: int, n: int) -> int {
+    var s = 0
+    for k in i..i + n {
+        s += v[k]
+    }
+    return s
+}
+
+fn main() {
+    println(window([1, 2, 3], 0, 2))
+}
+// error: `window` is `checkfree`, but this bounds check remains
