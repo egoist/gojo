@@ -1,0 +1,71 @@
+// A `match` binding on a variable holding a view points into the variable
+// itself: the variable can't be given another value while the binding is in
+// use (before this was checked, the binding could read another variant's
+// payload as its own).
+view enum Piece {
+    Word(str)
+    Pair(int, int)
+}
+
+fn reassigned() {
+    let s: String = "hello"
+    var r: str ! (int, int) = ok(s.asStr())
+    match r {
+        ok(w) => {
+            r = err((123456789, 1000))
+            // error: cannot change `r` while a `match` binding points into it
+            println(w)
+        }
+        err(_) => {}
+    }
+}
+
+fn viewEnum() {
+    let s: String = "hello"
+    var k = Piece.Word(s.asStr())
+    match k {
+        Word(w) => {
+            k = Piece.Pair(1, 2)
+            // error: cannot change `k` while a `match` binding points into it
+            println(w)
+        }
+        Pair(_, _) => {}
+    }
+}
+
+fn clear(o: inout ?str) {
+    o = none
+}
+
+fn throughInout() {
+    let s: String = "hello"
+    var o: ?str = s.asStr()
+    if let w = o {
+        clear(&o)
+        // error: cannot change `o` while a `match` binding points into it
+        println(w)
+    }
+}
+
+fn call(f: fn()) {
+    f()
+}
+
+fn throughClosure() {
+    let s: String = "hello"
+    var o: ?str = s.asStr()
+    if let w = o {
+        call(() => {
+            o = none
+            // error: cannot change `o` while a `match` binding points into it
+        })
+        println(w)
+    }
+}
+
+fn main() {
+    reassigned()
+    viewEnum()
+    throughInout()
+    throughClosure()
+}

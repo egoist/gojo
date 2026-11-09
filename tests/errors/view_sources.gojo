@@ -1,0 +1,75 @@
+// What a returned view points into stays borrowed while the view is used.
+fn left(a: str, b: str) -> str {
+    return a[0..a.len()]
+}
+
+fn right(a: str, b: str) -> str {
+    return left(b, a)
+}
+
+fn either(a: str, b: str, n: int) -> str {
+    if n <= 0 {
+        return a
+    }
+    return either(b, a, n - 1)
+}
+
+fn keyOf(line: str, sep: str) -> str of line, sep {
+    return line
+}
+
+fn wrong(a: str, b: str) -> str of a {
+    if a.len() > b.len() {
+        return b
+        // error: this view points into `b`, but the function's `of` doesn't name it
+    }
+    return a
+}
+
+fn grow(s: inout String) {
+    s.push("x")
+}
+
+fn leftKeepsFirst() {
+    var x: String = "x"
+    var y: String = "y"
+    let l = left(x.asStr(), y.asStr())
+    grow(&x)
+    // error: cannot modify `x` while it is borrowed by `l`
+    println(l)
+}
+
+fn rightKeepsSecond() {
+    var x: String = "x"
+    var y: String = "y"
+    let r = right(x.asStr(), y.asStr())
+    grow(&y)
+    // error: cannot modify `y` while it is borrowed by `r`
+    println(r)
+}
+
+fn recursionKeepsBoth() {
+    var x: String = "x"
+    var y: String = "y"
+    let e = either(x.asStr(), y.asStr(), 2)
+    grow(&y)
+    // error: cannot modify `y` while it is borrowed by `e`
+    println(e)
+}
+
+fn ofIsWhatCallersSee() {
+    var x: String = "x"
+    var y: String = "y"
+    let k = keyOf(x.asStr(), y.asStr())
+    grow(&y)
+    // error: cannot modify `y` while it is borrowed by `k`
+    println(k)
+}
+
+fn main() {
+    leftKeepsFirst()
+    rightKeepsSecond()
+    recursionKeepsBoth()
+    ofIsWhatCallersSee()
+    println(wrong("a", "b"))
+}

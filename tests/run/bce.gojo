@@ -145,7 +145,7 @@ fn arrays(a: [N]int, b: u8, x: int) -> int {
     t[b] = 1 // bce: proven
     s += t[x & 255] + t[int(b)] + a[x & Mask] // bce: proven proven proven
     if x >= 0 {
-        s += a[x % N] // bce: checked
+        s += a[x % N] // bce: proven
     }
     s += a[(x & 1023) % N] // bce: proven
     s += a[int(f64(x & 7))] + a[int(u8(x & 7))] // bce: checked proven
@@ -248,18 +248,18 @@ fn unknown(v: []int, w: []int, k: int) -> int {
     }
     for i in 0..v.len {
         if i < w.len {
-            s += w[i] // bce: checked
+            s += w[i] // bce: proven
         }
         if i + 1 < v.len {
             s += v[i + 1] // bce: checked
         }
         if i > 0 {
-            s += v[i - 1] // bce: checked
+            s += v[i - 1] // bce: proven
         }
     }
     for i in 0..=v.len {
         if i < v.len {
-            s += v[i] // bce: checked
+            s += v[i] // bce: proven
         }
     }
     let p = v.ptr()
@@ -269,6 +269,187 @@ fn unknown(v: []int, w: []int, k: int) -> int {
         }
     }
     return s
+}
+
+// What a condition says about a length: constant indexes after it.
+fn lengths(parts: []String, xs: []int) -> int {
+    var s = 0
+    if parts.len() < 7 {
+        return s
+    }
+    s += parts[1].len() + parts[5].len() // bce: proven proven
+    s += parts[7].len() // bce: checked
+    if xs.len() > 0 {
+        s += xs[0] // bce: proven
+    }
+    if xs.isEmpty() {
+        return s
+    }
+    s += xs[0] // bce: proven
+    s += xs[1] // bce: checked
+    return s
+}
+
+// What isn't a statement can change an index too: an `else if` condition
+// and a block's value.
+fn elseIf(v: []int, i0: int) -> int {
+    var i = i0
+    if i < 0 || i >= v.len {
+        return 0
+    } else if raise(&i) {
+        return v[i] // bce: checked
+    }
+    return 0
+}
+
+fn blockValue(v: []int, i0: int) -> int {
+    var i = i0
+    let r = if i >= 0 && i < v.len {
+        if raise(&i) { v[i] } else { 0 } // bce: checked
+    } else {
+        0
+    }
+    return r
+}
+
+fn fails(fail: bool) -> int ! String {
+    if fail {
+        return err("failed")
+    }
+    return 1
+}
+
+// deferred code emitted where `try` leaves says nothing about the way on
+fn deferred(v: []int, j: int, fail: bool) -> int ! String {
+    defer assert(j < v.len)
+    defer assert(j >= 0)
+    _ = try fails(fail)
+    return v[j] // bce: checked
+}
+
+// a fact a nested exit's deferred code ends doesn't let a block's own
+// facts outlive it
+fn nestedExit(v: []int, j: int, k0: int, c: bool, d: bool) -> int {
+    var k = k0
+    defer k = 0
+    if k < 0 || k > 9 {
+        return 0
+    }
+    if c {
+        if d {
+            return 1
+        }
+        assert(j >= 0)
+        assert(j < v.len)
+    }
+    return v[j] + k // bce: checked
+}
+
+// a length that changes after its guard
+fn shrunk(v: inout Vec[int]) -> int {
+    if v.len() >= 2 {
+        _ = v.pop()
+        return v[1] // bce: checked
+    }
+    return 0
+}
+
+// What a condition says about an index, where it holds.
+fn guards(v: []int, n: int) -> int {
+    var s = 0
+    // the body of a `while`
+    var i = 0
+    while i < v.len {
+        s += v[i] // bce: proven
+        i += 1
+    }
+    // the right side of `&&`, each time round
+    var k = 0
+    while k < v.len && v[k] != 0 { // bce: proven
+        k += 1
+    }
+    // changed before the use: no longer known
+    var j = 0
+    while j < v.len {
+        j += 1
+        s += v[j - 1] // bce: checked
+        if j < v.len {
+            s += v[j] // bce: proven
+        }
+    }
+    // the rest of the block after an early exit
+    if n < 0 || n >= v.len {
+        return s
+    }
+    s += v[n] // bce: proven
+    // a loop that changes it ends what the guard said, before its body
+    var m = n
+    if m < v.len {
+        for _ in 0..2 {
+            s += v[m] // bce: checked
+            m += 1
+        }
+    }
+    // a condition that changes what it compares tells nothing
+    var c = 0
+    if c < v.len && raise(&c) {
+        s += v[c] // bce: checked
+    }
+    // the other branch of an early exit may change it
+    var e = 0
+    if e >= v.len {
+        return s
+    } else {
+        e = v.len - 1
+    }
+    s += v[e] // bce: checked
+    // after `assert`
+    assert(k < v.len)
+    s += v[k] // bce: proven
+    // `>` and `<=`, and an `else`
+    if v.len > n {
+        s += v[n] // bce: proven
+    } else {
+        // (`assert(k < v.len)` above, with `k >= 0`, says `v` isn't empty)
+        s += v[0] // bce: proven
+    }
+    return s
+}
+
+// (it could change `c` as it likes; it happens to leave it in range)
+fn raise(c: inout int) -> bool {
+    c += 0
+    return true
+}
+
+// a length that changes after the guard
+fn grown(w: inout Vec[int], i: int) -> int {
+    if i >= 0 && i < w.len {
+        w.push(4)
+        return w[i] // bce: checked
+    }
+    return 0
+}
+
+struct Cursor {
+    buf: Vec[int]
+    pos: int
+
+    // a field of `self` compared
+    fn peek(self) -> int {
+        if self.pos >= 0 && self.pos < self.buf.len {
+            return self.buf[self.pos] // bce: proven
+        }
+        return -1
+    }
+
+    // (`self.pos` comes from the caller and may be negative, unless
+    // compared as in `peek`)
+    fn skip(inout self) {
+        while self.pos < self.buf.len && self.buf[self.pos] == 0 { // bce: checked
+            self.pos += 1
+        }
+    }
 }
 
 fn main() {
@@ -288,4 +469,16 @@ fn main() {
     println(changes(&w, &g), w.len, g.cells)
     println(unknown(v[..], w[..2], 1)) // bce: proven checked
     println(hoisted(v[..], &w, 13), hoistedThenGrown(&w), w) // bce: proven
+    println(guards([1, 2, 3, 0, 5][..], 2), guards([7, 0, 7][..], 1)) // bce: proven proven
+    let words = ["a", "bb", "c", "dd", "e", "ff", "g", "hh"]
+    let empty = Vec[int]{}
+    println(lengths(words[..], [4, 5][..]), lengths(words[..3], empty[..])) // bce: proven proven checked proven
+    var y: Vec[int] = [1, 2, 3]
+    println(shrunk(&y))
+    println(elseIf(v[..], 1), blockValue(v[..], 2), deferred(v[..], 1, false) catch { -1 }, nestedExit(v[..], 2, 1, false, false)) // bce: proven proven proven proven
+    var x: Vec[int] = [1, 2, 3]
+    println(grown(&x, 0))
+    var cur = Cursor{buf: [0, 0, 4], pos: 0}
+    cur.skip()
+    println(cur.peek(), cur.pos)
 }

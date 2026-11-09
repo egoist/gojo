@@ -140,7 +140,7 @@ log(.Warn, "disk almost full")   // the enum name can be omitted when the type i
 
 **Optional values `?T`** support these operations: `if let v = x { }` unwraps, `x ?? d` supplies a default, `x?.field` chains access (the result is still optional), and `x.unwrap()` panics on none. The memory layout of `?T` uses the niche of non-null types: `?Box[T]` is the size of one pointer.
 
-**Integer overflow**: in debug builds, overflow in `+ - *` panics. Release builds also check (turning the checks off per package, in `gojo.toml`, is planned). Write `+%` explicitly when you want wrapping; saturating arithmetic (`a.saturatingAdd(b)`) is planned. Array and slice indexing is always bounds-checked; the compiler removes a check only where it proves the index in range (`for i in 0..v.len { v[i] }`, see spec 14), and a constant index that can only fail is a compile error.
+**Integer overflow**: in debug builds, overflow in `+ - *` panics. Release builds also check (turning the checks off per package, in `gojo.toml`, is planned). Write `+%` explicitly when you want wrapping; saturating arithmetic (`a.saturatingAdd(b)`) is planned. Array and slice indexing is always bounds-checked; the compiler removes a check only where it proves the index in range (`for i in 0..v.len { v[i] }`, `while i < v.len { v[i]; i += 1 }`, `if i >= v.len { return }` then `v[i]`; see spec 14), and a constant index that can only fail is a compile error.
 
 ## 4. Ownership and borrowing
 
@@ -195,7 +195,8 @@ with e = counts.entry(word) {   // with binds a projection to a block
 ### 4.4 Release and defer
 
 - A type that defines a `fn drop(inout self)` method has it called automatically when it goes out of scope. Variables in the same scope are released in **reverse** declaration order; struct fields are released in declaration order.
-- A variable that has been moved out is not released. For a variable moved only on some branches, the compiler keeps a drop flag, and tests it only where it can't tell from the code whether the value is still there (a dataflow pass per function; most moves need no flag at all). A value whose release only frees memory is instead freed at the end of the branches that didn't move it, when nothing uses it afterwards: no program can tell the difference. This is Mojo's "as soon as possible" destruction taken only as far as it stays invisible; [drops.md](drops.md) proposes going further.
+- A variable that has been moved out is not released. For a variable moved only on some branches, the compiler keeps a drop flag, and tests it only where it can't tell from the code whether the value is still there (a dataflow pass per function; most moves need no flag at all).
+- A value whose release only frees memory (`String`, `Vec[int]`, structs of those: no `drop` method, nothing shared) is freed right after its last use, and, when some branches moved it, at the end of the others. No program can tell the difference, and memory doesn't sit unused until a scope ends. This is Mojo's "as soon as possible" destruction taken only as far as it stays invisible: values whose drop does something (closing a file or a channel, cancelling a task) keep scope-end drops. See [drops.md](drops.md).
 - `defer` runs at the end of the current block. Since resources are released automatically, code like `defer f.Close()` is mostly unnecessary; defer is mainly for restoring state and logging. Deferred code cannot change where the function goes: it cannot contain `return` or `try`, and it cannot jump out of an enclosing loop.
 - To release early, call `drop(x)`, which is just an ordinary function that takes a `sink` parameter.
 
@@ -561,7 +562,7 @@ Gojo is not a dialect of Go, but many readers know Go, so this table maps the fa
 
 | Feature | Why it is omitted |
 | --- | --- |
-| Stored references and lifetime annotations | The main reason Rust is hard to learn; projections and arenas cover the vast majority of cases |
+| Stored references and lifetime annotations | The main reason Rust is hard to learn; projections, view types (structs that hold views and live only in variables), arenas, and inferring which arguments a returned view points into cover the vast majority of cases |
 | Classes and inheritance | Composition and structural interfaces are enough |
 | Trait-style explicit implementations | They bring orphan rules and overlap problems and break separate compilation |
 | Higher-kinded types, specialization, variadic generics | Type checking would turn into a solving problem |
@@ -575,7 +576,7 @@ Gojo is not a dialect of Go, but many readers know Go, so this table maps the fa
 
 - [x] **Whether copy is derived automatically**: a compromise. Exported types must write `copy` explicitly; a package-private, non-generic type is derived as `copy` when all its fields are copy and it has no `drop` method.
 - [x] **Pull iterators**: no coroutines. The cursor protocol (`cursor` + `next`) provides zero-overhead pull iteration, and `zip` and merging just advance several cursors together; recursive structures use the push protocol `each` (see section 7).
-- [x] **Self-references and zero-copy views**: no `View[Owner, T]`. A parser stores owned `String` / `Vec` data and integer ranges `Span` in its struct, and borrows views through methods when needed (`span.of(self.src)`). Structs never store references, so the rules stay simple and no `unsafe` is needed.
+- [x] **Self-references and zero-copy views**: no `View[Owner, T]` (a value that owns data and views into it), but **view types**: `view struct Lexer { src: str, pos: int }` may hold views because it is one, living only in variables like `str`, under the same rules. That covers what Rust needs `struct Lexer<'a>` for (tokenizers, parsers over borrowed input, a context passed down a call tree) without lifetimes, since such a value can never outlive the variable that holds it. Its other fields must be copy, so it is copied like `str` and owns nothing; a value that has to keep its own data and views into it still stores the data and integer ranges (`Span`), and borrows views through methods (`span.of(self.src)`). Swift's non-escapable types (`~Escapable`, `Span`) take the same approach.
 - [x] **Cost of panic unwinding**: the default, and only, mode is abort; see section 5.
 - [x] **Default integer overflow behavior in release**: checked by default. Measurements (`bench/`) show that once the small functions containing the check branches are inlined, most benchmarks match the unchecked versions; code dense with recursive calls is about 1.6 times slower, and hot spots use `+%` for explicit wrapping. Turning checks off per package waits until there is a package manifest.
 - [x] **How cancellation shows up**: blocking operations return early in the "no result" form they already have (`none` for a receive, an error for the network, `none` for `timeout`), instead of uniformly returning `task.Cancelled`. Otherwise every receive and every `sleep` would have to become a result type, with `try` everywhere. Use `try task.check()` when an explicit checkpoint is needed.

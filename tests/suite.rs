@@ -651,6 +651,68 @@ fn c_call_locs<'a>(c: &'a str, pat: &str) -> Vec<&'a str> {
     out
 }
 
+/// Where drops go (codegen/drops.rs), in the C for tests/run/drop_states.gojo:
+/// flags only where a value may or may not have been moved, values that only
+/// free memory freed at the end of a branch that didn't move them or after
+/// their last use, and nothing freed early that a view, raw pointer, task or
+/// `defer` may still reach. (`run_programs` checks the output, and the
+/// sanitizer tests that nothing is freed too early.)
+#[test]
+fn drop_placement() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/run/drop_states.gojo");
+    let out = Command::new(gojo()).arg("emit-c").arg(&path).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let c = String::from_utf8_lossy(&out.stdout);
+    let body = |name: &str| -> String {
+        let head = format!(" k_main_{}(", name);
+        let start = c.match_indices(&head).map(|(i, _)| i).find(|&i| c[i..].split('\n').next().is_some_and(|l| l.ends_with('{'))).unwrap_or_else(|| panic!("no function {} in the C", name));
+        let end = c[start..].find("\n}\n").map_or(c.len(), |e| start + e);
+        c[start..end].lines().filter(|l| !l.starts_with("#line")).collect::<Vec<_>>().join("\n")
+    };
+    // (function, text, how many times it must appear)
+    let expect: &[(&str, &str, usize)] = &[
+        // a value with a `drop` method keeps its flag and its place
+        ("observable", "if (df", 1),
+        ("observable", "/* moved on another branch */", 0),
+        // moved on every path, or known to be there: no flag
+        ("plain", "bool df", 0),
+        ("leaves", "bool df", 0),
+        ("inLoop", "bool df", 0),
+        ("reassigned", "bool df", 0),
+        // freed at the end of the branch that didn't move it
+        ("early", "/* moved on another branch */", 2),
+        ("returned", "/* moved on another branch */", 1),
+        ("reassigned", "/* moved on another branch */", 1),
+        // a view may point into it: kept, with its flag
+        ("viewKept", "/* moved on another branch */", 0),
+        ("viewKept", "if (df", 1),
+        // freed after the last use
+        ("phases", "/* last use */", 1),
+        ("sunk", "&p_s); /* last use */", 1),
+        ("perIteration", "/* last use */", 2),
+        // only `other`: a raw pointer may read `s` later
+        ("pointedTo", "/* last use */", 1),
+        ("pointedTo", "_other); /* last use */", 1),
+        // a view, a task and a `defer` reach it later
+        ("viewedLater", "/* last use */", 0),
+        ("borrowedByTask", "/* last use */", 0),
+        ("deferred", "/* last use */", 0),
+        // a value with a `drop` method may reach it through a pointer
+        ("pinnedByDrop", "/* last use */", 0),
+    ];
+    let mut failures = vec![];
+    for (f, text, n) in expect {
+        let b = body(f);
+        let got = b.matches(text).count();
+        if got != *n {
+            failures.push(format!("{}: `{}` {} times, expected {}:\n{}", f, text, got, n, b));
+        }
+    }
+    if !failures.is_empty() {
+        panic!("drops in tests/run/drop_states.gojo:\n{}", failures.join("\n\n"));
+    }
+}
+
 /// Bounds-check elimination: tests/run/bce.gojo marks every index and slice
 /// `// bce: proven` (the compiler removes its check) or `// bce: checked`, in
 /// order along the line, and the generated C must agree. (`run_programs` and

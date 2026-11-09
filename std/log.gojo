@@ -276,7 +276,7 @@ fn stamp(out: inout String, ns: int) {
 fn pad(out: inout String, n: int, width: int) {
     var digits = 1
     var p = 10
-    while p <= n{
+    while p <= n {
         digits += 1
         p *= 10
     }

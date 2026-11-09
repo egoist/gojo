@@ -1,0 +1,13 @@
+Word x
+Punct =
+Number 42
+Punct +
+Word y
+first let and 5 more
+Lexeme{text: "alpha", line: 1} false true
+alpha beta beta
+at 0 ann
+at 1 bob
+al 7
+text a count 3 both ph 9
+picked alpha

@@ -17,6 +17,18 @@
 //   integer types (not through a float, which rounds) and
 //   constants. A literal index into an array is checked by the type checker.
 //
+// - A condition gives facts where it holds: `if i < v.len { v[i] }`, the
+//   rest of a block after `if i >= v.len { return }`, the body of
+//   `while i < n`, the right side of `i < n && v[i] == 0`, what follows
+//   `assert(i < n)`. Comparisons (`<`, `<=`, `>`, `>=`, `==`) between
+//   integers, joined by `&&` (where true) or `||` (where false), negated by
+//   `!`; on any place a bound can name (`self.pos`). Such a fact holds until
+//   a statement that may change the place it is about or the length it is
+//   measured against (the same test as below, applied to the whole
+//   statement, so a loop that changes either ends the fact before its body
+//   runs a second time), or that has `unsafe` code. Facts end with their
+//   block.
+//
 // A bound relative to `x.len` holds only while `x` keeps its length. A loop's
 // fact counts only if its body can't change that length (a `let`'s, only if
 // nothing in the function can), which needs it to
@@ -34,6 +46,7 @@
 use super::{Fs, Gen};
 use crate::tir::*;
 use crate::types::*;
+use std::collections::{HashMap, HashSet};
 
 /// A step from a local to a place inside it that has a fixed location.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -41,6 +54,9 @@ pub(super) enum Step {
     Field(usize),
     /// The contents of a `Box`.
     Unbox,
+    /// The length of the place (last step only): what a guard like
+    /// `parts.len() >= 7` is about.
+    Len,
 }
 
 /// A place with a fixed location while nothing assigns to it.
@@ -68,12 +84,21 @@ impl Upper {
     }
 }
 
-/// What is known about a loop variable inside the loop's body.
+/// What is known about an integer place (a loop variable, an immutable
+/// local, or anything a guard compared: `self.pos`) where the fact is in
+/// scope. Several facts about one place combine.
 #[derive(Clone, Debug)]
 pub(super) struct Fact {
-    pub var: LocalId,
+    pub subj: Path,
     pub lo: Option<i128>,
     pub hi: Option<Upper>,
+    /// From a condition (`if i < v.len`): holds only until something may
+    /// change the place, or the length it is measured against (`bce_kill`).
+    /// Loop and `let` facts are checked for that when they are made.
+    pub guard: bool,
+    /// Ended by a change (`bce_kill`). Kept in place rather than removed,
+    /// so a block that ends drops exactly the facts it added.
+    pub dead: bool,
 }
 
 /// Lengths the analysis looks at are below this, and so are the bounds it
@@ -133,8 +158,24 @@ impl<'a> Gen<'a> {
                 p.steps.push(Step::Unbox);
                 Some(p)
             }
-            _ => None,
+            // `x.len`: the length of `x`, as a place facts can be about
+            _ => {
+                let x = self.bce_len_of(e)?;
+                let mut p = self.bce_path(x)?;
+                if p.steps.last() == Some(&Step::Len) {
+                    return None;
+                }
+                p.steps.push(Step::Len);
+                Some(p)
+            }
         }
+    }
+
+    /// The lowest length of `base` the facts in scope say.
+    fn bce_len_floor(&self, fs: &Fs, base: &TExpr) -> Option<i128> {
+        let mut p = self.bce_path(base)?;
+        p.steps.push(Step::Len);
+        fs.bce.iter().filter(|f| !f.dead && f.subj == p).filter_map(|f| f.lo).max()
     }
 
     /// `x` when `e` is `x.len` or `x.len()` of a vector, slice, array or string.
@@ -160,8 +201,12 @@ impl<'a> Gen<'a> {
         }
     }
 
-    fn bce_fact<'f>(&self, fs: &'f Fs, l: LocalId) -> Option<&'f Fact> {
-        fs.bce.iter().rev().find(|f| f.var == l)
+    /// The facts in scope about the place `e` names.
+    fn bce_facts<'f>(&self, fs: &'f Fs, e: &TExpr) -> Vec<&'f Fact> {
+        match self.bce_path(e) {
+            Some(p) => fs.bce.iter().filter(|f| !f.dead && f.subj == p).collect(),
+            None => vec![],
+        }
     }
 
     /// Whether `to` converts `from` from one integer type to another.
@@ -191,7 +236,8 @@ impl<'a> Gen<'a> {
         let by_type = self.int_range(fs, &e.ty).map(|r| r.0);
         let e = strip(e);
         let derived = match &e.kind {
-            TK::Local(l) => self.bce_fact(fs, *l).and_then(|f| f.lo),
+            TK::Local(l) => self.bce_facts(fs, e).iter().filter_map(|f| f.lo).chain(fs.bce_floor.get(l).copied()).max(),
+            TK::Field { .. } => self.bce_facts(fs, e).iter().filter_map(|f| f.lo).max(),
             TK::Binary { op: BinOp::Add, l, r } => match (self.bce_const(fs, l), self.bce_const(fs, r)) {
                 (_, Some(c)) => self.bce_lower_d(fs, l, depth + 1).and_then(|x| x.checked_add(c)),
                 (Some(c), _) => self.bce_lower_d(fs, r, depth + 1).and_then(|x| x.checked_add(c)),
@@ -212,7 +258,7 @@ impl<'a> Gen<'a> {
             // a conversion between integer types panics unless the value
             // fits, so it keeps it (one through a float rounds)
             TK::Cast(x) if self.int_cast(fs, x, e) => self.bce_lower_d(fs, x, depth + 1),
-            _ if self.bce_len_of(e).is_some() => Some(0),
+            _ if self.bce_len_of(e).is_some() => self.bce_facts(fs, e).iter().filter_map(|f| f.lo).chain(Some(0)).max(),
             _ => None,
         };
         match (derived, by_type) {
@@ -221,54 +267,69 @@ impl<'a> Gen<'a> {
         }
     }
 
-    /// An upper bound on the value of `e`.
+    /// An upper bound on the value of `e`: one relative to a length when
+    /// there is one, else the lowest constant.
     pub(super) fn bce_upper(&self, fs: &Fs, e: &TExpr) -> Option<Upper> {
-        self.bce_upper_d(fs, e, 0)
+        let us = self.bce_uppers(fs, e);
+        us.iter().find(|u| matches!(u, Upper::Len(..))).cloned().or_else(|| {
+            us.iter()
+                .filter_map(|u| match u {
+                    Upper::Const(c) => Some(*c),
+                    _ => None,
+                })
+                .min()
+                .map(Upper::Const)
+        })
     }
 
-    fn bce_upper_d(&self, fs: &Fs, e: &TExpr, depth: u32) -> Option<Upper> {
+    /// Upper bounds on the value of `e`: every one that is known (from its
+    /// type, its shape, and every fact about it in scope).
+    pub(super) fn bce_uppers(&self, fs: &Fs, e: &TExpr) -> Vec<Upper> {
+        self.bce_uppers_d(fs, e, 0)
+    }
+
+    fn bce_uppers_d(&self, fs: &Fs, e: &TExpr, depth: u32) -> Vec<Upper> {
         if depth > 32 {
-            return None;
+            return vec![];
         }
         if let Some(c) = self.bce_const(fs, e) {
-            return Some(Upper::Const(c));
+            return vec![Upper::Const(c)];
         }
         let by_type = self.int_range(fs, &e.ty).map(|r| r.1).filter(|&m| m < LIMIT);
         let e = strip(e);
-        let derived = match &e.kind {
-            TK::Local(l) => self.bce_fact(fs, *l).and_then(|f| f.hi.clone()),
+        let shift = |us: Vec<Upper>, c: i128| -> Vec<Upper> { us.into_iter().filter_map(|u| u.plus(c)).collect() };
+        let mut out: Vec<Upper> = match &e.kind {
+            TK::Local(_) | TK::Field { .. } => self.bce_facts(fs, e).iter().filter_map(|f| f.hi.clone()).collect(),
             TK::Binary { op: BinOp::Add, l, r } => match (self.bce_const(fs, l), self.bce_const(fs, r)) {
-                (_, Some(c)) => self.bce_upper_d(fs, l, depth + 1).and_then(|u| u.plus(c)),
-                (Some(c), _) => self.bce_upper_d(fs, r, depth + 1).and_then(|u| u.plus(c)),
-                _ => None,
+                (_, Some(c)) => shift(self.bce_uppers_d(fs, l, depth + 1), c),
+                (Some(c), _) => shift(self.bce_uppers_d(fs, r, depth + 1), c),
+                _ => vec![],
             },
-            TK::Binary { op: BinOp::Sub, l, r } => match self.bce_const(fs, r) {
-                Some(c) => self.bce_upper_d(fs, l, depth + 1).and_then(|u| u.plus(c.checked_neg()?)),
-                None => None,
+            TK::Binary { op: BinOp::Sub, l, r } => match self.bce_const(fs, r).and_then(|c| c.checked_neg()) {
+                Some(c) => shift(self.bce_uppers_d(fs, l, depth + 1), c),
+                None => vec![],
             },
             TK::Binary { op: BinOp::BitAnd, l, r } => match (self.bce_const(fs, l), self.bce_const(fs, r)) {
-                (Some(c), _) | (_, Some(c)) if c >= 0 => Some(Upper::Const(c)),
-                _ => None,
+                (Some(c), _) | (_, Some(c)) if c >= 0 => vec![Upper::Const(c)],
+                _ => vec![],
             },
             TK::Binary { op: BinOp::Rem, l, r } => match self.bce_const(fs, r) {
-                Some(c) if c > 0 && self.bce_lower_d(fs, l, depth + 1).is_some_and(|x| x >= 0) => Some(Upper::Const(c - 1)),
-                _ => None,
+                Some(c) if c > 0 && self.bce_lower_d(fs, l, depth + 1).is_some_and(|x| x >= 0) => vec![Upper::Const(c - 1)],
+                _ => vec![],
             },
-            TK::Cast(x) if self.int_cast(fs, x, e) => self.bce_upper_d(fs, x, depth + 1),
+            TK::Cast(x) if self.int_cast(fs, x, e) => self.bce_uppers_d(fs, x, depth + 1),
             _ => match self.bce_len_of(e) {
                 Some(x) => match self.sub(fs, &x.ty) {
-                    Ty::Array(_, n) => Some(Upper::Const(n as i128)),
-                    _ => self.bce_path(x).map(|p| Upper::Len(p, 0)),
+                    Ty::Array(_, n) => vec![Upper::Const(n as i128)],
+                    _ => self.bce_path(x).map(|p| Upper::Len(p, 0)).into_iter().collect(),
                 },
-                None => None,
+                None => vec![],
             },
         };
-        match (derived, by_type) {
-            // a length-relative bound is the useful one for vectors
-            (Some(Upper::Const(a)), Some(b)) => Some(Upper::Const(a.min(b))),
-            (Some(u), _) => Some(u),
-            (None, b) => b.map(Upper::Const),
+        if let Some(b) = by_type {
+            out.push(Upper::Const(b));
         }
+        out
     }
 
     /// Whether `v <= len(base) - m` for every value `v` that has bound `u`.
@@ -276,6 +337,8 @@ impl<'a> Gen<'a> {
         match (self.sub(fs, &base.ty), u) {
             (Ty::Array(_, n), Upper::Const(c)) => *c <= n as i128 - m,
             (Ty::Vec(_) | Ty::Slice(_) | Ty::Str | Ty::String, Upper::Len(p, k)) => *k >= m && self.bce_path(base).as_ref() == Some(p),
+            // `if parts.len() >= 7 { parts[5] }`
+            (Ty::Vec(_) | Ty::Slice(_) | Ty::Str | Ty::String, Upper::Const(c)) => self.bce_len_floor(fs, base).is_some_and(|n| *c <= n - m),
             _ => false,
         }
     }
@@ -285,7 +348,12 @@ impl<'a> Gen<'a> {
         if !self.bce_lower(fs, idx).is_some_and(|l| l >= 0) {
             return false;
         }
-        self.bce_upper(fs, idx).is_some_and(|u| self.bce_within(fs, base, &u, 1))
+        self.bce_uppers(fs, idx).iter().any(|u| self.bce_within(fs, base, u, 1))
+    }
+
+    /// Whether `x <= len(base) - m` for every value of `x`.
+    fn bce_fits(&self, fs: &Fs, base: &TExpr, x: &TExpr, m: i128) -> bool {
+        self.bce_uppers(fs, x).iter().any(|u| self.bce_within(fs, base, u, m))
     }
 
     /// Whether `base[lo..hi]` (of a vector, slice or array) is always in range.
@@ -298,7 +366,7 @@ impl<'a> Gen<'a> {
         }
         // hi <= len
         if let Some(hi) = hi {
-            if !self.bce_upper(fs, hi).is_some_and(|u| self.bce_within(fs, base, &u, 0)) {
+            if !self.bce_fits(fs, base, hi, 0) {
                 return false;
             }
         }
@@ -306,10 +374,10 @@ impl<'a> Gen<'a> {
         match (lo, hi) {
             (None, None) => true,
             (None, Some(hi)) => self.bce_lower(fs, hi).is_some_and(|l| l >= 0),
-            (Some(lo), None) => self.bce_upper(fs, lo).is_some_and(|u| self.bce_within(fs, base, &u, 0)),
+            (Some(lo), None) => self.bce_fits(fs, base, lo, 0),
             (Some(lo), Some(hi)) => {
-                if let (Some(Upper::Const(a)), Some(b)) = (self.bce_upper(fs, lo), self.bce_lower(fs, hi)) {
-                    if a <= b {
+                if let Some(b) = self.bce_lower(fs, hi) {
+                    if self.bce_uppers(fs, lo).iter().any(|u| matches!(u, Upper::Const(a) if *a <= b)) {
                         return true;
                     }
                 }
@@ -357,7 +425,7 @@ impl<'a> Gen<'a> {
         if lo.is_none() && hi.is_none() {
             return None;
         }
-        Some(Fact { var, lo, hi })
+        Some(Fact { subj: Path { root: var, steps: vec![] }, lo, hi, guard: false, dead: false })
     }
 }
 
@@ -382,7 +450,7 @@ impl<'a> Gen<'a> {
         if lo.is_none() && hi.is_none() {
             return None;
         }
-        Some(Fact { var, lo, hi })
+        Some(Fact { subj: Path { root: var, steps: vec![] }, lo, hi, guard: false, dead: false })
     }
 }
 
@@ -443,6 +511,314 @@ fn touches(tf: &TFunc, p: &TExpr, x: &Path, elem_ok: bool) -> bool {
     true
 }
 
+impl<'a> Gen<'a> {
+    /// The facts `cond` gives where it is true (`positive`) or false. None
+    /// about a place the condition itself may change (`i < f(&i)`).
+    pub(super) fn bce_guard(&self, fs: &Fs, cond: &TExpr, positive: bool) -> Vec<Fact> {
+        let mut out = vec![];
+        self.bce_guard_into(fs, cond, positive, &mut out, 0);
+        let tf = fs.tf;
+        out.retain(|f| !changes_expr(tf, cond, &target(&f.subj)) && !matches!(&f.hi, Some(Upper::Len(p, _)) if changes_expr(tf, cond, p)));
+        out
+    }
+
+    fn bce_guard_into(&self, fs: &Fs, e: &TExpr, positive: bool, out: &mut Vec<Fact>, depth: u32) {
+        if depth > 16 {
+            return;
+        }
+        match &strip(e).kind {
+            // both hold where `l && r` does, and where `l || r` doesn't
+            TK::Binary { op: BinOp::And, l, r } if positive => {
+                self.bce_guard_into(fs, l, true, out, depth + 1);
+                self.bce_guard_into(fs, r, true, out, depth + 1);
+            }
+            TK::Binary { op: BinOp::Or, l, r } if !positive => {
+                self.bce_guard_into(fs, l, false, out, depth + 1);
+                self.bce_guard_into(fs, r, false, out, depth + 1);
+            }
+            TK::Unary { op: "!", e: x } => self.bce_guard_into(fs, x, !positive, out, depth + 1),
+            // `x.isEmpty()`: the length is 0, or at least 1
+            TK::Call { callee: Callee::Func(f, _), args } if args.len() == 1 && self.is_empty_fn(*f) => {
+                let len = TExpr::new(TK::Intrinsic { name: "len".into(), targs: vec![], args: vec![args[0].clone()] }, Ty::int(), e.span);
+                let Some(subj) = self.bce_path(&len) else { return };
+                if positive {
+                    out.push(Fact { subj, lo: None, hi: Some(Upper::Const(0)), guard: true, dead: false });
+                } else {
+                    out.push(Fact { subj, lo: Some(1), hi: None, guard: true, dead: false });
+                }
+            }
+            TK::Binary { op, l, r } if op.is_cmp() && self.int_range(fs, &l.ty).is_some() && self.int_range(fs, &r.ty).is_some() => {
+                let op = if positive {
+                    *op
+                } else {
+                    match op {
+                        BinOp::Lt => BinOp::Ge,
+                        BinOp::Le => BinOp::Gt,
+                        BinOp::Gt => BinOp::Le,
+                        BinOp::Ge => BinOp::Lt,
+                        BinOp::Eq => BinOp::Ne,
+                        _ => BinOp::Eq,
+                    }
+                };
+                // as `a < b` (strict) or `a <= b`
+                let (a, b, strict) = match op {
+                    BinOp::Lt => (l, r, true),
+                    BinOp::Le => (l, r, false),
+                    BinOp::Gt => (r, l, true),
+                    BinOp::Ge => (r, l, false),
+                    BinOp::Eq => {
+                        self.bce_bound_by(fs, l, r, true, true, false, out);
+                        self.bce_bound_by(fs, r, l, true, true, false, out);
+                        return;
+                    }
+                    _ => return,
+                };
+                // a <= b - 1 (or b), and b >= a + 1 (or a)
+                self.bce_bound_by(fs, a, b, false, true, strict, out);
+                self.bce_bound_by(fs, b, a, true, false, strict, out);
+            }
+            _ => {}
+        }
+    }
+
+    /// The prelude's `isEmpty` of a slice, vector or string.
+    fn is_empty_fn(&self, f: FuncId) -> bool {
+        let fd = self.prog.func(f);
+        fd.pkg == self.prog.prelude && fd.name == "isEmpty" && matches!(fd.recv_key, Some(TyKey::Slice) | Some(TyKey::Str))
+    }
+
+    /// Facts about the place `x` from `x <= y` (`below`) or `x >= y`
+    /// (`above`), `strict` for `<` / `>`; both for `==`.
+    #[allow(clippy::too_many_arguments)]
+    fn bce_bound_by(&self, fs: &Fs, x: &TExpr, y: &TExpr, above: bool, below: bool, strict: bool, out: &mut Vec<Fact>) {
+        let Some(subj) = self.bce_path(x) else { return };
+        let d = if strict { 1 } else { 0 };
+        if let Some(lo) = self.bce_lower(fs, y).and_then(|v| v.checked_add(d)).filter(|v| above && v.abs() < LIMIT) {
+            out.push(Fact { subj: subj.clone(), lo: Some(lo), hi: None, guard: true, dead: false });
+        }
+        if below {
+            for u in self.bce_uppers(fs, y) {
+                if let Some(u) = u.plus(-d) {
+                    out.push(Fact { subj: subj.clone(), lo: None, hi: Some(u), guard: true, dead: false });
+                }
+            }
+        }
+    }
+
+    /// Before statement `s` runs: the guard facts it may break.
+    pub(super) fn bce_kill(&self, fs: &mut Fs, s: &TStmt) {
+        if !fs.bce.iter().any(|f| f.guard && !f.dead) {
+            return;
+        }
+        let tf = fs.tf;
+        let all = has_unsafe_stmt(s);
+        for f in fs.bce.iter_mut().filter(|f| f.guard && !f.dead) {
+            if all || changes_stmt(tf, s, &target(&f.subj)) || matches!(&f.hi, Some(Upper::Len(p, _)) if changes_stmt(tf, s, p)) {
+                f.dead = true;
+            }
+        }
+    }
+
+    /// Before an expression that isn't a statement runs (a block's value,
+    /// which may be an `else if`): the guard facts it may break.
+    pub(super) fn bce_kill_expr(&self, fs: &mut Fs, e: &TExpr) {
+        if !fs.bce.iter().any(|f| f.guard && !f.dead) {
+            return;
+        }
+        let tf = fs.tf;
+        let mut all = false;
+        walk_expr(e, &mut |n| match n {
+            Node::Stmt(TStmt::Yield(..)) => all = true,
+            Node::Expr(x) if matches!(x.kind, TK::Unsafe(_)) => all = true,
+            _ => {}
+        });
+        for f in fs.bce.iter_mut().filter(|f| f.guard && !f.dead) {
+            if all || changes_expr(tf, e, &target(&f.subj)) || matches!(&f.hi, Some(Upper::Len(p, _)) if changes_expr(tf, e, p)) {
+                f.dead = true;
+            }
+        }
+    }
+
+    /// What holds after the statement `e` finished: when it is `if cond`
+    /// with a branch that always leaves (`return`, `break`, a panic), what
+    /// the other branch's side of the condition says, if that branch can't
+    /// change it; after `assert(cond)`, the condition.
+    pub(super) fn bce_after(&self, fs: &Fs, e: &TExpr) -> Vec<Fact> {
+        match &strip(e).kind {
+            TK::If { cond, then, else_ } => {
+                let else_leaves = else_.as_ref().is_some_and(block_leaves);
+                let (facts, other) = match (block_leaves(then), else_leaves) {
+                    (true, false) => (self.bce_guard(fs, cond, false), else_.as_ref()),
+                    (false, true) => (self.bce_guard(fs, cond, true), Some(then)),
+                    _ => return vec![],
+                };
+                match other {
+                    Some(b) => {
+                        let tf = fs.tf;
+                        if !no_facts(b) {
+                            facts.into_iter().filter(|f| !changes_len(tf, b, &target(&f.subj)) && !matches!(&f.hi, Some(Upper::Len(p, _)) if changes_len(tf, b, p))).collect()
+                        } else {
+                            vec![]
+                        }
+                    }
+                    None => facts,
+                }
+            }
+            TK::Call { callee: Callee::Func(f, _), args } if args.len() == 1 => {
+                let fd = self.prog.func(*f);
+                if fd.pkg == self.prog.prelude && fd.name == "assert" && fd.kind == FuncKind::Intrinsic {
+                    self.bce_guard(fs, &args[0].e, true)
+                } else {
+                    vec![]
+                }
+            }
+            _ => vec![],
+        }
+    }
+
+    /// The guard facts that still hold after `e` runs.
+    pub(super) fn bce_surviving(&self, fs: &Fs, facts: Vec<Fact>, e: &TExpr) -> Vec<Fact> {
+        let tf = fs.tf;
+        let mut bad = false;
+        walk_expr(e, &mut |n| {
+            if let Node::Expr(x) = n {
+                bad |= matches!(x.kind, TK::Unsafe(_));
+            }
+        });
+        if bad {
+            return vec![];
+        }
+        facts.into_iter().filter(|f| !changes_expr(tf, e, &target(&f.subj)) && !matches!(&f.hi, Some(Upper::Len(p, _)) if changes_expr(tf, e, p))).collect()
+    }
+}
+
+impl<'a> Gen<'a> {
+    /// For each `var` integer of the function, a value it never goes below,
+    /// when its initial value and every change keep it there: `var i = 0`
+    /// with `i += 1` or `i = j + 1` (`j >= 0`). Overflow is checked, so
+    /// adding a non-negative constant never wraps. Anything else that may
+    /// change it (`&i`, a closure, a mutable reference) leaves it without
+    /// one, as does `unsafe` code anywhere in the function.
+    pub(super) fn bce_floors(&self, fs: &mut Fs) -> HashMap<LocalId, i128> {
+        let tf = fs.tf;
+        if no_facts(&tf.body) {
+            return HashMap::new();
+        }
+        let is_var_int = |l: LocalId| matches!(tf.locals.get(l as usize).map(|v| v.kind), Some(LocalKind::Var)) && matches!(self.sub(fs, &tf.locals[l as usize].ty), Ty::Int(_));
+        // initial values, and how each is changed
+        let mut inits: Vec<(LocalId, TExpr)> = vec![];
+        let mut sets: Vec<(LocalId, Option<BinOp>, TExpr)> = vec![];
+        walk_block(&tf.body, &mut |n| match n {
+            Node::Stmt(TStmt::Let { local, init }) if is_var_int(*local) => inits.push((*local, init.clone())),
+            Node::Stmt(TStmt::Assign { place, op, value, .. }) => {
+                if let TK::Local(l) = strip(place).kind
+                    && is_var_int(l)
+                {
+                    sets.push((l, *op, value.clone()));
+                }
+            }
+            _ => {}
+        });
+        let mut bad: HashSet<LocalId> = HashSet::new();
+        let cands: HashSet<LocalId> = inits.iter().map(|x| x.0).collect();
+        walk_block(&tf.body, &mut |n| {
+            // (assignments of the whole variable are judged below)
+            if let Node::Stmt(TStmt::Assign { place, .. }) = n
+                && matches!(strip(place).kind, TK::Local(_))
+            {
+                return;
+            }
+            for &l in &cands {
+                if !bad.contains(&l) && changes_node(tf, n, &Path { root: l, steps: vec![] }) {
+                    bad.insert(l);
+                }
+            }
+        });
+        let mut floor: HashMap<LocalId, i128> = HashMap::new();
+        for (l, init) in &inits {
+            if bad.contains(l) {
+                continue;
+            }
+            let f = if matches!(init.kind, TK::DefaultOf) { Some(0) } else { self.bce_lower(fs, init) };
+            match f {
+                Some(v) => {
+                    let e = floor.entry(*l).or_insert(v);
+                    *e = (*e).min(v);
+                }
+                None => {
+                    bad.insert(*l);
+                }
+            }
+        }
+        // each change keeps the variable at its floor, given the others':
+        // lower floors until that holds (a few rounds; what still drops after
+        // them has none)
+        for round in 0..8 {
+            fs.bce_floor = std::rc::Rc::new(floor.clone());
+            let mut changed = false;
+            for (l, op, value) in &sets {
+                let Some(&cur) = floor.get(l) else { continue };
+                let after = match op {
+                    None => self.bce_lower(fs, value),
+                    Some(BinOp::Add) => self.bce_const(fs, value).filter(|c| *c >= 0).map(|_| cur),
+                    Some(BinOp::Sub) => self.bce_const(fs, value).filter(|c| *c <= 0).map(|_| cur),
+                    _ => None,
+                };
+                match after {
+                    Some(v) if v >= cur => {}
+                    Some(v) if round < 7 => {
+                        floor.insert(*l, v);
+                        changed = true;
+                    }
+                    _ => {
+                        floor.remove(l);
+                        changed = true;
+                    }
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        fs.bce_floor = Default::default();
+        floor.retain(|l, _| !bad.contains(l));
+        floor
+    }
+}
+
+/// The place whose change ends a fact about `subj`: for a length, the
+/// place it is the length of (whose elements may change).
+fn target(subj: &Path) -> Path {
+    let mut p = subj.clone();
+    if p.steps.last() == Some(&Step::Len) {
+        p.steps.pop();
+    }
+    p
+}
+
+/// Whether a block never finishes normally: it ends by leaving (`return`,
+/// `break`, `continue`), or with something that never returns (`panic`).
+pub(super) fn block_leaves(b: &TBlock) -> bool {
+    if let Some(v) = &b.value {
+        return v.ty == Ty::Never;
+    }
+    match b.stmts.last() {
+        Some(TStmt::Return(..) | TStmt::Break(..) | TStmt::Continue(..)) => true,
+        Some(TStmt::Expr(e)) => e.ty == Ty::Never,
+        _ => false,
+    }
+}
+
+fn has_unsafe_stmt(s: &TStmt) -> bool {
+    let mut bad = false;
+    walk_stmt(s, &mut |n| match n {
+        Node::Stmt(TStmt::Yield(..)) => bad = true,
+        Node::Expr(e) if matches!(e.kind, TK::Unsafe(_)) => bad = true,
+        _ => {}
+    });
+    bad
+}
+
 /// Whether facts can't be trusted anywhere in `body`.
 fn no_facts(body: &TBlock) -> bool {
     let mut bad = false;
@@ -456,37 +832,52 @@ fn no_facts(body: &TBlock) -> bool {
 
 /// Whether running `body` may change the length of `x` (see the top).
 pub(super) fn changes_len(tf: &TFunc, body: &TBlock, x: &Path) -> bool {
+    let mut hit = false;
+    walk_block(body, &mut |n| hit = hit || changes_node(tf, n, x));
+    hit
+}
+
+/// Whether running statement `s` may change `x` (other than its elements).
+fn changes_stmt(tf: &TFunc, s: &TStmt, x: &Path) -> bool {
+    let mut hit = false;
+    walk_stmt(s, &mut |n| hit = hit || changes_node(tf, n, x));
+    hit
+}
+
+/// Whether evaluating `e` may change `x` (other than its elements).
+fn changes_expr(tf: &TFunc, e: &TExpr, x: &Path) -> bool {
+    let mut hit = false;
+    walk_expr(e, &mut |n| hit = hit || changes_node(tf, n, x));
+    hit
+}
+
+/// Whether this statement or expression itself (not what is inside it) may
+/// change `x`, or its length (writing an element of `x` doesn't).
+fn changes_node(tf: &TFunc, n: Node, x: &Path) -> bool {
     let owner = |l: LocalId| tf.locals.get(l as usize).and_then(|v| v.ref_root).unwrap_or(l);
     let mutable_ref = |l: LocalId| matches!(tf.locals.get(l as usize).map(|v| v.kind), Some(LocalKind::Ref { mutable: true }));
-    let mut hit = false;
-    walk_block(body, &mut |n| {
-        if hit {
-            return;
-        }
-        hit = match n {
-            Node::Stmt(s) => match s {
-                TStmt::Assign { place, .. } => touches(tf, place, x, true),
-                TStmt::MapInsert { map, .. } => touches(tf, map, x, true),
-                TStmt::LetRef { local, place } => mutable_ref(*local) && touches(tf, place, x, true),
-                TStmt::With { local, place, lock, .. } => (*lock || mutable_ref(*local)) && touches(tf, place, x, true),
-                TStmt::WithLocks { places, .. } => places.iter().any(|p| touches(tf, p, x, true)),
-                TStmt::For { iter, mutable: true, .. } | TStmt::ParFor { iter, mutable: true, .. } => touches(tf, iter, x, true),
-                _ => false,
+    match n {
+        Node::Stmt(s) => match s {
+            TStmt::Assign { place, .. } => touches(tf, place, x, true),
+            TStmt::MapInsert { map, .. } => touches(tf, map, x, true),
+            TStmt::LetRef { local, place } => mutable_ref(*local) && touches(tf, place, x, true),
+            TStmt::With { local, place, lock, .. } => (*lock || mutable_ref(*local)) && touches(tf, place, x, true),
+            TStmt::WithLocks { places, .. } => places.iter().any(|p| touches(tf, p, x, true)),
+            TStmt::For { iter, mutable: true, .. } | TStmt::ParFor { iter, mutable: true, .. } => touches(tf, iter, x, true),
+            _ => false,
+        },
+        Node::Expr(e) => match &e.kind {
+            TK::Call { args, .. } | TK::Intrinsic { args, .. } => args.iter().any(|a| a.mode == ArgMode::Inout && touches(tf, &a.e, x, true)),
+            TK::Move(p) | TK::Unbox(p) => touches(tf, p, x, false),
+            TK::Match { scrut, owned: true, .. } => touches(tf, scrut, x, false),
+            TK::MutexRef(p) => touches(tf, p, x, true),
+            // a mutable view from a projection may be into any of its arguments
+            TK::Proj { mutable: true, call, .. } => match &call.kind {
+                TK::Call { args, .. } | TK::Intrinsic { args, .. } => args.iter().any(|a| touches(tf, &a.e, x, false)),
+                _ => true,
             },
-            Node::Expr(e) => match &e.kind {
-                TK::Call { args, .. } | TK::Intrinsic { args, .. } => args.iter().any(|a| a.mode == ArgMode::Inout && touches(tf, &a.e, x, true)),
-                TK::Move(p) | TK::Unbox(p) => touches(tf, p, x, false),
-                TK::Match { scrut, owned: true, .. } => touches(tf, scrut, x, false),
-                TK::MutexRef(p) => touches(tf, p, x, true),
-                // a mutable view from a projection may be into any of its arguments
-                TK::Proj { mutable: true, call, .. } => match &call.kind {
-                    TK::Call { args, .. } | TK::Intrinsic { args, .. } => args.iter().any(|a| touches(tf, &a.e, x, false)),
-                    _ => true,
-                },
-                TK::Closure(c) => c.captures.iter().any(|(l, u)| *u != CapUse::Read && owner(*l) == owner(x.root)),
-                _ => false,
-            },
-        };
-    });
-    hit
+            TK::Closure(c) => c.captures.iter().any(|(l, u)| *u != CapUse::Read && owner(*l) == owner(x.root)),
+            _ => false,
+        },
+    }
 }

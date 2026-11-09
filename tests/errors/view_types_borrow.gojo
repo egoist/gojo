@@ -1,0 +1,49 @@
+// A view struct borrows what its view fields point into.
+view struct Token {
+    text: str
+    n: int
+}
+
+fn modifySource() {
+    var s: String = "hello"
+    let t = Token{text: s.asStr(), n: 1}
+    s.push("more")
+    // error: cannot modify `s` while it is borrowed by `t`
+    println(t.text)
+}
+
+fn returnsLocal() -> Token {
+    let s: String = "hello"
+    return Token{text: s.asStr(), n: 1}
+    // error: returns a view of `s`, which is dropped when the function returns
+}
+
+fn inVec() -> int {
+    let s: String = "hello"
+    var v = Vec[Token]{}
+    // error: `v` has type `Vec[Token]`, which would store a borrowed view
+    v.push(Token{text: s.asStr(), n: 1})
+    return v.len()
+}
+
+fn reset(t: inout Token, other: str) {
+    t.text = other
+    // error: cannot store a view of `other` in the `inout` parameter `t`
+}
+
+fn fieldReassigned() {
+    var a: String = "a"
+    var t = Token{text: "lit", n: 1}
+    t.text = a.asStr()
+    a.push("grow the buffer")
+    // error: cannot modify `a` while it is borrowed by `t`
+    println(t.text)
+}
+
+fn main() {
+    modifySource()
+    println(returnsLocal().n, inVec())
+    var t = Token{text: "a", n: 1}
+    reset(&t, "b")
+    fieldReassigned()
+}

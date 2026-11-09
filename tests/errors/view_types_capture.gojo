@@ -1,0 +1,19 @@
+// Like `str`, a view struct can't leave the variables the checker tracks.
+view struct Token {
+    text: str
+    n: int
+}
+
+fn keep(f: sink fn() -> int) -> int {
+    return f()
+}
+
+fn main() {
+    let s: String = "hello"
+    let t = Token{text: s.asStr(), n: 1}
+    println(keep(() => t.text.len()))
+    // error: escaping closure cannot capture the borrowed view `t`
+    let ch = Chan[Token](1)
+    // error: `Chan` cannot be instantiated with a borrowed view type
+    println(ch.tx.len())
+}

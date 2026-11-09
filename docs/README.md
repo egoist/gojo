@@ -18,4 +18,4 @@ Gojo is a small, fast-compiling systems programming language with no garbage col
 - [Concurrency](concurrency.md): how goroutines became structured concurrency: scopes, cancellation, channels and `select`.
 - [Packages](packages.md): the proposal for packages, versions and a registry, written with coding agents in mind.
 - [WebAssembly](wasm.md): the proposal for compiling to Wasm: targets, tasks on one thread, WASI and the browser, with measurements from a prototype.
-- [Freeing memory at last use](drops.md): the proposal for freeing values whose drop only frees memory right after their last use, after Mojo's ASAP destruction, with measurements from a prototype.
+- [Freeing memory at last use](drops.md): why values whose drop only frees memory are freed right after their last use, after Mojo's ASAP destruction, and what it measures.

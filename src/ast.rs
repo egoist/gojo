@@ -87,6 +87,8 @@ pub struct FuncDecl {
     pub tparams: Vec<TParam>,
     pub params: Vec<Param>,
     pub ret: Option<TypeExpr>,
+    /// `-> str of a, b`: the parameters the returned view may point into.
+    pub ret_of: Vec<(String, Span)>,
     pub yields: Option<YieldKind>,
     /// `yield ?&T`: the projection may produce nothing.
     pub yield_opt: bool,
@@ -121,6 +123,8 @@ pub struct StructDecl {
     pub fields: Vec<FieldDecl>,
     pub is_copy: bool,
     pub unsafe_send: bool,
+    /// `view struct`: may hold views, and is one (spec 5.4).
+    pub is_view: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -137,6 +141,8 @@ pub struct EnumDecl {
     pub tparams: Vec<TParam>,
     pub variants: Vec<VariantDecl>,
     pub is_copy: bool,
+    /// `view enum`: may hold views, and is one.
+    pub is_view: bool,
 }
 
 #[derive(Clone, Debug)]

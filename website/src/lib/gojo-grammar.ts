@@ -16,7 +16,7 @@ export const keywords = {
 } as const
 
 /** Contextual keywords: names everywhere else. */
-export const contextual = ["self", "as", "lib", "static", "send"] as const
+export const contextual = ["self", "as", "lib", "static", "send", "view", "of"] as const
 
 /** The types the checker knows by name (builtin_type and the generic builtins). */
 export const primitiveTypes = [
@@ -140,8 +140,14 @@ export const gojoGrammar: LanguageRegistration = {
           captures: { 1: { name: "storage.type.function.gojo" }, 2: { name: "entity.name.function.gojo" } },
         },
         {
-          // A send struct is safe to move between tasks.
-          match: String.raw`\b(send)\s+(?=(?:struct|enum)\b)`,
+          // A send struct is safe to move between tasks; a view struct holds
+          // views and is one.
+          match: String.raw`\b(send|view)\s+(?=(?:struct|enum)\b)`,
+          captures: { 1: { name: "storage.modifier.gojo" } },
+        },
+        {
+          // fn first(a: str, b: str) -> str of a { ... }
+          match: String.raw`\b(of)\s+(?=${ident}(?:\s*,\s*${ident})*\s*(?:\{|\bwhere\b|$))`,
           captures: { 1: { name: "storage.modifier.gojo" } },
         },
         {

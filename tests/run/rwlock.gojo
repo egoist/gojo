@@ -52,5 +52,5 @@ fn main() {
 
 fn spin() {
     let start = time.now()
-    while time.since(start) < 5 * time.millisecond{}
+    while time.since(start) < 5 * time.millisecond {}
 }

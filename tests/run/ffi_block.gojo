@@ -19,7 +19,7 @@ fn main() {
         go () => {
             let start = time.now()
             var prev = start
-            while time.since(start) < 250 * time.millisecond{
+            while time.since(start) < 250 * time.millisecond {
                 time.sleep(time.millisecond)
                 let now = time.now()
                 with w = worst.lock() { if now - prev > w { w = now - prev } }

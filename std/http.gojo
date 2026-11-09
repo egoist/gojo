@@ -357,7 +357,7 @@ fn hexValue(s: str) -> int {
 
 // Reads from `c` into `buf` until it holds `n` bytes; false if the peer closed first.
 fn fillTo(c: Stream, buf: inout Vec[byte], n: int) -> bool {
-    while buf.len() < n{
+    while buf.len() < n {
         let got = c.read(&buf, 65536) catch _e { 0 }
         if got == 0 {
             return false

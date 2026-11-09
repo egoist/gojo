@@ -242,6 +242,8 @@ struct Fs<'a> {
     bce: Vec<bce::Fact>,
     /// Places whose length nothing in the function changes (bce.rs).
     bce_steady: HashMap<bce::Path, bool>,
+    /// `var` integers that never go below a value anywhere (bce.rs).
+    bce_floor: std::rc::Rc<HashMap<LocalId, i128>>,
     /// Where drop flags have known values, and drops moved to the ends of
     /// branches (drops.rs). `None` in closure bodies: flags everywhere.
     dinfo: Option<std::rc::Rc<drops::DropInfo>>,
@@ -252,6 +254,9 @@ struct Fs<'a> {
     used_flags: HashSet<String>,
     /// Join drops emitted (each must be, or the value would leak).
     jd_done: HashSet<(usize, usize)>,
+    /// Last-use frees emitted (each must be: a value moved elsewhere would
+    /// leak otherwise).
+    fd_done: HashSet<(usize, usize)>,
 }
 
 /// The body of `for x in t` over a type with `each`, compiled as a closure.
@@ -1017,7 +1022,7 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
         let (sig, ps) = self.fn_signature(f, &subst, &name);
         let _ = writeln!(self.protos, "{};", sig);
         let ret = if fd.yields.is_some() { fd.ret.subst(&subst) } else { fd.ret.subst(&subst) };
-        let mut fs = Fs { tf, subst, out: String::new(), decls: String::new(), ind: 1, scopes: vec![], repr: HashMap::new(), flagged: HashSet::new(), flags: HashMap::new(), ret, yields: fd.yields.is_some(), err_mode: None, loop_labels: vec![], lb: None, line: (u32::MAX, 0), tscopes: HashMap::new(), bce: vec![], bce_steady: HashMap::new(), dinfo: None, site: None, used_flags: HashSet::new(), jd_done: HashSet::new() };
+        let mut fs = Fs { tf, subst, out: String::new(), decls: String::new(), ind: 1, scopes: vec![], repr: HashMap::new(), flagged: HashSet::new(), flags: HashMap::new(), ret, yields: fd.yields.is_some(), err_mode: None, loop_labels: vec![], lb: None, line: (u32::MAX, 0), tscopes: HashMap::new(), bce: vec![], bce_steady: HashMap::new(), bce_floor: Default::default(), dinfo: None, site: None, used_flags: HashSet::new(), jd_done: HashSet::new(), fd_done: HashSet::new() };
         collect_moves_block(&tf.body, &mut fs.flagged, tf);
         fs.scopes.push(Scope { kind: SK::Func, items: vec![], wait: None });
         let mut lids = vec![];
@@ -1044,6 +1049,7 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
         let body = tf.body.clone();
         // (on the copy codegen walks: the analysis keys its results by address)
         self.analyze_drops(&mut fs, &body, &sinks);
+        fs.bce_floor = std::rc::Rc::new(self.bce_floors(&mut fs));
         self.line_directive(&mut fs, body.span);
         // the prelude's lazy-chain steps only call the closure they are given,
         // which polls in its own body if it can recurse
@@ -1054,8 +1060,8 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
         self.fn_body(&mut fs, &body);
         if let Some(info) = &fs.dinfo {
             // a join drop not emitted would leak its value
-            let missing = info.join_drops.keys().filter(|k| !fs.jd_done.contains(k)).count();
-            assert!(missing == 0, "internal error: {} drops at the ends of branches were not emitted in {}", missing, fd.name);
+            let missing = info.join_drops.keys().filter(|k| !fs.jd_done.contains(k)).count() + info.after_stmt.keys().filter(|k| !fs.fd_done.contains(k)).count();
+            assert!(missing == 0, "internal error: {} drops at the ends of branches or at last uses were not emitted in {}", missing, fd.name);
         }
         let out = resolve_flags(&fs.out, &fs.used_flags);
         let _ = writeln!(self.bodies, "{} {{\n{}{}}}\n{}", sig, fs.decls, out, C_LINE_MARK);
@@ -1064,8 +1070,9 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
     fn fn_body(&mut self, fs: &mut Fs, body: &TBlock) {
         let ret = fs.ret.clone();
         self.push_scope(fs, SK::Block);
-        for s in &body.stmts {
+        for (i, s) in body.stmts.iter().enumerate() {
             self.stmt(fs, s);
+            self.free_after(fs, body, i);
         }
         if fs.yields {
             self.at_site(fs, drops::Site::block(body), |g, fs| g.pop_scope(fs));
@@ -1165,7 +1172,7 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
 
     /// The scope for the value of a branch of type `t`.
     fn push_value_scope(&mut self, fs: &mut Fs, t: &Ty) {
-        self.push_scope(fs, if t.contains_view() { SK::Tail } else { SK::Stmt });
+        self.push_scope(fs, if self.prog.contains_view(&t) { SK::Tail } else { SK::Stmt });
     }
 
     /// Like `pop_scope`, but returns the branch-value temporaries (`DropLater`)
@@ -1226,6 +1233,9 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
             }
             Cl::Defer(b) => {
                 let site = fs.site.take();
+                // (deferred code emitted here runs only on this way out:
+                // what it says about indexes stays on it)
+                let facts = fs.bce.clone();
                 self.emit(fs, "{");
                 fs.ind += 1;
                 // the deferred code can't leave its own block, so it must not see the
@@ -1240,10 +1250,12 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
                 fs.ind -= 1;
                 self.emit(fs, "}");
                 fs.site = site;
+                fs.bce = facts;
             }
             Cl::ErrDefer(b) => {
                 if let Some(cond) = fs.err_mode.clone() {
                     let site = fs.site.take();
+                    let facts = fs.bce.clone();
                     self.emit(fs, &format!("if ({}) {{", cond));
                     fs.ind += 1;
                     let outer = std::mem::replace(&mut fs.scopes, vec![Scope { kind: SK::Func, items: vec![], wait: None }]);
@@ -1258,6 +1270,7 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
                     fs.ind -= 1;
                     self.emit(fs, "}");
                     fs.site = site;
+                    fs.bce = facts;
                 }
             }
             Cl::Unlock(m) => self.emit(fs, &format!("gojo_mutex_unlock({});", m)),
@@ -1394,6 +1407,34 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
         ls
     }
 
+    /// Free what statement `i` of `b` used last (drops.rs): its drop at the
+    /// end of the scope goes, so nothing leaving the scope later drops it again.
+    fn free_after(&mut self, fs: &mut Fs, b: &TBlock, i: usize) {
+        let key = (b as *const TBlock as usize, i);
+        let Some(ls) = fs.dinfo.as_ref().and_then(|d| d.after_stmt.get(&key).cloned()) else { return };
+        fs.fd_done.insert(key);
+        for l in ls {
+            let mut registered = false;
+            for sc in fs.scopes.iter_mut().rev() {
+                if let Some(pos) = sc.items.iter().position(|c| matches!(c, Cl::DropLocal(x) if *x == l)) {
+                    sc.items.remove(pos);
+                    registered = true;
+                    break;
+                }
+            }
+            if !registered {
+                continue;
+            }
+            let t = self.local_ty(fs, l);
+            let d = self.drop_fn(&t);
+            let p = self.local_place(fs, l);
+            self.emit(fs, &format!("{}(&{}); /* last use */", d, p));
+            if let Some(f) = fs.flags.get(&(l, vec![])).cloned() {
+                self.set_flag(fs, &f, false);
+            }
+        }
+    }
+
     fn emit_join_drops(&mut self, fs: &mut Fs, ls: &[LocalId]) {
         for &l in ls {
             let t = self.local_ty(fs, l);
@@ -1457,6 +1498,8 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
         if let Some(sp) = stmt_span(s) {
             self.line_directive(fs, sp);
         }
+        // (what a condition said about a place ends where it may change)
+        self.bce_kill(fs, s);
         match s {
             TStmt::Let { local, init } => {
                 self.push_scope(fs, SK::Stmt);
@@ -1502,6 +1545,10 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
                 let t = self.sub(fs, &e.ty);
                 self.discard(fs, &v, &t, e.is_place());
                 self.pop_scope(fs);
+                // what the rest of the block knows from it: `if i >= n {
+                // return }`, `assert(i < n)`
+                let after = self.bce_after(fs, e);
+                fs.bce.extend(after);
             }
             TStmt::Assign { place, op, value, span } => {
                 self.push_scope(fs, SK::Stmt);
@@ -1651,6 +1698,7 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
                 if !self.leaf_loop(cond.as_ref(), body) {
                     self.emit(fs, "GOJO_POLL();");
                 }
+                let nb = fs.bce.len();
                 if let Some(c) = cond {
                     self.push_scope(fs, SK::Stmt);
                     let cv = self.expr(fs, c);
@@ -1658,8 +1706,12 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
                     self.emit(fs, &format!("bool {} = {};", t, cv));
                     self.pop_scope(fs);
                     self.emit(fs, &format!("if (!{}) break;", t));
+                    // the condition holds where each run of the body starts
+                    let pos = self.bce_guard(fs, c, true);
+                    fs.bce.extend(pos);
                 }
                 self.block_stmts(fs, body);
+                fs.bce.truncate(nb);
                 self.emit(fs, &format!("{}:;", lc));
                 fs.scopes.pop();
                 fs.ind -= 1;
@@ -1888,10 +1940,14 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
         self.emit(fs, "{");
         fs.ind += 1;
         self.push_scope(fs, SK::Block);
-        for s in &b.stmts {
+        // (facts end with their block)
+        let nb = fs.bce.len();
+        for (i, s) in b.stmts.iter().enumerate() {
             self.stmt(fs, s);
+            self.free_after(fs, b, i);
         }
         if let Some(v) = &b.value {
+            self.bce_kill_expr(fs, v);
             self.push_scope(fs, SK::Stmt);
             let s = self.expr(fs, v);
             let t = self.sub(fs, &v.ty);
@@ -1899,6 +1955,7 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
             self.pop_scope(fs);
         }
         self.at_site(fs, drops::Site::block(b), |g, fs| g.pop_scope(fs));
+        fs.bce.truncate(nb);
         fs.ind -= 1;
         self.emit(fs, "}");
     }
@@ -1908,11 +1965,15 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
         self.emit(fs, "{");
         fs.ind += 1;
         self.push_scope(fs, SK::Block);
-        for s in &b.stmts {
+        // (facts end with their block)
+        let nb = fs.bce.len();
+        for (i, s) in b.stmts.iter().enumerate() {
             self.stmt(fs, s);
+            self.free_after(fs, b, i);
         }
         let mut later = vec![];
         if let Some(v) = &b.value {
+            self.bce_kill_expr(fs, v);
             let t = self.sub(fs, &v.ty);
             self.push_value_scope(fs, &t);
             let s = self.expr(fs, v);
@@ -1923,6 +1984,7 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
             later = self.pop_scope_keeping_later(fs);
         }
         self.at_site(fs, drops::Site::block(b), |g, fs| g.pop_scope(fs));
+        fs.bce.truncate(nb);
         fs.ind -= 1;
         self.emit(fs, "}");
         fs.scopes.last_mut().unwrap().items.extend(later);
@@ -2672,6 +2734,10 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
                 // the end of the other (drops.rs)
                 let key = e as *const TExpr as usize;
                 let (jd0, jd1) = (self.join_drops(fs, key, 0), self.join_drops(fs, key, 1));
+                // what the condition says inside each branch (bce.rs)
+                let (pos, neg) = (self.bce_guard(fs, cond, true), self.bce_guard(fs, cond, false));
+                let nb = fs.bce.len();
+                fs.bce.extend(pos);
                 if jd0.is_empty() {
                     self.emit(fs, &format!("if ({})", cv));
                     self.block_into(fs, then, r.as_deref());
@@ -2683,6 +2749,8 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
                     fs.ind -= 1;
                     self.emit(fs, "}");
                 }
+                fs.bce.truncate(nb);
+                fs.bce.extend(neg);
                 match else_ {
                     Some(eb) if jd1.is_empty() => {
                         self.emit(fs, "else");
@@ -2705,6 +2773,7 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
                     }
                     None => {}
                 }
+                fs.bce.truncate(nb);
                 r.unwrap_or_else(|| "0".into())
             }
             TK::Match { scrut, owned, arms } => self.match_expr(fs, scrut, *owned, arms, &t, e.span, e as *const TExpr as usize),
@@ -3213,7 +3282,13 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
             self.emit(fs, &format!("if ({}{}) {{", if op == BinOp::And { "" } else { "!" }, t));
             fs.ind += 1;
             self.push_scope(fs, SK::Stmt);
+            // `r` runs only where `l` is true (`&&`) or false (`||`)
+            let facts = self.bce_guard(fs, l, op == BinOp::And);
+            let facts = self.bce_surviving(fs, facts, r);
+            let nb = fs.bce.len();
+            fs.bce.extend(facts);
             let b = self.expr(fs, r);
+            fs.bce.truncate(nb);
             self.emit(fs, &format!("{} = {};", t, b));
             self.pop_scope(fs);
             fs.ind -= 1;
@@ -3602,7 +3677,9 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
         let ret = fty.ret.clone();
         let rc = self.ret_cty(&ret);
         let mut ps = vec!["void *envp".to_string()];
-        let mut nfs = Fs { tf: fs.tf, subst: fs.subst.clone(), out: String::new(), decls: String::new(), ind: 1, scopes: vec![], repr: HashMap::new(), flagged: fs.flagged.clone(), flags: HashMap::new(), ret: ret.clone(), yields: false, err_mode: None, loop_labels: vec![], lb: None, line: (u32::MAX, 0), tscopes: HashMap::new(), bce: vec![], bce_steady: HashMap::new(), dinfo: None, site: None, used_flags: HashSet::new(), jd_done: HashSet::new() };
+        let mut nfs = Fs { tf: fs.tf, subst: fs.subst.clone(), out: String::new(), decls: String::new(), ind: 1, scopes: vec![], repr: HashMap::new(), flagged: fs.flagged.clone(), flags: HashMap::new(), ret: ret.clone(), yields: false, err_mode: None, loop_labels: vec![], lb: None, line: (u32::MAX, 0), tscopes: HashMap::new(), bce: vec![], bce_steady: HashMap::new(), bce_floor: Default::default(), dinfo: None, site: None, used_flags: HashSet::new(), jd_done: HashSet::new(), fd_done: HashSet::new() };
+        // (the floors are about the whole function, closures included)
+        nfs.bce_floor = fs.bce_floor.clone();
         if let (Some(lid), Some(_)) = (c.loop_body, &lbp) {
             // `return` / `try` in the body act on the enclosing function
             nfs.ret = fs.ret.clone();
@@ -3672,8 +3749,8 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
             self.analyze_drops(&mut nfs, &body, &owned);
             self.fn_body(&mut nfs, &body);
             if let Some(info) = &nfs.dinfo {
-                let missing = info.join_drops.keys().filter(|k| !nfs.jd_done.contains(k)).count();
-                assert!(missing == 0, "internal error: {} drops at the ends of branches were not emitted in a closure", missing);
+                let missing = info.join_drops.keys().filter(|k| !nfs.jd_done.contains(k)).count() + info.after_stmt.keys().filter(|k| !nfs.fd_done.contains(k)).count();
+                assert!(missing == 0, "internal error: {} drops at the ends of branches or at last uses were not emitted in a closure", missing);
             }
         }
         let nout = resolve_flags(&nfs.out, &nfs.used_flags);
@@ -5317,8 +5394,10 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
         fs.ind += 1;
         self.push_scope(fs, SK::Block);
         fs.scopes.last_mut().unwrap().wait = Some(format!("{}.g", st));
-        for s in &body.stmts {
+        let nb = fs.bce.len();
+        for (i, s) in body.stmts.iter().enumerate() {
             self.stmt(fs, s);
+            self.free_after(fs, body, i);
         }
         if let Some(bv) = &body.value {
             self.push_scope(fs, SK::Stmt);
@@ -5332,6 +5411,7 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
         }
         // (the scope's tasks are waited for first)
         self.at_site(fs, drops::Site::block(body), |g, fs| g.pop_scope(fs));
+        fs.bce.truncate(nb);
         fs.ind -= 1;
         self.emit(fs, "}");
         fs.tscopes.remove(&id);
@@ -6886,7 +6966,7 @@ impl<'a> Gen<'a> {
         if !self.helper_header(&name, &sig) {
             return name;
         }
-        let mut nfs = Fs { tf, subst: HashMap::new(), out: String::new(), decls: String::new(), ind: 1, scopes: vec![], repr: HashMap::new(), flagged: HashSet::new(), flags: HashMap::new(), ret: ft.clone(), yields: false, err_mode: None, loop_labels: vec![], lb: None, line: (u32::MAX, 0), tscopes: HashMap::new(), bce: vec![], bce_steady: HashMap::new(), dinfo: None, site: None, used_flags: HashSet::new(), jd_done: HashSet::new() };
+        let mut nfs = Fs { tf, subst: HashMap::new(), out: String::new(), decls: String::new(), ind: 1, scopes: vec![], repr: HashMap::new(), flagged: HashSet::new(), flags: HashMap::new(), ret: ft.clone(), yields: false, err_mode: None, loop_labels: vec![], lb: None, line: (u32::MAX, 0), tscopes: HashMap::new(), bce: vec![], bce_steady: HashMap::new(), bce_floor: Default::default(), dinfo: None, site: None, used_flags: HashSet::new(), jd_done: HashSet::new(), fd_done: HashSet::new() };
         nfs.scopes.push(Scope { kind: SK::Func, items: vec![], wait: None });
         self.push_scope(&mut nfs, SK::Block);
         let v = self.field_default(&mut nfs, d, args.as_slice(), i);

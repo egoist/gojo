@@ -47,7 +47,7 @@ pub struct Deque[T] {
             let j = self.slot(i)
             nb.push(take(&self.buf[j]))
         }
-        while nb.len() < cap{
+        while nb.len() < cap {
             nb.push(none)
         }
         self.buf = nb
@@ -347,7 +347,7 @@ pub struct SortedMap[K: ordered, V] {
         let es = self.nodes[x].es
         var lo = 0
         var hi = es.len()
-        while lo < hi{
+        while lo < hi {
             let mid = (lo + hi) / 2
             if es[mid].key < k {
                 lo = mid + 1
@@ -882,7 +882,7 @@ pub struct BitSet {
             panic("BitSet: negative value")
         }
         let w = i >> 6
-        while self.words.len() <= w{
+        while self.words.len() <= w {
             self.words.push(0)
         }
         let bit = u64(1) << u64(i & 63)

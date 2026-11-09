@@ -25,7 +25,7 @@ fn main() {
         while k != 0 {
             var lo = 0
             var hi = k
-            while lo < hi{
+            while lo < hi {
                 let t = perm[lo]
                 perm[lo] = perm[hi]
                 perm[hi] = t

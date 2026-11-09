@@ -316,7 +316,7 @@ impl Checker {
             t
         };
         if !t.is_error() {
-            if t.contains_view() {
+            if self.prog.contains_view(&t) {
                 let s = self.prog.show(&t);
                 self.err(g.span, format!("package-level value `{}` can't be the borrowed view `{}`", g.name, s));
             } else if !self.is_send(&t) {
@@ -2700,7 +2700,7 @@ impl Checker {
     fn apply_targs(&mut self, _cx: &mut FnCx, b: PathRes, tys: Vec<Ty>, e: &Expr) -> Option<PathRes> {
         match b {
             PathRes::TypeCon(_, Some(d)) => {
-                if tys.iter().any(|t| t.contains_view()) && !matches!(self.prog.def(d).kind, TypeDefKind::Iface { .. }) {
+                if tys.iter().any(|t| self.prog.contains_view(&t)) && !matches!(self.prog.def(d).kind, TypeDefKind::Iface { .. }) {
                     self.err(e.span, format!("`{}` cannot be instantiated with a borrowed view type; use an owned type (String / Vec[T])", self.prog.def(d).name));
                 }
                 if self.prog.def(d).tparams.len() != tys.len() {
@@ -3463,7 +3463,7 @@ impl Checker {
             self.err(sp, "cannot infer the element type of this list; give it a type: `let xs: Vec[T] = [...]`");
             return TExpr::error(sp);
         }
-        if elem.contains_view() {
+        if self.prog.contains_view(&elem) {
             let s = self.prog.show(&elem);
             self.err(sp, format!("a list cannot hold borrowed views (`{}`); use owned values such as String", s));
             return TExpr::error(sp);
@@ -3505,7 +3505,7 @@ impl Checker {
             out.push(self.coerce(cx, e, &r, Use::Value));
         }
         let elem = self.resolve(cx, &elem);
-        if elem.contains_view() && !is_array {
+        if self.prog.contains_view(&elem) && !is_array {
             let s = self.prog.show(&elem);
             self.err(sp, format!("a list cannot hold borrowed views (`{}`); use owned values such as String", s));
             return TExpr::error(sp);
@@ -3778,7 +3778,7 @@ impl Checker {
             }
             if owned {
                 let lt = self.resolve(cx, &local.ty);
-                if lt.contains_view() {
+                if self.prog.contains_view(&lt) {
                     self.diags.push(Diag::new(c.span, format!("escaping closure cannot capture the borrowed view `{}`", local.name)).note(None, "the closure may outlive the data it points into; capture an owned copy (`.toString()` / `.toVec()`) instead"));
                 }
                 if u == CapUse::Mutate {
@@ -4071,7 +4071,7 @@ impl Checker {
             let ty = if vt == Ty::Unit { Ty::Unit } else { vt };
             return TExpr::new(TK::Block(TBlock { stmts: vec![ts], value: None, span: sp }), ty, sp);
         }
-        if vt.contains_view() {
+        if self.prog.contains_view(&vt) {
             let s = self.prog.show(&vt);
             self.diags.push(Diag::new(v.span, format!("the value of a `with` block can't be a view (`{}`): what it borrows is only reachable inside the block", s)).note(None, "give back an owned copy (`.toString()`, `.clone()`) or a value computed from it"));
             return TExpr::error(sp);
@@ -4511,7 +4511,7 @@ impl Checker {
             for p in &fd.params {
                 sig_tys.push(self.resolve(cx, &p.ty.subst(&s)));
             }
-            if let Some(t) = sig_tys.iter().find(|t| t.has_nested_view()) {
+            if let Some(t) = sig_tys.iter().find(|t| self.prog.has_nested_view(&t)) {
                 let ts = self.prog.show(t);
                 self.err(sp, format!("calling `{}` here would store a borrowed view inside `{}`; use owned values", fd.name, ts));
             }
@@ -4818,7 +4818,7 @@ impl Checker {
                 self.diags.push(Diag::new(sp, format!("`isolate` uses `{}` of type `{}` from outside", n, s)).note(Some(lsp), "declared here").note(None, "an isolated value may only be built from values that can cross tasks: then nothing outside points into it. Pass a copy or a `send` value in"));
             }
         }
-        if t.contains_view() {
+        if self.prog.contains_view(&t) {
             let s = self.prog.show(&t);
             self.err(sp, format!("`isolate` can't give back the borrowed view `{}`", s));
         }
@@ -4974,7 +4974,7 @@ impl Checker {
             }
         }
         let ret = self.resolve(cx, &rv);
-        if handle && ret.contains_view() {
+        if handle && self.prog.contains_view(&ret) {
             let r = self.prog.show(&ret);
             self.diags.push(Diag::new(sp, format!("a task can't give back the borrowed view `{}`", r)).note(None, "its result is stored until `join`; return an owned value (`String(s)`, `.toVec()`)"));
             self.pop_scope(cx);
@@ -5111,7 +5111,7 @@ impl Checker {
                 }
                 continue;
             }
-            if is_ref || matches!(local.kind, LocalKind::Param(Mode::Borrow | Mode::Inout)) || t.is_view() {
+            if is_ref || matches!(local.kind, LocalKind::Param(Mode::Borrow | Mode::Inout)) || self.prog.is_view(&t) {
                 if owned {
                     self.diags.push(Diag::new(c.span, format!("a task started through a `Scope` value borrows `{}`", local.name)).note(Some(local.span), "declared here").note(None, "it may outlive this function: give it owned values (`.clone()` them first)"));
                 } else {

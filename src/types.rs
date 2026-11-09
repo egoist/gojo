@@ -165,36 +165,6 @@ impl Ty {
         matches!(self, Ty::Str | Ty::String)
     }
     /// Borrowed views: may not be stored in fields or collections.
-    pub fn is_view(&self) -> bool {
-        match self {
-            Ty::Str | Ty::Slice(_) | Ty::MutexRef(_) | Ty::Task(_) | Ty::Scope => true,
-            Ty::Option(t) | Ty::Array(t, _) | Ty::ArrayT(t, _) => t.is_view(),
-            Ty::Result(a, b) => a.is_view() || b.is_view(),
-            _ => false,
-        }
-    }
-    /// A borrowed view anywhere inside the type.
-    pub fn contains_view(&self) -> bool {
-        match self {
-            Ty::Str | Ty::Slice(_) | Ty::MutexRef(_) | Ty::Task(_) | Ty::Scope => true,
-            // function values borrow their parameters; captures are checked separately
-            Ty::Func(_) => false,
-            Ty::Vec(a) | Ty::Array(a, _) | Ty::ArrayT(a, _) | Ty::Option(a) | Ty::Box(a) | Ty::Rc(a) | Ty::Arc(a) | Ty::Weak(a) | Ty::Cell(a) | Ty::Mutex(a) | Ty::Sender(a) | Ty::Receiver(a) | Ty::Iso(a) | Ty::Ptr(a) => a.contains_view(),
-            Ty::Map(a, b) | Ty::Result(a, b) => a.contains_view() || b.contains_view(),
-            Ty::Adt(_, args) | Ty::Iface(_, args) => args.iter().any(|a| a.contains_view()),
-            _ => false,
-        }
-    }
-    /// A view stored inside a container (not just at the top / in an option).
-    pub fn has_nested_view(&self) -> bool {
-        match self {
-            Ty::Str | Ty::Slice(_) | Ty::Scope => false,
-            Ty::Task(a) => a.contains_view(),
-            Ty::Option(a) => a.has_nested_view(),
-            Ty::Result(a, b) => a.has_nested_view() || b.has_nested_view(),
-            t => t.contains_view(),
-        }
-    }
     pub fn has_vars(&self) -> bool {
         let mut found = false;
         self.walk(&mut |t| {
@@ -385,6 +355,9 @@ pub struct TypeDef {
     /// One of the prelude's `TupleN` structs: written `(A, B)`, copy when its
     /// elements are.
     pub tuple: bool,
+    /// `view struct` / `view enum`: may hold views and is one itself, so it
+    /// lives only in variables, like `str` (spec 5.4). Always copy.
+    pub view: bool,
 }
 
 impl TypeDef {
@@ -438,6 +411,11 @@ pub struct FuncDef {
     pub tparams: Vec<TParamId>,
     pub params: Vec<FuncParam>,
     pub ret: Ty,
+    /// `-> str of a, b`: the arguments (receiver first) the returned view may
+    /// point into, as declared. Callers rely on it instead of what the
+    /// borrow checker infers from the body, so the body may change without
+    /// changing what callers see.
+    pub ret_of: Option<Vec<usize>>,
     pub yields: Option<YieldKind>,
     pub yield_opt: bool,
     pub is_pub: bool,
@@ -583,6 +561,45 @@ pub struct Program {
 }
 
 impl Program {
+    /// A borrowed view: `str`, `[]T`, a `view struct` or `view enum`, a lock
+    /// guard (`MutexRef`), task handle or `Scope`, or an optional, result or
+    /// array of one. A view lives only in variables (spec 5.4).
+    pub fn is_view(&self, t: &Ty) -> bool {
+        match t {
+            Ty::Str | Ty::Slice(_) | Ty::MutexRef(_) | Ty::Task(_) | Ty::Scope => true,
+            Ty::Adt(d, _) => self.def(*d).view,
+            Ty::Option(t) | Ty::Array(t, _) | Ty::ArrayT(t, _) => self.is_view(t),
+            Ty::Result(a, b) => self.is_view(a) || self.is_view(b),
+            _ => false,
+        }
+    }
+
+    /// A borrowed view anywhere inside the type.
+    pub fn contains_view(&self, t: &Ty) -> bool {
+        match t {
+            Ty::Str | Ty::Slice(_) | Ty::MutexRef(_) | Ty::Task(_) | Ty::Scope => true,
+            // function values borrow their parameters; captures are checked separately
+            Ty::Func(_) => false,
+            Ty::Vec(a) | Ty::Array(a, _) | Ty::ArrayT(a, _) | Ty::Option(a) | Ty::Box(a) | Ty::Rc(a) | Ty::Arc(a) | Ty::Weak(a) | Ty::Cell(a) | Ty::Mutex(a) | Ty::Sender(a) | Ty::Receiver(a) | Ty::Iso(a) | Ty::Ptr(a) => self.contains_view(a),
+            Ty::Map(a, b) | Ty::Result(a, b) => self.contains_view(a) || self.contains_view(b),
+            Ty::Adt(d, args) => self.def(*d).view || args.iter().any(|a| self.contains_view(a)),
+            Ty::Iface(_, args) => args.iter().any(|a| self.contains_view(a)),
+            _ => false,
+        }
+    }
+
+    /// A view stored inside a container (not just at the top / in an option).
+    pub fn has_nested_view(&self, t: &Ty) -> bool {
+        match t {
+            Ty::Str | Ty::Slice(_) | Ty::Scope => false,
+            Ty::Adt(d, args) if self.def(*d).view => args.iter().any(|a| self.contains_view(a)),
+            Ty::Task(a) => self.contains_view(a),
+            Ty::Option(a) => self.has_nested_view(a),
+            Ty::Result(a, b) => self.has_nested_view(a) || self.has_nested_view(b),
+            t => self.contains_view(t),
+        }
+    }
+
     /// Whether some type reachable from `t` (its fields, elements, and what
     /// it boxes or points to) satisfies `bad`. Each type is visited once, so
     /// recursive types end; a type that grows as it recurses
@@ -652,7 +669,7 @@ impl Program {
     /// Whether a value of this type may hold a borrow of something else: a
     /// view, reference-like handle, raw pointer, function or interface value.
     pub fn may_borrow(&self, t: &Ty) -> bool {
-        t.contains_view()
+        self.contains_view(t)
             || self.reaches(t, &|t| matches!(t, Ty::Str | Ty::Slice(_) | Ty::MutexRef(_) | Ty::Task(_) | Ty::Scope | Ty::Func(_) | Ty::Iface(..) | Ty::Ptr(_) | Ty::Param(_) | Ty::Var(_) | Ty::Error) || matches!(t, Ty::Adt(d, _) if matches!(self.def(*d).kind, TypeDefKind::Iface { .. })))
     }
 

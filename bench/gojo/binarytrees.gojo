@@ -29,7 +29,7 @@ fn main() {
     println("stretch tree of depth", stretch, "check:", check(make(stretch)))
     let long = make(maxDepth)
     var d = minDepth
-    while d <= maxDepth{
+    while d <= maxDepth {
         let iterations = 1 << (maxDepth - d + minDepth)
         var sum = 0
         for _ in 0..iterations {
