@@ -1,0 +1,10 @@
+fixtures/*.ndjson
+fixtures/*.log
+fixtures/products.json
+fixtures/manifest.json
+rust/target/
+/bin/
+__pycache__/
+/tmp/
+*.exe
+*.pyc

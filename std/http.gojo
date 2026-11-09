@@ -585,7 +585,7 @@ fn handleOne[H: Handler + send](c: Stream, buf: inout Vec[byte], h: H, opts: Opt
         _ = writeResponse(c, stopping(), false, true)
         return (.Stopped, false)
     }
-    // each task writes its own variable
+    // the watcher and the handler each write their own variable
     var result = Response{status: 0}
     var hungUp = false
     var early = Vec[byte]{}
@@ -599,13 +599,12 @@ fn handleOne[H: Handler + send](c: Stream, buf: inout Vec[byte], h: H, opts: Opt
                 s.cancel()
             }
         }
-        // the handler, under the deadline; when done it stops the watcher
-        go () => {
-            if let r = task.timeout(opts.deadline, () => h.serve(req)) {
-                result = r
-            }
-            s.cancel()
+        // the handler, in the body (s.cancel() cancels it too, so no task of
+        // its own), under the deadline; when done it stops the watcher
+        if let r = task.timeout(opts.deadline, () => h.serve(req)) {
+            result = r
         }
+        s.cancel()
     }
     if hungUp {
         return (.HungUp, false)

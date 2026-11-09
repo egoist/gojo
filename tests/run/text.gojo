@@ -5,6 +5,30 @@ fn main() {
     println("aaaa".count("aa"), "héllo".count(""), "abcabc".count("bc"), "".count("x"))
     println(s.splitN("=", 2), s.splitN("=", 1), s.splitN("=", 0), s.splitN("=", 9), "héj".splitN("", 2), "ab".splitN("", 5))
     println("key=value=x".splitOnce("="), "novalue".splitOnce("="), "=".splitOnce("="))
+    // split counts the pieces first and keeps the first 32 cuts it found:
+    // past them, and with separators longer than a byte or overlapping
+    var words: String = "w0"
+    for i in 1..40 {
+        words.push(" w${i}")
+    }
+    let ws = words.split(" ")
+    println(ws.len(), ws[31], ws[32], ws[39], ws.join(" ") == words, words.splitN(" ", 35).len(), words.splitN(" ", 35)[34])
+    println("x<>y<><>z".split("<>"), "aaaaa".split("aa"), "aaaaa".splitN("aa", 2), "".split(","), ",".split(","), ",".repeat(40).split(",").len())
+    // == on every length up to 17: equal copies, and one byte changed at the
+    // start, the middle or the end, or one more byte
+    var eqs: String = ""
+    for n in 0..18 {
+        let a = "abcdefghijklmnopq"[0..n].toString()
+        eqs.push(if a == a.clone() { "T" } else { "F" })
+        if n > 0 {
+            for i in [0, n / 2, n - 1] {
+                let b = a[0..i] + "Z" + a[i + 1..]
+                eqs.push(if a == b { "T" } else { "F" })
+            }
+        }
+        eqs.push(if a == a + "q" { "T " } else { "F " })
+    }
+    println(eqs)
     println("prefix-body".trimPrefix("prefix-"), "body".trimPrefix("x"), "file.tar.gz".trimSuffix(".gz"), "a".trimSuffix("abc"))
     println("--a-b--".trimChars("-"), "xyhixy".trimChars("xy"), "ééaé".trimChars("é"), "----".trimChars("-").len(), "abc".trimChars(""))
     println("Hello".equalFold("hELLO"), "Σίσυφος".equalFold("ΣΊΣΥΦΟΣ"), "Straße".equalFold("STRASSE"), "a".equalFold("ab"), "K".equalFold("\u{212A}"))

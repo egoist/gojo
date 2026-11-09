@@ -10,6 +10,10 @@
 //   try out.flush()
 use std/io
 
+fn __indexByte(s: []byte, c: byte) -> int
+fn __append(v: inout Vec[byte], s: []byte)
+fn __dropFront(v: inout Vec[byte], n: int)
+
 // Reads from `R` in large chunks, and line by line.
 pub struct Reader[R: io.Reader] {
     src: R
@@ -24,11 +28,7 @@ pub struct Reader[R: io.Reader] {
         }
         if self.pos > 0 {
             // drop what was consumed
-            var rest = Vec[byte]{}
-            for i in self.pos..self.buf.len() {
-                rest.push(self.buf[i])
-            }
-            self.buf = rest
+            __dropFront(&self.buf, self.pos)
             self.pos = 0
         }
         let n = try self.src.read(&self.buf, 65536)
@@ -53,35 +53,54 @@ pub struct Reader[R: io.Reader] {
     // Everything up to and including `delim` (or to the end), or none when
     // nothing is left.
     pub fn readUntil(inout self, delim: byte) -> ?Vec[byte] ! io.Error {
-        var out = Vec[byte]{}
-        loop {
-            while self.pos < self.buf.len() {
-                let b = self.buf[self.pos]
-                self.pos += 1
-                out.push(b)
-                if b == delim {
-                    return some(out)
-                }
-            }
-            if !try self.fill() {
-                if out.len() == 0 {
-                    return none
-                }
-                return some(out)
-            }
+        let end = try self.scan(delim)
+        if end == self.pos {
+            return none
         }
+        var out = Vec[byte]{}
+        __append(&out, self.buf[self.pos..end])
+        self.pos = end
+        return some(out)
     }
 
     // The next line without its "\n" (or "\r\n"), or none at the end.
     pub fn readLine(inout self) -> ?String ! io.Error {
-        var b = try self.readUntil(10) ?? return none
-        if b.len() > 0 && b[b.len() - 1] == 10 {
-            _ = b.pop()
-            if b.len() > 0 && b[b.len() - 1] == 13 {
-                _ = b.pop()
+        let end = try self.scan(10)
+        if end == self.pos {
+            return none
+        }
+        var stop = end
+        if self.buf[stop - 1] == 10 {
+            stop -= 1
+            if stop > self.pos && self.buf[stop - 1] == 13 {
+                stop -= 1
             }
         }
-        return some(String(b))
+        let line = String(self.buf[self.pos..stop])
+        self.pos = end
+        return some(line)
+    }
+
+    // Buffers input until it holds `delim` (or the stream ends), and returns
+    // the index just past it (or the end of the buffer). Reading resumes where
+    // the last search stopped, so a long line is scanned once. On an error the
+    // buffered bytes are dropped, as if they had been read.
+    fn scan(inout self, delim: byte) -> int ! io.Error {
+        errdefer {
+            self.pos = self.buf.len()
+        }
+        var from = self.pos
+        loop {
+            let i = __indexByte(self.buf[from..], delim)
+            if i >= 0 {
+                return from + i + 1
+            }
+            let seen = self.buf.len() - self.pos
+            if !try self.fill() {
+                return self.buf.len()
+            }
+            from = self.pos + seen
+        }
     }
 
     // As an io.Reader: what is buffered first.
@@ -91,12 +110,15 @@ pub struct Reader[R: io.Reader] {
                 return 0
             }
         }
-        var n = 0
-        while n < max && self.pos < self.buf.len() {
-            buf.push(self.buf[self.pos])
-            self.pos += 1
-            n += 1
+        var n = self.buf.len() - self.pos
+        if n > max {
+            n = max
         }
+        if n <= 0 {
+            return 0
+        }
+        __append(&buf, self.buf[self.pos..self.pos + n])
+        self.pos += n
         return n
     }
 
@@ -133,9 +155,7 @@ pub struct Writer[W: io.Writer] {
         if data.len() >= self.size {
             return self.dst.write(data)
         }
-        for b in data {
-            self.buf.push(b)
-        }
+        __append(&self.buf, data)
     }
 
     // Buffers the bytes of `s`.

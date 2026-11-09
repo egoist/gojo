@@ -11,7 +11,76 @@ fn lines(text: str) ! io.Error {
     }
 }
 
+// A reader that gives at most `step` bytes a call, and fails the first call
+// at or past byte `failAt` (once).
+struct Trickle {
+    data: Vec[byte]
+    step: int
+    failAt: int = -1
+    pos: int = 0
+
+    fn read(inout self, buf: inout Vec[byte], max: int) -> int ! io.Error {
+        if self.failAt >= 0 && self.pos >= self.failAt {
+            self.failAt = -1
+            return err(io.Error{kind: .Other, msg: "trickle failed"})
+        }
+        var n = 0
+        while n < self.step && n < max && self.pos < self.data.len() {
+            buf.push(self.data[self.pos])
+            self.pos += 1
+            n += 1
+        }
+        return n
+    }
+}
+
+fn trickle(text: str, step: int, failAt: int) -> bufio.Reader[Trickle] {
+    return bufio.reader(Trickle{data: text.bytes().toVec(), step: step, failAt: failAt})
+}
+
+// readLine until the end.
+fn trickleLines(text: str, step: int) {
+    var r = trickle(text, step, -1)
+    loop {
+        let line = r.readLine().unwrap() ?? break
+        print("[" + line + "]")
+    }
+    println()
+}
+
 fn main() {
+    // lines and "\r\n" split across reads; at the end, a "\r" with no "\n"
+    // after it stays
+    trickleLines("ab\r\ncd\n\r\nlast\r", 3)
+    trickleLines("ab\r\ncd\n\r\nlast\r", 1)
+    // a failed read drops the part of the line read so far; reading goes on.
+    // (Separate calls, not a loop: one call site that gets an error and then a
+    // value trips TypeSanitizer on how results are built, whatever bufio does.)
+    var failing = trickle("one\ntwo\nthree\n", 5, 6)
+    let one = failing.readLine().unwrap() ?? "<end>"
+    let two = failing.readLine().unwrap() ?? "<end>"
+    let failed = failing.readLine().isErr()
+    let after = failing.readLine().unwrap() ?? "<end>"
+    let end = failing.readLine().unwrap() ?? "<end>"
+    println(one, two, failed, after, end)
+
+    // a line longer than the buffer's 64 KB reads, needing several fills
+    var long = bufio.reader(io.textReader("x".repeat(200000) + "\ny"))
+    println(long.readLine().unwrap().unwrap().len(), long.readLine().unwrap().unwrap())
+
+    // readUntil keeps the delimiter, across reads too
+    var until = trickle("k=v;key=value;tail", 4, -1)
+    loop {
+        let field = until.readUntil(59).unwrap() ?? break
+        print("[" + String(field) + "]")
+    }
+    println()
+
+    // read hands over what is buffered, at most `max` at a time
+    var mixed = trickle("hello\nworld", 64, -1)
+    var got = Vec[byte]{}
+    println(mixed.readLine().unwrap().unwrap(), mixed.read(&got, 3).unwrap(), mixed.read(&got, 10).unwrap(), mixed.read(&got, 10).unwrap(), String(got))
+
     lines("one\ntwo\r\nthree") catch e { println(e.message()) }
     lines("") catch e { println(e.message()) }
     lines("\n\n") catch e { println(e.message()) }
