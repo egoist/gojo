@@ -2184,6 +2184,14 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
                     vec![]
                 }
             };
+            // a struct with fields that view others (`of`): its fields are
+            // changed only together, by its own code
+            if let Ty::Adt(d, _) = &owner {
+                if self.prog.def(*d).is_struct() && self.prog.def(*d).fields().iter().any(|f| f.of.is_some()) && writes_static_field(body) && self.static_err.is_none() {
+                    let l = self.sm.file(span.file).line_col(span.lo);
+                    self.static_err = Some(format!("{}:{}:{}: `static for` changes the fields of `{}` (in `{}`), whose fields view others (`of`): they can't be changed one by one", self.sm.file(span.file).path, l.0, l.1, self.prog.show(&owner), self.prog.func(fs.tf.func).name));
+                }
+            }
             let saved = (fs.subst.get(&fp).cloned(), fs.static_cur.get(&fp).cloned());
             for (fname, fty) in fields {
                 fs.subst.insert(fp, fty);
@@ -4920,12 +4928,13 @@ static bool mr_{m}(gojo_map *mp, const {k} *key, {e} *out) {{\n\
                 let fp = *fp;
                 let here = self.prog.func(fs.tf.func).pkg;
                 let fields = match &t {
-                    Ty::Adt(d, a) if self.prog.def(*d).is_struct() && !self.prog.def(*d).newtype && !self.prog.def(*d).view && (self.prog.def(*d).pkg == here || self.prog.def(*d).tuple || self.prog.def(*d).fields().iter().all(|f| f.declared_pub)) => self.prog.field_tys(*d, a),
+                    Ty::Adt(d, a) if self.prog.def(*d).is_struct() && !self.prog.def(*d).newtype && !self.prog.def(*d).view && !self.prog.def(*d).fields().iter().any(|f| f.of.is_some()) && (self.prog.def(*d).pkg == here || self.prog.def(*d).tuple || self.prog.def(*d).fields().iter().all(|f| f.declared_pub)) => self.prog.field_tys(*d, a),
                     _ => {
                         if self.static_err.is_none() {
                             let l = self.sm.file(_sp.file).line_col(_sp.lo);
                             let why = match &t {
                                 Ty::Adt(d, _) if self.prog.def(*d).view => "is a view struct (its views would come from nowhere the borrow checker sees)",
+                                Ty::Adt(d, _) if self.prog.def(*d).is_struct() && self.prog.def(*d).fields().iter().any(|f| f.of.is_some()) => "has fields that view others (`of`), which must be built together",
                                 Ty::Adt(d, _) if self.prog.def(*d).is_struct() && !self.prog.def(*d).newtype => "has fields private to its package",
                                 _ => "isn't a struct: guard it with `static if T: struct`",
                             };
@@ -8028,4 +8037,28 @@ fn bounded_funcs(tfuncs: &[TFunc], may_recurse: &HashSet<FuncId>) -> HashSet<Fun
         }
     }
     out
+}
+
+/// Whether `body` assigns, lends `inout` or moves out of a `static for`
+/// field (`x.[f] = v`, `f(&x.[f])`, `take(x.[f])`).
+fn writes_static_field(body: &TBlock) -> bool {
+    fn through(e: &TExpr) -> bool {
+        match &e.kind {
+            TK::StaticField { .. } => true,
+            TK::Field { base, .. } | TK::Index { base, .. } | TK::Deref(base) | TK::OptField { base, .. } => through(base),
+            TK::Coerce(_, x) => through(x),
+            _ => false,
+        }
+    }
+    let mut found = false;
+    walk_block(body, &mut |n| match n {
+        Node::Stmt(TStmt::Assign { place, .. }) if through(place) => found = true,
+        Node::Expr(e) => match &e.kind {
+            TK::Call { args, .. } | TK::Intrinsic { args, .. } if args.iter().any(|a| !matches!(a.mode, ArgMode::Borrow) && through(&a.e)) => found = true,
+            TK::Move(x) if through(x) => found = true,
+            _ => {}
+        },
+        _ => {}
+    });
+    found
 }

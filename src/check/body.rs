@@ -881,6 +881,14 @@ impl Checker {
                     Ty::Adt(d, _) => (self.prog.def(*d).fields().get(*index).map(|f| f.name.clone()).unwrap_or_default(), self.prog.def(*d).has_drop || (self.prog.def(*d).linear && self.prog.def(*d).pkg != cx.env.pkg)),
                     _ => (String::new(), false),
                 };
+                // a field other fields view (`of`) is frozen: it can't
+                // change or move under them
+                let frozen = matches!(bty, Ty::Adt(d, _) if self.prog.def(*d).is_struct() && self.prog.def(*d).fields().get(*index).is_some_and(|f| f.frozen));
+                if frozen {
+                    let Ty::Adt(d, _) = bty else { unreachable!() };
+                    let by: Vec<String> = self.prog.def(*d).fields().iter().filter(|f| f.of == Some(*index)).map(|f| format!("`{}`", f.name)).collect();
+                    return Some(PInfo { root: b.root, owned: false, mutable: false, desc: format!("field `{}` of {}, which {} views (`of {}`): it can't change or move", fname, b.desc, by.join(" and "), fname) });
+                }
                 Some(PInfo { root: b.root, owned: b.owned && !has_drop, mutable: b.mutable, desc: format!("field `{}` of {}", fname, b.desc) })
             }
             TK::Deref(base) => {

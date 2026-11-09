@@ -1,0 +1,89 @@
+// A struct that owns its text and keeps views into it (`of`): built once,
+// then moved, returned, stored and sent like any owned value.
+use std/task
+
+struct Doc {
+    text: String
+    words: Vec[str] of text
+    longest: str of text
+
+    // the views it stores point into its own text
+    fn add(inout self, from: int) {
+        self.words.push(self.text[from..])
+    }
+
+    fn word(self, i: int) -> str {
+        return self.words[i]
+    }
+}
+
+fn load(text: sink String) -> Doc {
+    var d = Doc{text, words: text.splitViews(" "), longest: ""}
+    for w in d.words {
+        if w.len() > d.longest.len() {
+            d.longest = w
+        }
+    }
+    return d
+}
+
+// a long-lived owner: docs by name
+struct Library {
+    docs: Map[String, Doc]
+}
+
+// views into a vector of numbers it owns
+struct Runs[T] {
+    data: Vec[T]
+    runs: Vec[[]T] of data
+}
+
+fn runs(data: sink Vec[int]) -> Runs[int] {
+    var out = Vec[[]int]{}
+    var start = 0
+    for i in 1..data.len() + 1 {
+        if i == data.len() || data[i] != data[start] {
+            out.push(data[start..i])
+            start = i
+        }
+    }
+    return Runs[int]{data, runs: out}
+}
+
+struct Named {
+    node: Box[String]
+    first: str of node
+}
+
+fn count(d: sink Doc) -> int {
+    return d.words.len()
+}
+
+fn main() {
+    var d = load("the quick brown fox jumps".toString())
+    println(d.words.len(), d.longest, d.word(1))
+    d.add(10)
+    println(d.words[5])
+    var lib = Library{docs: [:]}
+    lib.docs["a"] = d
+    lib.docs["b"] = load("lazy dog".toString())
+    if let x = lib.docs.get("b") {
+        println(x.longest, x.words)
+    }
+    // a task takes one along with its views
+    let docs = [load("one two three".toString()), load("four".toString())]
+    let counts = task.map(docs, 2, x => x.words.len())
+    println(counts)
+    let n = scope {
+        let t = go count(load("a b c d".toString()))
+        t.join()
+    }
+    println(n)
+    let r = runs([1, 1, 2, 3, 3, 3])
+    for run in r.runs {
+        println(run)
+    }
+    let s = "boxed text".toString()
+    let named = Named{node: Box(s), first: s[0..5]}
+    println(named.node.len(), named.first)
+}

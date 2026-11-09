@@ -1,0 +1,54 @@
+// What could change a field declared `of` without its views being checked.
+view struct Tok {
+    text: str
+}
+
+struct Doc {
+    text: String
+    words: Vec[str] of text
+    first: ?str of text
+    idx: Map[str, str] of text
+    toks: Vec[Tok] of text
+
+    fn wordsMut(inout self) yield inout Vec[str] {
+        yield self.words
+    }
+}
+
+struct Arr {
+    node: Box[[4]int]
+    part: []int of node
+}
+
+fn arr() -> Arr {
+    let a: [4]int = [1, 2, 3, 4]
+    return Arr{node: Box(a), part: a[0..2]}
+}
+
+fn main() {
+    let t = "a b".toString()
+    let other = "zz".toString()
+    var d = Doc{text: t, words: t.splitViews(" "), first: none, idx: [:], toks: Vec[Tok]{}}
+    for w in &d.words {
+        w = other
+    }
+    if let x = d.first {
+        x = other
+    }
+    if let e = d.idx.getMut("k") {
+        e = other
+    }
+    for k in &d.toks {
+        k.text = other
+    }
+    let mu = Mutex(&d.words)
+    with g = mu.lock() {
+        g.push(other)
+    }
+    println(d.words, arr().part)
+}
+// error: `words` holds views of `text` (`of text`), so it can't be lent through a changeable reference
+// error: `first` holds views of `text` (`of text`), so it can't be lent through a changeable reference
+// error: `idx` holds views of `text` (`of text`), so it can't be lent through a changeable reference
+// error: `toks` holds views of `text` (`of text`), so it can't be lent through a changeable reference
+// error: `part` views `a`, whose data is in the variable itself

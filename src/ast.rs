@@ -117,6 +117,9 @@ pub struct FuncDecl {
 pub struct FieldDecl {
     pub name: String,
     pub ty: TypeExpr,
+    /// `words: Vec[str] of text`: its views point into the field `text` of
+    /// the same value (spec 5.4).
+    pub of: Option<(String, Span)>,
     pub default: Option<Expr>,
     pub is_pub: bool,
     pub embedded: bool,

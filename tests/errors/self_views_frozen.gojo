@@ -1,0 +1,17 @@
+// The field other fields view (`of`) can't change, move or be copied apart
+// from them.
+struct Doc {
+    text: String
+    words: Vec[str] of text
+}
+
+fn main() {
+    var d = Doc{text: "a b".toString(), words: Vec[str]{}}
+    d.text.push("c")
+    d.text = "x".toString()
+    let c = d.clone()
+    println(c.words.len())
+}
+// error: cannot call `push` (it modifies its receiver) on field `text` of variable `d`, which `words` views (`of text`): it can't change or move
+// error: cannot assign to field `text` of variable `d`, which `words` views (`of text`)
+// error: `Doc` cannot be cloned

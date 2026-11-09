@@ -1,0 +1,23 @@
+// A view struct holding a view collection or owned data is moved, not copied,
+// and still lives only in variables.
+view struct Token {
+    text: str
+}
+
+view struct Ast {
+    src: str
+    toks: Vec[Token]
+    nodes: Vec[int]
+}
+
+fn main() {
+    var text = "a b".toString()
+    var ast = Ast{src: text, toks: Vec[Token]{}, nodes: Vec[int]{}}
+    ast.toks.push(Token{text: text[0..1]})
+    let other = ast
+    println(ast.src)
+    text.push("c")
+    println(other.src)
+}
+// error: use of `ast` after it was moved
+// error: cannot modify `text` while it is borrowed by `other`

@@ -1,0 +1,27 @@
+// What `of` may name: another field of the same struct that owns its data on
+// the heap; and the field it views can't change.
+struct A {
+    data: [4]int
+    part: []int of data
+}
+
+struct B {
+    text: String
+    n: int of text
+}
+
+struct C {
+    text: String
+    w: str of missing
+}
+
+view struct D {
+    text: str
+    w: str of text
+}
+
+fn main() {}
+// error: `data` is a `[4]int`: a field viewed with `of` is a `String`, `Vec` or `Box`
+// error: `of` says what a field's views point into, but `int` is not a view
+// error: `missing` is not a field of `C`
+// error: `of` is for a struct that owns what its views point into; `D` is a view type

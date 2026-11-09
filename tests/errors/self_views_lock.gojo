@@ -1,0 +1,8 @@
+// A field viewed with `of` can't change at all, not even through a lock.
+struct Doc {
+    text: Box[RwLock[String]]
+    first: str of text
+}
+
+fn main() {}
+// error: `text` holds `Box[RwLock[String]]`, whose insides can change through a lock or cell

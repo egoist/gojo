@@ -751,16 +751,22 @@ impl Parser {
                     TypeExprKind::Named { path, .. } => path.last().unwrap().clone(),
                     _ => unreachable!(),
                 };
-                fields.push(FieldDecl { name, ty, default: None, is_pub, embedded: true, span: self.sp_from(lo) });
+                fields.push(FieldDecl { name, ty, of: None, default: None, is_pub, embedded: true, span: self.sp_from(lo) });
                 self.end_stmt()?;
                 continue;
             }
             let names = vec![self.ident()?];
             self.colon("a field", "")?;
             let ty = self.ty()?;
+            let of = if matches!(self.peek(), Tok::Ident(s) if s == "of") {
+                self.bump();
+                Some(self.ident()?)
+            } else {
+                None
+            };
             let default = if self.eat_p("=") { Some(self.expr()?) } else { None };
             for (n, sp) in names {
-                fields.push(FieldDecl { name: n, ty: ty.clone(), default: default.clone(), is_pub, embedded: false, span: sp });
+                fields.push(FieldDecl { name: n, ty: ty.clone(), of: of.clone(), default: default.clone(), is_pub, embedded: false, span: sp });
             }
             if !self.eat_p(",") {
                 self.end_stmt()?;

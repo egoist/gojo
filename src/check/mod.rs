@@ -181,8 +181,8 @@ impl Checker {
             for ii in 0..self.files[fi].items.len() {
                 let item = &self.files[fi].items[ii];
                 let (name, kind, tps, is_copy, unsafe_send, view, linear) = match &item.kind {
-                    ast::ItemKind::Struct(s) => (s.name.clone(), TypeDefKind::Struct { fields: vec![] }, s.tparams.clone(), s.is_copy || s.is_view, s.unsafe_send, s.is_view, s.is_linear),
-                    ast::ItemKind::Enum(e) => (e.name.clone(), TypeDefKind::Enum { variants: vec![] }, e.tparams.clone(), e.is_copy || e.is_view, false, e.is_view, e.is_linear),
+                    ast::ItemKind::Struct(s) => (s.name.clone(), TypeDefKind::Struct { fields: vec![] }, s.tparams.clone(), s.is_copy, s.unsafe_send, s.is_view, s.is_linear),
+                    ast::ItemKind::Enum(e) => (e.name.clone(), TypeDefKind::Enum { variants: vec![] }, e.tparams.clone(), e.is_copy, false, e.is_view, e.is_linear),
                     // (for interfaces, `unsafe_send` records `send interface`)
                     ast::ItemKind::Interface(i) => (i.name.clone(), TypeDefKind::Iface { methods: vec![], type_set: None }, i.tparams.clone(), false, i.is_send, false, false),
                     ast::ItemKind::TypeAlias { newtype: true, name, tparams, .. } => (name.clone(), TypeDefKind::Struct { fields: vec![] }, tparams.clone(), false, false, false, false),
@@ -251,15 +251,18 @@ impl Checker {
                             self.err(f.span, format!("duplicate field `{}`", f.name));
                         }
                         let ty = self.resolve_type(&f.ty, &env);
-                        self.check_field_view(id, &ty, f.ty.span, &f.name);
-                        fields.push(FieldInfo { name: f.name.clone(), ty, default: None, is_pub: f.is_pub || self.prog.packages[self.prog.def(id).pkg as usize].is_std, declared_pub: f.is_pub, embedded: f.embedded, span: f.span });
+                        if f.of.is_none() {
+                            self.check_field_view(id, &ty, f.ty.span, &f.name);
+                        }
+                        fields.push(FieldInfo { name: f.name.clone(), ty, of: None, frozen: false, default: None, is_pub: f.is_pub || self.prog.packages[self.prog.def(id).pkg as usize].is_std, declared_pub: f.is_pub, embedded: f.embedded, span: f.span });
                     }
+                    self.self_views(id, s, &mut fields);
                     self.prog.types[id as usize].kind = TypeDefKind::Struct { fields };
                 }
                 ast::ItemKind::TypeAlias { ty, .. } => {
                     let t = self.resolve_type(ty, &env);
                     let is_copy = self.is_copy(&t);
-                    self.prog.types[id as usize].kind = TypeDefKind::Struct { fields: vec![FieldInfo { name: "value".into(), ty: t, default: None, is_pub: true, declared_pub: false, embedded: false, span: item.span }] };
+                    self.prog.types[id as usize].kind = TypeDefKind::Struct { fields: vec![FieldInfo { name: "value".into(), ty: t, of: None, frozen: false, default: None, is_pub: true, declared_pub: false, embedded: false, span: item.span }] };
                     self.prog.types[id as usize].is_copy = is_copy;
                 }
                 ast::ItemKind::Enum(e) => {
@@ -454,11 +457,13 @@ impl Checker {
         }
         // Package-private, non-generic types are `copy` when all their fields
         // are (exported types must say `copy`, so adding a field to a public
-        // type never silently changes how downstream code compiles).
+        // type never silently changes how downstream code compiles). View
+        // types are too, public or not: one that holds a view collection or
+        // owned data owns memory, and is moved like it (spec 5.4).
         let mut auto: Vec<DefId> = (0..self.prog.types.len() as DefId)
             .filter(|&d| {
                 let def = self.prog.def(d);
-                !def.is_pub && !def.is_copy && !def.linear && def.tparams.is_empty() && !def.has_drop && !matches!(def.kind, TypeDefKind::Iface { .. }) && !self.prog.packages[def.pkg as usize].is_std
+                !def.is_copy && !def.linear && !def.has_drop && !matches!(def.kind, TypeDefKind::Iface { .. }) && (def.view || (!def.is_pub && def.tparams.is_empty() && !self.prog.packages[def.pkg as usize].is_std))
             })
             .collect();
         for &d in &auto {
@@ -498,20 +503,15 @@ impl Checker {
                 for t in tys {
                     if !self.is_copy(&t) {
                         let s = self.prog.show(&t);
-                        if def.view {
-                            self.diags.push(Diag::new(def.span, format!("`{}` is a view type, so it can only hold views and copy values, and `{}` is neither", def.name, s)).note(None, "a view type is copied like `str` and never dropped: keep owned data (`String`, `Vec[T]`) in an ordinary variable or struct beside it"));
-                        } else {
-                            self.err(def.span, format!("`{}` is declared `copy` but contains `{}`, which is not copy", def.name, s));
-                        }
+                        self.err(def.span, format!("`{}` is declared `copy` but contains `{}`, which is not copy", def.name, s));
                     }
                 }
                 if def.has_drop {
-                    if def.view {
-                        self.err(def.span, format!("`{}` is a view type, which is never dropped: it can't have a `drop` method", def.name));
-                    } else {
-                        self.err(def.span, format!("`{}` is declared `copy` but has a `drop` method", def.name));
-                    }
+                    self.err(def.span, format!("`{}` is declared `copy` but has a `drop` method", def.name));
                 }
+            }
+            if def.view && def.has_drop {
+                self.err(def.span, format!("`{}` is a view type: it can't have a `drop` method (dropping one only frees memory, at its last use)", def.name));
             }
             if def.linear && def.has_drop {
                 self.err(def.span, format!("`{}` is linear, so it is never dropped implicitly: it can't have a `drop` method; its `sink self` methods end its values", def.name));
@@ -1405,6 +1405,53 @@ impl Checker {
     /// A field or enum payload `name` of type `ty` in type `owner`. Only a
     /// `view` type may hold views, and only views that can sit in a variable
     /// (not task handles, scopes or lock guards, which their blocks track).
+    /// `words: Vec[str] of text` (spec 5.4): a field whose views point into
+    /// another field of the same value. That field's data is on the heap
+    /// (a `String`, `Vec` or `Box`), so moving the value doesn't move what
+    /// the views point into; it is frozen, so it can't change under them.
+    fn self_views(&mut self, owner: DefId, s: &ast::StructDecl, fields: &mut [FieldInfo]) {
+        for (i, f) in s.fields.iter().enumerate() {
+            let Some((src, sp)) = &f.of else { continue };
+            let def = self.prog.def(owner);
+            if def.view || s.is_copy {
+                self.err(*sp, format!("`of` is for a struct that owns what its views point into; `{}` is a {} type", s.name, if def.view { "view" } else { "copy" }));
+                continue;
+            }
+            let Some(j) = s.fields.iter().position(|g| &g.name == src) else {
+                self.err(*sp, format!("`{}` is not a field of `{}`", src, s.name));
+                continue;
+            };
+            if j == i || s.fields[j].of.is_some() {
+                self.err(*sp, format!("`{}` must be a field that owns its data: a `String`, `Vec` or `Box` without `of`", src));
+                continue;
+            }
+            // frozen means nothing inside changes either: no locks or cells
+            let inner_mut = |p: &Program, t: &Ty| matches!(t, Ty::Mutex(_) | Ty::Cell(_) | Ty::MutexRef(_)) || matches!(t, Ty::Adt(d, _) if p.def(*d).unsafe_send);
+            if self.prog.reaches(&fields[j].ty, &|t| inner_mut(&self.prog, t)) {
+                let t = self.prog.show(&fields[j].ty);
+                self.diags.push(Diag::new(*sp, format!("`{}` holds `{}`, whose insides can change through a lock or cell: a field viewed with `of` must not change at all", src, t)).note(None, "keep what can change in another field"));
+                continue;
+            }
+            if !matches!(fields[j].ty, Ty::String | Ty::Vec(_) | Ty::Box(_)) || self.prog.is_view(&fields[j].ty) {
+                let t = self.prog.show(&fields[j].ty);
+                self.diags.push(Diag::new(*sp, format!("`{}` is a `{}`: a field viewed with `of` is a `String`, `Vec` or `Box`", src, t)).note(None, "their data is on the heap, so it stays where it is when the struct moves; data held in the struct itself would move"));
+                continue;
+            }
+            if !self.prog.is_view(&fields[i].ty) {
+                let t = self.prog.show(&fields[i].ty);
+                self.err(*sp, format!("`of` says what a field's views point into, but `{}` is not a view", t));
+                continue;
+            }
+            if self.prog.reaches(&fields[i].ty, &|t| matches!(t, Ty::Task(_) | Ty::Scope | Ty::MutexRef(_))) {
+                let t = self.prog.show(&fields[i].ty);
+                self.err(*sp, format!("`{}` can't hold `{}`: task handles, scopes and lock guards live only in the variables their blocks track", s.name, t));
+                continue;
+            }
+            fields[i].of = Some(j);
+            fields[j].frozen = true;
+        }
+    }
+
     fn check_field_view(&mut self, owner: DefId, ty: &Ty, sp: Span, name: &str) {
         if !self.prog.is_view(ty) {
             return;
@@ -1552,6 +1599,10 @@ impl Checker {
                 // a linear value is consumed once: copies only where its
                 // own `clone` method says how
                 if self.prog.def(*d).has_drop || self.prog.def(*d).linear {
+                    return false;
+                }
+                // a copy's views would still point into the original
+                if self.prog.def(*d).is_struct() && self.prog.def(*d).fields().iter().any(|f| f.of.is_some()) {
                     return false;
                 }
                 self.all_fields(*d, args, "clone", &|c, t| c.is_clone(t))

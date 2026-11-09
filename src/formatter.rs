@@ -255,6 +255,8 @@ fn layout(src: &str) -> Result<String, String> {
                             // `f()[0]`, `xs[1]`, `Vec[int]`
                             (Tok::P(")") | Tok::Str(_) | Tok::Interp(_) | Tok::Ident(_), Tok::P("[")) => false,
                             (_, Tok::P("[")) => !(matches!(pt, Tok::P(")" | "]"))),
+                            // `Vec[str] of text` (but `[]int`, `[4]T`)
+                            (Tok::P("]"), Tok::Ident(w)) if w == "of" => true,
                             (Tok::P("]"), Tok::Ident(_) | Tok::Kw(Kw::Func)) => false,
                             (_, Tok::P("{")) => !(matches!(pt, Tok::Ident(_) | Tok::P("]")) && !header),
                             (Tok::P("{"), Tok::P("}")) => false,

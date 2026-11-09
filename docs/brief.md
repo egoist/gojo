@@ -79,7 +79,7 @@ interface Area {
 ## Ownership: no lifetimes
 
 - Parameters: borrow (default), `inout` (call with `&x`), `sink` (moves). Exclusive: `f(&a, a)` is an error.
-- References are second-class: views (`str`, `[]T`, `view struct`) live only in local variables, never in fields, collections or escaping closures. Keep owned data and `Span` ranges instead; `-> str of a` says which parameter a returned view points into.
+- References are second-class: views (`str`, `[]T`, `view struct`, and `Vec`/`Map` of views) live only in local variables, never in ordinary fields, boxes or escaping closures; `-> str of a` says which parameter a returned view points into. To keep views long-term, keep them with what they view: `struct Doc { text: String, words: Vec[str] of text }`, built as `Doc{text: t, words: t.splitViews(" ")}`, is an ordinary value (`text` is then frozen). Otherwise keep `Span` ranges.
 - `v[i]`, `m.get(k)`, `m.entry(k)`, `mu.lock()` are projections: they lend a reference for a statement or a block (`if let u = m.get(k) { }`, `with e = m.entry(k) { e += 1 }`).
 - Values are dropped when their owner's scope ends (memory is freed right after its last use). `drop(x)` drops early; a `fn drop(inout self)` method runs on drop.
 - Shared data: `Rc`/`Weak` (one task), `Arc`, `Cell`, `Mutex`, `RwLock`, `Atomic`, `Arena[T]` with `Id[T]`.

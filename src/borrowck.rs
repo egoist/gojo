@@ -29,6 +29,7 @@ pub fn check(prog: &Program, tfuncs: &[TFunc]) -> Vec<Diag> {
         }
         let view_ret = prog.is_view(&fd.ret) && fd.yields.is_none();
         let mut b = Bc::new(prog, tf, &proj, &rsrc, view_ret);
+        b.of_ref_bindings();
         let mut st = St::new();
         b.block(&mut st, &tf.body);
         b.end_scope_defers(&mut st);
@@ -928,6 +929,256 @@ impl<'a> Bc<'a> {
         }
     }
 
+    /// Where views stored into `target` may point when it is (or is inside)
+    /// a field declared `of f`: into field `f` of the same value. `None`
+    /// inside means the value isn't a place, so no view may go in.
+    fn self_view_target(&self, target: &TExpr) -> Option<(Option<Path>, String, String)> {
+        let mut e = target;
+        loop {
+            match &e.kind {
+                TK::Field { base, index } => {
+                    if let Ty::Adt(d, _) = &base.ty {
+                        let def = self.prog.def(*d);
+                        if def.is_struct() {
+                            if let Some(j) = def.fields().get(*index).and_then(|f| f.of) {
+                                let prefix = place_path(base).map(|(l, mut ps)| {
+                                    ps.push(j);
+                                    (l, ps)
+                                });
+                                return Some((prefix, def.fields()[*index].name.clone(), def.fields()[j].name.clone()));
+                            }
+                        }
+                    }
+                    e = base;
+                }
+                TK::Index { base, .. } | TK::MapIndex { base, .. } | TK::Deref(base) | TK::OptField { base, .. } | TK::StaticField { base, .. } => e = base,
+                TK::Coerce(_, x) | TK::ProjUnwrap { proj: x, .. } => e = x,
+                // `d.idx.entry(k)`, `d.words.getMut(i)`: a reference into the receiver
+                TK::Proj { call, .. } => match &call.kind {
+                    TK::Call { args, .. } if !args.is_empty() => e = &args[0].e,
+                    _ => return None,
+                },
+                _ => return None,
+            }
+        }
+    }
+
+    /// A reference that can change what a field declared `of` holds
+    /// (`for w in &d.words`, `with e = d.idx.entry(k)`, `Mutex(&d.words)`,
+    /// `yield d.words` from an `inout` projection): what is stored through it
+    /// can't be checked, so it may not hold views.
+    fn no_mut_ref_into_of(&mut self, place: &TExpr, sp: Span) {
+        if !self.prog.contains_view(&place.ty) {
+            return;
+        }
+        if let Some((_, field, of)) = self.self_view_target(place) {
+            self.err(Diag::new(sp, format!("`{}` holds views of `{}` (`of {}`), so it can't be lent through a changeable reference", field, of, of)).note(None, format!("change `{}` with direct assignments and calls (`d.{} = ...`, `d.{}.push(...)`), which check that what goes in views `{}`", field, field, field, of)));
+        }
+    }
+
+    /// Changeable references bound into fields declared `of` (spec 5.4):
+    /// `for w in &d.words`, `if let x = d.first { x = ... }`, `with e =
+    /// d.idx.getMut(k)`, `match` bindings.
+    fn of_ref_bindings(&mut self) {
+        let tf = self.tf;
+        // locals something writes through: assigned, lent `inout`, or bound
+        // by another changeable reference
+        let mut written: HashSet<LocalId> = HashSet::new();
+        walk_block(&tf.body, &mut |n| match n {
+            Node::Stmt(TStmt::Assign { place, .. }) => {
+                if let Some(l) = root_local(place).or_else(|| place_path(place).map(|p| p.0)) {
+                    written.insert(l);
+                }
+            }
+            Node::Stmt(TStmt::LetRef { place, .. } | TStmt::With { place, .. }) => {
+                if let Some(p) = place_path(place) {
+                    written.insert(p.0);
+                }
+            }
+            Node::Expr(e) => match &e.kind {
+                TK::Call { args, .. } | TK::Intrinsic { args, .. } => {
+                    for a in args.iter().filter(|a| matches!(a.mode, ArgMode::Inout)) {
+                        if let Some(p) = place_path(&a.e) {
+                            written.insert(p.0);
+                        }
+                    }
+                }
+                TK::MutexRef(x) => {
+                    if let Some(p) = place_path(x) {
+                        written.insert(p.0);
+                    }
+                }
+                _ => {}
+            },
+            _ => {}
+        });
+        let mutable = |l: LocalId| matches!(tf.locals[l as usize].kind, LocalKind::Ref { mutable: true }) && written.contains(&l);
+        let mut places: Vec<&TExpr> = vec![];
+        walk_block(&tf.body, &mut |n| match n {
+            Node::Stmt(TStmt::LetRef { local, place } | TStmt::With { local, place, .. }) if mutable(*local) => places.push(place),
+            Node::Stmt(TStmt::For { mutable: true, iter, .. } | TStmt::ParFor { mutable: true, iter, .. }) => places.push(iter),
+            Node::Stmt(TStmt::WithLocks { locals, places: ps, .. }) => {
+                for (l, p) in locals.iter().zip(ps) {
+                    if mutable(*l) {
+                        places.push(p);
+                    }
+                }
+            }
+            Node::Expr(TExpr { kind: TK::Match { scrut, arms, .. }, .. }) if arms.iter().any(|a| a.binds.iter().any(|b| mutable(*b))) => places.push(scrut),
+            _ => {}
+        });
+        for p in places {
+            self.no_mut_ref_into_of(p, p.span);
+        }
+    }
+
+    /// Views stored into a field declared `of f` must point into `f` of the
+    /// same value. True when `target` is such a field (checked).
+    fn check_self_view_store(&mut self, target: &TExpr, srcs: &[(Path, bool)], sp: Span) -> bool {
+        let Some((prefix, field, of)) = self.self_view_target(target) else { return false };
+        let bad = srcs.iter().find(|(p, _)| match &prefix {
+            Some((l, ps)) => p.0 != *l || !p.1.starts_with(ps),
+            None => true,
+        });
+        if let Some((p, _)) = bad {
+            let o = self.name(p);
+            self.err(Diag::new(sp, format!("`{}` may hold only views of `{}` of the same value (`of {}`), and this views `{}`", field, of, of, o)).note(None, format!("the value carries its views along wherever it goes, so they must point into what it owns: slice `{}` (or store an owned copy elsewhere)", of)));
+        }
+        true
+    }
+
+    /// The field that field `i` of type `t` views (`of`), if it views one.
+    fn of_field(&self, t: &Ty, i: usize) -> Option<usize> {
+        match t {
+            Ty::Adt(d, _) if self.prog.def(*d).is_struct() => self.prog.def(*d).fields().get(i).and_then(|f| f.of),
+            _ => None,
+        }
+    }
+
+    /// Whether `p` names data its variable owns, rather than what it views:
+    /// a path into a view struct that reaches a field that isn't a view, or a
+    /// view collection's buffer.
+    fn own_data(&self, p: &Path) -> bool {
+        let mut t = self.tf.locals[p.0 as usize].ty.clone();
+        for &i in &p.1 {
+            t = match &t {
+                Ty::Adt(d, args) if self.prog.def(*d).is_struct() => match self.prog.field_tys(*d, args).get(i) {
+                    Some(f) => f.1.clone(),
+                    None => return true,
+                },
+                _ => return true,
+            };
+            if !self.prog.is_view(&t) || self.prog.owning_view(&t) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Whether what `p` names keeps its data on the heap (a `String`, `Vec`
+    /// or `Box`), so moving the variable doesn't move what views of it see.
+    fn heap_path(&self, p: &Path) -> bool {
+        let mut t = self.tf.locals[p.0 as usize].ty.clone();
+        for &i in &p.1 {
+            t = match &t {
+                Ty::Adt(d, args) if self.prog.def(*d).is_struct() => match self.prog.field_tys(*d, args).get(i) {
+                    Some(f) => f.1.clone(),
+                    None => return false,
+                },
+                _ => return false,
+            };
+        }
+        matches!(t, Ty::String | Ty::Vec(_) | Ty::Box(_))
+    }
+
+    /// A struct with fields that view others of the same value (`of`).
+    fn self_viewing(&self, t: &Ty) -> bool {
+        matches!(t, Ty::Adt(d, _) if self.prog.def(*d).is_struct() && self.prog.def(*d).fields().iter().any(|f| f.of.is_some()))
+    }
+
+    /// `Doc{text: t, words: t.splitViews(" ")}`: the views stored in `words`
+    /// may point only into what goes into `text`, a local moved in whole (its
+    /// heap data moves with it) or a new value. They are checked first, and
+    /// the move of `t` comes after them: the views go into the struct along
+    /// with what they view.
+    fn self_view_lit(&mut self, st: &mut St, ty: &Ty, vals: &[TExpr]) {
+        let Ty::Adt(d, _) = ty else { return };
+        let fields = self.prog.def(*d).fields().to_vec();
+        // the local each viewed field takes, if it takes one
+        // (or a `Box` made of one: what the box holds keeps its heap data)
+        let src_of = |j: usize| -> Option<LocalId> {
+            let mut v = vals.get(j)?;
+            if let TK::Wrap(x) = &v.kind {
+                v = x;
+            }
+            match &v.kind {
+                TK::Move(x) | TK::Copy(x) => match x.kind {
+                    TK::Local(l) => Some(l),
+                    _ => None,
+                },
+                _ => None,
+            }
+        };
+        let n = self.loans.len();
+        let mut taken: Vec<LocalId> = vec![];
+        // locals moved in whole into the viewing fields: their loans travel too
+        let mut carriers: Vec<LocalId> = vec![];
+        for (i, f) in fields.iter().enumerate() {
+            if f.frozen {
+                continue;
+            }
+            let Some(v) = vals.get(i) else { continue };
+            self.expr(st, v);
+            let Some(j) = f.of else { continue };
+            if let TK::Move(x) = &v.kind {
+                if let TK::Local(h) = x.kind {
+                    carriers.push(h);
+                }
+            }
+            let allowed = src_of(j);
+            match self.view_sources(v) {
+                Ok(srcs) => {
+                    if let Some((p, _)) = srcs.iter().find(|(p, _)| Some(p.0) == allowed && !self.heap_path(p)) {
+                        let o = self.name(p);
+                        self.err(Diag::new(v.span, format!("`{}` views `{}`, whose data is in the variable itself: it stays behind when the value moves into `{}`", f.name, o, fields[j].name)).note(None, "only data on the heap moves along: a `String`'s or `Vec`'s buffer, or what a `Box` holds"));
+                    } else if let Some((p, _)) = srcs.iter().find(|(p, _)| Some(p.0) != allowed) {
+                        let o = self.name(p);
+                        let what = match allowed {
+                            Some(l) => format!("of `{}`, which goes into `{}`", self.tf.locals[l as usize].name, fields[j].name),
+                            None => format!("of `{}`", fields[j].name),
+                        };
+                        self.err(Diag::new(v.span, format!("`{}` may hold only views {}, and this one views `{}`", f.name, what, o)).note(None, format!("its views point into `{}` of the same value (`of {}`), which moves with it; build them from the variable you put in `{}`", fields[j].name, fields[j].name, fields[j].name)));
+                    }
+                }
+                Err(tsp) => {
+                    self.err(Diag::new(tsp, "this temporary value is dropped at the end of the statement, but a view of it would be kept").note(None, format!("view the value that goes into `{}`", fields[j].name)));
+                }
+            }
+            if let Some(l) = allowed {
+                taken.push(l);
+            }
+        }
+        // what the views borrowed now travels with them, inside the struct
+        let mut k = 0;
+        while k < self.loans.len() {
+            let l = &self.loans[k];
+            let temp = k >= n && l.holder.is_none();
+            let carried = l.holder.is_some_and(|h| carriers.contains(&h));
+            if (temp || carried) && !l.mutable && taken.contains(&l.target.0) {
+                self.loans.remove(k);
+            } else {
+                k += 1;
+            }
+        }
+        for (i, f) in fields.iter().enumerate() {
+            if f.frozen {
+                if let Some(v) = vals.get(i) {
+                    self.expr(st, v);
+                }
+            }
+        }
+    }
+
     fn do_move(&mut self, st: &mut St, e: &TExpr) {
         self.subexprs_of_place(st, e);
         if let Some(p) = place_path(e) {
@@ -993,6 +1244,9 @@ impl<'a> Bc<'a> {
     /// borrow comes from: borrowing again through an existing reference (a
     /// re-borrow) does not conflict with that reference's own loan.
     fn add_loans(&mut self, holder: LocalId, targets: Vec<(Path, bool)>, mutable: bool, sp: Span, st: &St, from: &TExpr) {
+        if mutable {
+            self.no_mut_ref_into_of(from, sp);
+        }
         let mut vias: Vec<LocalId> = vec![];
         visit_expr(from, &mut |e| {
             if let TK::Local(l) = e.kind {
@@ -1132,6 +1386,17 @@ impl<'a> Bc<'a> {
                     }
                 }
                 Ok(out)
+            }
+            // a field declared `of f` views field `f` of the same value
+            TK::Field { base, index } if self.of_field(&base.ty, *index).is_some() => {
+                let j = self.of_field(&base.ty, *index).unwrap();
+                match place_path(base) {
+                    Some((l, mut ps)) => {
+                        ps.push(j);
+                        Ok(vec![((l, ps), false)])
+                    }
+                    None => Err(base.span),
+                }
             }
             // a field of a view struct views what the struct does; where the
             // struct is its own source (a parameter), just that field of it,
@@ -1274,7 +1539,9 @@ impl<'a> Bc<'a> {
             // a view collection: what is returned may point into its buffer
             // (a slice of it), or only view what it views (an element: `str`)
             if self.prog.owning_view(&a.e.ty) && a.e.is_place() {
-                if points_into_buffer(self.prog, ret) {
+                // a view struct holding owned data (`name: String`): what is
+                // returned may point into that too
+                if points_into_buffer(self.prog, ret) || matches!(a.e.ty, Ty::Adt(..)) {
                     out.extend(self.targets(&a.e));
                 } else {
                     out.extend(self.view_sources(&a.e)?);
@@ -1424,8 +1691,9 @@ impl<'a> Bc<'a> {
             return;
         }
         if matches!(l.kind, LocalKind::Param(Mode::Inout)) {
-            // the caller can't see new borrows; re-slicing the view itself is fine
-            if let Some((p, _)) = srcs.iter().find(|(p, _)| p.0 != v) {
+            // the caller can't see new borrows; re-slicing the view itself is
+            // fine, a view of data it owns (`self.name`) is not
+            if let Some((p, _)) = srcs.iter().find(|(p, _)| p.0 != v || self.own_data(p)) {
                 let o = self.name(p);
                 self.err(Diag::new(sp, format!("cannot store a view of `{}` in the `inout` parameter `{}`", o, name)).note(None, "the caller couldn't see that its variable now borrows this; return the view instead, or use an owned type"));
             }
@@ -1627,6 +1895,19 @@ impl<'a> Bc<'a> {
             TStmt::Expr(e) => self.expr(st, e),
             TStmt::Assign { place, op, value, .. } => {
                 self.expr(st, value);
+                // into a field declared `of f`: only views of `f`
+                if op.is_none() && self.prog.contains_view(&value.ty) {
+                    match self.view_sources(value) {
+                        Ok(srcs) => {
+                            self.check_self_view_store(place, &srcs, value.span);
+                        }
+                        Err(tsp) => {
+                            if self.self_view_target(place).is_some() {
+                                self.err(Diag::new(tsp, "this temporary value is dropped at the end of the statement, but a view of it would be kept"));
+                            }
+                        }
+                    }
+                }
                 if let (None, TK::Local(v)) = (op, &place.kind) {
                     if self.prog.is_view(&self.tf.locals[*v as usize].ty) {
                         // a `match` binding is a reference into the variable
@@ -1733,6 +2014,9 @@ impl<'a> Bc<'a> {
             }
             TStmt::Yield(e, _) => {
                 if let Some(e) = e {
+                    if self.prog.func(self.tf.func).yields == Some(crate::ast::YieldKind::Mut) {
+                        self.no_mut_ref_into_of(e, e.span);
+                    }
                     self.read(st, e);
                 }
                 *st = St::unreachable();
@@ -2192,7 +2476,10 @@ impl<'a> Bc<'a> {
                 }
             }
             TK::Unary { e: x, .. } | TK::Cast(x) | TK::SomeLit(x) | TK::OkLit(x) | TK::ErrLit(x) | TK::Coerce(_, x) | TK::Recv(x) | TK::Wrap(x) | TK::MakeChan(x) | TK::Unbox(x) => self.expr(st, x),
-            TK::MutexRef(p) => self.write(st, p),
+            TK::MutexRef(p) => {
+                self.no_mut_ref_into_of(p, p.span);
+                self.write(st, p)
+            }
             TK::OptField { base, .. } => self.expr(st, base),
             TK::Binary { op, l, r } => {
                 self.expr(st, l);
@@ -2210,6 +2497,7 @@ impl<'a> Bc<'a> {
                 self.expr(&mut s2, r);
                 st.join(&s2);
             }
+            TK::StructLit { fields, .. } if self.self_viewing(&e.ty) => self.self_view_lit(st, &e.ty, fields),
             TK::StructLit { fields, .. } => fields.iter().for_each(|f| self.expr(st, f)),
             TK::EnumLit { args, .. } => args.iter().for_each(|f| self.expr(st, f)),
             TK::VecLit(xs) | TK::ArrayLit(xs) => xs.iter().for_each(|x| self.expr(st, x)),
@@ -2642,10 +2930,21 @@ impl<'a> Bc<'a> {
         if srcs.is_empty() {
             return true;
         }
+        // a field declared `of f`: its views travel with the value
+        if self.check_self_view_store(target, &srcs, target.span) {
+            return true;
+        }
         self.check_storage(&root, target.span);
         // stored through a reference: in what it points into (not into
         // itself: `w = w[1..]` in `for w in &ws`)
         let v = self.owner_of(root.0);
+        // a view of data the variable owns itself (`self.toks.push(self.name
+        // .asStr())`): it would point into a value that changes or goes away
+        if let Some((p, _)) = srcs.iter().find(|(p, _)| p.0 == v && self.own_data(p)) {
+            let (o, name) = (self.name(p), self.tf.locals[v as usize].name.clone());
+            self.err(Diag::new(target.span, format!("cannot store a view of `{}` in `{}`, which holds that data itself", o, name)).note(None, "a view struct may hold views of what it views, not of what it owns; keep the view in a variable beside it"));
+            return true;
+        }
         srcs.retain(|(p, _)| p.0 != v);
         if srcs.is_empty() {
             return true;
@@ -2659,8 +2958,13 @@ impl<'a> Bc<'a> {
             let k = params.iter().position(|q| *q == v).unwrap_or(0);
             let mut got = vec![];
             for (p, _) in &srcs {
-                if p.0 == v {
+                if p.0 == v && !self.own_data(p) {
                     continue;
+                }
+                if p.0 == v {
+                    let (o, name) = (self.name(p), l.name.clone());
+                    self.err(Diag::new(target.span, format!("cannot store a view of `{}` in the `inout` parameter `{}`", o, name)).note(None, format!("`{}` holds that data itself: a view of it would point into a value that can change or go away", name)));
+                    return true;
                 }
                 match params.iter().position(|q| *q == p.0) {
                     Some(i) => got.push(i),
