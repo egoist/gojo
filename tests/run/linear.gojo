@@ -68,11 +68,14 @@ fn commitIt(t: sink Tx) {
     t.commit()
 }
 
+// moved into a task, which consumes it (one at a time, so the output's
+// order is fixed)
 fn tasks() {
     scope {
         for i in 0..2 {
             let tx = begin(8 + i * 100)
-            go commitIt(tx)
+            let t = go commitIt(tx)
+            t.join()
         }
     }
 }
