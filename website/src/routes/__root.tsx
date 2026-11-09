@@ -25,7 +25,19 @@ export const Route = createRootRoute({
     links: [
       { rel: "stylesheet", href: appCss },
     ],
-    scripts: [{ children: themeScript }],
+    scripts: [
+      { children: themeScript },
+      // Analytics only in production builds, never in local development.
+      ...(import.meta.env.PROD
+        ? [
+            {
+              src: "https://u.egoist.dev/script.js",
+              defer: true,
+              "data-website-id": "bd622d42-4751-4cc6-8697-953da87fd050",
+            },
+          ]
+        : []),
+    ],
   }),
   shellComponent: RootDocument,
   component: RootLayout,
