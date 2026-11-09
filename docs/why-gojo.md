@@ -61,7 +61,7 @@ view struct Lexer {
 }
 ```
 
-The words it returns point into the input, so the lexer can move on while earlier words are in use. There is no position to keep: the lexer re-slices what it views. Often no struct is needed at all: a generator yields the words to a `for` loop, and `src.fieldViews()` gives them all at once, as views.
+The words it returns point into the input, so the lexer can move on while earlier words are in use. Often no struct is needed at all: a generator yields the words to a `for` loop, and `src.fieldViews()` gives them all at once, as views.
 
 ```gojo
 gen fn words(src: str) -> str {
@@ -93,7 +93,7 @@ fn load(text: sink String) -> Doc {
 }
 ```
 
-What a view still can't do is point into data owned by some *other* long-lived value: there are no lifetime names to say which. A structure like that stores ranges (`Span`) into its input instead.
+What a view can't do is point into data owned by some *other* long-lived value: there are no lifetime names to say which. A structure like that stores ranges (`Span`) into its input instead.
 
 Graphs, trees and ASTs use an `Arena[T]` and `Id[T]` handles (an `Id` carries a generation, so a stale one gives `none` instead of a dangling pointer), or `Rc` and `Weak`.
 
