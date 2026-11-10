@@ -1,0 +1,144 @@
+// toml.decode / toml.encode of any table-shaped type, and toml.parse.
+use std/{toml, yaml, json}
+
+copy enum Level { Debug, Info, Warn }
+
+struct Server {
+    host: String = "localhost"
+    port: u16
+    tls: bool = false
+}
+
+struct Db {
+    url: String
+    pool: int = 5
+    timeout: f64 = 2.5
+}
+
+struct Job {
+    name: String
+    every: String
+    args: Vec[String] = []
+}
+
+struct Config {
+    title: String
+    level: Level = .Info
+    started: ?String
+    tags: Set[String] = []
+    server: Server
+    db: ?Db
+    jobs: Vec[Job] = []
+    limits: Map[String, int] = [:]
+}
+
+fn show[T](r: T ! toml.Error) {
+    match r {
+        ok(v) => println(v)
+        err(e) => println(e.message())
+    }
+}
+
+fn main() {
+    let text = `
+# the whole document is a table
+title = "API \"v2\""
+level = "Debug"
+started = 1979-05-27T07:32:00Z
+tags = ["a", "b", "a"]
+limits = { requests = 1_000, burst = 0x10 }
+
+[server]
+port = 8080
+tls = true
+
+[db]
+url = '''
+postgres://localhost/app
+'''
+
+[[jobs]]
+name = "backup"
+every = "24h"
+args = ["--full", "--compress"]
+
+[[jobs]]
+name = "vacuum"
+every = "1h"
+`
+    match toml.decode[Config](text) {
+        ok(c) => {
+            println(c.title, c.level, c.started, c.tags, c.server.host, c.server.port, c.server.tls, c.limits)
+            println(c.db?.url, c.db?.pool, c.db?.timeout)
+            for j in c.jobs {
+                println(j.name, j.every, j.args)
+            }
+            let out = toml.encode(c).unwrap()
+            print(out)
+            // and back
+            println(json.encode(toml.decode[Config](out).unwrap()) == json.encode(c))
+            // and the same data as YAML
+            print(yaml.encode(c))
+        }
+        err(e) => println(e.message())
+    }
+
+    // values: integers, floats, strings, dates and times
+    show(toml.parse(`
+ints = [+99, -17, 0, 1_000, 0xDEAD_beef, 0o755, 0b1101]
+floats = [1.0, 3.1415, -0.01, 5e+22, 1e06, -2E-2, 6.626e-34, inf, -inf, nan]
+strings = ["tab\there", 'C:\path', """
+multi \
+  line""", '''
+raw ''lines''
+''']
+dates = [1979-05-27, 07:32:00, 1979-05-27T07:32:00, 1979-05-27 07:32:00.999-07:00, 07:32]
+dotted.a.b = 1
+"quoted key" = { inline = true, x.y = 2 }
+`))
+
+    // keys and variant names match ignoring case, `-` and `_`
+    show(toml.decode[Server]("PORT = 1\nhost_ = \"h\"\n"))
+    show(toml.decode[Server]("port = 1\nPort = 2\n"))
+    show(toml.decode[Server]("Port = 1\nPORT = 2\n"))
+    show(toml.decode[Config]("title = \"t\"\nlevel = \"WARN\"\n[server]\nport = 80\n"))
+
+    // errors: what, where, and the path to the value
+    show(toml.decode[Config]("title = 1\n[server]\nport = 1\n"))
+    show(toml.decode[Config]("title = \"t\"\n[server]\nport = 70000\n"))
+    show(toml.decode[Config]("title = \"t\"\n[server]\nport = 80\n[[jobs]]\nname = \"x\"\n"))
+    show(toml.decode[Config]("title = \"t\"\nlevel = \"Loud\"\n[server]\nport = 80\n"))
+    show(toml.decode[Config]("title = \"t\"\nstarted = 2024-01-01\n[server]\nport = \"80\"\n"))
+    show(toml.parse("a = 1\na = 2"))
+    show(toml.parse("[a]\nb = 1\n[a]\nc = 2"))
+    show(toml.parse("a = {b = 1}\na.c = 2"))
+    show(toml.parse("[t]\na.b = 1\n[t.a]\nc = 1"))
+    show(toml.parse("a = 01"))
+    show(toml.parse("a = 1__0"))
+    show(toml.parse("a = 9223372036854775808"))
+    show(toml.parse("a = 1979-02-29"))
+    show(toml.parse("a = \"open"))
+    show(toml.parse("a = \"\\q\""))
+    show(toml.parse("a = [1, 2"))
+    show(toml.parse("a = yes"))
+    show(toml.parse("a b = 1"))
+    show(toml.parse("= 1"))
+
+    // what TOML can't hold
+    var arr = json.array()
+    arr.push(json.integer(1))
+    arr.push(json.null())
+    var doc = json.object()
+    doc.set("list", arr)
+    show(toml.encode(doc))
+    show(toml.encode(json.integer(1)))
+    var big: Map[String, u64] = [:]
+    big.insert("n", 18446744073709551615)
+    show(toml.encode(big))
+
+    // a tree converts between the formats
+    let tree = toml.parse("[a]\nb = [1, 2.5, \"three\"]\nc = { d = true }\n").unwrap()
+    print(yaml.encode(tree))
+    println(json.encode(tree))
+    print(toml.encode(yaml.parse("x:\n  y: [1, 2]\n  z: {w: v, n: null}\nlist:\n  - {a: 1}\n  - {a: 2}\n").unwrap()).unwrap())
+}

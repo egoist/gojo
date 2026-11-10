@@ -86,6 +86,9 @@ fn main() {
     }
     println(json.decode[json.Value](deep))
 
+    // JSON keys match fields exactly (others are skipped)
+    println(json.decode[Address](`{"_city": 1, "CITY": 2, "city": "x"}`), json.decode[Address](`{"CITY": "x"}`))
+
     // to and from a Value tree
     var tree = json.toValue(Address{city: "Oslo"})
     tree.set("zip", json.string("0150"))

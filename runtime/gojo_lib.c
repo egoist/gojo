@@ -937,10 +937,20 @@ void gojo_jenc_str(gojo_string *b, gojo_str s) {
 
 void gojo_json___quote(gojo_string *b, gojo_str s) { gojo_jenc_str(b, s); }
 
-// JSON has no NaN or infinity: they are written as null
-void gojo_jenc_f64(gojo_string *b, double v) {
-    if (isnan(v) || isinf(v)) gojo_fmt_cstr(b, "null");
-    else gojo_fmt_f64(b, v);
+// JSON has no NaN or infinity: they are written as null. For YAML and
+// TOML (`ext`), the encoder's JSON spells them out (NaN, Infinity,
+// -Infinity) and keeps a `.` in every float, so that 2.0 stays a float.
+void gojo_jenc_f64(gojo_string *b, double v, int ext) {
+    if (isnan(v) || isinf(v)) {
+        gojo_fmt_cstr(b, !ext ? "null" : isnan(v) ? "NaN" : v > 0 ? "Infinity" : "-Infinity");
+        return;
+    }
+    int64_t st = b->len;
+    gojo_fmt_f64(b, v);
+    if (!ext) return;
+    for (int64_t k = st; k < b->len; k++)
+        if (b->ptr[k] == '.' || b->ptr[k] == 'e' || b->ptr[k] == 'E') return;
+    gojo_fmt_cstr(b, ".0");
 }
 
 // Indents compact JSON text (as the encoder writes it) by `indent` spaces.
@@ -983,9 +993,11 @@ void gojo_jdec_init(gojo_jdec *d, gojo_str s) {
     d->s = s.ptr;
     d->len = s.len;
     d->errpos = -1;
+    d->cur = -1;
 }
 
 void gojo_jdec_free(gojo_jdec *d) {
+    if (d->t) gojo_dtree_free(d->t);
     free(d->err.ptr);
     free(d->path.ptr);
     free(d->buf.ptr);
@@ -1003,13 +1015,15 @@ static inline void jd_ws(gojo_jdec *d) {
 bool gojo_jdec_fail(gojo_jdec *d, const char *msg) {
     if (d->errpos < 0) {
         d->errpos = d->pos;
-        gojo_fmt_cstr(&d->err, msg);
+        if (d->t) gojo_td_words(d, &d->err, msg);
+        else gojo_fmt_cstr(&d->err, msg);
     }
     return false;
 }
 
 // what the next value is, for messages
 static const char *jd_found(gojo_jdec *d) {
+    if (d->t) return gojo_td_found(d);
     jd_ws(d);
     if (d->pos >= d->len) return "the end of the text";
     switch (d->s[d->pos]) {
@@ -1027,7 +1041,8 @@ bool gojo_jdec_expected(gojo_jdec *d, const char *what) {
     if (d->errpos >= 0) return false;
     const char *f = jd_found(d);
     gojo_fmt_cstr(&d->err, "expected ");
-    gojo_fmt_cstr(&d->err, what);
+    if (d->t) gojo_td_words(d, &d->err, what);
+    else gojo_fmt_cstr(&d->err, what);
     gojo_fmt_cstr(&d->err, ", found ");
     gojo_fmt_cstr(&d->err, f);
     d->errpos = d->pos;
@@ -1043,11 +1058,13 @@ static bool jd_word(gojo_jdec *d, const char *w, int n) {
 }
 
 bool gojo_jdec_null(gojo_jdec *d) {
+    if (d->t) return gojo_td_null(d);
     jd_ws(d);
     return jd_word(d, "null", 4);
 }
 
 bool gojo_jdec_bool(gojo_jdec *d, bool *out) {
+    if (d->t) return gojo_td_bool(d, out);
     jd_ws(d);
     if (jd_word(d, "true", 4)) { *out = true; return true; }
     if (jd_word(d, "false", 5)) { *out = false; return true; }
@@ -1116,6 +1133,7 @@ static int64_t jd_int_start(gojo_jdec *d) {
 }
 
 bool gojo_jdec_i64(gojo_jdec *d, int64_t *out, int64_t lo, int64_t hi, const char *ty) {
+    if (d->t) return gojo_td_i64(d, out, lo, hi, ty);
     int64_t end = jd_int_start(d);
     if (end == -2) return false;
     if (end < 0) return gojo_jdec_expected(d, "an integer");
@@ -1132,6 +1150,7 @@ bool gojo_jdec_i64(gojo_jdec *d, int64_t *out, int64_t lo, int64_t hi, const cha
 }
 
 bool gojo_jdec_u64(gojo_jdec *d, uint64_t *out, uint64_t hi, const char *ty) {
+    if (d->t) return gojo_td_u64(d, out, hi, ty);
     int64_t end = jd_int_start(d);
     if (end == -2) return false;
     if (end < 0) return gojo_jdec_expected(d, "an integer");
@@ -1156,6 +1175,7 @@ bool gojo_jdec_u64(gojo_jdec *d, uint64_t *out, uint64_t hi, const char *ty) {
 }
 
 bool gojo_jdec_f64(gojo_jdec *d, double *out) {
+    if (d->t) return gojo_td_f64(d, out);
     jd_ws(d);
     bool frac;
     int64_t end = d->pos < d->len ? jd_number(d, &frac) : -1;
@@ -1168,6 +1188,7 @@ bool gojo_jdec_f64(gojo_jdec *d, double *out) {
 }
 
 bool gojo_jdec_f32(gojo_jdec *d, float *out) {
+    if (d->t) return gojo_td_f32(d, out);
     jd_ws(d);
     bool frac;
     int64_t end = d->pos < d->len ? jd_number(d, &frac) : -1;
@@ -1269,27 +1290,33 @@ static bool jd_string(gojo_jdec *d, gojo_str *view, gojo_string *buf) {
 
 // the next character after white space, or -1 at the end
 int gojo_jdec_peek(gojo_jdec *d) {
+    if (d->t) return gojo_td_peek(d);
     jd_ws(d);
     return d->pos < d->len ? d->s[d->pos] : -1;
 }
 
 // a string as a view, valid until the next string is read
 bool gojo_jdec_strview(gojo_jdec *d, gojo_str *out) {
+    if (d->t) return gojo_td_strview(d, out);
     return jd_string(d, out, &d->buf);
 }
 
 bool gojo_jdec_str(gojo_jdec *d, gojo_string *out) {
     gojo_str v;
-    if (!jd_string(d, &v, &d->buf)) return false;
+    if (!gojo_jdec_strview(d, &v)) return false;
     *out = gojo_string_from(v);
     return true;
 }
 
 // `[` or `{`
 bool gojo_jdec_open(gojo_jdec *d, uint8_t c) {
+    if (d->t) return gojo_td_open(d, c);
     jd_ws(d);
     if (d->pos >= d->len || d->s[d->pos] != c) return gojo_jdec_expected(d, c == '[' ? "an array" : "an object");
-    if (++d->depth > JDEC_MAX_DEPTH) return gojo_jdec_fail(d, "values are nested more than 500 deep");
+    if (++d->depth > JDEC_MAX_DEPTH) {
+        d->nopath = d->errpos < 0;
+        return gojo_jdec_fail(d, "values are nested more than 500 deep");
+    }
     d->pos++;
     return true;
 }
@@ -1297,6 +1324,7 @@ bool gojo_jdec_open(gojo_jdec *d, uint8_t c) {
 // Before element i of an array: 1 when there is one, 0 at the `]`, -1 on
 // an error.
 int gojo_jdec_item(gojo_jdec *d, int64_t i) {
+    if (d->t) return gojo_td_item(d);
     jd_ws(d);
     if (d->pos < d->len && d->s[d->pos] == ']' && i == 0) { d->pos++; d->depth--; return 0; }
     if (i > 0) {
@@ -1312,6 +1340,7 @@ int gojo_jdec_item(gojo_jdec *d, int64_t i) {
 // Before entry i of an object: 1 with its key in *key (valid until the next
 // key) and the `:` read, 0 at the `}`, -1 on an error.
 int gojo_jdec_key(gojo_jdec *d, int64_t i, gojo_str *key) {
+    if (d->t) return gojo_td_key(d, key);
     jd_ws(d);
     if (d->pos < d->len && d->s[d->pos] == '}') {
         d->pos++;
@@ -1334,6 +1363,7 @@ int gojo_jdec_key(gojo_jdec *d, int64_t i, gojo_str *key) {
 
 // Skips one value of any kind, checking it.
 bool gojo_jdec_skip(gojo_jdec *d) {
+    if (d->t) return gojo_td_skip(d);
     jd_ws(d);
     if (d->pos >= d->len) return gojo_jdec_expected(d, "a value");
     uint8_t c = d->s[d->pos];
@@ -1365,9 +1395,110 @@ bool gojo_jdec_skip(gojo_jdec *d) {
 
 // Only white space may follow the value.
 bool gojo_jdec_end(gojo_jdec *d) {
+    if (d->t) return true;
     jd_ws(d);
     if (d->pos < d->len) return gojo_jdec_fail(d, "more text after the value");
     return true;
+}
+
+// What the next value is, for a `json.Value`: 0 null, 1 a bool, 2 an
+// integer that fits in an int, 3 another number, 4 a string, 5 an array, 6
+// an object; -1 (with the error set) when it isn't a value.
+// Why the number at pos isn't one (jd_number failed), at the character
+// where it goes wrong.
+static void jd_number_error(gojo_jdec *d) {
+    if (d->errpos >= 0) return;   // leading zeros: reported already
+    const uint8_t *s = d->s;
+    int64_t i = d->pos, n = d->len;
+    const char *msg;
+    if (i < n && s[i] == '-') i++;
+    if (i >= n || s[i] < '0' || s[i] > '9') {
+        msg = "expected a digit";
+    } else {
+        while (i < n && s[i] >= '0' && s[i] <= '9') i++;
+        bool frac_ok = true;
+        if (i < n && s[i] == '.') {
+            i++;
+            frac_ok = i < n && s[i] >= '0' && s[i] <= '9';
+            while (i < n && s[i] >= '0' && s[i] <= '9') i++;
+        }
+        if (!frac_ok) {
+            msg = "expected a digit after `.`";
+        } else {
+            // the exponent has no digits
+            msg = "expected a digit in the exponent";
+            if (i < n && (s[i] == 'e' || s[i] == 'E')) i++;
+            if (i < n && (s[i] == '+' || s[i] == '-')) i++;
+        }
+    }
+    d->pos = i;
+    gojo_jdec_fail(d, msg);
+}
+
+int gojo_jdec_kind(gojo_jdec *d) {
+    if (d->t) return gojo_td_kind(d);
+    int c = gojo_jdec_peek(d);
+    // a word must be all there
+    const char *w = c == 'n' ? "null" : c == 't' ? "true" : c == 'f' ? "false" : NULL;
+    if (w) {
+        int64_t k = (int64_t)strlen(w);
+        if (d->len - d->pos < k || memcmp(d->s + d->pos, w, (size_t)k) != 0) {
+            gojo_jdec_fail(d, c == 'n' ? "expected `null`" : c == 't' ? "expected `true`" : "expected `false`");
+            return -1;
+        }
+        return c == 'n' ? 0 : 1;
+    }
+    switch (c) {
+    case '"': return 4;
+    case '[': return 5;
+    case '{': return 6;
+    default: break;
+    }
+    if (c == '-' || (c >= '0' && c <= '9')) {
+        bool frac;
+        int64_t end = jd_number(d, &frac);
+        if (end < 0) { jd_number_error(d); return -1; }
+        if (frac) return 3;
+        bool neg = d->s[d->pos] == '-';
+        uint64_t v = 0;
+        for (int64_t i = d->pos + neg; i < end; i++) {
+            uint64_t dg = d->s[i] - '0';
+            if (v > (UINT64_MAX - dg) / 10) return 3;
+            v = v * 10 + dg;
+        }
+        return v > (neg ? (uint64_t)INT64_MAX + 1 : (uint64_t)INT64_MAX) ? 3 : 2;
+    }
+    gojo_jdec_expected(d, "a value");
+    return -1;
+}
+
+// Any number as a double (as json.parse reads them: too large is infinity).
+bool gojo_jdec_num(gojo_jdec *d, double *out) {
+    if (d->t) return gojo_td_f64(d, out);
+    jd_ws(d);
+    bool frac;
+    int64_t end = d->pos < d->len ? jd_number(d, &frac) : -1;
+    if (end < 0) return gojo_jdec_expected(d, "a number");
+    gojo_str num = { d->s + d->pos, end - d->pos };
+    if (!gojo_prelude___parseFloat(num, out)) return gojo_jdec_expected(d, "a number");
+    d->pos = end;
+    return true;
+}
+
+// Whether a key matches a name ignoring case, `-` and `_`:
+// `max-connections`, `max_connections` and `MaxConnections` all match
+// `maxConnections`. `norm` is the name in that form ("maxconnections").
+bool gojo_jdec_loose(gojo_str key, const char *norm, int64_t n) {
+    int64_t j = 0;
+    if (n == 0) return false;
+    for (int64_t i = 0; i < key.len; i++) {
+        uint8_t c = key.ptr[i];
+        if (c == '-' || c == '_') continue;
+        if (c >= 'A' && c <= 'Z') c += 32;
+        if (j >= n || (uint8_t)norm[j] != c) return false;
+        j++;
+    }
+    return j == n;
 }
 
 // An error naming text from the input: a + s + b.
@@ -1381,8 +1512,24 @@ bool gojo_jdec_fail_str(gojo_jdec *d, const char *a, gojo_str s, const char *b) 
     return false;
 }
 
+// Whether the path is long enough: its outer steps are left out, marked
+// by "..." (deep nesting would make it as long as the text).
+static bool jd_path_full(gojo_jdec *d) {
+    if (d->nopath) return true;
+    if (d->path.len < 160) return false;
+    if (d->path.ptr[0] != '.' || d->path.len < 3 || memcmp(d->path.ptr, "...", 3) != 0) {
+        gojo_string p = { 0 };
+        gojo_fmt_cstr(&p, "...");
+        gojo_string_push(&p, gojo_string_view(&d->path));
+        free(d->path.ptr);
+        d->path = p;
+    }
+    return true;
+}
+
 // Prepends a step to the path of the value an error is in.
 void gojo_jdec_at_key(gojo_jdec *d, const uint8_t *k, int64_t n) {
+    if (jd_path_full(d)) return;
     gojo_string p = { 0 };
     bool ident = n > 0;
     for (int64_t i = 0; i < n; i++) {
@@ -1404,6 +1551,7 @@ void gojo_jdec_at_key(gojo_jdec *d, const uint8_t *k, int64_t n) {
 }
 
 void gojo_jdec_at_index(gojo_jdec *d, int64_t i) {
+    if (jd_path_full(d)) return;
     gojo_string p = { 0 };
     gojo_string_push_byte(&p, '[');
     gojo_fmt_i64(&p, i);

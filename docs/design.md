@@ -530,7 +530,7 @@ Gojo is not a dialect of Go, but many readers know Go, so this table maps the fa
 | Type declarations | `type Config struct {}` | `struct Config {}`, `enum`, `interface` |
 | Zero values | Every type has one | Only types that satisfy `default` |
 | Package declaration | Every file writes `package name`, which must match the directory | None; the directory is the package |
-| Imports | `import "fmt"`, `import "example.com/m/geom"` | `use std/fmt`, `use ./geom`, `use yaml` (a dependency in gojo.toml), `use ./geom.{Vec2}` |
+| Imports | `import "fmt"`, `import "example.com/m/geom"` | `use std/fmt`, `use ./geom`, `use markdown` (a dependency in gojo.toml), `use ./geom.{Vec2}` |
 | Functions | `func f(x int) int` | `fn f(x: int) -> int` |
 | Methods | `func (p *Point) scale(k int)`, value / pointer receivers | Inside the type: `fn scale(inout self, k: int)`; `extend T {}` for additions |
 | Constructors | Package-level function `NewStack()` | Associated function `Stack.new()` |

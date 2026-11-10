@@ -1,0 +1,184 @@
+// yaml.decode / yaml.encode of any type, and yaml.parse into a tree.
+use std/{yaml, json}
+
+copy enum Restart { Always, OnFailure, Never }
+
+enum Check {
+    Http(path: String, port: int)
+    Exec(cmd: Vec[String])
+    None
+}
+
+struct Service {
+    image: String
+    ports: Vec[int] = []
+    env: Map[String, String] = [:]
+    restart: Restart = .Always
+    check: Check = .None
+    replicas: ?int
+    limits: (f64, String) = (1.0, "256Mi")
+}
+
+struct Compose {
+    version: String
+    services: Map[String, Service]
+    volumes: Set[String] = []
+    extra: ?json.Value
+}
+
+struct Opts {
+    verbose: bool = false
+    level: int = 1
+}
+
+struct Small {
+    n: u8
+    f: f32 = 0.0
+    name: String = ""
+}
+
+fn show[T](r: T ! yaml.Error) {
+    match r {
+        ok(v) => println(v)
+        err(e) => println(e.message())
+    }
+}
+
+fn main() {
+    // a configuration with anchors, a merge key, flow and block styles
+    let text = `
+version: 3.10            # a plain scalar reads into a String as written
+x-defaults: &defaults
+  restart: OnFailure
+  env: {LOG: info, TZ: UTC}
+services:
+  web:
+    <<: *defaults
+    image: "nginx:1.27"
+    ports: [80, 443]
+    check:
+      Http: {path: /health, port: 8080}
+    limits: [0.5, 512Mi]
+  worker:
+    image: app:latest
+    restart: Never
+    replicas: 3
+    check: {Exec: {cmd: [run, --once]}}
+    env:
+      LOG: debug
+volumes: [data, logs, data]
+extra:
+  note: >
+    folded
+    text
+  raw: |
+    line 1
+    line 2
+`
+    match yaml.decode[Compose](text) {
+        ok(c) => {
+            println(c.version, c.volumes, c.extra)
+            for name, s in c.services {
+                println(name, s.image, s.ports, s.env, s.restart, s.check, s.replicas, s.limits)
+            }
+            println(yaml.encode(c))
+            // and back
+            println(json.encode(yaml.decode[Compose](yaml.encode(c)).unwrap()) == json.encode(c))
+        }
+        err(e) => println(e.message())
+    }
+
+    // keys and variant names match ignoring case, `-` and `_`; an exact key
+    // wins, and two loose ones are an error
+    show(yaml.decode[Service]("image: x\nrestart: on-failure\nReplicas: 2\nreplicas: 3\n"))
+    show(yaml.decode[Service]("image: x\nRe-plicas: 2\nre_plicas: 3\n"))
+    // integer keys as YAML writes integers
+    show(yaml.decode[Map[int, String]]("0x10: a\n+2: b\n3: c\n"))
+    // an empty document gives a struct its defaults; anchors belong to their document
+    show(yaml.decode[Opts]("# nothing\n"))
+    show(yaml.decodeAll[Opts]("level: 2\n---\n---\nverbose: true\n"))
+    show(yaml.parse("a: &x 1\n---\nb: *x\n"))
+
+    // the core schema: only true and false are bools, `yes` is a string
+    show(yaml.parse(`[~, null, true, yes, on, 0x1F, 0o17, -12, 1.5e3, .inf, -.inf, 1_000, "0x1F", '42', 2001-12-14, 007]`))
+    show(yaml.parse("a:\nb: !!str\nc: !!float 1\n? d\n: [e: f]\n"))
+    // block scalars and chomping
+    show(yaml.parse("a: |\n  x\n\n  y\n\nb: |-\n  z\nc: |+\n  w\n\nd: >\n  folded\n  lines\n\n    kept\n  end\ne: \"tab\\there \\u00e9 \\x41\"\nf: 'it''s'\n"))
+    // documents
+    show(yaml.parseAll("---\na: 1\n---\n- 2\n...\n--- text\n"))
+    show(yaml.decodeAll[Small]("n: 1\n---\nn: 2\nf: 2.5\n"))
+    show(yaml.decode[Small]("~"))
+
+    // errors: what, where, and the path to the value
+    show(yaml.decode[Small]("n: 300"))
+    show(yaml.decode[Small]("n: 1.5"))
+    show(yaml.decode[Small]("n: one"))
+    show(yaml.decode[Small]("name: [a]\nn: 1"))
+    show(yaml.decode[Small]("f: 2"))
+    show(yaml.decode[Compose]("version: 1\nservices:\n  web:\n    image: x\n    restart: Sometimes\n"))
+    show(yaml.decode[Compose]("version: 1\nservices:\n  web:\n    image: x\n    check: Http\n"))
+    show(yaml.decode[Compose]("version: 1\nservices:\n  web:\n    image: x\n    ports: [80, x]\n"))
+    show(yaml.parse("a: 1\na: 2"))
+    show(yaml.parse("a: *nowhere"))
+    show(yaml.parse("a:\n  b: 1\n c: 2"))
+    show(yaml.parse("a:\n\tb: 1"))
+    show(yaml.parse("a: b: c"))
+    show(yaml.parse("a: [1, 2"))
+    show(yaml.parse("a: \"open"))
+    show(yaml.parse("a: 1\n---\nb: 2"))
+    show(yaml.parse("a: !!int x"))
+    show(yaml.parse("<<: 1"))
+    show(yaml.parse("a: 1e999"))
+    show(yaml.parse("a: \u{1}"))
+    // aliases that expand without limit (the "billion laughs") are refused
+    var laughs: String = "a: &a [x, x, x, x, x, x, x, x, x, x]\n"
+    let names = ["b", "c", "d", "e", "f", "g", "h", "i"]
+    var prev = "a"
+    for n in names {
+        laughs.push("${n}: &${n} [*${prev}, *${prev}, *${prev}, *${prev}, *${prev}, *${prev}, *${prev}, *${prev}, *${prev}, *${prev}]\n")
+        prev = n
+    }
+    show(yaml.parse(laughs))
+    var deep: String = ""
+    for _ in 0..600 {
+        deep.push("[")
+    }
+    show(yaml.parse(deep))
+
+    // encoding: quotes only where needed, literal blocks for lines
+    var v = yaml.Value.Obj([:])
+    v.set("plain", json.string("hello world"))
+    v.set("keyword", json.string("yes"))
+    v.set("number", json.string("1.10"))
+    v.set("colon", json.string("a: b"))
+    v.set("flag", json.string("--verbose"))
+    v.set("dash", json.string("-1"))
+    v.set("size", json.string("512Mi"))
+    v.set("date", json.string("2001-12-14"))
+    v.set("hidden", json.string(".env"))
+    v.set("empty", json.string(""))
+    v.set("lines", json.string("one\ntwo\n"))
+    v.set("indented", json.string("  code\nmore"))
+    v.set("tabbed", json.string("\tcode\nmore\n"))
+    v.set("k".repeat(1100), json.integer(1))
+    v.set("float", json.number(2.0))
+    v.set("nan", json.number(0.0 / 0.0))
+    v.set("list", json.array())
+    var items = json.array()
+    var m = json.object()
+    m.set("k", json.integer(1))
+    m.set("l", json.array())
+    items.push(m)
+    var inner = json.array()
+    inner.push(json.boolean(true))
+    inner.push(json.null())
+    items.push(inner)
+    v.set("items", items)
+    let out = yaml.encode(v)
+    print(out)
+    println(fmt_eq(yaml.parse(out).unwrap(), v))
+}
+
+fn fmt_eq(a: json.Value, b: json.Value) -> bool {
+    return "${a}" == "${b}"
+}

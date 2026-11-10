@@ -1,0 +1,112 @@
+3.10 {"data", "logs"} some(Obj({"note": Str("folded text\n"), "raw": Str("line 1\nline 2\n")}))
+web nginx:1.27 [80, 443] {"LOG": "info", "TZ": "UTC"} OnFailure Http("/health", 8080) none (0.5, "512Mi")
+worker app:latest [] {"LOG": "debug"} Never Exec(["run", "--once"]) some(3) (1, "256Mi")
+version: "3.10"
+services:
+  web:
+    image: nginx:1.27
+    ports:
+      - 80
+      - 443
+    env:
+      LOG: info
+      TZ: UTC
+    restart: OnFailure
+    check:
+      Http:
+        path: /health
+        port: 8080
+    replicas: null
+    limits:
+      - 0.5
+      - 512Mi
+  worker:
+    image: app:latest
+    ports: []
+    env:
+      LOG: debug
+    restart: Never
+    check:
+      Exec:
+        cmd:
+          - run
+          - --once
+    replicas: 3
+    limits:
+      - 1.0
+      - 256Mi
+volumes:
+  - data
+  - logs
+extra:
+  note: |
+    folded text
+  raw: |
+    line 1
+    line 2
+
+true
+Service{image: "x", ports: [], env: {}, restart: OnFailure, check: None, replicas: some(3), limits: (1, "256Mi")}
+yaml: the keys "Re-plicas" and "re_plicas" both mean the field `replicas` (keys match fields ignoring case, `-` and `_`) at line 3, column 1
+{16: "a", 2: "b", 3: "c"}
+Opts{verbose: false, level: 1}
+[Opts{verbose: false, level: 2}, Opts{verbose: false, level: 1}, Opts{verbose: true, level: 1}]
+yaml: unknown anchor `x` (an alias can only refer to an anchor before it) at line 3, column 4
+Arr([Null, Null, Bool(true), Str("yes"), Str("on"), Int(31), Int(15), Int(-12), Num(1500), Num(+Inf), Num(-Inf), Str("1_000"), Str("0x1F"), Str("42"), Str("2001-12-14"), Int(7)])
+Obj({"a": Null, "b": Str(""), "c": Num(1), "d": Arr([Obj({"e": Str("f")})])})
+Obj({"a": Str("x\n\ny\n"), "b": Str("z"), "c": Str("w\n\n"), "d": Str("folded lines\n\n  kept\nend\n"), "e": Str("tab\there é A"), "f": Str("it's")})
+[Obj({"a": Int(1)}), Arr([Int(2)]), Str("text")]
+[Small{n: 1, f: 0, name: ""}, Small{n: 2, f: 2.5, name: ""}]
+yaml: expected a mapping, found null at line 1, column 1
+yaml: the number 300 doesn't fit in u8 (in .n) at line 1, column 4
+yaml: expected an integer, found 1.5 (in .n) at line 1, column 4
+yaml: expected an integer, found a string (in .n) at line 1, column 4
+yaml: expected a string, found a sequence (in .name) at line 1, column 7
+yaml: missing field `n` of `Small` at line 1, column 1
+yaml: unknown variant "Sometimes" (a `Restart`: one of Always, OnFailure, Never) (in .services.web.restart) at line 5, column 14
+yaml: the variant `Http` of `Check` has fields: write Http: { ... } (in .services.web.check) at line 5, column 12
+yaml: expected an integer, found a string (in .services.web.ports[1]) at line 5, column 17
+yaml: the key "a" appears twice in this mapping at line 2, column 1
+yaml: unknown anchor `nowhere` (an alias can only refer to an anchor before it) at line 1, column 4
+yaml: this line is indented more than the mapping's keys at line 3, column 2
+yaml: a tab before a key (indent with spaces) at line 2, column 2
+yaml: unexpected `:` (a mapping in a value starts on the next line; or quote the value) at line 1, column 5
+yaml: a `[` has no closing `]` at line 1, column 4
+yaml: a string has no closing `"` at line 1, column 4
+yaml: the text has more than one document (read them with `yaml.decodeAll` or `yaml.parseAll`) at line 2, column 1
+yaml: the tag says an integer, but the value isn't one at line 1, column 4
+yaml: a merge (`<<`) takes a mapping or a list of mappings at line 1, column 5
+yaml: the number 1e999 doesn't fit in f64 at line 1, column 4
+yaml: a control character in the text (write it as an escape in a double-quoted string: "\x01") at line 1, column 4
+yaml: aliases expand the document to too many values at line 1, column 1
+yaml: values are nested more than 500 deep at line 1, column 501
+plain: hello world
+keyword: "yes"
+number: "1.10"
+colon: "a: b"
+flag: --verbose
+dash: "-1"
+size: 512Mi
+date: "2001-12-14"
+hidden: .env
+empty: ""
+lines: |
+  one
+  two
+indented: |2-
+    code
+  more
+tabbed: |2
+  	code
+  more
+? "kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk"
+: 1
+float: 2.0
+nan: .nan
+list: []
+items:
+  - k: 1
+    l: []
+  - - true
+    - null
+true

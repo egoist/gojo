@@ -1,0 +1,285 @@
+// `gojo-fuzz data`: fuzzes std/yaml and std/toml (built with AddressSanitizer
+// and UBSan by gojo-fuzz).
+//
+//   data <seed> <iterations> <file>
+//
+// Each iteration builds a random tree with awkward strings, numbers and keys,
+// and checks that it comes back the same from YAML (exactly) and from TOML
+// (without nulls, in any key order). Then it mutates the text and reads it
+// again: reading must not crash, an error must have a position, and what
+// reads must come back the same after `encode`. Typed decoding into a struct
+// runs on every text too. Each text is written to <file> before it is read,
+// so a crash leaves it behind. Exits with 1 at the first failure.
+use std/{yaml, toml, json, os, rand, fmt}
+
+enum Shape {
+    Dot
+    Circle(r: f64)
+}
+
+struct Inner {
+    a: ?int
+    b: Vec[String] = []
+    c: Map[String, f64] = [:]
+}
+
+struct Probe {
+    name: String = ""
+    n: i32 = 0
+    u: u8 = 0
+    on: bool = false
+    f: f32 = 0.0
+    tags: Set[String] = []
+    shape: Shape = .Dot
+    pair: ?(int, String)
+    inner: ?Inner
+    any: ?json.Value
+}
+
+fn pieces() -> Vec[str] {
+    return ["a", "name", "yes", "No", "null", "~", "true", "1.10", "0x1F", "007", "-1", ".inf", ".5", "1e3", "2001-12-14", "12:30", "-", "--flag", "---", "...", "?", ":", ": ", " #", "#", "&a", "*a", "!", "!!str", "|", ">", "%", "@", "`", "'", "\"", "\\", "[", "]", "{", "}", ",", "=", "<<", " ", "  ", "\t", "\n", "\r", "\r\n", "\u{0}", "\u{1}", "\u{7f}", "\u{85}", "\u{a0}", "é", "日本", "\u{2028}", "\u{feff}", "😀", "'''", "\"\"\"", "a.b", "x y", "512Mi"]
+}
+
+fn words() -> Vec[str] {
+    return ["\n", ": ", "- ", "  ", "\t", "[", "]", "{", "}", ",", "&a ", "*a", "<<: ", "!!str ", "!!int ", "|", ">-", "|+2", "\"", "'", "#", "---\n", "...\n", "%YAML 1.2\n", "%TAG !e! x\n", "? ", "\\", "\\u00e9", "\\x41", " = ", "[[", "]]", "'''", "\"\"\"", "0x1F", "1e999", "-.inf", ".nan", "inf", "nan", "_", "1979-05-27T07:32:00Z", "07:32", "~", "null", "true", "\r\n", "\u{2028}", "é", "\u{feff}", "a.b.c", "[a.b]", "name", "n", "u", "300", "-1", "tags", "shape", "Circle", "r", "inner", "any", "pair"]
+}
+
+// the texts mutation starts from, besides the generated ones
+fn seeds() -> Vec[str] {
+    return ["a: 1\nb: [x, y]\nc: {d: e}\n", "- &a {x: 1}\n- *a\n- <<: *a\n  y: 2\n", "s: |\n  line\n\n  more\nf: >-\n  folded\n  text\n", "? k\n: v\n\"q\": 'r'\n", "---\nx: 1\n...\n--- !!str 2\n", "name = \"x\"\n[t]\na.b = 1\n[[arr]]\nk = [1, 2.5, 'lit']\n", "dt = 1979-05-27T07:32:00Z\nm = \"\"\"\nmulti\\\n  line\"\"\"\ninl = { a = 1, b.c = 2 }\n", "n: 300\nu: -1\nf: 1e40\ntags: [a, a]\nshape: {Circle: {r: x}}\npair: [1, s]\ninner: {a: 1, b: [x], c: {k: 1.5}}\nany: [1, {x: ~}]\n"]
+}
+
+fn text(r: inout rand.Rng) -> String {
+    var s: String = ""
+    let ps = pieces()
+    for _ in 0..r.below(4) {
+        s.push(ps[r.below(ps.len())])
+    }
+    return s
+}
+
+fn num(r: inout rand.Rng) -> json.Value {
+    let fs = [0.0, -0.0, 0.1, 2.0, 1e21, 5e-324, 1.7976931348623157e308, -2.5, 0.0 / 0.0, 1.0 / 0.0, -1.0 / 0.0]
+    let is = [0, -1, 1, 9223372036854775807, -9223372036854775807 - 1, 42, 1000000]
+    if r.bool() {
+        return json.number(fs[r.below(fs.len())])
+    }
+    return json.integer(is[r.below(is.len())])
+}
+
+fn tree(r: inout rand.Rng, depth: int) -> json.Value {
+    let k = if depth > 4 { r.below(4) } else { r.below(7) }
+    if k == 0 {
+        return json.null()
+    }
+    if k == 1 {
+        return json.boolean(r.bool())
+    }
+    if k == 2 {
+        return num(&r)
+    }
+    if k == 3 {
+        return json.string(text(&r))
+    }
+    if k == 4 {
+        var a = json.array()
+        for _ in 0..r.below(4) {
+            a.push(tree(&r, depth + 1))
+        }
+        return a
+    }
+    var o = json.object()
+    for _ in 0..r.below(5) {
+        o.set(text(&r), tree(&r, depth + 1))
+    }
+    return o
+}
+
+// A value as text with the keys of objects sorted (and, with `nonull`, the
+// members that are null left out, as TOML does).
+fn canon(v: json.Value, nonull: bool) -> String {
+    match v {
+        .Obj(fields) => {
+            var keys = fields.keys()
+            keys.sort()
+            var out: String = "{"
+            for k in keys {
+                let x = fields.get(k).unwrap()
+                if nonull && x.isNull() {
+                    continue
+                }
+                out.push(json.quoted(k))
+                out.push(":")
+                out.push(canon(x, nonull))
+                out.push(",")
+            }
+            out.push("}")
+            return out
+        }
+        .Arr(items) => {
+            var out: String = "["
+            for x in items {
+                out.push(canon(x, nonull))
+                out.push(",")
+            }
+            out.push("]")
+            return out
+        }
+        _ => return fmt.sprint(v)
+    }
+}
+
+fn fail(what: str, text: str, more: str) -> bool {
+    println("FAIL ${what}\n--- text\n${json.quoted(text)}\n--- more\n${more}")
+    return false
+}
+
+// A tree comes back from YAML exactly, and from TOML without its nulls.
+fn roundTrip(v: json.Value, text: str) -> bool {
+    let y = yaml.encode(v)
+    match yaml.parse(y) {
+        ok(v2) => {
+            if fmt.sprint(v2) != fmt.sprint(v) {
+                return fail("yaml round trip", text, "${y}\n${v}\n${v2}")
+            }
+        }
+        err(e) => return fail("yaml can't read what it wrote", text, "${e.message()}\n${y}")
+    }
+    if let t = toml.encode(v).ok() {
+        match toml.parse(t) {
+            ok(v3) => {
+                if canon(v3, true) != canon(v, true) {
+                    return fail("toml round trip", text, "${t}\n${canon(v, true)}\n${canon(v3, true)}")
+                }
+            }
+            err(e) => return fail("toml can't read what it wrote", text, "${e.message()}\n${t}")
+        }
+    }
+    return true
+}
+
+fn mutate(r: inout rand.Rng, src: str) -> String {
+    var b = src.bytes().toVec()
+    let ws = words()
+    for _ in 0..r.below(4) + 1 {
+        let at = r.below(b.len() + 1)
+        let op = r.below(3)
+        var nb = Vec[byte]{}
+        if op == 0 && b.len() > 0 {
+            let end = min(b.len(), at + r.below(8) + 1)
+            for i in 0..b.len() {
+                if i < at || i >= end {
+                    nb.push(b[i])
+                }
+            }
+        } else if op == 1 && at < b.len() {
+            for i in 0..b.len() {
+                nb.push(if i == at { byte(r.below(256)) } else { b[i] })
+            }
+        } else {
+            for i in 0..at {
+                nb.push(b[i])
+            }
+            for x in ws[r.below(ws.len())].bytes() {
+                nb.push(x)
+            }
+            for i in at..b.len() {
+                nb.push(b[i])
+            }
+        }
+        b = nb
+    }
+    return String(b)
+}
+
+fn readYaml(text: str) -> bool {
+    match yaml.parseAll(text) {
+        ok(docs) => {
+            for d in docs {
+                if !roundTrip(d, text) {
+                    return false
+                }
+            }
+        }
+        err(e) => {
+            if e.line < 1 || e.column < 1 {
+                return fail("yaml error without a position", text, e.message())
+            }
+        }
+    }
+    if let p = yaml.decode[Probe](text).ok() {
+        let y = yaml.encode(p)
+        match yaml.decode[Probe](y) {
+            ok(p2) => {
+                if json.encode(p2) != json.encode(p) {
+                    return fail("yaml typed round trip", text, y)
+                }
+            }
+            err(e) => return fail("yaml can't decode what it encoded", text, "${e.message()}\n${y}")
+        }
+    }
+    _ = yaml.decodeAll[Probe](text)
+    return true
+}
+
+fn readToml(text: str) -> bool {
+    match toml.parse(text) {
+        ok(v) => {
+            if !roundTrip(v, text) {
+                return false
+            }
+        }
+        err(e) => {
+            if e.line < 1 || e.column < 1 {
+                return fail("toml error without a position", text, e.message())
+            }
+        }
+    }
+    if let p = toml.decode[Probe](text).ok() {
+        if let t = toml.encode(p).ok() {
+            match toml.decode[Probe](t) {
+                ok(p2) => {
+                    if json.encode(p2) != json.encode(p) {
+                        return fail("toml typed round trip", text, t)
+                    }
+                }
+                err(e) => return fail("toml can't decode what it encoded", text, "${e.message()}\n${t}")
+            }
+        }
+    }
+    return true
+}
+
+fn main() {
+    let args = os.args()
+    let seed = args[1].parseInt().unwrap()
+    let iters = args[2].parseInt().unwrap()
+    let cur = args[3].clone()
+    var r = rand.Rng.new(u64(seed))
+    let ss = seeds()
+    for _ in 0..iters {
+        // a random tree, and texts made from it
+        var v = tree(&r, 0)
+        if r.bool() {
+            var o = json.object()
+            o.set(text(&r), v)
+            v = o
+        }
+        _ = os.writeText(cur, json.encode(v))
+        if !roundTrip(v, "(generated)") {
+            os.exit(1)
+        }
+        var texts = [yaml.encode(v), ss[r.below(ss.len())].toString()]
+        if let t = toml.encode(v).ok() {
+            texts.push(t)
+        }
+        for t in texts {
+            let m = mutate(&r, t)
+            _ = os.writeText(cur, m)
+            if !readYaml(m) || !readToml(m) {
+                os.exit(1)
+            }
+        }
+    }
+    println("done")
+}

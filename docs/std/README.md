@@ -14,6 +14,8 @@ The prelude is available everywhere; other modules are imported with `use std/na
 | [`io`](io.md) | Errors from the operating system, files, processes and the network, and the interfaces for streams of bytes. |
 | [`bufio`](bufio.md) | Buffered reading and writing on top of io.Reader / io.Writer. |
 | [`json`](json.md) | JSON: parse text into a `json.Value` tree and encode it back. |
+| [`yaml`](yaml.md) | YAML: read configuration and data written in YAML 1.2 into your own types or a `yaml.Value` tree, and write them back. |
+| [`toml`](toml.md) | TOML: read configuration files written in TOML 1.0 into your own types or a `toml.Value` tree, and write them back. |
 | [`http`](http.md) | HTTP/1.1: a server built on tasks, scopes and cancellation, and a small client, over plain TCP or TLS (`serveTls`, `https://` URLs). |
 | [`strings`](strings.md) | Building strings piece by piece. |
 | [`rand`](rand.md) | Random numbers: fast pseudo-random values for simulations, sampling and shuffling, a seeded generator for reproducible sequences, and cryptographically secure bytes from the operating system. |
